@@ -19,7 +19,7 @@ def test_command_catalog_combines_cli_and_console_builtins():
 def test_progressive_command_option_and_alias_suggestions(tmp_path):
     commands = suggestions_for("ins", cwd=tmp_path)
     assert [item.replacement for item in commands] == [
-        "inspect-package-rpfs ", "inspect-rpf ",
+        "inspect-package-rpfs ", "inspect-rpf ", "install-package ",
     ]
 
     options = suggestions_for("inspect-rpf --g", cwd=tmp_path)

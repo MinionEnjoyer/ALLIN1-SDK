@@ -16,11 +16,12 @@ from allin1_sdk.addon_sdk import AddonLinker, AddonManifest, AddonSdkCatalog
 from allin1_sdk.detector import detect_gta_path
 from allin1_sdk.dlc_inventory import DlcInventory
 from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
+from allin1_sdk.mods import ModIntegrationService, ModManifest
 from allin1_sdk.oiv_workbench import OivWorkbench
 from allin1_sdk.paths import project_root
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.rage_data_compiler import RageVehicleDataCompiler
-from allin1_sdk.rpf_tools import RpfExplorerService
+from allin1_sdk.rpf_tools import RpfExplorerService, _running_gta_processes
 
 
 PROJECT_ROOT = project_root()
@@ -61,6 +62,10 @@ def _rpf_service(
     return RpfExplorerService(PROJECT_ROOT, _game_path(gta_path), workspace_roots=roots)
 
 
+def _mod_service(gta_path: Path | None) -> ModIntegrationService:
+    return ModIntegrationService(_game_path(gta_path))
+
+
 def _progress(message: str, percent: int) -> None:
     click.echo(f"[{percent:3d}%] {message}")
 
@@ -83,6 +88,90 @@ def agent_api(allow_game_writes: bool) -> None:
     from allin1_sdk.agent_api import serve_stdio
 
     serve_stdio(sys.stdin, sys.stdout, allow_game_writes=allow_game_writes)
+
+
+@main.command("list-installed-packages")
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="GTA V installation; auto-detected when omitted.",
+)
+def list_installed_packages(gta_path: Path | None) -> None:
+    """List receipt-backed mod packages installed in a GTA V edition."""
+    packages = _mod_service(gta_path).list_installed()
+    if not packages:
+        click.echo("No managed packages are installed.")
+        return
+    for package in packages:
+        state = "enabled" if package.enabled else "disabled"
+        click.echo(
+            f"{package.mod_id}\t{package.version}\t{state}\t{package.name}"
+        )
+
+
+@main.command("install-package")
+@click.argument(
+    "manifest", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="GTA V installation; auto-detected when omitted.",
+)
+@click.option(
+    "--acknowledge-write", is_flag=True,
+    help="Confirm that validated package files may be installed or backed up.",
+)
+def install_package(
+    manifest: Path, gta_path: Path | None, acknowledge_write: bool,
+) -> None:
+    """Install one validated package with receipts, backups, and rollback ownership."""
+    if not acknowledge_write:
+        raise click.ClickException(
+            "Package installation requires --acknowledge-write."
+        )
+    running = _running_gta_processes()
+    if running:
+        raise click.ClickException(
+            "Close GTA V before installing a package: " + ", ".join(running)
+        )
+    package = ModManifest.load(manifest)
+    status = _mod_service(gta_path).install(package)
+    click.echo(
+        f"Installed {status.name} {status.version} ({status.mod_id}); "
+        "receipt and rollback ownership verified."
+    )
+
+
+@main.command("uninstall-package")
+@click.argument("mod_id")
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="GTA V installation; auto-detected when omitted.",
+)
+@click.option(
+    "--acknowledge-write", is_flag=True,
+    help="Confirm that the receipt-owned files may be removed or restored.",
+)
+def uninstall_package(
+    mod_id: str, gta_path: Path | None, acknowledge_write: bool,
+) -> None:
+    """Uninstall one managed package using its verified receipt and backups."""
+    if not acknowledge_write:
+        raise click.ClickException(
+            "Package uninstall requires --acknowledge-write."
+        )
+    running = _running_gta_processes()
+    if running:
+        raise click.ClickException(
+            "Close GTA V before uninstalling a package: " + ", ".join(running)
+        )
+    package_id = mod_id.strip().casefold()
+    service = _mod_service(gta_path)
+    installed = {item.mod_id: item for item in service.list_installed()}
+    package = installed.get(package_id)
+    if package is None:
+        raise click.ClickException(f"Managed package is not installed: {package_id}")
+    service.uninstall(package_id)
+    click.echo(f"Uninstalled {package.name} ({package_id}) and applied its receipt rollback.")
 
 
 @main.command("list")

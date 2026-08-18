@@ -70,9 +70,9 @@ The console invokes the same Click commands and safety checks as allin1-sdk in a
         "Let local AI and developer tools inspect and operate the SDK through structured JSON.",
         """Run allin1-sdk agent-api and exchange one JSON object per line over standard input and output. Use the ping action to negotiate the protocol, catalog to discover command schemas and risk levels, and execute with a command plus a string args array.
 
-The transport never invokes a shell and cannot evaluate Python. Requests are written to the per-user agent-api-audit.jsonl log. Game/archive mutation commands are rejected by default. A user must explicitly start the process with --allow-game-writes, and the requested SDK command must still pass its normal acknowledgement, closed-game, authorized-target, checksum, lock, backup, and rollback checks.
+The transport never invokes a shell and cannot evaluate Python. Requests are written to the per-user agent-api-audit.jsonl log. Game/archive mutation commands are rejected by default. A user must explicitly start the process with --allow-game-writes, and the requested SDK command must still pass its normal acknowledgement, closed-game, authorized-target, checksum, lock, backup, and rollback checks. list-installed-packages discovers receipt-backed installs; install-package validates and installs a mod.toml package; uninstall-package removes one through its owned-file and backup receipt.
 
-This API is intended as the stable foundation for AI-assisted package inspection and installation planning. The ALLIN1 Launcher remains the owner of full-package installation and game launch.""",
+This API is the stable foundation for AI-assisted package inspection and approved package lifecycle actions. The ALLIN1 Launcher remains the user-facing owner of interactive installation and game launch.""",
         ("ai", "agent", "api", "json", "jsonl", "stdio", "automation", "audit"),
     ),
     HelpTopic(

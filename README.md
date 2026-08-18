@@ -188,6 +188,9 @@ editor, build system, or custom mod manager.
 {"id":"hello","action":"ping"}
 {"id":"commands","action":"catalog"}
 {"id":"validate-1","action":"execute","command":"validate","args":["C:\\Mods\\Example\\addon.json"]}
+{"id":"packages","action":"execute","command":"list-installed-packages","args":["--gta-path","D:\\Games\\GTA V Enhanced"]}
+{"id":"install","action":"execute","command":"install-package","args":["C:\\Mods\\Example\\mod.toml","--gta-path","D:\\Games\\GTA V Enhanced","--acknowledge-write"]}
+{"id":"remove","action":"execute","command":"uninstall-package","args":["example.mod","--gta-path","D:\\Games\\GTA V Enhanced","--acknowledge-write"]}
 ```
 
 The `catalog` response includes parameter schemas and a `read_only`,
@@ -198,10 +201,9 @@ at `%LOCALAPPDATA%\ALLIN1-SDK\agent-api-audit.jsonl`.
 Game/archive mutation is refused unless the user explicitly starts the API with
 `--allow-game-writes`. That process-level opt-in does not bypass the selected
 command's `--acknowledge-write`, closed-game check, authorized target, hashes,
-locks, backup, verification, receipt, or rollback rules. Full-package lifecycle
-installation remains owned by ALLIN1 Launcher; the API currently provides the
-inspection, validation, authoring, and guarded RPF primitives used to build a
-reviewable install workflow.
+locks, backup, verification, receipt, or rollback rules. The API can list, install,
+and uninstall validated receipt-backed packages through the same guarded lifecycle
+service used by the launcher.
 
 ## Safety model
 

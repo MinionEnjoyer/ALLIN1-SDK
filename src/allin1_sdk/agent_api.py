@@ -24,7 +24,9 @@ MAX_REQUEST_BYTES = 256 * 1024
 MAX_OUTPUT_CHARS = 1024 * 1024
 GAME_WRITE_COMMANDS = frozenset({
     "apply-rpf-plan",
+    "install-package",
     "rollback-rpf-transaction",
+    "uninstall-package",
 })
 AUTHORING_COMMANDS = frozenset({
     "audit-folder",
@@ -234,4 +236,3 @@ def serve_stdio(
                 )
         output_stream.write(json.dumps(response, ensure_ascii=False) + "\n")
         output_stream.flush()
-
