@@ -12,7 +12,7 @@ make weapons, vehicles, archives, and other add-ons work coherently.
 ALLIN1 SDK supports GTA V Legacy and GTA V Enhanced. Its inspection and planning
 workflows are designed for Story Mode mod development.
 
-> **Current public release:** **0.4.9**. Install it from ALLIN1 Launcher or
+> **Current public release:** **0.5.0**. Install it from ALLIN1 Launcher or
 > download the self-contained Windows package from
 > [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases).
 
@@ -95,7 +95,7 @@ submodule, and RPF helper.
 
 - Windows 10 or Windows 11 for the self-contained desktop release.
 - GTA V Legacy or GTA V Enhanced when inspecting installed game content.
-- ALLIN1 Launcher 0.4.9 or newer for managed install, update, repair, and removal.
+- ALLIN1 Launcher 0.5.0 or newer for managed install, update, repair, and removal.
 - Python 3.10 or newer only when running the SDK from source.
 - .NET 8 SDK only when rebuilding `RpfPatcher` from source.
 

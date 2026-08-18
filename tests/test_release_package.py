@@ -27,9 +27,9 @@ def test_release_package_contains_launcher_contract_and_checksums(tmp_path):
     (app / "_internal" / "python312.dll").write_bytes(b"runtime")
     (rpf / "RpfPatcher.exe").write_bytes(b"MZhelper")
 
-    archive, checksum = package_release(root, app, rpf, output, "0.4.9")
+    archive, checksum = package_release(root, app, rpf, output, "0.5.0")
 
-    assert archive.name == "ALLIN1-SDK-0.4.9-win-x64.zip"
+    assert archive.name == "ALLIN1-SDK-0.5.0-win-x64.zip"
     assert checksum.read_text().startswith(hashlib.sha256(archive.read_bytes()).hexdigest())
     with zipfile.ZipFile(archive) as package:
         names = set(package.namelist())
@@ -43,7 +43,7 @@ def test_release_package_contains_launcher_contract_and_checksums(tmp_path):
         assert metadata == {
             "entrypoint": "ALLIN1-SDK.exe", "platform": "win-x64",
             "agent_entrypoint": "ALLIN1-SDK-Agent.exe",
-            "product": "ALLIN1-SDK", "version": "0.4.9",
+            "product": "ALLIN1-SDK", "version": "0.5.0",
         }
         assert set(checksums) == names - {"checksums.json"}
         assert all(
