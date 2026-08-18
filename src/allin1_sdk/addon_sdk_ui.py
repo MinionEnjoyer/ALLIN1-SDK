@@ -190,7 +190,10 @@ class AddonSdkDialog(tk.Toplevel):
         outer.pack(fill="both", expand=True)
         header = ttk.Frame(outer)
         header.pack(fill="x", pady=(0, 10))
-        logo = self.project_root / "assets" / "ALLIN1_SDK.png"
+        # The full SDK badge is release/README artwork. In the application
+        # header it duplicates the adjacent title and becomes illegible at
+        # shell scale, so use the supplied A1 product mark instead.
+        logo = self.project_root / "assets" / "ALLIN1.png"
         if logo.is_file():
             try:
                 with Image.open(logo) as opened:

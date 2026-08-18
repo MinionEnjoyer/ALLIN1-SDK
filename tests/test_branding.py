@@ -59,8 +59,16 @@ def test_sdk_icon_reports_missing_asset(tmp_path):
 
 def test_distributed_favicon_has_small_and_high_dpi_frames():
     with Image.open(ROOT / "assets" / "favicon.ico") as icon:
-        assert {(16, 16), (32, 32), (48, 48), (128, 128), (256, 256)} <= \
-            icon.ico.sizes()
+        expected = {
+            (size, size) for size in (
+                16, 20, 24, 28, 32, 36, 40, 48,
+                56, 64, 72, 80, 96, 128, 256,
+            )
+        }
+        assert expected == icon.ico.sizes()
+        for size in expected:
+            frame = icon.ico.getimage(size).convert("RGBA")
+            assert frame.getchannel("A").getextrema() == (0, 255)
 
 
 def test_distributed_sdk_logo_has_real_transparency():

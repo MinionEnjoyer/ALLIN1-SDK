@@ -20,6 +20,10 @@ def _apply_windows_native_icon(window: tk.Misc, favicon: Path) -> bool:
         user32 = ctypes.windll.user32
         user32.GetParent.argtypes = (wintypes.HWND,)
         user32.GetParent.restype = wintypes.HWND
+        user32.GetDpiForWindow.argtypes = (wintypes.HWND,)
+        user32.GetDpiForWindow.restype = wintypes.UINT
+        user32.GetSystemMetricsForDpi.argtypes = (ctypes.c_int, wintypes.UINT)
+        user32.GetSystemMetricsForDpi.restype = ctypes.c_int
         user32.LoadImageW.argtypes = (
             wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
             ctypes.c_int, ctypes.c_int, wintypes.UINT,
@@ -41,11 +45,18 @@ def _apply_windows_native_icon(window: tk.Misc, favicon: Path) -> bool:
         if not handles:
             image_icon = 1
             load_from_file = 0x0010
+            dpi = int(user32.GetDpiForWindow(targets[0]) or 96)
+            small_width = max(16, int(user32.GetSystemMetricsForDpi(49, dpi)))
+            small_height = max(16, int(user32.GetSystemMetricsForDpi(50, dpi)))
+            large_width = max(32, int(user32.GetSystemMetricsForDpi(11, dpi)))
+            large_height = max(32, int(user32.GetSystemMetricsForDpi(12, dpi)))
             small = int(user32.LoadImageW(
-                None, str(favicon), image_icon, 16, 16, load_from_file,
+                None, str(favicon), image_icon,
+                small_width, small_height, load_from_file,
             ) or 0)
             large = int(user32.LoadImageW(
-                None, str(favicon), image_icon, 32, 32, load_from_file,
+                None, str(favicon), image_icon,
+                large_width, large_height, load_from_file,
             ) or 0)
             if not small and not large:
                 return False
