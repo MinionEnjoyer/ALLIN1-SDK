@@ -190,15 +190,15 @@ class AddonSdkDialog(tk.Toplevel):
         outer.pack(fill="both", expand=True)
         header = ttk.Frame(outer)
         header.pack(fill="x", pady=(0, 10))
-        # The full SDK badge is release/README artwork. In the application
-        # header it duplicates the adjacent title and becomes illegible at
-        # shell scale, so use the supplied A1 product mark instead.
-        logo = self.project_root / "assets" / "ALLIN1.png"
+        # Keep the developer application visually distinct from the launcher.
+        # The adjacent heading describes the workspace instead of repeating
+        # the product name already present in the supplied SDK badge.
+        logo = self.project_root / "assets" / "ALLIN1_SDK.png"
         if logo.is_file():
             try:
                 with Image.open(logo) as opened:
                     image = opened.convert("RGBA")
-                    image.thumbnail((145, 82), Image.Resampling.LANCZOS)
+                    image.thumbnail((220, 112), Image.Resampling.LANCZOS)
                     self._logo_photo = ImageTk.PhotoImage(image.copy())
                 ttk.Label(header, image=self._logo_photo).pack(
                     side="left", padx=(0, 14), anchor="center",
@@ -208,8 +208,8 @@ class AddonSdkDialog(tk.Toplevel):
         header_text = ttk.Frame(header)
         header_text.pack(side="left", fill="x", expand=True, anchor="center")
         ttk.Label(
-            header_text, text="ALLIN1 SDK",
-            font=("Segoe UI Semibold", 20), foreground="#173d32",
+            header_text, text="Developer Workspace",
+            font=("Segoe UI Semibold", 19), foreground="#173d32",
         ).pack(anchor="w")
         ttk.Label(
             header_text,

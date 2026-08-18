@@ -89,3 +89,11 @@ def test_compact_title_bar_logo_has_real_transparency():
         assert logo.mode == "RGBA"
         assert logo.size == (256, 256)
         assert logo.getchannel("A").getextrema() == (0, 255)
+
+
+def test_sdk_workspace_banner_uses_sdk_specific_artwork():
+    source = (ROOT / "src" / "allin1_sdk" / "addon_sdk_ui.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'logo = self.project_root / "assets" / "ALLIN1_SDK.png"' in source
+    assert 'header_text, text="Developer Workspace"' in source
