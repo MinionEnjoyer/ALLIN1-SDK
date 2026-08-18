@@ -24,6 +24,7 @@ allin1-sdk-gui = "allin1_sdk.app:main"
 
 [project.optional-dependencies]
 test = ["pytest>=8.0", "pytest-cov>=5.0"]
+release = ["pyinstaller>=6.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

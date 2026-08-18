@@ -21,6 +21,16 @@ RPF inspection and extraction are read-only. Replacement is deliberately
 plan-only until a transactional writer with backup, verification, and rollback
 guarantees is available.
 
+## Install from the ALLIN1 Launcher
+
+Open **SDK → Install / Manage SDK** in ALLIN1 Launcher 0.4.8 or newer. The
+launcher downloads the latest public, self-contained Windows release, verifies
+its published SHA-256 and internal file manifest, and installs it per-user under
+`%LOCALAPPDATA%\ALLIN1\SDK`. Python is not required for this installation.
+
+The same panel can update, repair, open, or uninstall the managed application.
+SDK projects and imported content remain in the separate per-user data folder.
+
 ## Run from source
 
 ```powershell
