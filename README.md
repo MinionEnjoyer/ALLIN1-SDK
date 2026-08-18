@@ -2,8 +2,7 @@
 
 ALLIN1 SDK is the standalone developer companion to the ALLIN1 GTA V Launcher.
 It focuses exclusively on add-on authoring, package analysis, native asset
-inspection, and safe integration planning. It never launches GTA V or installs
-the ALLIN1 gameplay client.
+inspection, and safe integration planning.
 
 ## Workspaces
 
