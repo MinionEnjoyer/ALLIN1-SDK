@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/ALLIN1.png" alt="ALLIN1" width="180" />
+</p>
+
 # ALLIN1 SDK — GTA V Mod Developer Tools
 
 The standalone developer companion to ALLIN1 Launcher for authoring, inspecting,
