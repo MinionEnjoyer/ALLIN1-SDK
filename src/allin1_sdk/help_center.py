@@ -58,19 +58,31 @@ Commands return non-zero exit codes for invalid or unsafe inputs. Creating an en
     HelpTopic(
         "console", "Automation", "SDK Console",
         "Use the complete command surface without leaving the desktop SDK.",
-        """Open Tools → SDK Console or press Ctrl+`. Start typing to progressively filter commands. Suggestions include command syntax, options, local paths, and persistent command history.
+        """Use the prompt docked beneath every workspace, or press Ctrl+` to focus and expand it. Start typing to progressively filter commands. Suggestions include command syntax, options, local paths, and persistent command history.
 
-Tab accepts the selected suggestion. Up and Down move through visible matches; Ctrl+Up and Ctrl+Down move through history. Enter runs the command asynchronously, Ctrl+L clears output, and Escape clears the command or closes an empty console.
+The prompt stays docked at the bottom of every workspace. Ctrl+backtick focuses and expands it; Expand reveals output, history, and the complete suggestion table without leaving the current tool. Tab accepts the selected suggestion. Up and Down move through visible matches; Ctrl+Up and Ctrl+Down move through history. Enter runs the command asynchronously, Ctrl+L clears output, and Escape clears the command or collapses the dock.
 
 The console invokes the same Click commands and safety checks as allin1-sdk in a terminal. It does not bypass target authorization, acknowledgements, hashes, locks, game-process checks, or rollback requirements. Type help for the catalog or help <command> for detailed syntax.""",
         ("console", "autocomplete", "completion", "history", "source", "terminal"),
+    ),
+    HelpTopic(
+        "agent-api", "Automation", "AI agent integration",
+        "Let local AI and developer tools inspect and operate the SDK through structured JSON.",
+        """Run allin1-sdk agent-api and exchange one JSON object per line over standard input and output. Use the ping action to negotiate the protocol, catalog to discover command schemas and risk levels, and execute with a command plus a string args array.
+
+The transport never invokes a shell and cannot evaluate Python. Requests are written to the per-user agent-api-audit.jsonl log. Game/archive mutation commands are rejected by default. A user must explicitly start the process with --allow-game-writes, and the requested SDK command must still pass its normal acknowledgement, closed-game, authorized-target, checksum, lock, backup, and rollback checks.
+
+This API is intended as the stable foundation for AI-assisted package inspection and installation planning. The ALLIN1 Launcher remains the owner of full-package installation and game launch.""",
+        ("ai", "agent", "api", "json", "jsonl", "stdio", "automation", "audit"),
     ),
     HelpTopic(
         "input", "Interface", "Navigating the SDK",
         "Use the integration graph, field inspector, menus, and search efficiently.",
         """Content imports are grouped under Import content. Review actions apply to the selected package, and Package intelligence contains cross-package tools.
 
-Select an integration node to see its source, contract, and linked fields. Select a field for a plain-language explanation. Tools → SDK Console opens the in-app command surface. F1 opens contextual help; Escape closes secondary dialogs.""",
+Use the persistent sidebar to move between Integration, Native Assets, RPF Explorer, and Help Center. Ctrl+1–4 selects those workspaces without opening another application window. The SDK Console remains available along the bottom in all four contexts.
+
+Select an integration node to see its source, contract, and linked fields. Select a field for a plain-language explanation. Ctrl+` focuses or expands the console dock and F1 routes to contextual help.""",
         ("navigation", "menus", "graph", "field", "keyboard"),
     ),
     HelpTopic(
@@ -126,7 +138,7 @@ Only one ALLIN1 transaction can own an archive at a time. Transaction History ca
 
 An unresolved edition, missing source, unsafe archive path, checksum mismatch, or incomplete rollback step is intentionally surfaced instead of guessed. Export the audit/link report when asking for help so the exact finding codes and paths are preserved.
 
-F1 opens this help center in every primary SDK window.""",
+F1 routes the current workspace to the relevant article in this embedded Help Center.""",
         ("logs", "error", "helper", "diagnostics", "finding", "failure"),
     ),
 )
@@ -158,21 +170,31 @@ def search_help_topics(query: str) -> tuple[HelpTopic, ...]:
     ))
 
 
-class HelpCenterDialog(tk.Toplevel):
-    """Searchable help center shared by the SDK and its inspection tools."""
+class HelpCenterDialog(ttk.Frame):
+    """Searchable help center embedded in the primary SDK shell."""
 
-    def __init__(self, parent: tk.Misc, initial_topic: str | None = None) -> None:
-        super().__init__(parent)
+    def __init__(
+        self, parent: tk.Misc, initial_topic: str | None = None,
+        *, embedded: bool = False,
+    ) -> None:
+        self._window: tk.Toplevel | None = None
+        host = parent
+        if not embedded:
+            self._window = tk.Toplevel(parent)
+            self._window.title("ALLIN1 SDK Help Center")
+            self._window.geometry("1040x700")
+            self._window.minsize(780, 540)
+            self._window.transient(parent.winfo_toplevel())
+            host = self._window
+        super().__init__(host)
+        self.pack(fill="both", expand=True)
         self.initial_topic = initial_topic
         self.visible_topics: tuple[HelpTopic, ...] = ()
         self.topic_items: dict[str, HelpTopic] = {}
-        self.title("ALLIN1 Help Center")
-        self.geometry("1040x700")
-        self.minsize(780, 540)
-        self.transient(parent)
         self._build()
         self._populate()
-        self.bind("<Escape>", lambda _event: self.destroy())
+        if self._window is not None:
+            self.bind("<Escape>", lambda _event: self._window.destroy())
 
     def _build(self) -> None:
         outer = ttk.Frame(self, padding=20)
@@ -271,6 +293,12 @@ class HelpCenterDialog(tk.Toplevel):
         self.results.selection_set(selected_index)
         self.results.see(selected_index)
         self._show_topic(self.visible_topics[selected_index])
+
+    def show_topic(self, key: str) -> None:
+        """Navigate an existing help workspace without opening a window."""
+        self.initial_topic = key
+        self.query.set("")
+        self._populate()
 
     def _select_topic(self, _event: object | None = None) -> None:
         selection = self.results.curselection()

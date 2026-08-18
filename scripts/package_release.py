@@ -19,13 +19,14 @@ def _version(value: str) -> str:
 
 
 def _copy_runtime(root: Path, app_dir: Path, rpf_dir: Path) -> None:
-    executable = app_dir / "ALLIN1-SDK.exe"
-    signature = b""
-    if executable.is_file():
-        with executable.open("rb") as stream:
-            signature = stream.read(2)
-    if signature != b"MZ":
-        raise ValueError(f"PyInstaller executable is missing or invalid: {executable}")
+    for name in ("ALLIN1-SDK.exe", "ALLIN1-SDK-Agent.exe"):
+        executable = app_dir / name
+        signature = b""
+        if executable.is_file():
+            with executable.open("rb") as stream:
+                signature = stream.read(2)
+        if signature != b"MZ":
+            raise ValueError(f"PyInstaller executable is missing or invalid: {executable}")
     if not (rpf_dir / "RpfPatcher.exe").is_file():
         raise ValueError(f"RpfPatcher runtime is missing: {rpf_dir}")
     shutil.copytree(root / "sdk", app_dir / "sdk", dirs_exist_ok=True)
@@ -48,6 +49,7 @@ def package_release(root: Path, app_dir: Path, rpf_dir: Path, output: Path, vers
         "version": version,
         "platform": "win-x64",
         "entrypoint": "ALLIN1-SDK.exe",
+        "agent_entrypoint": "ALLIN1-SDK-Agent.exe",
     }
     (app_dir / "release.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"

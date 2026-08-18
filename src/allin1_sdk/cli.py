@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -67,6 +68,21 @@ def _progress(message: str, percent: int) -> None:
 @click.group()
 def main() -> None:
     """Author, audit, and inspect GTA V add-on content."""
+
+
+@main.command("agent-api")
+@click.option(
+    "--allow-game-writes", is_flag=True,
+    help=(
+        "Permit guarded game/archive commands. Each command still requires its "
+        "normal acknowledgement and safety checks."
+    ),
+)
+def agent_api(allow_game_writes: bool) -> None:
+    """Serve the structured local AI/developer API over JSONL stdio."""
+    from allin1_sdk.agent_api import serve_stdio
+
+    serve_stdio(sys.stdin, sys.stdout, allow_game_writes=allow_game_writes)
 
 
 @main.command("list")

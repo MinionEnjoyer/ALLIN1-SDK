@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 allin1-sdk = "allin1_sdk.cli:main"
+allin1-sdk-agent = "allin1_sdk.agent_host:main"
 
 [project.gui-scripts]
 allin1-sdk-gui = "allin1_sdk.app:main"

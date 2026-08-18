@@ -6,12 +6,14 @@ import json
 import os
 import sys
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from PIL import Image, ImageTk
 
+from allin1_sdk import __version__
 from allin1_sdk.addon_importer import AddonDraftBuilder, AddonPackageInspector, PackageScan
 from allin1_sdk.asset_viewer import AssetViewerDialog
 from allin1_sdk.rpf_explorer import RpfExplorerDialog
@@ -84,25 +86,34 @@ class AddonSdkDialog(tk.Toplevel):
         menu.add_cascade(label="Review", menu=review)
         intelligence = self._make_intelligence_menu(menu)
         menu.add_cascade(label="Package Intelligence", menu=intelligence)
+        view = tk.Menu(menu, tearoff=False)
+        for index, (key, label) in enumerate((
+            ("linker", "Integration"), ("assets", "Native Assets"),
+            ("rpf", "RPF Explorer"), ("help", "Help Center"),
+        ), start=1):
+            view.add_command(
+                label=label, accelerator=f"Ctrl+{index}",
+                command=lambda selected=key: self._select_workspace(selected),
+            )
+        menu.add_cascade(label="View", menu=view)
         tools = tk.Menu(menu, tearoff=False)
         tools.add_command(
-            label="SDK Console…", accelerator="Ctrl+`", command=self._open_console,
+            label="Focus / expand SDK Console", accelerator="Ctrl+`",
+            command=self._open_console,
         )
         menu.add_cascade(label="Tools", menu=tools)
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(
             label="SDK Help Center", accelerator="F1",
-            command=lambda: HelpCenterDialog(self, initial_topic="sdk"),
+            command=lambda: self._open_help("sdk"),
         )
         help_menu.add_command(
             label="RPF Explorer Help",
-            command=lambda: HelpCenterDialog(self, initial_topic="rpf-explorer"),
+            command=lambda: self._open_help("rpf-explorer"),
         )
         menu.add_cascade(label="Help", menu=help_menu)
         self.configure(menu=menu)
-        self.bind(
-            "<F1>", lambda _event: HelpCenterDialog(self, initial_topic="sdk"),
-        )
+        self.bind("<F1>", lambda _event: self._open_context_help())
         self.bind("<Control-KeyPress-grave>", lambda _event: self._open_console())
 
     def _make_content_menu(self, parent: tk.Misc) -> tk.Menu:
@@ -153,13 +164,29 @@ class AddonSdkDialog(tk.Toplevel):
             )
 
     def _open_console(self) -> None:
-        existing = getattr(self, "_console_dialog", None)
-        if existing is not None and existing.winfo_exists():
-            existing.deiconify()
-            existing.lift()
-            existing.focus_force()
+        self.console_workspace.toggle()
+
+    def _open_help(self, topic: str = "sdk") -> None:
+        self._select_workspace("help")
+        self.help_workspace.show_topic(topic)
+
+    def _open_context_help(self) -> None:
+        topic = {
+            "linker": "sdk", "assets": "asset-viewer",
+            "rpf": "rpf-explorer", "help": "input",
+        }.get(getattr(self, "current_workspace", "linker"), "sdk")
+        self._open_help(topic)
+
+    def _select_workspace(self, key: str) -> None:
+        pages = getattr(self, "workspace_pages", {})
+        if key not in pages:
             return
-        self._console_dialog = SdkConsoleDialog(self, self.project_root)
+        pages[key].tkraise()
+        self.current_workspace = key
+        for name, button in self.workspace_buttons.items():
+            button.configure(
+                style="NavSelected.TButton" if name == key else "Nav.TButton",
+            )
 
     def _build(self) -> None:
         self._build_menu()
@@ -172,7 +199,7 @@ class AddonSdkDialog(tk.Toplevel):
             try:
                 with Image.open(logo) as opened:
                     image = opened.convert("RGBA")
-                    image.thumbnail((175, 100), Image.Resampling.LANCZOS)
+                    image.thumbnail((145, 82), Image.Resampling.LANCZOS)
                     self._logo_photo = ImageTk.PhotoImage(image.copy())
                 ttk.Label(header, image=self._logo_photo).pack(
                     side="left", padx=(0, 14), anchor="center",
@@ -193,8 +220,72 @@ class AddonSdkDialog(tk.Toplevel):
             ),
             wraplength=1080, justify="left",
         ).pack(anchor="w", pady=(3, 0))
+        header_actions = ttk.Frame(header)
+        header_actions.pack(side="right", padx=(18, 4), fill="y")
+        tk.Label(
+            header_actions, text=f"v{__version__}",
+            background="#176b36", foreground="white",
+            font=("Segoe UI Semibold", 10), padx=12, pady=5,
+        ).pack(anchor="e")
+        support = ttk.Label(
+            header_actions, text="Support ALLIN1 ↗", foreground="#176b36",
+            cursor="hand2", font=("Segoe UI Semibold", 9, "underline"),
+        )
+        support.pack(anchor="e", pady=(10, 0))
+        support.bind(
+            "<Button-1>",
+            lambda _event: webbrowser.open(
+                "https://buymeacoffee.com/minionenjoyer"
+            ),
+        )
 
-        toolbar = ttk.Frame(outer)
+        shell = ttk.Frame(outer)
+        shell.pack(fill="both", expand=True)
+        console_host = ttk.Frame(shell, style="Surface.TFrame")
+        console_host.pack(side="bottom", fill="x", pady=(10, 0))
+        content_shell = ttk.Frame(shell)
+        content_shell.pack(fill="both", expand=True)
+        sidebar = ttk.Frame(content_shell, style="Surface.TFrame", padding=(8, 12))
+        sidebar.pack(side="left", fill="y", padx=(0, 12))
+        ttk.Label(
+            sidebar, text="DEVELOPER WORKSPACES", style="FieldLabel.TLabel",
+            background="#ffffff",
+        ).pack(anchor="w", padx=10, pady=(0, 7))
+        workspace = ttk.Frame(content_shell)
+        workspace.pack(side="left", fill="both", expand=True)
+        workspace.rowconfigure(0, weight=1)
+        workspace.columnconfigure(0, weight=1)
+
+        linker_page = ttk.Frame(workspace)
+        assets_page = ttk.Frame(workspace)
+        rpf_page = ttk.Frame(workspace)
+        help_page = ttk.Frame(workspace)
+        self.workspace_pages = {
+            "linker": linker_page,
+            "assets": assets_page,
+            "rpf": rpf_page,
+            "help": help_page,
+        }
+        self.workspace_buttons: dict[str, ttk.Button] = {}
+        for index, (key, label) in enumerate((
+            ("linker", "Integration"),
+            ("assets", "Native Assets"),
+            ("rpf", "RPF Explorer"),
+            ("help", "Help Center"),
+        ), start=1):
+            self.workspace_pages[key].grid(row=0, column=0, sticky="nsew")
+            button = ttk.Button(
+                sidebar, text=label, style="Nav.TButton", width=19,
+                command=lambda selected=key: self._select_workspace(selected),
+            )
+            button.pack(fill="x", pady=1)
+            self.workspace_buttons[key] = button
+            self.bind(
+                f"<Control-Key-{index}>",
+                lambda _event, selected=key: self._select_workspace(selected),
+            )
+
+        toolbar = ttk.Frame(linker_page)
         toolbar.pack(fill="x", pady=(0, 10))
         content_menu = self._make_content_menu(toolbar)
         ttk.Menubutton(
@@ -212,19 +303,26 @@ class AddonSdkDialog(tk.Toplevel):
         self.status = tk.StringVar(value="Loading SDK examples…")
         ttk.Label(toolbar, textvariable=self.status).pack(side="right")
 
-        panes = ttk.Panedwindow(outer, orient="horizontal")
+        panes = ttk.Panedwindow(linker_page, orient="horizontal")
         panes.pack(fill="both", expand=True)
 
-        examples = ttk.LabelFrame(panes, text="Packages", padding=8)
+        examples = ttk.LabelFrame(panes, text="Packages", padding=8, width=250)
         graph = ttk.LabelFrame(panes, text="Integration graph", padding=8)
         inspector = ttk.LabelFrame(panes, text="Field inspector", padding=8)
-        panes.add(examples, weight=1)
-        panes.add(graph, weight=3)
-        panes.add(inspector, weight=3)
+        # Package names and compatibility tags need enough width to scan without
+        # forcing users to resize the first pane every session.
+        panes.add(examples, weight=2)
+        panes.add(graph, weight=4)
+        panes.add(inspector, weight=5)
 
-        self.example_list = tk.Listbox(
-            examples, exportselection=False, activestyle="none", width=27,
+        self.example_list = ttk.Treeview(
+            examples, columns=("package",), show="tree headings",
+            selectmode="browse", height=16,
         )
+        self.example_list.heading("#0", text="Status")
+        self.example_list.heading("package", text="Package")
+        self.example_list.column("#0", width=78, minwidth=68, stretch=False)
+        self.example_list.column("package", width=205, minwidth=140, stretch=True)
         example_scroll = ttk.Scrollbar(
             examples, orient="vertical", command=self.example_list.yview,
         )
@@ -283,6 +381,24 @@ class AddonSdkDialog(tk.Toplevel):
             justify="left", foreground="#52635c",
         ).pack(fill="x", pady=(8, 0))
 
+        self.asset_workspace = AssetViewerDialog(
+            assets_page, embedded=True, on_help=self._open_help,
+            on_close=lambda: self._select_workspace("linker"),
+        )
+        self.rpf_workspace = RpfExplorerDialog(
+            rpf_page, self.project_root, installation_roots=self.installation_roots,
+            embedded=True, on_help=self._open_help,
+            on_close=lambda: self._select_workspace("linker"),
+        )
+        self.console_workspace = SdkConsoleDialog(
+            console_host, self.project_root, embedded=True, docked=True,
+        )
+        self.help_workspace = HelpCenterDialog(
+            help_page, initial_topic="sdk", embedded=True,
+        )
+        self.current_workspace = "linker"
+        self._select_workspace("linker")
+
     def _load_examples(self) -> None:
         try:
             self.manifests = self.catalog.discover(
@@ -292,21 +408,36 @@ class AddonSdkDialog(tk.Toplevel):
             messagebox.showerror("SDK example error", str(exc), parent=self)
             self.status.set("Could not load built-in examples")
             return
-        self.example_list.delete(0, "end")
-        for manifest in self.manifests:
+        self.example_list.delete(*self.example_list.get_children())
+        for index, manifest in enumerate(self.manifests):
             self.example_list.insert(
-                "end", f"{manifest.name}  [{manifest.catalog_state}]",
+                "", "end", iid=str(index),
+                text=self._catalog_state_label(manifest.catalog_state),
+                values=(manifest.name,),
             )
         if self.manifests:
-            self.example_list.selection_set(0)
+            self.example_list.selection_set("0")
             self._show_manifest(self.manifests[0])
         else:
             self.status.set("No SDK examples, imports, packages, or receipts found")
 
     def _select_example(self, _event: object | None = None) -> None:
-        selection = self.example_list.curselection()
+        selection = self.example_list.selection()
         if selection:
-            self._show_manifest(self.manifests[selection[0]])
+            self._show_manifest(self.manifests[int(selection[0])])
+
+    @staticmethod
+    def _catalog_state_label(value: str) -> str:
+        normalized = value.casefold()
+        for prefix, label in (
+            ("installed", "Installed"),
+            ("imported", "Draft"),
+            ("available", "Available"),
+            ("built-in", "Example"),
+        ):
+            if normalized.startswith(prefix):
+                return label
+        return value.replace("-", " ").title()
 
     def _open_manifest(self) -> None:
         selected = filedialog.askopenfilename(
@@ -329,13 +460,14 @@ class AddonSdkDialog(tk.Toplevel):
 
     def _append_manifest(self, manifest: AddonManifest) -> None:
         self.manifests.append(manifest)
-        self.example_list.insert(
-            "end", f"{manifest.name}  [{manifest.catalog_state}]",
-        )
         index = len(self.manifests) - 1
-        self.example_list.selection_clear(0, "end")
-        self.example_list.selection_set(index)
-        self.example_list.see(index)
+        self.example_list.insert(
+            "", "end", iid=str(index),
+            text=self._catalog_state_label(manifest.catalog_state),
+            values=(manifest.name,),
+        )
+        self.example_list.selection_set(str(index))
+        self.example_list.see(str(index))
         self._show_manifest(manifest)
 
     def _import_folder(self) -> None:
@@ -453,12 +585,14 @@ class AddonSdkDialog(tk.Toplevel):
         )
 
     def _open_asset_viewer(self) -> None:
-        AssetViewerDialog(self, self.package_source, self.package_scan)
+        if self.package_source is not None:
+            self.asset_workspace.open_source(
+                self.package_source, self.package_scan,
+            )
+        self._select_workspace("assets")
 
     def _open_rpf_explorer(self) -> None:
-        RpfExplorerDialog(
-            self, self.project_root, installation_roots=self.installation_roots,
-        )
+        self._select_workspace("rpf")
 
     def _inspect_package_rpfs(self) -> None:
         if self.package_source is None:

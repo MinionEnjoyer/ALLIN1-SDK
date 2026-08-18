@@ -63,6 +63,10 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
 - **Self-contained Windows releases** — use the GUI and RPF helper without a
   separate Python or .NET installation. Every release includes external and
   internal SHA-256 verification data for the ALLIN1 Launcher installer.
+- **Agent automation API** — let local AI and developer tools discover SDK
+  command schemas and submit structured JSON requests over stdio without shell
+  evaluation. Game/archive writes are off by default, retain every existing
+  safety check, and every execution request is audit-logged.
 
 ## How it fits together
 
@@ -119,17 +123,21 @@ the checksum, extract the archive to a fresh directory, and run
 
 ## Desktop SDK
 
-The desktop application organizes developer tasks into focused workspaces and
-keeps dense commands in contextual menus instead of covering content with large
-button rows:
+The desktop application is one persistent developer window. Its sidebar moves
+between **Integration**, **Native Assets**, **RPF Explorer**, and **Help Center**.
+The SDK Console remains docked along the bottom and can expand over any context;
+opening a tool no longer creates another independent workspace
+window. Only file pickers, confirmations, and blocking transaction progress use
+temporary dialogs. Dense commands stay in contextual menus instead of covering
+content with large button rows:
 
 - **Content** opens manifests, packages, folders, and installed DLC sources.
 - **Review** validates links, explains fields, and exports reports.
 - **Package Intelligence** opens OIV, DLC inventory, vehicle compiler, and structured
   META/XML tools.
-- **Tools → SDK Console** opens the complete CLI inside the desktop app. Its
-  Source-style completion list narrows as you type, suggests commands, options,
-  paths, and history, and runs work off the UI thread. Press Ctrl+backtick to open it,
+- **The bottom SDK Console dock** keeps the complete CLI available from every
+  workspace. Its Source-style completion list narrows as you type, suggests commands,
+  options, paths, and history, and runs work off the UI thread. Press Ctrl+backtick to focus or expand it,
   `Tab` to accept a completion, arrows to navigate, and `Ctrl+L` to clear output.
 - **Archive / Entry** controls RPF search, metadata, preview, extraction,
   replace/add/delete planning, guarded application, canaries, transaction history,
@@ -142,7 +150,7 @@ application under `%LOCALAPPDATA%\ALLIN1-SDK`.
 ## Command line
 
 Source installations also expose `allin1-sdk`. The packaged desktop app exposes
-the same commands through **Tools → SDK Console**, so a separate Python terminal
+the same commands through the bottom **SDK Console** dock, so a separate Python terminal
 is not required:
 
 ```powershell
@@ -167,6 +175,33 @@ allin1-sdk compile-vehicle-data C:\Mods\Example -o compiled-vehicle-data
 
 Run `allin1-sdk --help` or `allin1-sdk <command> --help` for the complete command
 surface and options.
+
+### AI and tool integration
+
+`allin1-sdk agent-api` (source install) or `ALLIN1-SDK-Agent.exe` (self-contained
+Windows release) exposes the same command registry as the embedded SDK Console
+using newline-delimited JSON on standard input and output. It is local,
+transport-neutral, and straightforward to host as a subprocess from an AI agent,
+editor, build system, or custom mod manager.
+
+```json
+{"id":"hello","action":"ping"}
+{"id":"commands","action":"catalog"}
+{"id":"validate-1","action":"execute","command":"validate","args":["C:\\Mods\\Example\\addon.json"]}
+```
+
+The `catalog` response includes parameter schemas and a `read_only`,
+`authoring_write`, or `game_write` risk classification. Requests never enter a
+system shell and cannot evaluate Python. An append-only request record is stored
+at `%LOCALAPPDATA%\ALLIN1-SDK\agent-api-audit.jsonl`.
+
+Game/archive mutation is refused unless the user explicitly starts the API with
+`--allow-game-writes`. That process-level opt-in does not bypass the selected
+command's `--acknowledge-write`, closed-game check, authorized target, hashes,
+locks, backup, verification, receipt, or rollback rules. Full-package lifecycle
+installation remains owned by ALLIN1 Launcher; the API currently provides the
+inspection, validation, authoring, and guarded RPF primitives used to build a
+reviewable install workflow.
 
 ## Safety model
 

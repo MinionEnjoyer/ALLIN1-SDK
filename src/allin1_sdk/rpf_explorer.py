@@ -40,7 +40,7 @@ class RpfProgressDialog(tk.Toplevel):
         self.title(title)
         self.geometry("520x150")
         self.resizable(False, False)
-        self.transient(parent)
+        self.transient(parent.winfo_toplevel())
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", lambda: None)
         frame = ttk.Frame(self, padding=18)
@@ -93,17 +93,27 @@ class RpfProgressDialog(tk.Toplevel):
             self.after(80, self._poll)
 
 
-class RpfTransactionHistoryDialog(tk.Toplevel):
-    """Receipt history, verification, interrupted recovery, and stale-lock tools."""
+class RpfTransactionHistoryDialog(ttk.Frame):
+    """Receipt history embedded inside the RPF workspace."""
 
-    def __init__(self, parent: tk.Misc, service: RpfExplorerService) -> None:
-        super().__init__(parent)
+    def __init__(
+        self, parent: tk.Misc, service: RpfExplorerService,
+        *, embedded: bool = False, on_close=None,
+    ) -> None:
+        self._window: tk.Toplevel | None = None
+        self._on_close = on_close
+        host = parent
+        if not embedded:
+            self._window = tk.Toplevel(parent)
+            self._window.title("ALLIN1 — RPF Transaction History")
+            self._window.geometry("1180x560")
+            self._window.minsize(880, 420)
+            self._window.transient(parent.winfo_toplevel())
+            host = self._window
+        super().__init__(host)
+        self.pack(fill="both", expand=True)
         self.service = service
         self.records: dict[str, dict] = {}
-        self.title("ALLIN1 — RPF Transaction History")
-        self.geometry("1180x560")
-        self.minsize(880, 420)
-        self.transient(parent)
         outer = ttk.Frame(self, padding=14)
         outer.pack(fill="both", expand=True)
         ttk.Label(
@@ -126,6 +136,9 @@ class RpfTransactionHistoryDialog(tk.Toplevel):
             ("Clear stale lock", self._clear_lock), ("Open folder", self._open_folder),
         ):
             ttk.Button(tools, text=label, command=command).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            tools, text="Back to archive", command=self._close_panel,
+        ).pack(side="right")
         frame = ttk.Frame(outer)
         frame.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(
@@ -146,6 +159,14 @@ class RpfTransactionHistoryDialog(tk.Toplevel):
         )
         self._refresh()
 
+    def _close_panel(self) -> None:
+        if self._on_close is not None:
+            self._on_close()
+        elif self._window is not None:
+            self._window.destroy()
+        else:
+            self.destroy()
+
     def _refresh(self) -> None:
         self.tree.delete(*self.tree.get_children())
         self.records.clear()
@@ -157,10 +178,10 @@ class RpfTransactionHistoryDialog(tk.Toplevel):
                 record.get("action", ""), record.get("status", ""),
                 record.get("archive", ""), record.get("entry", ""),
             ))
-        self.status.set(f"{len(self.records)} receipt(s) · {self._root()}")
+        self.status.set(f"{len(self.records)} receipt(s) · {self._receipt_root()}")
 
     @staticmethod
-    def _root() -> Path:
+    def _receipt_root() -> Path:
         return user_data_root() / "rpf-transactions"
 
     def _selected(self) -> dict | None:
@@ -262,14 +283,27 @@ class RpfTransactionHistoryDialog(tk.Toplevel):
             os.startfile(Path(record["receipt"]).parent)
 
 
-class RpfExplorerDialog(tk.Toplevel):
-    """Search, inspect, extract, plan, and transact guarded RPF changes."""
+class RpfExplorerDialog(ttk.Frame):
+    """Search and transact RPF changes inside the unified SDK shell."""
 
     def __init__(
         self, parent: tk.Misc, project_root: str | Path,
         installation_roots: tuple[Path, ...] = (), archive: str | Path | None = None,
+        *, embedded: bool = False, on_help=None, on_close=None,
     ) -> None:
-        super().__init__(parent)
+        self._window: tk.Toplevel | None = None
+        self._on_help = on_help
+        self._on_close = on_close
+        host = parent
+        if not embedded:
+            self._window = tk.Toplevel(parent)
+            self._window.title("ALLIN1 — RPF Explorer")
+            self._window.geometry("1320x840")
+            self._window.minsize(980, 650)
+            self._window.transient(parent.winfo_toplevel())
+            host = self._window
+        super().__init__(host)
+        self.pack(fill="both", expand=True)
         self.project_root = Path(project_root).resolve()
         roots = [str(path.resolve()) for path in installation_roots if path.is_dir()]
         detected = detect_gta_path()
@@ -283,11 +317,8 @@ class RpfExplorerDialog(tk.Toplevel):
         self.file_menus: list[tk.Menu] = []
         self._photo: ImageTk.PhotoImage | None = None
         self._preview_temp = tempfile.TemporaryDirectory(prefix="allin1-rpf-preview-")
-        self.title("ALLIN1 — RPF Explorer")
-        self.geometry("1320x840")
-        self.minsize(980, 650)
-        self.transient(parent)
-        self.protocol("WM_DELETE_WINDOW", self._close)
+        if self._window is not None:
+            self._window.protocol("WM_DELETE_WINDOW", self._close)
         self._build()
         if archive:
             self._load_archive(Path(archive))
@@ -302,15 +333,15 @@ class RpfExplorerDialog(tk.Toplevel):
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(
             label="RPF Explorer Help", accelerator="F1",
-            command=lambda: HelpCenterDialog(self, initial_topic="rpf-explorer"),
+            command=self._show_help,
         )
         menu.add_cascade(label="Help", menu=help_menu)
-        self.configure(menu=menu)
-        self.bind(
-            "<F1>", lambda _event: HelpCenterDialog(self, initial_topic="rpf-explorer"),
-        )
+        if self._window is not None:
+            self._window.configure(menu=menu)
+            self._window.bind("<F1>", lambda _event: self._show_help())
 
         outer = ttk.Frame(self, padding=14)
+        self.main_surface = outer
         outer.pack(fill="both", expand=True)
         ttk.Label(
             outer, text="RPF explorer", font=("Segoe UI Semibold", 17),
@@ -939,7 +970,21 @@ class RpfExplorerDialog(tk.Toplevel):
     def _transaction_history(self) -> None:
         service = self._transaction_service()
         if service is not None:
-            RpfTransactionHistoryDialog(self, service)
+            existing = getattr(self, "_history_panel", None)
+            if existing is not None and existing.winfo_exists():
+                existing.destroy()
+            self.main_surface.pack_forget()
+            self._history_panel = RpfTransactionHistoryDialog(
+                self, service, embedded=True,
+                on_close=self._hide_transaction_history,
+            )
+
+    def _hide_transaction_history(self) -> None:
+        existing = getattr(self, "_history_panel", None)
+        if existing is not None and existing.winfo_exists():
+            existing.destroy()
+        self._history_panel = None
+        self.main_surface.pack(fill="both", expand=True)
 
     def _run_canary(self) -> None:
         service = self._transaction_service()
@@ -1016,8 +1061,19 @@ class RpfExplorerDialog(tk.Toplevel):
         self.text_preview.pack(fill="both", expand=True)
 
     def _close(self) -> None:
-        self._preview_temp.cleanup()
-        self.destroy()
+        if self._on_close is not None:
+            self._on_close()
+        elif self._window is not None:
+            self._preview_temp.cleanup()
+            self._window.destroy()
+        else:
+            self.destroy()
+
+    def _show_help(self) -> None:
+        if self._on_help is not None:
+            self._on_help("rpf-explorer")
+        else:
+            HelpCenterDialog(self, initial_topic="rpf-explorer")
 
 
 def PurePathParts(value: str) -> tuple[str, ...]:

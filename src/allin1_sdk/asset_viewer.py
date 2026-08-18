@@ -60,24 +60,33 @@ _BINARY_HELP = {
 }
 
 
-class AssetViewerDialog(tk.Toplevel):
-    """Browse loose or archived package assets without installing them."""
+class AssetViewerDialog(ttk.Frame):
+    """Browse package assets in the SDK shell or a compatibility window."""
 
     def __init__(
         self, parent: tk.Misc, source: str | Path | None = None,
         scan: PackageScan | None = None,
+        *, embedded: bool = False, on_help=None, on_close=None,
     ) -> None:
-        super().__init__(parent)
+        self._window: tk.Toplevel | None = None
+        self._on_help = on_help
+        self._on_close = on_close
+        host = parent
+        if not embedded:
+            self._window = tk.Toplevel(parent)
+            self._window.title("ALLIN1 Package Asset Viewer")
+            self._window.geometry("1180x780")
+            self._window.minsize(900, 620)
+            self._window.transient(parent.winfo_toplevel())
+            host = self._window
+        super().__init__(host)
+        self.pack(fill="both", expand=True)
         self.source: Path | None = None
         self.scan: PackageScan | None = None
         self.reader: PackageAssetReader | None = None
         self.entries: dict[str, PackageEntry] = {}
         self.action_menus: list[tk.Menu] = []
         self._photo: ImageTk.PhotoImage | None = None
-        self.title("ALLIN1 Package Asset Viewer")
-        self.geometry("1180x780")
-        self.minsize(900, 620)
-        self.transient(parent)
         self._build()
         if source is not None:
             self._load_source(Path(source), scan)
@@ -86,20 +95,19 @@ class AssetViewerDialog(tk.Toplevel):
         menu = tk.Menu(self, tearoff=False)
         file_menu = self._open_menu(menu)
         file_menu.add_separator()
-        file_menu.add_command(label="Close", command=self.destroy)
+        file_menu.add_command(label="Close", command=self._close_panel)
         menu.add_cascade(label="File", menu=file_menu)
         action_menu = self._action_menu(menu)
         menu.add_cascade(label="Actions", menu=action_menu)
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(
             label="Asset Viewer Help", accelerator="F1",
-            command=lambda: HelpCenterDialog(self, initial_topic="asset-viewer"),
+            command=self._show_help,
         )
         menu.add_cascade(label="Help", menu=help_menu)
-        self.configure(menu=menu)
-        self.bind(
-            "<F1>", lambda _event: HelpCenterDialog(self, initial_topic="asset-viewer"),
-        )
+        if self._window is not None:
+            self._window.configure(menu=menu)
+            self._window.bind("<F1>", lambda _event: self._show_help())
 
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill="both", expand=True)
@@ -212,6 +220,26 @@ class AssetViewerDialog(tk.Toplevel):
         for menu in self.action_menus:
             menu.entryconfigure("Export inventory…", state=state)
             menu.entryconfigure("Open package location", state=state)
+
+    def _show_help(self) -> None:
+        if self._on_help is not None:
+            self._on_help("asset-viewer")
+        else:
+            HelpCenterDialog(self, initial_topic="asset-viewer")
+
+    def _close_panel(self) -> None:
+        if self._on_close is not None:
+            self._on_close()
+        elif self._window is not None:
+            self._window.destroy()
+        else:
+            self.destroy()
+
+    def open_source(
+        self, source: str | Path, scan: PackageScan | None = None,
+    ) -> None:
+        """Load a package into an existing embedded asset workspace."""
+        self._load_source(Path(source), scan)
 
     def _choose_folder(self) -> None:
         selected = filedialog.askdirectory(

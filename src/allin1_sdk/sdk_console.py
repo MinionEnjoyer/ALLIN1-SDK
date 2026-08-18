@@ -265,21 +265,33 @@ def execute_console_command(command_line: str, history: Iterable[str] = ()) -> C
     return ConsoleResult(output, result.exit_code)
 
 
-class SdkConsoleDialog(tk.Toplevel):
-    """Interactive SDK CLI with live Source-style completion and history."""
+class SdkConsoleDialog(ttk.Frame):
+    """Interactive SDK CLI embedded in the primary developer workspace."""
 
-    def __init__(self, parent: tk.Misc, project_root: str | Path) -> None:
-        super().__init__(parent)
+    def __init__(
+        self, parent: tk.Misc, project_root: str | Path,
+        *, embedded: bool = False, docked: bool = False, on_close=None,
+    ) -> None:
+        self._window: tk.Toplevel | None = None
+        self._on_close = on_close
+        self.docked = docked
+        self.expanded = not docked
+        host = parent
+        if not embedded:
+            self._window = tk.Toplevel(parent)
+            self._window.title("ALLIN1 SDK Console")
+            self._window.geometry("1040x680")
+            self._window.minsize(760, 500)
+            self._window.transient(parent.winfo_toplevel())
+            host = self._window
+        super().__init__(host)
+        self.pack(fill="both", expand=True)
         self.project_root = Path(project_root).resolve()
         self.history_path = user_data_root() / "console-history.txt"
         self.history = self._load_history()
         self.history_index = len(self.history)
         self.matches: tuple[ConsoleSuggestion, ...] = ()
         self.running = False
-        self.title("ALLIN1 SDK Console")
-        self.geometry("1040x680")
-        self.minsize(760, 500)
-        self.transient(parent)
         self._build()
         self._append(
             "ALLIN1 SDK Console\n"
@@ -289,15 +301,66 @@ class SdkConsoleDialog(tk.Toplevel):
         )
         self.entry.focus_set()
 
+    def activate(self) -> None:
+        """Move keyboard focus into the persistent command line."""
+        self.after_idle(self.entry.focus_set)
+
+    def toggle(self) -> None:
+        """Expand or collapse the dock while leaving its prompt available."""
+        if self.docked:
+            self._set_expanded(not self.expanded)
+        self.activate()
+
+    def _leave_console(self) -> None:
+        if self.docked:
+            self._set_expanded(False)
+            self.activate()
+        elif self._on_close is not None:
+            self._on_close()
+        elif self._window is not None:
+            self._window.destroy()
+        else:
+            self.destroy()
+
     def _build(self) -> None:
-        outer = tk.Frame(self, bg="#111614", padx=12, pady=12)
+        outer = tk.Frame(
+            self, bg="#111614", padx=10 if self.docked else 12,
+            pady=8 if self.docked else 12,
+        )
         outer.pack(fill="both", expand=True)
+        api_bar = tk.Frame(outer, bg="#17201c", padx=12, pady=9)
+        api_bar.pack(fill="x", pady=(0, 9))
+        tk.Label(
+            api_bar, text="SDK CONSOLE", bg="#17201c", fg="#8cff65",
+            font=("Segoe UI Semibold", 9),
+        ).pack(side="left")
+        tk.Label(
+            api_bar,
+            text="  AI API: allin1-sdk agent-api",
+            bg="#17201c", fg="#c8d8d0", font=("Cascadia Mono", 9),
+        ).pack(side="left")
+        if self.docked:
+            self.toggle_button = ttk.Button(
+                api_bar, text="Expand", command=self.toggle, width=10,
+            )
+            self.toggle_button.pack(side="right")
+        else:
+            tk.Label(
+                api_bar, text="local · audited · writes off by default",
+                bg="#17201c", fg="#76bca0", font=("Segoe UI", 9),
+            ).pack(side="right")
+
+        self.console_body = tk.Frame(outer, bg="#111614")
+        self.console_body.pack(fill="both", expand=True)
         self.output = tk.Text(
-            outer, bg="#0b0f0d", fg="#d8e6df", insertbackground="#8cff65",
+            self.console_body, bg="#0b0f0d", fg="#d8e6df", insertbackground="#8cff65",
             selectbackground="#28623c", relief="flat", padx=12, pady=10,
             font=("Cascadia Mono", 10), wrap="word", state="disabled",
+            height=8 if self.docked else 20,
         )
-        scroll = ttk.Scrollbar(outer, orient="vertical", command=self.output.yview)
+        scroll = ttk.Scrollbar(
+            self.console_body, orient="vertical", command=self.output.yview,
+        )
         self.output.configure(yscrollcommand=scroll.set)
         self.output.pack(side="top", fill="both", expand=True)
         scroll.place(relx=1.0, rely=0.0, relheight=0.72, anchor="ne")
@@ -305,11 +368,11 @@ class SdkConsoleDialog(tk.Toplevel):
         self.output.tag_configure("error", foreground="#ff857a")
         self.output.tag_configure("system", foreground="#76bca0")
 
-        suggestion_frame = tk.Frame(outer, bg="#111614")
+        suggestion_frame = tk.Frame(self.console_body, bg="#111614")
         suggestion_frame.pack(fill="x", pady=(8, 6))
         self.suggestions = ttk.Treeview(
             suggestion_frame, columns=("kind", "description"), show="tree headings",
-            height=6, selectmode="browse",
+            height=4 if self.docked else 6, selectmode="browse",
         )
         self.suggestions.heading("#0", text="Completion")
         self.suggestions.heading("kind", text="Type")
@@ -320,15 +383,15 @@ class SdkConsoleDialog(tk.Toplevel):
         self.suggestions.pack(fill="x")
         self.suggestions.bind("<Double-1>", self._accept_suggestion)
 
-        command_row = tk.Frame(outer, bg="#111614")
-        command_row.pack(fill="x")
+        self.command_row = tk.Frame(outer, bg="#111614")
+        self.command_row.pack(fill="x")
         tk.Label(
-            command_row, text=">", bg="#111614", fg="#8cff65",
+            self.command_row, text=">", bg="#111614", fg="#8cff65",
             font=("Cascadia Mono", 13, "bold"),
         ).pack(side="left", padx=(0, 8))
         self.command = tk.StringVar()
         self.entry = tk.Entry(
-            command_row, textvariable=self.command, bg="#17201c", fg="#f0f7f3",
+            self.command_row, textvariable=self.command, bg="#17201c", fg="#f0f7f3",
             insertbackground="#8cff65", relief="flat", bd=0,
             font=("Cascadia Mono", 11),
         )
@@ -349,6 +412,20 @@ class SdkConsoleDialog(tk.Toplevel):
         self.entry.bind("<Escape>", self._escape)
         self.bind("<Control-Key-space>", self._accept_suggestion)
         self._refresh_suggestions()
+        if self.docked:
+            self._set_expanded(False)
+
+    def _set_expanded(self, value: bool) -> None:
+        if not self.docked:
+            return
+        self.expanded = value
+        if value:
+            self.console_body.pack(
+                fill="both", expand=True, before=self.command_row, pady=(0, 7),
+            )
+        else:
+            self.console_body.pack_forget()
+        self.toggle_button.configure(text="Collapse" if value else "Expand")
 
     def _load_history(self) -> list[str]:
         try:
@@ -451,7 +528,7 @@ class SdkConsoleDialog(tk.Toplevel):
         if result.action == "clear":
             self._clear_output()
         elif result.action == "exit":
-            self.destroy()
+            self._leave_console()
             return
         elif result.output:
             self._append(result.output, "error" if result.exit_code else "")
@@ -476,5 +553,5 @@ class SdkConsoleDialog(tk.Toplevel):
         if self.command.get():
             self.command.set("")
         else:
-            self.destroy()
+            self._leave_console()
         return "break"
