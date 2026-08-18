@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "allin1-sdk"
+version = "0.1.0"
+description = "Standalone GTA V add-on authoring, package auditing, and native asset inspection SDK"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+dependencies = [
+    "click>=8.0",
+    "lxml>=4.9",
+    "Pillow>=10.0",
+    "openpyxl>=3.1",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.scripts]
+allin1-sdk = "allin1_sdk.cli:main"
+
+[project.gui-scripts]
+allin1-sdk-gui = "allin1_sdk.app:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8.0", "pytest-cov>=5.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --strict-config"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["allin1_sdk"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 90
+omit = [
+    "src/allin1_sdk/app.py",
+    "src/allin1_sdk/addon_sdk_ui.py",
+    "src/allin1_sdk/asset_viewer.py",
+    "src/allin1_sdk/rpf_explorer.py",
+    "src/allin1_sdk/help_center.py",
+    "src/allin1_sdk/detector.py",
+    "src/allin1_sdk/mods.py",
+]

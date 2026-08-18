@@ -1,0 +1,1762 @@
+"""Safe package inspection and draft SDK-manifest generation."""
+
+from __future__ import annotations
+
+import json
+import hashlib
+import re
+import shutil
+import subprocess
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any, Iterable
+from xml.etree import ElementTree as ET
+
+from allin1_sdk.processes import hidden_process_options
+
+
+MAX_PACKAGE_FILES = 10_000
+MAX_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_XML_BYTES = 16 * 1024 * 1024
+MAX_PREVIEW_BYTES = 8 * 1024 * 1024
+MAX_BINARY_HEADER_BYTES = 1024 * 1024
+XML_SUFFIXES = frozenset({".xml", ".meta"})
+EXTERNAL_ARCHIVE_SUFFIXES = frozenset({".rar", ".7z"})
+MANIFEST_TEXT_SUFFIXES = frozenset({".lua"})
+PARSED_TEXT_SUFFIXES = XML_SUFFIXES | MANIFEST_TEXT_SUFFIXES
+INSPECTION_TEXT_SUFFIXES = PARSED_TEXT_SUFFIXES | frozenset({".txt", ".md"})
+BINARY_PLUGIN_SUFFIXES = frozenset({".dll", ".asi", ".addon64"})
+TEXT_SUFFIXES = frozenset({
+    ".xml", ".meta", ".json", ".toml", ".txt", ".ini", ".cfg",
+    ".log", ".md", ".lua", ".cs", ".asi.xml",
+})
+IMAGE_SUFFIXES = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".dds",
+})
+ASSET_SUFFIXES = frozenset({
+    ".ydr", ".ydd", ".yft", ".ytd", ".ybn", ".ymap", ".ytyp",
+    ".ycd", ".yed", ".yfd", ".ymf", ".ymt", ".ynd", ".ynv",
+    ".ypt", ".yvr", ".ywr", ".awc", ".rel", ".gfx", ".gxt2",
+})
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _safe_member_path(value: str) -> PurePosixPath:
+    normalized = value.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    path = PurePosixPath(normalized)
+    if (not normalized or any(ord(char) < 32 for char in normalized)
+            or normalized.startswith("/") or path.is_absolute()
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or ":" in path.parts[0]):
+        raise ValueError(f"Unsafe package member path: {value}")
+    return path
+
+
+def _external_archive_tool() -> str:
+    """Return a libarchive-compatible reader for RAR/7z packages."""
+    for name in ("bsdtar", "tar"):
+        executable = shutil.which(name)
+        if executable:
+            return executable
+    raise ValueError(
+        "RAR/7z inspection requires bsdtar (included with current Windows builds)"
+    )
+
+
+def _run_archive_command(arguments: list[str], *, timeout: int = 60) -> bytes:
+    command = [_external_archive_tool(), *arguments]
+    completed = subprocess.run(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=timeout, check=False, **hidden_process_options(),
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"Archive inspection failed: {detail or 'unknown error'}")
+    return completed.stdout
+
+
+def _list_external_archive(archive: Path) -> list[tuple[str, int]]:
+    """List regular files in a RAR/7z without extracting the package."""
+    output = _run_archive_command(["-tvf", str(archive)], timeout=120)
+    entries: list[tuple[str, int]] = []
+    for raw_line in output.decode("utf-8", errors="replace").splitlines():
+        parts = raw_line.split(None, 8)
+        if len(parts) != 9:
+            raise ValueError("Archive listing used an unsupported format")
+        mode, size_text, name = parts[0], parts[4], parts[8]
+        if mode.startswith("d") or name.endswith("/"):
+            continue
+        try:
+            size = int(size_text)
+        except ValueError as exc:
+            raise ValueError("Archive listing contains an invalid file size") from exc
+        entries.append((_safe_member_path(name).as_posix(), size))
+    return entries
+
+
+def _read_external_archive_member(
+    archive: Path, member: str, *, limit: int,
+) -> tuple[bytes, bool]:
+    """Stream a bounded member from a RAR/7z and stop before unbounded buffering."""
+    # libarchive's command-line matcher treats member names as shell-style
+    # patterns even though no shell is involved. Escape pattern metacharacters
+    # so a valid name such as ``ReadMe [ENG].txt`` is addressed literally and
+    # cannot concatenate multiple wildcard matches into one preview.
+    literal_member = member.replace("[", "[[]").replace("*", "[*]").replace(
+        "?", "[?]"
+    )
+    command = [
+        _external_archive_tool(), "-xOf", str(archive), "--", literal_member,
+    ]
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        **hidden_process_options(),
+    )
+    assert process.stdout is not None
+    try:
+        data = process.stdout.read(limit + 1)
+        truncated = len(data) > limit
+        if truncated:
+            data = data[:limit]
+            process.terminate()
+        try:
+            _, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            _, stderr = process.communicate()
+    except Exception:
+        process.kill()
+        process.communicate()
+        raise
+    if not truncated and process.returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(
+            f"Could not read archive member {member}: {detail or 'unknown error'}"
+        )
+    return data, truncated
+
+
+def _parse_xml(content: bytes, path: str) -> ET.Element:
+    """Parse bounded metadata while refusing XML entity/DTD expansion."""
+    uppercase = content[:4096].upper()
+    if b"<!DOCTYPE" in uppercase or b"<!ENTITY" in uppercase:
+        raise ValueError(f"DTD/entity declarations are not allowed in {path}")
+    return ET.fromstring(content)
+
+
+def _slug(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9._-]+", "-", value.lower()).strip("-._")
+    return cleaned[:70] or "package"
+
+
+def _unique(values: Iterable[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def _binary_plugin_record(path: str, content: bytes | None) -> BinaryPluginRecord:
+    if not content or len(content) < 64 or content[:2] != b"MZ":
+        return BinaryPluginRecord(path, "unknown", "unknown", False)
+    pe_offset = int.from_bytes(content[0x3C:0x40], "little")
+    if pe_offset + 6 > len(content) or content[pe_offset:pe_offset + 4] != b"PE\0\0":
+        return BinaryPluginRecord(path, "invalid-pe", "unknown", False)
+    machine = int.from_bytes(content[pe_offset + 4:pe_offset + 6], "little")
+    section_count = int.from_bytes(content[pe_offset + 6:pe_offset + 8], "little")
+    optional_size = int.from_bytes(content[pe_offset + 20:pe_offset + 22], "little")
+    optional_offset = pe_offset + 24
+    optional_magic = int.from_bytes(
+        content[optional_offset:optional_offset + 2], "little"
+    )
+    directory_offset = optional_offset + (112 if optional_magic == 0x20B else 96)
+    clr_directory = directory_offset + (14 * 8)
+    clr_rva = int.from_bytes(content[clr_directory:clr_directory + 4], "little")
+    managed = clr_rva != 0
+    cor_flags: int | None = None
+    if managed:
+        section_offset = optional_offset + optional_size
+        for index in range(section_count):
+            header = section_offset + (index * 40)
+            virtual_size = int.from_bytes(content[header + 8:header + 12], "little")
+            virtual_address = int.from_bytes(
+                content[header + 12:header + 16], "little"
+            )
+            raw_size = int.from_bytes(content[header + 16:header + 20], "little")
+            raw_pointer = int.from_bytes(content[header + 20:header + 24], "little")
+            span = max(virtual_size, raw_size)
+            if virtual_address <= clr_rva < virtual_address + span:
+                clr_offset = raw_pointer + (clr_rva - virtual_address)
+                if clr_offset + 20 <= len(content):
+                    cor_flags = int.from_bytes(
+                        content[clr_offset + 16:clr_offset + 20], "little"
+                    )
+                break
+    architectures = {
+        0x014C: "x86", 0x8664: "x64", 0xAA64: "arm64",
+    }
+    architecture = architectures.get(machine, f"machine-0x{machine:04x}")
+    if managed and machine == 0x014C:
+        architecture = "x86" if cor_flags is not None and cor_flags & 0x2 else "anycpu"
+    return BinaryPluginRecord(
+        path, "pe", architecture, managed or b"BSJB" in content,
+    )
+
+
+def asset_category(path: str) -> str:
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix in IMAGE_SUFFIXES:
+        return "Images"
+    if suffix in XML_SUFFIXES or suffix in {".json", ".toml", ".ini", ".cfg"}:
+        return "Metadata"
+    if suffix in {
+        ".ydr", ".ydd", ".yft", ".ybn", ".ymap", ".ytyp", ".ymt",
+        ".ymf", ".ynd", ".ynv", ".ypt", ".ycd", ".yed", ".yfd",
+        ".yvr", ".ywr",
+    }:
+        return "Models & world"
+    if suffix in {".ytd", ".gfx", ".gxt2"}:
+        return "Textures & UI"
+    if suffix in {".awc", ".rel"}:
+        return "Audio"
+    if suffix == ".rpf":
+        return "Archives"
+    if suffix in {".dll", ".asi", ".cs", ".lua"}:
+        return "Scripts"
+    if suffix in TEXT_SUFFIXES:
+        return "Text"
+    return "Other"
+
+
+def asset_preview_kind(path: str) -> str:
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix in IMAGE_SUFFIXES:
+        return "image"
+    if suffix in TEXT_SUFFIXES:
+        return "text"
+    return "binary"
+
+
+def decode_text_preview(content: bytes) -> str:
+    """Decode authored text without failing the viewer on legacy encodings."""
+    if content.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return content.decode("utf-16")
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return content.decode("cp1252", errors="replace")
+
+
+def hex_preview(content: bytes, *, width: int = 16, rows: int = 16) -> str:
+    lines: list[str] = []
+    for offset in range(0, min(len(content), width * rows), width):
+        chunk = content[offset:offset + width]
+        hexadecimal = " ".join(f"{value:02X}" for value in chunk)
+        printable = "".join(chr(value) if 32 <= value < 127 else "." for value in chunk)
+        lines.append(f"{offset:08X}  {hexadecimal:<{width * 3 - 1}}  {printable}")
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class PackageFinding:
+    severity: str
+    code: str
+    message: str
+    path: str | None = None
+
+
+@dataclass(frozen=True)
+class PackageEntry:
+    path: str
+    size: int
+    content: bytes | None = None
+
+    @property
+    def suffix(self) -> str:
+        return PurePosixPath(self.path).suffix.lower()
+
+    @property
+    def category(self) -> str:
+        return asset_category(self.path)
+
+    @property
+    def preview_kind(self) -> str:
+        return asset_preview_kind(self.path)
+
+
+@dataclass(frozen=True)
+class PackageAssetContent:
+    path: str
+    size: int
+    data: bytes
+    truncated: bool
+    sha256: str | None
+    preview_kind: str
+
+
+class PackageAssetReader:
+    """Read one bounded package member without extraction or path traversal."""
+
+    def __init__(self, source: str | Path) -> None:
+        self.source = Path(source).expanduser().resolve()
+        self._external_entries: dict[str, tuple[str, int]] | None = None
+        if self.source.is_dir():
+            self.source_kind = "folder"
+        elif self.source.is_file() and self.source.suffix.lower() in {".oiv", ".zip"}:
+            self.source_kind = "archive"
+        elif (self.source.is_file()
+              and self.source.suffix.lower() in EXTERNAL_ARCHIVE_SUFFIXES):
+            self.source_kind = "external_archive"
+            listed = _list_external_archive(self.source)
+            entries: dict[str, tuple[str, int]] = {}
+            for path, size in listed:
+                key = path.casefold()
+                if key in entries:
+                    raise ValueError(f"Ambiguous package asset: {path}")
+                entries[key] = (path, size)
+            self._external_entries = entries
+        else:
+            raise ValueError(
+                "Asset viewer requires a package folder or .oiv/.zip/.rar/.7z"
+            )
+
+    def read(
+        self, entry_path: str, *, limit: int = MAX_PREVIEW_BYTES,
+    ) -> PackageAssetContent:
+        if limit <= 0:
+            raise ValueError("Asset preview limit must be positive")
+        relative = _safe_member_path(entry_path).as_posix()
+        if self.source_kind == "folder":
+            return self._read_folder(relative, limit)
+        if self.source_kind == "external_archive":
+            return self._read_external_archive(relative, limit)
+        return self._read_archive(relative, limit)
+
+    def _read_folder(self, relative: str, limit: int) -> PackageAssetContent:
+        root = self.source.resolve()
+        unresolved = root / Path(*PurePosixPath(relative).parts)
+        candidate = unresolved.resolve(strict=False)
+        if unresolved.is_symlink() or not candidate.is_relative_to(root):
+            raise ValueError(f"Asset path escapes the package root: {relative}")
+        if not candidate.is_file():
+            raise FileNotFoundError(f"Package asset not found: {relative}")
+        size = candidate.stat().st_size
+        with candidate.open("rb") as stream:
+            data = stream.read(min(size, limit))
+        return self._content(relative, size, data, size > limit)
+
+    def _read_archive(self, relative: str, limit: int) -> PackageAssetContent:
+        try:
+            with zipfile.ZipFile(self.source) as package:
+                matches = [
+                    member for member in package.infolist()
+                    if not member.is_dir()
+                    and _safe_member_path(member.filename).as_posix().casefold()
+                    == relative.casefold()
+                ]
+                if len(matches) != 1:
+                    if matches:
+                        raise ValueError(f"Ambiguous package asset: {relative}")
+                    raise FileNotFoundError(f"Package asset not found: {relative}")
+                member = matches[0]
+                if member.flag_bits & 0x1:
+                    raise ValueError(f"Encrypted package asset cannot be viewed: {relative}")
+                with package.open(member) as stream:
+                    data = stream.read(min(member.file_size, limit))
+                return self._content(
+                    relative, member.file_size, data, member.file_size > limit,
+                )
+        except zipfile.BadZipFile as exc:
+            raise ValueError(f"Invalid package archive: {exc}") from exc
+
+    def _read_external_archive(
+        self, relative: str, limit: int,
+    ) -> PackageAssetContent:
+        assert self._external_entries is not None
+        match = self._external_entries.get(relative.casefold())
+        if match is None:
+            raise FileNotFoundError(f"Package asset not found: {relative}")
+        authored_path, size = match
+        data, truncated = _read_external_archive_member(
+            self.source, authored_path, limit=min(size, limit),
+        )
+        if not truncated and len(data) != size:
+            raise ValueError(
+                f"Archive member size mismatch for {authored_path}: "
+                f"expected {size}, read {len(data)}"
+            )
+        return self._content(authored_path, size, data, truncated or size > limit)
+
+    @staticmethod
+    def _content(
+        relative: str, size: int, data: bytes, truncated: bool,
+    ) -> PackageAssetContent:
+        digest = None if truncated else hashlib.sha256(data).hexdigest()
+        return PackageAssetContent(
+            relative, size, data, truncated, digest, asset_preview_kind(relative),
+        )
+
+
+@dataclass(frozen=True)
+class WeaponRecord:
+    source: str
+    name: str
+    slot: str
+    ammo_info: str
+    model: str
+    human_name_hash: str
+    stat_name: str
+
+
+@dataclass(frozen=True)
+class AmmoRecord:
+    source: str
+    name: str
+    model: str
+    ammo_max: str
+    ammo_max_50: str
+    explosion: str
+    trail_fx: str
+    primed_fx: str
+
+
+@dataclass(frozen=True)
+class VehicleRecord:
+    source: str
+    model_name: str
+    txd_name: str
+    handling_id: str
+    game_name: str
+    make_name: str
+    audio_name_hash: str
+    layout: str
+    vehicle_type: str
+    vehicle_class: str
+
+
+@dataclass(frozen=True)
+class HandlingRecord:
+    source: str
+    name: str
+
+
+@dataclass(frozen=True)
+class VehicleVariationRecord:
+    source: str
+    model_name: str
+    kits: tuple[str, ...]
+    light_settings: str
+
+
+@dataclass(frozen=True)
+class VehicleKitRecord:
+    source: str
+    name: str
+    kit_id: str
+    model_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PackageRegistrationRecord:
+    source: str
+    kind: str
+    package_names: tuple[str, ...]
+    metadata_files: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BinaryPluginRecord:
+    path: str
+    format: str
+    architecture: str
+    managed: bool
+
+
+@dataclass(frozen=True)
+class PackageScan:
+    source: Path
+    source_kind: str
+    entries: tuple[PackageEntry, ...]
+    findings: tuple[PackageFinding, ...]
+    weapons: tuple[WeaponRecord, ...]
+    ammo: tuple[AmmoRecord, ...]
+    animation_weapons: tuple[str, ...]
+    shop_weapons: tuple[str, ...]
+    vehicles: tuple[VehicleRecord, ...] = ()
+    handlings: tuple[HandlingRecord, ...] = ()
+    variations: tuple[VehicleVariationRecord, ...] = ()
+    kits: tuple[VehicleKitRecord, ...] = ()
+    registrations: tuple[PackageRegistrationRecord, ...] = ()
+    binary_plugins: tuple[str, ...] = ()
+    config_files: tuple[str, ...] = ()
+    shader_assets: tuple[str, ...] = ()
+    replacement_assets: tuple[str, ...] = ()
+    package_kinds: tuple[str, ...] = ()
+    edition_hints: tuple[str, ...] = ()
+    installation_targets: tuple[str, ...] = ()
+    dependency_hints: tuple[str, ...] = ()
+    plugin_details: tuple[BinaryPluginRecord, ...] = ()
+
+    @property
+    def valid(self) -> bool:
+        return not any(item.severity == "error" for item in self.findings)
+
+    @property
+    def error_count(self) -> int:
+        return sum(item.severity == "error" for item in self.findings)
+
+    @property
+    def warning_count(self) -> int:
+        return sum(item.severity == "warning" for item in self.findings)
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(entry.size for entry in self.entries)
+
+    @property
+    def edition_tag(self) -> str:
+        editions = set(self.edition_hints)
+        if editions == {"legacy", "enhanced"}:
+            return "Legacy + Enhanced"
+        if editions == {"legacy"}:
+            return "Legacy"
+        if editions == {"enhanced"}:
+            return "Enhanced"
+        return "Unresolved"
+
+
+@dataclass(frozen=True)
+class ImportedAddonDraft:
+    scan: PackageScan
+    manifest: dict[str, Any]
+
+    def write(self, destination: str | Path) -> Path:
+        path = Path(destination).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(
+            json.dumps(self.manifest, indent=2) + "\n", encoding="utf-8"
+        )
+        temporary.replace(path)
+        return path
+
+
+class AddonPackageInspector:
+    """Read a loose DLC folder or OIV/ZIP/RAR/7z without installing it."""
+
+    def inspect(self, source: str | Path) -> PackageScan:
+        path = Path(source).expanduser().resolve()
+        if path.is_dir():
+            source_kind = "folder"
+            entries, findings = self._read_folder(path)
+        elif path.is_file() and path.suffix.lower() in {".oiv", ".zip"}:
+            source_kind = "oiv" if path.suffix.lower() == ".oiv" else "zip"
+            entries, findings = self._read_zip(path, source_kind)
+        elif path.is_file() and path.suffix.lower() in EXTERNAL_ARCHIVE_SUFFIXES:
+            source_kind = path.suffix.lower().lstrip(".")
+            entries, findings = self._read_external_archive(path)
+        else:
+            raise ValueError(
+                "Select a DLC folder or an .oiv/.zip/.rar/.7z package"
+            )
+
+        weapons: list[WeaponRecord] = []
+        ammo: list[AmmoRecord] = []
+        animations: list[str] = []
+        shop_weapons: list[str] = []
+        vehicles: list[VehicleRecord] = []
+        handlings: list[HandlingRecord] = []
+        variations: list[VehicleVariationRecord] = []
+        kits: list[VehicleKitRecord] = []
+        registrations: list[PackageRegistrationRecord] = []
+        for entry in entries:
+            if entry.content is None:
+                continue
+            if entry.suffix in MANIFEST_TEXT_SUFFIXES:
+                registrations.extend(self._script_registration_records(
+                    entry.path, decode_text_preview(entry.content),
+                ))
+                continue
+            if entry.suffix not in XML_SUFFIXES:
+                continue
+            try:
+                root = _parse_xml(entry.content, entry.path)
+            except (ET.ParseError, ValueError) as exc:
+                findings.append(PackageFinding(
+                    "warning", "xml_parse_failed",
+                    f"Could not parse XML metadata: {exc}", entry.path,
+                ))
+                continue
+            found_weapons, found_ammo = self._metadata_records(entry.path, root)
+            weapons.extend(found_weapons)
+            ammo.extend(found_ammo)
+            animations.extend(self._animation_records(root))
+            shop_weapons.extend(self._shop_records(root))
+            vehicles.extend(self._vehicle_records(entry.path, root))
+            handlings.extend(self._handling_records(entry.path, root))
+            variations.extend(self._variation_records(entry.path, root))
+            kits.extend(self._kit_records(entry.path, root))
+            registrations.extend(self._xml_registration_records(entry.path, root))
+
+        binary_plugins = tuple(
+            entry.path for entry in entries
+            if entry.suffix in BINARY_PLUGIN_SUFFIXES
+        )
+        plugin_details = tuple(
+            _binary_plugin_record(entry.path, entry.content)
+            for entry in entries if entry.suffix in BINARY_PLUGIN_SUFFIXES
+        )
+        config_files = tuple(
+            entry.path for entry in entries
+            if entry.suffix in {".ini", ".toml", ".cfg", ".json"}
+        )
+        shader_assets = tuple(
+            entry.path for entry in entries if entry.suffix in {".fx", ".fxh"}
+        )
+        replacement_assets = tuple(
+            entry.path for entry in entries
+            if entry.suffix in ASSET_SUFFIXES
+            and ((not vehicles and not weapons and not binary_plugins) or any(
+                part.casefold().endswith(".rpf")
+                for part in PurePosixPath(entry.path).parts
+            ))
+        )
+        edition_hints: list[str] = []
+        for entry in entries:
+            lowered_parts = {part.casefold() for part in PurePosixPath(entry.path).parts}
+            if "legacy" in lowered_parts:
+                edition_hints.append("legacy")
+            if "enhanced" in lowered_parts:
+                edition_hints.append("enhanced")
+
+        installation_targets: list[str] = []
+        dependency_hints: list[str] = []
+        dependency_terms = {
+            "scripthookvdotnet": "ScriptHookVDotNet",
+            "shvdn": "ScriptHookVDotNet",
+            "scripthookv": "ScriptHookV",
+            "openrpf": "OpenRPF",
+            "openiv": "OpenIV",
+            "reshade": "ReShade",
+        }
+        for entry in entries:
+            parts = PurePosixPath(entry.path).parts
+            if entry.suffix == ".rpf" and PurePosixPath(entry.path).name.casefold() == "dlc.rpf":
+                pack_name = PurePosixPath(entry.path).parent.name
+                if pack_name:
+                    installation_targets.append(
+                        f"mods/update/x64/dlcpacks/{pack_name}/dlc.rpf"
+                    )
+            else:
+                for index, part in enumerate(parts):
+                    if part.casefold().endswith(".rpf"):
+                        installation_targets.append("/".join(parts[:index + 1]))
+            if entry.content is None or entry.suffix not in {".txt", ".md"}:
+                continue
+            text = decode_text_preview(entry.content)
+            lowered = text.casefold()
+            if re.search(
+                r"\b(?:gta\s*v\s*)?legacy\b|\bclassic(?:/legacy)?\s+version\b",
+                lowered,
+            ):
+                edition_hints.append("legacy")
+            if re.search(r"\b(?:gta\s*v\s*)?enhanced\b", lowered):
+                edition_hints.append("enhanced")
+            for term, label in dependency_terms.items():
+                if term in lowered:
+                    dependency_hints.append(label)
+            for line in text.splitlines():
+                candidate_line = line.strip().strip("`\"'")
+                if not re.match(r"(?i)^mods[\\/]", candidate_line):
+                    continue
+                match = re.search(
+                    r"(?i)(?:mods[\\/])?[^\r\n]*?\.rpf(?:[\\/][^\r\n]*)?",
+                    candidate_line,
+                )
+                if match:
+                    installation_targets.append(
+                        match.group(0).strip().replace("\\", "/")
+                    )
+
+        package_kinds: list[str] = []
+        suffixes = {PurePosixPath(path).suffix.casefold() for path in binary_plugins}
+        if ".asi" in suffixes:
+            package_kinds.append("asi_plugin")
+        if ".dll" in suffixes:
+            package_kinds.append("script_plugin")
+        if ".addon64" in suffixes or shader_assets:
+            package_kinds.append("reshade_addon")
+        if any(entry.suffix == ".rpf" for entry in entries):
+            package_kinds.append("dlc_archive")
+        if replacement_assets:
+            package_kinds.append("replacement_assets")
+        if vehicles:
+            package_kinds.append("vehicle_addon")
+        if weapons:
+            package_kinds.append("weapon_addon")
+        if not package_kinds:
+            package_kinds.append("data_or_unknown")
+
+        if binary_plugins:
+            findings.append(PackageFinding(
+                "warning", "executable_payload_review_required",
+                f"Package contains {len(binary_plugins)} compiled plug-in(s). "
+                "They were inventoried but never loaded or executed.",
+            ))
+        invalid_plugins = [
+            item.path for item in plugin_details if item.format != "pe"
+        ]
+        if invalid_plugins:
+            findings.append(PackageFinding(
+                "warning", "plugin_header_unrecognized",
+                "Compiled plug-in headers could not be verified as PE files: "
+                + ", ".join(invalid_plugins) + ".",
+            ))
+        x86_plugins = [
+            item.path for item in plugin_details if item.architecture == "x86"
+        ]
+        if x86_plugins:
+            findings.append(PackageFinding(
+                "warning", "plugin_architecture_incompatible",
+                "GTA V requires x64 plug-ins, but x86 payloads were detected: "
+                + ", ".join(x86_plugins) + ".",
+            ))
+        if any(entry.suffix == ".pdb" for entry in entries):
+            findings.append(PackageFinding(
+                "info", "debug_symbols_present",
+                "Package includes debug symbols; they are optional at runtime.",
+            ))
+        if replacement_assets:
+            findings.append(PackageFinding(
+                "warning", "replacement_assets_require_targets",
+                "Replacement assets require exact current-build archive targets, "
+                "per-entry backups, and edition-specific verification.",
+            ))
+        if len(package_kinds) > 1:
+            findings.append(PackageFinding(
+                "warning", "mixed_package_layout",
+                "Package combines multiple integration shapes: "
+                + ", ".join(package_kinds) + ".",
+            ))
+        if not edition_hints:
+            findings.append(PackageFinding(
+                "warning", "edition_compatibility_unresolved",
+                "The package contains no trustworthy Legacy/Enhanced declaration. "
+                "Choose an edition only after inspecting its resources or author notes.",
+            ))
+        if source_kind != "folder" and not any(
+            PurePosixPath(entry.path).name.casefold() == "mod.toml"
+            for entry in entries
+        ):
+            findings.append(PackageFinding(
+                "warning", "managed_manifest_not_found",
+                "No reviewed mod.toml was found. This archive can be inspected, "
+                "but it is not directly installable by ALLIN1.",
+            ))
+
+        weapons = self._dedupe_records(weapons, lambda item: item.name, findings)
+        ammo = self._dedupe_records(ammo, lambda item: item.name, findings)
+        vehicles = self._dedupe_records(
+            vehicles, lambda item: item.model_name.casefold(), findings,
+        )
+        handlings = self._dedupe_records(
+            handlings, lambda item: item.name.casefold(), findings,
+        )
+        variations = self._dedupe_records(
+            variations, lambda item: item.model_name.casefold(), findings,
+        )
+        kits = self._dedupe_records(
+            kits, lambda item: item.name.casefold(), findings,
+        )
+        animation_names = tuple(_unique(animations))
+        shop_names = tuple(_unique(shop_weapons))
+        ammo_names = {item.name for item in ammo}
+        animation_set = set(animation_names)
+        shop_set = set(shop_names)
+        for weapon in weapons:
+            if not weapon.ammo_info:
+                findings.append(PackageFinding(
+                    "warning", "weapon_ammo_reference_missing",
+                    f"{weapon.name} has no AmmoInfo reference.", weapon.source,
+                ))
+            elif weapon.ammo_info not in ammo_names:
+                findings.append(PackageFinding(
+                    "warning", "ammo_definition_not_found",
+                    f"{weapon.name} references {weapon.ammo_info}, but its definition "
+                    "was not visible in the package.", weapon.source,
+                ))
+            if weapon.name not in animation_set:
+                findings.append(PackageFinding(
+                    "warning", "animation_mapping_not_found",
+                    f"No weaponanimations mapping was discovered for {weapon.name}.",
+                    weapon.source,
+                ))
+            if weapon.name not in shop_set:
+                findings.append(PackageFinding(
+                    "warning", "storefront_mapping_not_found",
+                    f"No weapon_shop entry was discovered for {weapon.name}.",
+                    weapon.source,
+                ))
+
+        handling_names = {item.name.casefold() for item in handlings}
+        variation_names = {item.model_name.casefold() for item in variations}
+        kit_names = {item.name.casefold() for item in kits}
+        yft_models = {
+            PurePosixPath(entry.path).stem.casefold()
+            for entry in entries if entry.suffix == ".yft"
+        }
+        ytd_models = {
+            PurePosixPath(entry.path).stem.casefold()
+            for entry in entries if entry.suffix == ".ytd"
+        }
+        has_loose_vehicle_assets = bool(yft_models or ytd_models)
+        for vehicle in vehicles:
+            if not vehicle.handling_id:
+                findings.append(PackageFinding(
+                    "warning", "vehicle_handling_reference_missing",
+                    f"{vehicle.model_name} has no handlingId.", vehicle.source,
+                ))
+            elif vehicle.handling_id.casefold() not in handling_names:
+                findings.append(PackageFinding(
+                    "warning", "handling_definition_not_found",
+                    f"{vehicle.model_name} references {vehicle.handling_id}, but "
+                    "that handling record was not visible in the package.",
+                    vehicle.source,
+                ))
+            if vehicle.model_name.casefold() not in variation_names:
+                findings.append(PackageFinding(
+                    "warning", "vehicle_variation_not_found",
+                    f"No carvariations record was discovered for {vehicle.model_name}.",
+                    vehicle.source,
+                ))
+            if has_loose_vehicle_assets:
+                if vehicle.model_name.casefold() not in yft_models:
+                    findings.append(PackageFinding(
+                        "warning", "vehicle_model_asset_not_found",
+                        f"No streamed YFT was discovered for {vehicle.model_name}.",
+                        vehicle.source,
+                    ))
+                if vehicle.txd_name and vehicle.txd_name.casefold() not in ytd_models:
+                    findings.append(PackageFinding(
+                        "warning", "vehicle_texture_asset_not_found",
+                        f"No streamed YTD was discovered for {vehicle.txd_name}.",
+                        vehicle.source,
+                    ))
+
+        for variation in variations:
+            for kit in variation.kits:
+                if kit.casefold() not in kit_names:
+                    findings.append(PackageFinding(
+                        "warning", "vehicle_kit_not_found",
+                        f"{variation.model_name} references missing tuning kit {kit}.",
+                        variation.source,
+                    ))
+        if has_loose_vehicle_assets:
+            for kit in kits:
+                for model_name in kit.model_names:
+                    if model_name.casefold() not in yft_models:
+                        findings.append(PackageFinding(
+                            "warning", "tuning_model_asset_not_found",
+                            f"Tuning kit {kit.name} references missing YFT "
+                            f"{model_name}.", kit.source,
+                        ))
+
+        entry_paths = {entry.path.casefold() for entry in entries}
+        for registration in registrations:
+            if registration.kind != "fivem-resource":
+                continue
+            base = PurePosixPath(registration.source).parent
+            for declared in registration.metadata_files:
+                candidate = (base / declared).as_posix().casefold()
+                if candidate not in entry_paths:
+                    findings.append(PackageFinding(
+                        "warning", "declared_metadata_file_not_found",
+                        f"Resource manifest references missing file {declared}.",
+                        registration.source,
+                    ))
+        if vehicles and not registrations:
+            findings.append(PackageFinding(
+                "warning", "vehicle_registration_not_found",
+                "Vehicle metadata was discovered without content.xml/setup2.xml or "
+                "a FiveM resource manifest.",
+            ))
+
+        rpf_entries = [entry.path for entry in entries if entry.suffix == ".rpf"]
+        for rpf_path in rpf_entries[:20]:
+            findings.append(PackageFinding(
+                "warning", "opaque_rpf",
+                "Nested RPF content is inventoried but not inferred by the Python "
+                "draft importer; inspect it with the Enhanced-aware RPF tool.",
+                rpf_path,
+            ))
+        if len(rpf_entries) > 20:
+            findings.append(PackageFinding(
+                "warning", "opaque_rpf_summary",
+                f"{len(rpf_entries) - 20} additional RPF archives were omitted "
+                "from individual warnings.",
+            ))
+        if not weapons and not vehicles:
+            findings.append(PackageFinding(
+                "warning", "no_content_records",
+                "No custom weapon or vehicle records were discovered. The draft "
+                "will describe the detected plug-in, replacement, shader, archive, "
+                "or generic package shape instead.",
+            ))
+        return PackageScan(
+            path, source_kind, tuple(entries), tuple(findings),
+            tuple(weapons), tuple(ammo), animation_names, shop_names,
+            tuple(vehicles), tuple(handlings), tuple(variations), tuple(kits),
+            tuple(registrations),
+            binary_plugins, config_files, shader_assets, replacement_assets,
+            tuple(_unique(package_kinds)), tuple(_unique(edition_hints)),
+            tuple(_unique(installation_targets)),
+            tuple(_unique(dependency_hints)),
+            plugin_details,
+        )
+
+    def _read_external_archive(
+        self, archive: Path,
+    ) -> tuple[list[PackageEntry], list[PackageFinding]]:
+        listed = _list_external_archive(archive)
+        if len(listed) > MAX_PACKAGE_FILES:
+            raise ValueError(
+                f"Package contains more than {MAX_PACKAGE_FILES:,} files"
+            )
+        total = sum(size for _, size in listed)
+        if total > MAX_PACKAGE_BYTES:
+            raise ValueError("Package exceeds the 2 GiB inspection limit")
+        entries: list[PackageEntry] = []
+        findings: list[PackageFinding] = []
+        seen_paths: set[str] = set()
+        for relative, size in listed:
+            normalized = relative.casefold()
+            if normalized in seen_paths:
+                findings.append(PackageFinding(
+                    "error", "duplicate_member",
+                    "Duplicate archive member paths are ambiguous and cannot "
+                    "be imported safely.", relative,
+                ))
+            seen_paths.add(normalized)
+            suffix = PurePosixPath(relative).suffix.lower()
+            content = None
+            if suffix in INSPECTION_TEXT_SUFFIXES:
+                if size <= MAX_XML_BYTES:
+                    content, truncated = _read_external_archive_member(
+                        archive, relative, limit=MAX_XML_BYTES,
+                    )
+                    if truncated or len(content) != size:
+                        findings.append(PackageFinding(
+                            "error", "archive_member_size_mismatch",
+                            "Archive member did not match its declared size.", relative,
+                        ))
+                        content = None
+                else:
+                    findings.append(PackageFinding(
+                        "warning", "xml_too_large",
+                        "XML metadata exceeds the 16 MiB parser limit.", relative,
+                    ))
+            elif suffix in BINARY_PLUGIN_SUFFIXES:
+                content, _ = _read_external_archive_member(
+                    archive, relative, limit=min(size, MAX_BINARY_HEADER_BYTES),
+                )
+            entries.append(PackageEntry(relative, size, content))
+        return entries, findings
+
+    def _read_folder(
+        self, root: Path,
+    ) -> tuple[list[PackageEntry], list[PackageFinding]]:
+        entries: list[PackageEntry] = []
+        findings: list[PackageFinding] = []
+        total = 0
+        for candidate in sorted(root.rglob("*")):
+            if candidate.is_symlink():
+                findings.append(PackageFinding(
+                    "warning", "symlink_skipped",
+                    "Symbolic links are not followed during package inspection.",
+                    candidate.relative_to(root).as_posix(),
+                ))
+                continue
+            if not candidate.is_file():
+                continue
+            relative = candidate.relative_to(root).as_posix()
+            _safe_member_path(relative)
+            size = candidate.stat().st_size
+            total += size
+            if len(entries) >= MAX_PACKAGE_FILES:
+                raise ValueError(
+                    f"Package contains more than {MAX_PACKAGE_FILES:,} files"
+                )
+            if total > MAX_PACKAGE_BYTES:
+                raise ValueError("Package exceeds the 2 GiB inspection limit")
+            content = None
+            if candidate.suffix.lower() in INSPECTION_TEXT_SUFFIXES:
+                if size <= MAX_XML_BYTES:
+                    content = candidate.read_bytes()
+                else:
+                    findings.append(PackageFinding(
+                        "warning", "xml_too_large",
+                        "XML metadata exceeds the 16 MiB parser limit.", relative,
+                    ))
+            elif candidate.suffix.lower() in BINARY_PLUGIN_SUFFIXES:
+                with candidate.open("rb") as stream:
+                    content = stream.read(MAX_BINARY_HEADER_BYTES)
+            entries.append(PackageEntry(relative, size, content))
+        return entries, findings
+
+    def _read_zip(
+        self, archive: Path, source_kind: str,
+    ) -> tuple[list[PackageEntry], list[PackageFinding]]:
+        entries: list[PackageEntry] = []
+        findings: list[PackageFinding] = []
+        try:
+            with zipfile.ZipFile(archive) as package:
+                members = [item for item in package.infolist() if not item.is_dir()]
+                if len(members) > MAX_PACKAGE_FILES:
+                    raise ValueError(
+                        f"Package contains more than {MAX_PACKAGE_FILES:,} files"
+                    )
+                total = sum(item.file_size for item in members)
+                if total > MAX_PACKAGE_BYTES:
+                    raise ValueError("Package exceeds the 2 GiB inspection limit")
+                seen_paths: set[str] = set()
+                for member in members:
+                    relative = _safe_member_path(member.filename).as_posix()
+                    normalized = relative.casefold()
+                    if normalized in seen_paths:
+                        findings.append(PackageFinding(
+                            "error", "duplicate_member",
+                            "Duplicate archive member paths are ambiguous and cannot "
+                            "be imported safely.", relative,
+                        ))
+                    seen_paths.add(normalized)
+                    if member.flag_bits & 0x1:
+                        findings.append(PackageFinding(
+                            "error", "encrypted_member",
+                            "Encrypted package members cannot be inspected.", relative,
+                        ))
+                        entries.append(PackageEntry(relative, member.file_size))
+                        continue
+                    suffix = PurePosixPath(relative).suffix.lower()
+                    content = None
+                    if suffix in INSPECTION_TEXT_SUFFIXES:
+                        if member.file_size <= MAX_XML_BYTES:
+                            content = package.read(member)
+                        else:
+                            findings.append(PackageFinding(
+                                "warning", "xml_too_large",
+                                "XML metadata exceeds the 16 MiB parser limit.",
+                                relative,
+                            ))
+                    elif suffix in BINARY_PLUGIN_SUFFIXES:
+                        with package.open(member) as stream:
+                            content = stream.read(MAX_BINARY_HEADER_BYTES)
+                    entries.append(PackageEntry(
+                        relative, member.file_size, content,
+                    ))
+        except zipfile.BadZipFile as exc:
+            raise ValueError(f"Invalid {source_kind.upper()} archive: {exc}") from exc
+        if source_kind == "oiv" and not any(
+            entry.path.lower() == "assembly.xml" for entry in entries
+        ):
+            findings.append(PackageFinding(
+                "error", "oiv_assembly_missing",
+                "An OIV package must contain assembly.xml at its root.",
+            ))
+        return entries, findings
+
+    @staticmethod
+    def _direct_value(element: ET.Element, name: str) -> str:
+        for child in element:
+            if _local_name(child.tag) != name:
+                continue
+            if "ref" in child.attrib:
+                return child.attrib["ref"].strip()
+            if "value" in child.attrib:
+                return child.attrib["value"].strip()
+            return (child.text or "").strip()
+        return ""
+
+    @classmethod
+    def _metadata_records(
+        cls, source: str, root: ET.Element,
+    ) -> tuple[list[WeaponRecord], list[AmmoRecord]]:
+        weapons: list[WeaponRecord] = []
+        ammo: list[AmmoRecord] = []
+        for item in root.iter():
+            if _local_name(item.tag) != "Item":
+                continue
+            name = cls._direct_value(item, "Name")
+            if name.startswith("WEAPON_") and any(
+                cls._direct_value(item, field)
+                for field in ("Slot", "AmmoInfo", "HumanNameHash")
+            ):
+                weapons.append(WeaponRecord(
+                    source, name, cls._direct_value(item, "Slot"),
+                    cls._direct_value(item, "AmmoInfo"),
+                    cls._direct_value(item, "Model"),
+                    cls._direct_value(item, "HumanNameHash"),
+                    cls._direct_value(item, "StatName"),
+                ))
+            elif name.startswith("AMMO_"):
+                ammo.append(AmmoRecord(
+                    source, name, cls._direct_value(item, "Model"),
+                    cls._direct_value(item, "AmmoMax"),
+                    cls._direct_value(item, "AmmoMax50"),
+                    cls._direct_value(item, "Explosion"),
+                    cls._direct_value(item, "TrailFx"),
+                    cls._direct_value(item, "PrimedFx"),
+                ))
+        return weapons, ammo
+
+    @staticmethod
+    def _animation_records(root: ET.Element) -> list[str]:
+        return _unique(
+            item.attrib.get("key", "").strip()
+            for item in root.iter()
+            if _local_name(item.tag) == "Item"
+            and item.attrib.get("key", "").startswith("WEAPON_")
+        )
+
+    @staticmethod
+    def _shop_records(root: ET.Element) -> list[str]:
+        values: list[str] = []
+        for item in root.iter():
+            if _local_name(item.tag) not in {"nameHash", "weaponName"}:
+                continue
+            value = (item.text or item.attrib.get("value", "")).strip()
+            if value.startswith("WEAPON_"):
+                values.append(value)
+        return _unique(values)
+
+    @classmethod
+    def _vehicle_records(
+        cls, source: str, root: ET.Element,
+    ) -> list[VehicleRecord]:
+        records: list[VehicleRecord] = []
+        for container in root.iter():
+            if _local_name(container.tag) != "InitDatas":
+                continue
+            for item in container:
+                if _local_name(item.tag) != "Item":
+                    continue
+                model = cls._direct_value(item, "modelName")
+                if not model:
+                    continue
+                records.append(VehicleRecord(
+                    source, model, cls._direct_value(item, "txdName"),
+                    cls._direct_value(item, "handlingId"),
+                    cls._direct_value(item, "gameName"),
+                    cls._direct_value(item, "vehicleMakeName"),
+                    cls._direct_value(item, "audioNameHash"),
+                    cls._direct_value(item, "layout"),
+                    cls._direct_value(item, "type"),
+                    cls._direct_value(item, "vehicleClass"),
+                ))
+        return records
+
+    @classmethod
+    def _handling_records(
+        cls, source: str, root: ET.Element,
+    ) -> list[HandlingRecord]:
+        records: list[HandlingRecord] = []
+        for container in root.iter():
+            if _local_name(container.tag) != "HandlingData":
+                continue
+            for item in container:
+                if _local_name(item.tag) != "Item":
+                    continue
+                name = cls._direct_value(item, "handlingName")
+                if name:
+                    records.append(HandlingRecord(source, name))
+        return records
+
+    @classmethod
+    def _variation_records(
+        cls, source: str, root: ET.Element,
+    ) -> list[VehicleVariationRecord]:
+        records: list[VehicleVariationRecord] = []
+        for container in root.iter():
+            if _local_name(container.tag) != "variationData":
+                continue
+            for item in container:
+                if _local_name(item.tag) != "Item":
+                    continue
+                model = cls._direct_value(item, "modelName")
+                if not model:
+                    continue
+                kits: list[str] = []
+                for child in item:
+                    if _local_name(child.tag) != "kits":
+                        continue
+                    kits.extend(
+                        (kit.text or "").strip() for kit in child
+                        if _local_name(kit.tag) == "Item"
+                    )
+                records.append(VehicleVariationRecord(
+                    source, model, tuple(_unique(kits)),
+                    cls._direct_value(item, "lightSettings"),
+                ))
+        return records
+
+    @classmethod
+    def _kit_records(
+        cls, source: str, root: ET.Element,
+    ) -> list[VehicleKitRecord]:
+        records: list[VehicleKitRecord] = []
+        for container in root.iter():
+            if _local_name(container.tag) != "Kits":
+                continue
+            for item in container:
+                if _local_name(item.tag) != "Item":
+                    continue
+                name = cls._direct_value(item, "kitName")
+                if not name:
+                    continue
+                models = _unique(
+                    (element.text or "").strip()
+                    for element in item.iter()
+                    if _local_name(element.tag) == "modelName"
+                )
+                records.append(VehicleKitRecord(
+                    source, name, cls._direct_value(item, "id"), tuple(models),
+                ))
+        return records
+
+    @classmethod
+    def _xml_registration_records(
+        cls, source: str, root: ET.Element,
+    ) -> list[PackageRegistrationRecord]:
+        root_name = _local_name(root.tag)
+        if root_name == "SSetupData":
+            package_names = _unique((
+                cls._direct_value(root, "deviceName"),
+                cls._direct_value(root, "nameHash"),
+            ))
+            return [PackageRegistrationRecord(
+                source, "single-player-setup", tuple(package_names), (),
+            )]
+        if root_name != "CDataFileMgr__ContentsOfDataFileXml":
+            return []
+        filenames: list[str] = []
+        packages: list[str] = []
+        for element in root.iter():
+            if _local_name(element.tag) != "filename":
+                continue
+            value = (element.text or "").strip()
+            if not value:
+                continue
+            filenames.append(value.rsplit("/", 1)[-1])
+            if ":" in value:
+                packages.append(value.split(":", 1)[0])
+        return [PackageRegistrationRecord(
+            source, "single-player-content", tuple(_unique(packages)),
+            tuple(_unique(filenames)),
+        )]
+
+    @staticmethod
+    def _script_registration_records(
+        source: str, text: str,
+    ) -> list[PackageRegistrationRecord]:
+        name = PurePosixPath(source).name.casefold()
+        if name not in {"__resource.lua", "fxmanifest.lua"}:
+            return []
+        metadata = _unique(
+            match.group(1).replace("\\", "/")
+            for match in re.finditer(
+                r"['\"]([^'\"]+\.(?:meta|xml))['\"]", text,
+                flags=re.IGNORECASE,
+            )
+        )
+        package_name = PurePosixPath(source).parent.name
+        return [PackageRegistrationRecord(
+            source, "fivem-resource", (package_name,) if package_name else (),
+            tuple(metadata),
+        )]
+
+    @staticmethod
+    def _dedupe_records(records, key, findings):
+        result = []
+        seen: set[str] = set()
+        for record in records:
+            identifier = key(record)
+            if identifier in seen:
+                findings.append(PackageFinding(
+                    "warning", "duplicate_record",
+                    f"Duplicate metadata record ignored: {identifier}",
+                    record.source,
+                ))
+                continue
+            seen.add(identifier)
+            result.append(record)
+        return result
+
+
+class AddonDraftBuilder:
+    """Convert discovered package facts into an intentionally reviewable draft."""
+
+    def build(self, scan: PackageScan) -> ImportedAddonDraft:
+        folder_sources = scan.source_kind == "folder"
+        source_by_suffix: dict[str, str] = {}
+        for entry in scan.entries:
+            source_by_suffix.setdefault(entry.suffix, entry.path)
+
+        def sourced(node: dict[str, Any], source: str | None) -> dict[str, Any]:
+            if folder_sources and source:
+                node["source"] = source
+            return node
+
+        nodes: list[dict[str, Any]] = [sourced({
+            "id": "package.imported",
+            "kind": "package",
+            "label": "Imported package inventory",
+            "description": (
+                "Generated from a read-only package scan. Review every inferred "
+                "field before using it as an installation contract."
+            ),
+            "fields": {
+                "Registration": (
+                    "OIV assembly.xml" if scan.source_kind == "oiv"
+                    else "Loose DLC/package folder"
+                ),
+                "Edition": scan.edition_tag,
+                "Safety": "Draft only; no archive writes have been authorized",
+                "Files": len(scan.entries),
+                "Bytes": scan.total_bytes,
+                "ImportedFrom": scan.source.name,
+                "PackageKinds": list(scan.package_kinds),
+                "EditionHints": list(scan.edition_hints),
+                "InstallationTargets": list(scan.installation_targets),
+                "DependencyHints": list(scan.dependency_hints),
+            },
+        }, "assembly.xml" if scan.source_kind == "folder" and
+            any(item.path.lower() == "assembly.xml" for item in scan.entries)
+            else None)]
+
+        references: list[dict[str, Any]] = []
+        companion_assets = [
+            entry.path for entry in scan.entries
+            if entry.path not in scan.binary_plugins
+            and entry.path not in scan.config_files
+            and entry.suffix not in {".pdb", ".txt", ".md"}
+        ]
+        plugin_details = {item.path: item for item in scan.plugin_details}
+        script_binaries = [
+            path for path in scan.binary_plugins
+            if PurePosixPath(path).suffix.casefold() == ".dll"
+        ]
+        if script_binaries:
+            nodes.append(sourced({
+                "id": "scripts.imported", "kind": "script_plugin",
+                "label": f"Discovered .NET script plug-ins ({len(script_binaries)})",
+                "description": (
+                    "Compiled DLLs were inventoried without loading them. Confirm "
+                    "the intended ScriptHookVDotNet version and game edition."
+                ),
+                "fields": {
+                    "Binaries": script_binaries,
+                    "Architecture": {
+                        path: plugin_details[path].architecture
+                        for path in script_binaries
+                    },
+                    "Managed": {
+                        path: plugin_details[path].managed for path in script_binaries
+                    },
+                    "Configuration": list(scan.config_files),
+                    "CompanionAssets": companion_assets,
+                    "DependencyHints": list(scan.dependency_hints),
+                    "InstallRoot": "Unresolved; commonly the GTA V scripts directory",
+                },
+            }, script_binaries[0]))
+        asi_binaries = [
+            path for path in scan.binary_plugins
+            if PurePosixPath(path).suffix.casefold() == ".asi"
+        ]
+        if asi_binaries:
+            nodes.append(sourced({
+                "id": "asi.imported", "kind": "asi_plugin",
+                "label": f"Discovered ASI plug-ins ({len(asi_binaries)})",
+                "description": (
+                    "Native ASI plug-ins were inventoried without loading them. "
+                    "Confirm loader, architecture, game build, and companion layout."
+                ),
+                "fields": {
+                    "Binaries": asi_binaries,
+                    "Architecture": {
+                        path: plugin_details[path].architecture for path in asi_binaries
+                    },
+                    "Configuration": list(scan.config_files),
+                    "CompanionAssets": companion_assets,
+                    "DependencyHints": list(scan.dependency_hints),
+                    "InstallRoot": "Unresolved; commonly the GTA V root directory",
+                },
+            }, asi_binaries[0]))
+        reshade_binaries = [
+            path for path in scan.binary_plugins
+            if PurePosixPath(path).suffix.casefold() == ".addon64"
+        ]
+        if reshade_binaries or scan.shader_assets:
+            nodes.append(sourced({
+                "id": "reshade.imported", "kind": "reshade_addon",
+                "label": "Discovered ReShade companion content",
+                "description": (
+                    "ReShade add-ons and shaders require an add-on-enabled ReShade "
+                    "host and must retain their authored directory layout."
+                ),
+                "fields": {
+                    "Binaries": reshade_binaries,
+                    "Architecture": {
+                        path: plugin_details[path].architecture
+                        for path in reshade_binaries
+                    },
+                    "Shaders": list(scan.shader_assets),
+                    "Configuration": list(scan.config_files),
+                    "InstallRoot": "Unresolved; confirm the GTA V/ReShade root layout",
+                },
+            }, (reshade_binaries or list(scan.shader_assets))[0]))
+        if scan.replacement_assets:
+            nodes.append(sourced({
+                "id": "replacements.imported", "kind": "replacement",
+                "label": f"Discovered replacement assets ({len(scan.replacement_assets)})",
+                "description": (
+                    "Replacement content must be merged into the user's current-build "
+                    "archives and cannot be treated as a standalone DLC pack."
+                ),
+                "fields": {
+                    "Assets": list(scan.replacement_assets),
+                    "TargetArchives": list(scan.installation_targets) or [
+                        "Unresolved; declare every target RPF and entry"
+                    ],
+                    "Editions": list(scan.edition_hints) or ["Unverified"],
+                    "MergeStrategy": "Unresolved; exact-entry merge required",
+                    "Backup": "Exact replaced entries plus archive rollback required",
+                },
+            }, scan.replacement_assets[0]))
+
+        weapon_names = [item.name for item in scan.weapons]
+        if scan.weapons:
+            weapon_source = scan.weapons[0].source
+            nodes.append(sourced({
+                "id": "weapons.imported",
+                "kind": "weapon",
+                "label": f"Discovered weapon records ({len(scan.weapons)})",
+                "description": "Fields inferred from XML weapon metadata.",
+                "fields": {
+                    "Name": weapon_names,
+                    "Slot": [item.slot for item in scan.weapons],
+                    "AmmoInfo": [item.ammo_info for item in scan.weapons],
+                    "Model": [item.model for item in scan.weapons],
+                    "HumanNameHash": [item.human_name_hash for item in scan.weapons],
+                    "StatName": [item.stat_name for item in scan.weapons],
+                },
+            }, weapon_source))
+        if scan.ammo:
+            nodes.append(sourced({
+                "id": "ammo.imported",
+                "kind": "ammo",
+                "label": f"Discovered ammo records ({len(scan.ammo)})",
+                "description": "Ammo pools inferred from XML metadata.",
+                "fields": {
+                    "Name": [item.name for item in scan.ammo],
+                    "Model": [item.model for item in scan.ammo],
+                    "AmmoMax": [item.ammo_max for item in scan.ammo],
+                    "AmmoMax50": [item.ammo_max_50 for item in scan.ammo],
+                    "Explosion": [item.explosion for item in scan.ammo],
+                    "TrailFx": [item.trail_fx for item in scan.ammo],
+                    "PrimedFx": [item.primed_fx for item in scan.ammo],
+                },
+            }, scan.ammo[0].source))
+            if scan.weapons:
+                references.append(self._reference(
+                    "weapon-ammo", "AmmoInfo", "ammo.imported", "Name",
+                    "uses_ammo", "Match each weapon to its declared ammo pool.",
+                ))
+        if scan.animation_weapons:
+            source = next((
+                entry.path for entry in scan.entries
+                if "weaponanimation" in entry.path.lower()
+            ), None)
+            nodes.append(sourced({
+                "id": "animations.imported", "kind": "animation",
+                "label": "Discovered animation mappings",
+                "fields": {
+                    "WeaponNames": list(scan.animation_weapons),
+                    "Template": "Verify the native animation template",
+                    "Sets": ["Detected XML mappings; inspect every required set"],
+                },
+            }, source))
+            if scan.weapons:
+                references.append(self._reference(
+                    "weapon-animation", "Name", "animations.imported",
+                    "WeaponNames", "uses_animation",
+                    "Require animation coverage for every discovered weapon.",
+                ))
+        if scan.shop_weapons:
+            source = next((
+                entry.path for entry in scan.entries
+                if "weapon_shop" in entry.path.lower()
+            ), None)
+            nodes.append(sourced({
+                "id": "storefront.imported", "kind": "storefront",
+                "label": "Discovered weapon shop registration",
+                "fields": {
+                    "WeaponNames": list(scan.shop_weapons),
+                    "Catalog": "weapon_shop.meta",
+                    "Persistence": "Declare purchase and save behavior",
+                },
+            }, source))
+            if scan.weapons:
+                references.append(self._reference(
+                    "weapon-storefront", "Name", "storefront.imported",
+                    "WeaponNames", "sold_by",
+                    "Match discovered weapons to shop registrations.",
+                ))
+
+        vehicle_names = [item.model_name for item in scan.vehicles]
+        variation_kits = {
+            item.model_name.casefold(): list(item.kits) for item in scan.variations
+        }
+        available_kit_names = {item.name.casefold() for item in scan.kits}
+        declared_tuning_models = _unique(
+            variation.model_name for variation in scan.variations
+            if any(
+                kit.casefold() in available_kit_names for kit in variation.kits
+            )
+        )
+        if scan.vehicles:
+            nodes.append(sourced({
+                "id": "vehicles.imported", "kind": "vehicle",
+                "label": f"Discovered vehicle records ({len(scan.vehicles)})",
+                "description": "Vehicle definitions inferred from vehicles.meta.",
+                "fields": {
+                    "ModelName": vehicle_names,
+                    "TxdName": [item.txd_name for item in scan.vehicles],
+                    "HandlingId": [item.handling_id for item in scan.vehicles],
+                    "GameName": [item.game_name for item in scan.vehicles],
+                    "MakeName": [item.make_name for item in scan.vehicles],
+                    "AudioNameHash": [item.audio_name_hash for item in scan.vehicles],
+                    "Layout": [item.layout for item in scan.vehicles],
+                    "Type": [item.vehicle_type for item in scan.vehicles],
+                    "Class": [item.vehicle_class for item in scan.vehicles],
+                    "TuningKits": _unique(
+                        kit for vehicle in scan.vehicles
+                        for kit in variation_kits.get(vehicle.model_name.casefold(), [])
+                    ),
+                    "TuningModels": declared_tuning_models,
+                },
+            }, scan.vehicles[0].source))
+        if scan.handlings:
+            nodes.append(sourced({
+                "id": "handling.imported", "kind": "handling",
+                "label": f"Discovered handling records ({len(scan.handlings)})",
+                "fields": {
+                    "HandlingNames": [item.name for item in scan.handlings],
+                },
+            }, scan.handlings[0].source))
+            if scan.vehicles:
+                references.append(self._reference(
+                    "vehicle-handling", "HandlingId", "handling.imported",
+                    "HandlingNames", "uses_handling",
+                    "Match every vehicle handlingId to handling.meta.",
+                    source="vehicles.imported",
+                ))
+        if scan.variations:
+            nodes.append(sourced({
+                "id": "variations.imported", "kind": "vehicle_variation",
+                "label": f"Discovered vehicle variations ({len(scan.variations)})",
+                "fields": {
+                    "ModelNames": [item.model_name for item in scan.variations],
+                    "Kits": _unique(
+                        kit for item in scan.variations for kit in item.kits
+                    ),
+                    "LightSettings": [
+                        item.light_settings for item in scan.variations
+                    ],
+                },
+            }, scan.variations[0].source))
+            if scan.vehicles:
+                references.append(self._reference(
+                    "vehicle-variation", "ModelName", "variations.imported",
+                    "ModelNames", "uses_variation",
+                    "Require carvariations coverage for every vehicle model.",
+                    source="vehicles.imported",
+                ))
+        if scan.kits:
+            tuned_models = declared_tuning_models
+            nodes.append(sourced({
+                "id": "tuning.imported", "kind": "tuning",
+                "label": f"Discovered tuning kits ({len(scan.kits)})",
+                "fields": {
+                    "VehicleModels": tuned_models,
+                    "KitNames": [item.name for item in scan.kits],
+                    "ModelNames": _unique(
+                        model for item in scan.kits for model in item.model_names
+                    ),
+                    "KitIds": [item.kit_id for item in scan.kits],
+                },
+            }, scan.kits[0].source))
+            if scan.vehicles and tuned_models:
+                references.append(self._reference(
+                    "vehicle-tuning", "TuningModels", "tuning.imported",
+                    "VehicleModels", "uses_tuning",
+                    "Match vehicles with declared mod kits to carcols definitions.",
+                    source="vehicles.imported",
+                ))
+
+        streamed_models = _unique(
+            PurePosixPath(entry.path).stem for entry in scan.entries
+            if entry.suffix == ".yft"
+        )
+        streamed_textures = _unique(
+            PurePosixPath(entry.path).stem for entry in scan.entries
+            if entry.suffix == ".ytd"
+        )
+        streamed_assets = [
+            entry.path for entry in scan.entries
+            if entry.suffix in {".yft", ".ytd"}
+        ]
+        if streamed_assets and (scan.vehicles or scan.kits):
+            nodes.append({
+                "id": "streaming.imported", "kind": "streaming",
+                "label": f"Discovered streamed vehicle assets ({len(streamed_assets)})",
+                "fields": {
+                    "ModelNames": streamed_models,
+                    "TextureNames": streamed_textures,
+                    "Assets": streamed_assets,
+                },
+            })
+            if scan.vehicles:
+                references.append(self._reference(
+                    "vehicle-stream", "ModelName", "streaming.imported",
+                    "ModelNames", "streams_model",
+                    "Require a streamed model for every vehicle definition.",
+                    source="vehicles.imported",
+                ))
+            if scan.kits:
+                references.append(self._reference(
+                    "tuning-stream", "ModelNames", "streaming.imported",
+                    "ModelNames", "streams_tuning_assets",
+                    "Require every tuning model referenced by carcols.meta.",
+                    source="tuning.imported",
+                ))
+
+        if scan.registrations:
+            registration_sources = [item.source for item in scan.registrations]
+            nodes.append(sourced({
+                "id": "registration.imported", "kind": "dlc_registration",
+                "label": "Discovered package registration",
+                "fields": {
+                    "VehicleModels": vehicle_names,
+                    "PackageNames": _unique(
+                        name for item in scan.registrations
+                        for name in item.package_names
+                    ),
+                    "MetadataFiles": _unique(
+                        name for item in scan.registrations
+                        for name in item.metadata_files
+                    ),
+                    "Registration": _unique(
+                        item.kind for item in scan.registrations
+                    ),
+                    "Edition": "Verify registration against the selected GTA edition",
+                },
+            }, registration_sources[0]))
+            if scan.vehicles:
+                references.append(self._reference(
+                    "vehicle-registration", "ModelName", "registration.imported",
+                    "VehicleModels", "registered_by",
+                    "Tie every vehicle to an explicit DLC/resource registration.",
+                    source="vehicles.imported",
+                ))
+
+        for index, entry in enumerate(
+            (item for item in scan.entries if item.suffix == ".rpf"), start=1
+        ):
+            if index > 20:
+                break
+            nodes.append(sourced({
+                "id": f"archive.imported-{index}", "kind": "archive",
+                "label": f"Opaque RPF: {entry.path}",
+                "fields": {
+                    "Path": entry.path,
+                    "Entry": "Inspect nested entries with RpfPatcher/CodeWalker",
+                    "MergeStrategy": "Unresolved; do not replace a current-build archive",
+                    "Backup": "Exact originals and rollback plan required",
+                },
+            }, entry.path))
+
+        steps: list[dict[str, Any]] = []
+        categories = (
+            ("metadata", lambda item: item.suffix in XML_SUFFIXES,
+             "metadata review/merge"),
+            ("assets", lambda item: item.suffix in ASSET_SUFFIXES,
+             "streamed asset validation"),
+            ("archives", lambda item: item.suffix == ".rpf",
+             "nested archive inspection"),
+            ("scripts", lambda item: item.suffix in {".dll", ".asi", ".cs", ".lua"},
+             "runtime dependency review"),
+            ("shaders", lambda item: item.suffix in {".addon64", ".fx", ".fxh"},
+             "shader host and directory-layout review"),
+        )
+        order = 10
+        for category, predicate, strategy in categories:
+            matches = [entry for entry in scan.entries if predicate(entry)]
+            if not matches:
+                continue
+            step: dict[str, Any] = {
+                "id": f"inspect-{category}", "order": order,
+                "title": f"Inspect {category}",
+                "target": ", ".join(item.path for item in matches[:8]) +
+                    (f" (+{len(matches) - 8} more)" if len(matches) > 8 else ""),
+                "strategy": strategy,
+                "description": (
+                    "Generated inventory step. Replace this with an exact target, "
+                    "merge rule, verifier, and rollback action."
+                ),
+            }
+            if folder_sources and len(matches) == 1:
+                step["source"] = matches[0].path
+            steps.append(step)
+            order += 10
+        steps.append({
+            "id": "verify-and-rollback", "order": 90,
+            "title": "Verify and define rollback",
+            "target": "Installed package",
+            "strategy": "read-only verification before transactional install",
+            "description": (
+                "Resolve every linker error, test the intended game edition, and "
+                "define exact backups before enabling installation."
+            ),
+        })
+
+        manifest = {
+            "schema_version": 1,
+            "id": f"imported.{_slug(scan.source.stem)}",
+            "name": f"Imported draft: {scan.source.stem.replace('_', ' ').title()}",
+            "version": "0.1.0-draft",
+            "summary": (
+                f"Read-only draft generated from {len(scan.entries)} files. "
+                f"Importer findings: {scan.error_count} errors and "
+                f"{scan.warning_count} warnings."
+            ),
+            "editions": list(scan.edition_hints) or ["legacy", "enhanced"],
+            "nodes": nodes,
+            "references": references,
+            "install_steps": steps,
+        }
+        return ImportedAddonDraft(scan, manifest)
+
+    @staticmethod
+    def _reference(
+        reference_id: str, source_field: str, target: str,
+        target_field: str, relationship: str, description: str,
+        *, source: str = "weapons.imported",
+    ) -> dict[str, Any]:
+        return {
+            "id": reference_id, "source": source,
+            "source_field": source_field, "target": target,
+            "target_field": target_field, "relationship": relationship,
+            "description": description,
+        }
