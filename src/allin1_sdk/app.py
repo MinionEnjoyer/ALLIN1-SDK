@@ -8,6 +8,7 @@ from tkinter import ttk
 
 from allin1_sdk import __version__
 from allin1_sdk.addon_sdk_ui import AddonSdkDialog
+from allin1_sdk.branding import apply_sdk_window_icon
 from allin1_sdk.detector import detect_gta_path
 from allin1_sdk.paths import project_root
 
@@ -120,12 +121,7 @@ def main() -> None:
         return
     root = tk.Tk()
     root.withdraw()
-    favicon = project_root() / "assets" / "favicon.ico"
-    if favicon.is_file() and os.name == "nt":
-        try:
-            root.iconbitmap(default=str(favicon))
-        except tk.TclError:
-            pass
+    apply_sdk_window_icon(root, project_root())
     _configure_style(root)
     detected = detect_gta_path()
     roots = (detected,) if detected else ()

@@ -15,6 +15,7 @@ from PIL import Image, ImageTk
 
 from allin1_sdk import __version__
 from allin1_sdk.addon_importer import AddonDraftBuilder, AddonPackageInspector, PackageScan
+from allin1_sdk.branding import apply_sdk_window_icon
 from allin1_sdk.asset_viewer import AssetViewerDialog
 from allin1_sdk.rpf_explorer import RpfExplorerDialog
 from allin1_sdk.sdk_console import SdkConsoleDialog
@@ -69,12 +70,7 @@ class AddonSdkDialog(tk.Toplevel):
         self.minsize(1020, 680)
         if not standalone:
             self.transient(parent)
-        favicon = self.project_root / "assets" / "favicon.ico"
-        if favicon.is_file() and os.name == "nt":
-            try:
-                self.iconbitmap(default=str(favicon))
-            except tk.TclError:
-                pass
+        apply_sdk_window_icon(self, self.project_root)
         self._build()
         self._load_examples()
 
