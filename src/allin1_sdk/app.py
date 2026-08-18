@@ -53,6 +53,12 @@ def main() -> None:
         )
     root = tk.Tk()
     root.withdraw()
+    favicon = project_root() / "assets" / "favicon.ico"
+    if favicon.is_file() and os.name == "nt":
+        try:
+            root.iconbitmap(default=str(favicon))
+        except tk.TclError:
+            pass
     _configure_style(root)
     detected = detect_gta_path()
     roots = (detected,) if detected else ()

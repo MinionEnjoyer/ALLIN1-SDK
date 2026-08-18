@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import queue
 import tempfile
+import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageOps, ImageTk, UnidentifiedImageError
 
 from allin1_sdk.detector import detect_gta_path
 from allin1_sdk.native_assets import MAX_NATIVE_PREVIEW_BYTES, NativeAssetInspector
+from allin1_sdk.paths import user_data_root
 from allin1_sdk.rpf_tools import RpfEntryRecord, RpfExplorerService, RpfIndex
 from allin1_sdk.help_center import HelpCenterDialog
 
@@ -26,8 +30,240 @@ def _human_size(value: int) -> str:
     return f"{value} B"
 
 
+class RpfProgressDialog(tk.Toplevel):
+    """Run one archive transaction off the Tk thread and show guarded phases."""
+
+    def __init__(
+        self, parent: tk.Misc, title: str, work, on_success, on_failure,
+    ) -> None:
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("520x150")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", lambda: None)
+        frame = ttk.Frame(self, padding=18)
+        frame.pack(fill="both", expand=True)
+        self.message = tk.StringVar(value="Preparing guarded transaction…")
+        ttk.Label(
+            frame, textvariable=self.message, wraplength=470, justify="left",
+        ).pack(fill="x", pady=(0, 12))
+        self.progress = ttk.Progressbar(frame, maximum=100, value=0)
+        self.progress.pack(fill="x")
+        ttk.Label(
+            frame, text="Do not start GTA V while this operation is running.",
+            foreground="#52635c",
+        ).pack(anchor="w", pady=(10, 0))
+        self._events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._on_success = on_success
+        self._on_failure = on_failure
+
+        def progress(message: str, percent: int) -> None:
+            self._events.put(("progress", (message, percent)))
+
+        def runner() -> None:
+            try:
+                self._events.put(("result", work(progress)))
+            except Exception as exc:  # marshalled to the Tk thread
+                self._events.put(("error", exc))
+
+        threading.Thread(target=runner, daemon=True).start()
+        self.after(80, self._poll)
+
+    def _poll(self) -> None:
+        try:
+            while True:
+                kind, payload = self._events.get_nowait()
+                if kind == "progress":
+                    message, percent = payload
+                    self.message.set(str(message))
+                    self.progress.configure(value=int(percent))
+                elif kind == "result":
+                    self.grab_release()
+                    self.destroy()
+                    self._on_success(payload)
+                    return
+                else:
+                    self.grab_release()
+                    self.destroy()
+                    self._on_failure(payload)
+                    return
+        except queue.Empty:
+            self.after(80, self._poll)
+
+
+class RpfTransactionHistoryDialog(tk.Toplevel):
+    """Receipt history, verification, interrupted recovery, and stale-lock tools."""
+
+    def __init__(self, parent: tk.Misc, service: RpfExplorerService) -> None:
+        super().__init__(parent)
+        self.service = service
+        self.records: dict[str, dict] = {}
+        self.title("ALLIN1 — RPF Transaction History")
+        self.geometry("1180x560")
+        self.minsize(880, 420)
+        self.transient(parent)
+        outer = ttk.Frame(self, padding=14)
+        outer.pack(fill="both", expand=True)
+        ttk.Label(
+            outer, text="RPF transaction history",
+            font=("Segoe UI Semibold", 16), foreground="#1f7f42",
+        ).pack(anchor="w")
+        ttk.Label(
+            outer,
+            text=(
+                "Receipts preserve the complete rollback snapshot. Recovery only reconciles "
+                "receipt state; it never completes an interrupted archive commit."
+            ),
+            foreground="#52635c", wraplength=1080, justify="left",
+        ).pack(anchor="w", pady=(3, 10))
+        tools = ttk.Frame(outer)
+        tools.pack(fill="x", pady=(0, 8))
+        for label, command in (
+            ("Refresh", self._refresh), ("Verify", self._verify),
+            ("Recover receipt", self._recover), ("Rollback", self._rollback),
+            ("Clear stale lock", self._clear_lock), ("Open folder", self._open_folder),
+        ):
+            ttk.Button(tools, text=label, command=command).pack(side="left", padx=(0, 6))
+        frame = ttk.Frame(outer)
+        frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(
+            frame, columns=("created", "action", "status", "archive", "entry"),
+            show="headings", selectmode="browse",
+        )
+        widths = {"created": 165, "action": 75, "status": 165, "archive": 320, "entry": 310}
+        for name in ("created", "action", "status", "archive", "entry"):
+            self.tree.heading(name, text=name.title())
+            self.tree.column(name, width=widths[name], minwidth=70)
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.status = tk.StringVar()
+        ttk.Label(outer, textvariable=self.status, foreground="#52635c").pack(
+            fill="x", pady=(8, 0),
+        )
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        self.records.clear()
+        for number, record in enumerate(self.service.list_transactions()):
+            item = f"receipt-{number}"
+            self.records[item] = record
+            self.tree.insert("", "end", iid=item, values=(
+                str(record.get("created_at", ""))[:19].replace("T", " "),
+                record.get("action", ""), record.get("status", ""),
+                record.get("archive", ""), record.get("entry", ""),
+            ))
+        self.status.set(f"{len(self.records)} receipt(s) · {self._root()}")
+
+    @staticmethod
+    def _root() -> Path:
+        return user_data_root() / "rpf-transactions"
+
+    def _selected(self) -> dict | None:
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("Select a receipt", "Select a transaction first.", parent=self)
+            return None
+        return self.records[selected[0]]
+
+    def _valid_selected(self) -> dict | None:
+        record = self._selected()
+        if record is not None and not record.get("valid"):
+            messagebox.showerror(
+                "Invalid receipt", record.get("error", "Malformed receipt"), parent=self,
+            )
+            return None
+        return record
+
+    def _verify(self) -> None:
+        record = self._valid_selected()
+        if record is None:
+            return
+        try:
+            result = self.service.verify_transaction(record["receipt"])
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("Verification failed", str(exc), parent=self)
+            return
+        messagebox.showinfo(
+            "Transaction verification", json.dumps(result, indent=2), parent=self,
+        )
+
+    def _recover(self) -> None:
+        record = self._valid_selected()
+        if record is None:
+            return
+        try:
+            result = self.service.recover_transaction(record["receipt"])
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("Recovery refused", str(exc), parent=self)
+            return
+        self._refresh()
+        messagebox.showinfo(
+            "Receipt recovered", json.dumps(result, indent=2), parent=self,
+        )
+
+    def _rollback(self) -> None:
+        record = self._valid_selected()
+        if record is None or not messagebox.askyesno(
+            "Rollback transaction?",
+            "The archive must still exactly match this receipt. The complete pre-change "
+            "snapshot will be restored and verified.", parent=self, icon="warning",
+        ):
+            return
+        RpfProgressDialog(
+            self, "Rolling back RPF transaction",
+            lambda progress: self.service.rollback_transaction(
+                record["receipt"], progress=progress,
+            ),
+            lambda _result: (self._refresh(), messagebox.showinfo(
+                "Rollback complete", "The original archive was restored and verified.",
+                parent=self,
+            )),
+            lambda error: messagebox.showerror("Rollback failed", str(error), parent=self),
+        )
+
+    def _clear_lock(self) -> None:
+        record = self._valid_selected()
+        if record is None:
+            return
+        try:
+            lock = self.service.inspect_archive_lock(record["archive"])
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("Lock inspection failed", str(exc), parent=self)
+            return
+        if lock is None:
+            messagebox.showinfo("No lock", "This archive has no ALLIN1 lock.", parent=self)
+            return
+        if lock["process_running"]:
+            messagebox.showwarning(
+                "Lock is active", f"PID {lock['pid']} still owns this archive.", parent=self,
+            )
+            return
+        if not messagebox.askyesno(
+            "Clear stale lock?",
+            f"The recorded owner process is gone. Remove this lock?\n\n{lock['path']}",
+            parent=self, icon="warning",
+        ):
+            return
+        try:
+            self.service.clear_stale_lock(record["archive"])
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("Lock removal refused", str(exc), parent=self)
+            return
+        messagebox.showinfo("Lock cleared", "The stale archive lock was removed.", parent=self)
+
+    def _open_folder(self) -> None:
+        record = self._selected()
+        if record is not None:
+            os.startfile(Path(record["receipt"]).parent)
+
+
 class RpfExplorerDialog(tk.Toplevel):
-    """Search, inspect, extract, and plan changes without editing an RPF."""
+    """Search, inspect, extract, plan, and transact guarded RPF changes."""
 
     def __init__(
         self, parent: tk.Misc, project_root: str | Path,
@@ -84,8 +320,8 @@ class RpfExplorerDialog(tk.Toplevel):
             outer,
             text=(
                 "Browse real RPF and nested-RPF entries with edition-aware keys. "
-                "Extraction and native preview are read-only; replacement produces a "
-                "reviewable safety plan and never modifies the archive."
+                "Writes require a reviewed plan, a mods or isolated workspace copy, "
+                "full-archive staging, exact-entry verification, and a rollback receipt."
             ),
             wraplength=1180, justify="left", foreground="#52635c",
         ).pack(anchor="w", pady=(3, 10))
@@ -203,6 +439,22 @@ class RpfExplorerDialog(tk.Toplevel):
         menu.add_command(
             label="Export index…", command=self._export_index, state="disabled",
         )
+        menu.add_separator()
+        menu.add_command(
+            label="Apply entry-change plan…", command=self._apply_replacement_plan,
+        )
+        menu.add_command(
+            label="Verify transaction receipt…", command=self._verify_transaction,
+        )
+        menu.add_command(
+            label="Rollback transaction…", command=self._rollback_transaction,
+        )
+        menu.add_command(label="Transaction history…", command=self._transaction_history)
+        menu.add_separator()
+        menu.add_command(
+            label="Run disposable archive canary…", command=self._run_canary,
+            state="disabled",
+        )
         self.file_menus.append(menu)
         return menu
 
@@ -218,6 +470,12 @@ class RpfExplorerDialog(tk.Toplevel):
         menu.add_command(
             label="Plan replacement…", command=self._plan_replacement, state="disabled",
         )
+        menu.add_command(
+            label="Plan new entry…", command=self._plan_addition, state="disabled",
+        )
+        menu.add_command(
+            label="Plan deletion…", command=self._plan_deletion, state="disabled",
+        )
         self.entry_action_menus.append(menu)
         return menu
 
@@ -225,6 +483,7 @@ class RpfExplorerDialog(tk.Toplevel):
         state = "normal" if enabled else "disabled"
         for menu in self.file_menus:
             menu.entryconfigure("Export index…", state=state)
+            menu.entryconfigure("Run disposable archive canary…", state=state)
 
     def _set_entry_actions(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -232,6 +491,8 @@ class RpfExplorerDialog(tk.Toplevel):
             menu.entryconfigure("Native preview", state=state)
             menu.entryconfigure("Extract selected…", state=state)
             menu.entryconfigure("Plan replacement…", state=state)
+            menu.entryconfigure("Plan new entry…", state=state)
+            menu.entryconfigure("Plan deletion…", state=state)
 
     def _choose_game(self) -> None:
         selected = filedialog.askdirectory(parent=self, title="Select GTA V installation")
@@ -441,10 +702,278 @@ class RpfExplorerDialog(tk.Toplevel):
         try:
             plan = self.service.replacement_plan(self.index, entry, payload)
             Path(output).write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
-        except (OSError, ValueError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             messagebox.showerror("Could not create plan", str(exc), parent=self)
             return
-        self.status.set(f"Wrote plan only; no RPF changes were made: {output}")
+        self.status.set(
+            f"Wrote {plan['status']} plan; no RPF changes were made: {output}"
+        )
+        if plan["status"] == "blocked":
+            messagebox.showwarning(
+                "Replacement plan is blocked",
+                "No archive was changed. Resolve these items and create a new plan:\n\n"
+                + "\n".join(f"• {item}" for item in plan["blocking_reasons"]),
+                parent=self,
+            )
+
+    def _plan_addition(self) -> None:
+        if self.index is None or self.service is None:
+            return
+        selected_entry = self._selected()
+        default_archive = selected_entry.archive_path if selected_entry else ""
+        archive_path = simpledialog.askstring(
+            "Nested archive",
+            "Nested RPF virtual path (leave blank for the root archive):",
+            initialvalue=default_archive, parent=self,
+        )
+        if archive_path is None:
+            return
+        entry_path = simpledialog.askstring(
+            "New RPF entry",
+            "Exact new virtual path, including its filename and extension:", parent=self,
+        )
+        if not entry_path:
+            return
+        payload = filedialog.askopenfilename(
+            parent=self, title=f"Select payload for {entry_path}",
+        )
+        if not payload:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save RPF add safety plan",
+            initialfile=f"{Path(entry_path).stem}-add-plan.json",
+            defaultextension=".json", filetypes=(("JSON", "*.json"),),
+        )
+        if not output:
+            return
+        try:
+            plan = self.service.addition_plan(
+                self.index, entry_path, payload, archive_path=archive_path,
+            )
+            Path(output).write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("Could not create add plan", str(exc), parent=self)
+            return
+        self._report_plan(plan, Path(output))
+
+    def _plan_deletion(self) -> None:
+        entry = self._selected()
+        if entry is None or self.index is None or self.service is None:
+            return
+        if entry.kind in {"directory", "archive"}:
+            messagebox.showinfo(
+                "File entry required",
+                "Select a binary or resource file. Directory and nested-archive deletion "
+                "is intentionally not available.", parent=self,
+            )
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save RPF delete safety plan",
+            initialfile=f"{Path(entry.name).stem}-delete-plan.json",
+            defaultextension=".json", filetypes=(("JSON", "*.json"),),
+        )
+        if not output:
+            return
+        try:
+            plan = self.service.deletion_plan(self.index, entry)
+            Path(output).write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("Could not create delete plan", str(exc), parent=self)
+            return
+        self._report_plan(plan, Path(output))
+
+    def _report_plan(self, plan: dict, output: Path) -> None:
+        self.status.set(
+            f"Wrote {plan['status']} {plan['action']} plan; no RPF changes were made: {output}"
+        )
+        if plan["status"] == "blocked":
+            messagebox.showwarning(
+                "Entry-change plan is blocked",
+                "No archive was changed. Resolve these items and create a new plan:\n\n"
+                + "\n".join(f"• {item}" for item in plan["blocking_reasons"]),
+                parent=self,
+            )
+
+    def _transaction_service(self) -> RpfExplorerService | None:
+        game = Path(self.game_path.get().strip())
+        if not game.is_dir():
+            messagebox.showerror(
+                "GTA V path required",
+                "Select the installation that owns the mods copy and its encryption keys.",
+                parent=self,
+            )
+            return None
+        return RpfExplorerService(self.project_root, game)
+
+    def _apply_replacement_plan(self) -> None:
+        service = self._transaction_service()
+        if service is None:
+            return
+        selected = filedialog.askopenfilename(
+            parent=self, title="Open reviewed RPF entry-change plan",
+            filetypes=(("RPF entry-change plan", "*.json"),),
+        )
+        if not selected:
+            return
+        try:
+            summary = json.loads(Path(selected).read_text(encoding="utf-8"))
+            if not isinstance(summary, dict):
+                raise ValueError("Entry-change plan must contain a JSON object")
+            archive = str(summary.get("archive", "unknown archive"))
+            entry = str(summary.get("entry", "unknown entry"))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            messagebox.showerror("Invalid replacement plan", str(exc), parent=self)
+            return
+        if not messagebox.askyesno(
+            "Apply guarded RPF transaction?",
+            "GTA V must be closed. ALLIN1 will copy the complete archive, modify a "
+            "staged copy, verify the exact entry, and retain a rollback receipt.\n\n"
+            f"Action: {summary.get('action', 'unknown')}\n"
+            f"Archive: {archive}\n"
+            f"Entry: {summary.get('archive_path') or 'root'}::{entry}\n\nContinue?",
+            parent=self, icon="warning",
+        ):
+            return
+        self.status.set("Guarded RPF transaction is running…")
+
+        def failed(exc) -> None:
+            self.status.set("RPF transaction was refused or rolled back.")
+            messagebox.showerror("RPF transaction failed", str(exc), parent=self)
+
+        def completed(receipt) -> None:
+            self.status.set(f"RPF transaction applied and verified: {receipt}")
+            messagebox.showinfo(
+                "RPF transaction complete",
+                f"The staged archive and exact entry passed verification.\n\nReceipt: {receipt}",
+                parent=self,
+            )
+            if self.index and Path(archive).resolve() == self.index.source:
+                self._load_archive(self.index.source)
+
+        RpfProgressDialog(
+            self, "Applying RPF entry change",
+            lambda progress: service.apply_change_plan(selected, progress=progress),
+            completed, failed,
+        )
+
+    def _verify_transaction(self) -> None:
+        service = self._transaction_service()
+        if service is None:
+            return
+        selected = filedialog.askopenfilename(
+            parent=self, title="Open RPF transaction receipt",
+            initialdir=str(self._transaction_receipt_directory()),
+            filetypes=(("Transaction receipt", "*.json"),),
+        )
+        if not selected:
+            return
+        try:
+            result = service.verify_transaction(selected)
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("Transaction verification failed", str(exc), parent=self)
+            return
+        rendered = json.dumps(result, indent=2)
+        self._show_text(rendered)
+        self.status.set(
+            f"Transaction {'is healthy' if result['healthy'] else 'needs attention'} · "
+            f"archive state: {result['archive_state']}"
+        )
+        messagebox.showinfo(
+            "RPF transaction verification",
+            f"Archive state: {result['archive_state']}\n"
+            f"Rollback snapshot: {'valid' if result['backup_valid'] else 'invalid'}\n"
+            f"Exact entry: {'valid' if result['entry_valid'] else 'invalid'}",
+            parent=self,
+        )
+
+    def _rollback_transaction(self) -> None:
+        service = self._transaction_service()
+        if service is None:
+            return
+        selected = filedialog.askopenfilename(
+            parent=self, title="Open applied RPF transaction receipt",
+            initialdir=str(self._transaction_receipt_directory()),
+            filetypes=(("Transaction receipt", "*.json"),),
+        )
+        if not selected:
+            return
+        try:
+            summary = json.loads(Path(selected).read_text(encoding="utf-8"))
+            if not isinstance(summary, dict):
+                raise ValueError("Transaction receipt must contain a JSON object")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            messagebox.showerror("Invalid transaction receipt", str(exc), parent=self)
+            return
+        if not messagebox.askyesno(
+            "Rollback RPF transaction?",
+            "ALLIN1 will first prove that the archive still matches this receipt, then "
+            "restore and verify its complete pre-transaction snapshot.\n\n"
+            f"Archive: {summary.get('archive', 'unknown')}\n"
+            f"Entry: {summary.get('entry', 'unknown')}\n\nContinue?",
+            parent=self, icon="warning",
+        ):
+            return
+        self.status.set("Verifying ownership and restoring rollback snapshot…")
+
+        def failed(exc) -> None:
+            self.status.set("RPF rollback was refused or failed safely.")
+            messagebox.showerror("RPF rollback failed", str(exc), parent=self)
+
+        def completed(receipt) -> None:
+            self.status.set(f"RPF rollback completed and verified: {receipt}")
+            messagebox.showinfo(
+                "RPF rollback complete",
+                f"The original archive and exact entry passed verification.\n\nReceipt: {receipt}",
+                parent=self,
+            )
+            if (self.index
+                    and Path(str(summary.get("archive", ""))).resolve() == self.index.source):
+                self._load_archive(self.index.source)
+
+        RpfProgressDialog(
+            self, "Rolling back RPF transaction",
+            lambda progress: service.rollback_transaction(selected, progress=progress),
+            completed, failed,
+        )
+
+    def _transaction_history(self) -> None:
+        service = self._transaction_service()
+        if service is not None:
+            RpfTransactionHistoryDialog(self, service)
+
+    def _run_canary(self) -> None:
+        service = self._transaction_service()
+        if service is None or self.index is None:
+            return
+        if not messagebox.askyesno(
+            "Run disposable real-archive canary?",
+            "ALLIN1 will copy this archive into its isolated canary workspace, change one "
+            "byte in the smallest eligible entry, verify the write, and prove an exact "
+            "full-archive rollback. The selected source archive is never written.\n\n"
+            f"Source: {self.index.source}\n\nContinue?",
+            parent=self, icon="warning",
+        ):
+            return
+
+        def completed(report) -> None:
+            self.status.set(f"Disposable real-archive canary passed: {report}")
+            messagebox.showinfo(
+                "RPF canary passed",
+                f"Apply, exact-entry verification, and byte-for-byte rollback passed.\n\n"
+                f"Report: {report}", parent=self,
+            )
+
+        RpfProgressDialog(
+            self, "Running disposable RPF canary",
+            lambda progress: service.run_canary(self.index.source, progress=progress),
+            completed,
+            lambda exc: messagebox.showerror("RPF canary failed", str(exc), parent=self),
+        )
+
+    @staticmethod
+    def _transaction_receipt_directory() -> Path:
+        transactions = user_data_root() / "rpf-transactions"
+        return transactions if transactions.is_dir() else user_data_root()
 
     def _export_index(self) -> None:
         if self.index is None:

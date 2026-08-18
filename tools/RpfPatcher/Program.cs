@@ -2785,13 +2785,17 @@ namespace RpfPatcher
             bool isGen9 = File.Exists(Path.Combine(gtaPath, "GTA5_Enhanced.exe"))
                        || File.Exists(Path.Combine(gtaPath, "eboot.bin"));
             GTA5Keys.LoadFromPath(gtaPath, isGen9, null);
-            var rpf = new RpfFile(rpfPath, rpfPath);
+            // Keep the physical path in FilePath but use a virtual root name for
+            // CodeWalker's entry graph. Drive-colons in the virtual path make
+            // otherwise valid Enhanced binary entries fail structural scanning.
+            string virtualRoot = Path.GetFileName(rpfPath);
+            var rpf = new RpfFile(rpfPath, virtualRoot);
             rpf.ScanStructure(null,
                 err => Console.Error.WriteLine($"RPF scan warning: {err}"));
             if (rpf.AllEntries == null || rpf.AllEntries.Count == 0)
                 throw new InvalidDataException("RPF scan returned no entries.");
             RpfFile.EnsureValidEncryption(rpf, null, true);
-            rpf = new RpfFile(rpfPath, rpfPath);
+            rpf = new RpfFile(rpfPath, virtualRoot);
             rpf.ScanStructure(null,
                 err => Console.Error.WriteLine($"RPF reopen warning: {err}"));
             return rpf;

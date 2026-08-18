@@ -10,12 +10,16 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
+from PIL import Image, ImageTk
+
 from allin1_sdk.addon_importer import AddonDraftBuilder, AddonPackageInspector, PackageScan
 from allin1_sdk.asset_viewer import AssetViewerDialog
 from allin1_sdk.rpf_explorer import RpfExplorerDialog
+from allin1_sdk.sdk_console import SdkConsoleDialog
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.help_center import HelpCenterDialog
 from allin1_sdk.paths import user_data_root
+from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
 from allin1_sdk.addon_sdk import (
     AddonInstallStep,
     AddonLinkReport,
@@ -57,11 +61,18 @@ class AddonSdkDialog(tk.Toplevel):
         self.package_scan: PackageScan | None = None
         self._selection: dict[str, object] = {}
         self.review_menus: list[tk.Menu] = []
+        self._logo_photo: ImageTk.PhotoImage | None = None
         self.title("ALLIN1 SDK — Developer Workspace")
         self.geometry("1320x840")
         self.minsize(1020, 680)
         if not standalone:
             self.transient(parent)
+        favicon = self.project_root / "assets" / "favicon.ico"
+        if favicon.is_file() and os.name == "nt":
+            try:
+                self.iconbitmap(default=str(favicon))
+            except tk.TclError:
+                pass
         self._build()
         self._load_examples()
 
@@ -73,6 +84,11 @@ class AddonSdkDialog(tk.Toplevel):
         menu.add_cascade(label="Review", menu=review)
         intelligence = self._make_intelligence_menu(menu)
         menu.add_cascade(label="Package Intelligence", menu=intelligence)
+        tools = tk.Menu(menu, tearoff=False)
+        tools.add_command(
+            label="SDK Console…", accelerator="Ctrl+`", command=self._open_console,
+        )
+        menu.add_cascade(label="Tools", menu=tools)
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(
             label="SDK Help Center", accelerator="F1",
@@ -87,6 +103,7 @@ class AddonSdkDialog(tk.Toplevel):
         self.bind(
             "<F1>", lambda _event: HelpCenterDialog(self, initial_topic="sdk"),
         )
+        self.bind("<Control-KeyPress-grave>", lambda _event: self._open_console())
 
     def _make_content_menu(self, parent: tk.Misc) -> tk.Menu:
         menu = tk.Menu(parent, tearoff=False)
@@ -119,6 +136,11 @@ class AddonSdkDialog(tk.Toplevel):
         menu.add_command(label="Preview OIV recipe…", command=self._preview_oiv)
         menu.add_command(label="Inventory installed DLC…", command=self._inventory_dlc)
         menu.add_command(label="Compile vehicle data…", command=self._compile_vehicle_data)
+        menu.add_separator()
+        menu.add_command(label="Compare META/XML…", command=self._compare_meta)
+        menu.add_command(
+            label="Validate META/XML round trip…", command=self._validate_meta_roundtrip,
+        )
         return menu
 
     def _set_package_actions(self, *, assets: bool, rpfs: bool) -> None:
@@ -130,18 +152,41 @@ class AddonSdkDialog(tk.Toplevel):
                 "Inspect package RPFs…", state="normal" if rpfs else "disabled",
             )
 
+    def _open_console(self) -> None:
+        existing = getattr(self, "_console_dialog", None)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return
+        self._console_dialog = SdkConsoleDialog(self, self.project_root)
+
     def _build(self) -> None:
         self._build_menu()
         outer = ttk.Frame(self, padding=14)
         outer.pack(fill="both", expand=True)
         header = ttk.Frame(outer)
         header.pack(fill="x", pady=(0, 10))
+        logo = self.project_root / "assets" / "ALLIN1_SDK.png"
+        if logo.is_file():
+            try:
+                with Image.open(logo) as opened:
+                    image = opened.convert("RGBA")
+                    image.thumbnail((175, 100), Image.Resampling.LANCZOS)
+                    self._logo_photo = ImageTk.PhotoImage(image.copy())
+                ttk.Label(header, image=self._logo_photo).pack(
+                    side="left", padx=(0, 14), anchor="center",
+                )
+            except (OSError, tk.TclError):
+                self._logo_photo = None
+        header_text = ttk.Frame(header)
+        header_text.pack(side="left", fill="x", expand=True, anchor="center")
         ttk.Label(
-            header, text="ALLIN1 SDK",
+            header_text, text="ALLIN1 SDK",
             font=("Segoe UI Semibold", 20), foreground="#173d32",
         ).pack(anchor="w")
         ttk.Label(
-            header,
+            header_text,
             text=(
                 "Developer workspace for package integration, native assets, "
                 "archive inspection, compatibility, and safe authoring plans."
@@ -562,6 +607,68 @@ class AddonSdkDialog(tk.Toplevel):
             "Vehicle data compiled",
             "JSON, CSV, XLSX, and Markdown reports were written to:\n"
             f"{Path(destination).resolve()}", parent=self,
+        )
+
+    def _compare_meta(self) -> None:
+        before = filedialog.askopenfilename(
+            parent=self, title="Select original META/XML",
+            filetypes=(("GTA metadata", "*.meta *.xml *.ymt"), ("All files", "*.*")),
+        )
+        if not before:
+            return
+        after = filedialog.askopenfilename(
+            parent=self, title="Select modified META/XML",
+            filetypes=(("GTA metadata", "*.meta *.xml *.ymt"), ("All files", "*.*")),
+        )
+        if not after:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save structured metadata diff",
+            initialfile="meta-structured-diff.md", defaultextension=".md",
+            filetypes=(("Markdown", "*.md"), ("JSON", "*.json")),
+        )
+        if not output:
+            return
+        try:
+            report = diff_meta(before, after)
+            written = report.write(output)
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("META/XML comparison failed", str(exc), parent=self)
+            return
+        self.status.set(f"Structured META/XML diff: {len(report.changes)} changes")
+        messagebox.showinfo(
+            "META/XML comparison complete",
+            f"Found {len(report.changes)} semantic change(s).\n\nReport: {written}",
+            parent=self,
+        )
+
+    def _validate_meta_roundtrip(self) -> None:
+        source = filedialog.askopenfilename(
+            parent=self, title="Select authored META/XML",
+            filetypes=(("GTA metadata", "*.meta *.xml *.ymt"), ("All files", "*.*")),
+        )
+        if not source:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save META/XML round-trip report",
+            initialfile=f"{Path(source).stem}-roundtrip.json",
+            defaultextension=".json", filetypes=(("JSON", "*.json"),),
+        )
+        if not output:
+            return
+        try:
+            result = validate_meta_roundtrip(source)
+            Path(output).write_text(
+                json.dumps(result, indent=2) + "\n", encoding="utf-8",
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("META/XML round trip failed", str(exc), parent=self)
+            return
+        self.status.set("META/XML round trip is semantically equivalent")
+        messagebox.showinfo(
+            "META/XML round trip passed",
+            f"The serialized document reparsed with the same canonical structure.\n\n"
+            f"Report: {Path(output).resolve()}", parent=self,
         )
 
     @staticmethod

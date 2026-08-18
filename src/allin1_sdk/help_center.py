@@ -28,7 +28,7 @@ HELP_TOPICS: tuple[HelpTopic, ...] = (
 3. Resolve missing fields, source files, references, edition tags, and rollback steps.
 4. Export the link report and keep it with the package's release artifacts.
 
-The SDK audits and authors content. Installation, repair, and game launch remain the responsibility of the separate ALLIN1 Launcher.""",
+The SDK audits and authors content. Its RPF workspace applies reviewed replace, add, or delete plans to an exact mods copy or an explicitly isolated external workspace, including one-level nested entries. Full package installation, repair, and game launch remain the responsibility of the separate ALLIN1 Launcher.""",
         ("first run", "import", "addon", "linker", "report"),
     ),
     HelpTopic(
@@ -52,15 +52,25 @@ The native viewers remain useful without the helper for lightweight header inspe
         "Run validation and inspection in scripts or continuous integration.",
         """The allin1-sdk command exposes package import, manifest validation, link reports, OIV plans, DLC inventory, vehicle compilation, and RPF indexing/extraction.
 
-Commands return non-zero exit codes for invalid or unsafe inputs. Generated drafts and replacement plans remain review-only artifacts; automation should never reinterpret them as authorization to write a game archive.""",
+Commands return non-zero exit codes for invalid or unsafe inputs. Creating an entry-change plan never authorizes a write. Applying or rolling back a ready plan is a separate command and requires --acknowledge-write, a closed game, an authorized target, and unchanged input hashes. Real-archive canary mode proves replace/add/delete and rollback on a disposable copy.""",
         ("cli", "automation", "continuous integration", "script", "exit code"),
+    ),
+    HelpTopic(
+        "console", "Automation", "SDK Console",
+        "Use the complete command surface without leaving the desktop SDK.",
+        """Open Tools → SDK Console or press Ctrl+`. Start typing to progressively filter commands. Suggestions include command syntax, options, local paths, and persistent command history.
+
+Tab accepts the selected suggestion. Up and Down move through visible matches; Ctrl+Up and Ctrl+Down move through history. Enter runs the command asynchronously, Ctrl+L clears output, and Escape clears the command or closes an empty console.
+
+The console invokes the same Click commands and safety checks as allin1-sdk in a terminal. It does not bypass target authorization, acknowledgements, hashes, locks, game-process checks, or rollback requirements. Type help for the catalog or help <command> for detailed syntax.""",
+        ("console", "autocomplete", "completion", "history", "source", "terminal"),
     ),
     HelpTopic(
         "input", "Interface", "Navigating the SDK",
         "Use the integration graph, field inspector, menus, and search efficiently.",
         """Content imports are grouped under Import content. Review actions apply to the selected package, and Package intelligence contains cross-package tools.
 
-Select an integration node to see its source, contract, and linked fields. Select a field for a plain-language explanation. F1 opens contextual help; Escape closes secondary dialogs.""",
+Select an integration node to see its source, contract, and linked fields. Select a field for a plain-language explanation. Tools → SDK Console opens the in-app command surface. F1 opens contextual help; Escape closes secondary dialogs.""",
         ("navigation", "menus", "graph", "field", "keyboard"),
     ),
     HelpTopic(
@@ -76,7 +86,7 @@ Generated addon.json files are drafts. Resolve their warnings and linker errors 
         "Trace game-facing fields and audit add-on integration before installation.",
         """The Add-on SDK links authored package fields to metadata, native UI text, animations, runtime behavior, packaging, and rollback expectations.
 
-Import a DLC folder or archive, inspect its integration graph, then select nodes and fields for explanations. Package Intelligence contains OIV preview, DLC inventory, and vehicle-data compilation tools.""",
+Import a DLC folder or archive, inspect its integration graph, then select nodes and fields for explanations. Package Intelligence contains OIV preview, DLC inventory, vehicle-data compilation, and structured META/XML comparison and round-trip tools.""",
         ("authoring", "addon", "dlc", "audit", "linker", "developer"),
     ),
     HelpTopic(
@@ -89,18 +99,24 @@ The viewer is read-only. Compiled DLL, ASI, and script payloads are never execut
     ),
     HelpTopic(
         "rpf-explorer", "Inspectors", "RPF Explorer",
-        "Search nested archives, inspect metadata, extract entries, and create safe plans.",
+        "Search archives, inspect metadata, and transact guarded root or nested changes.",
         """Select the matching GTA V installation before opening an RPF so the correct encryption keys and resource decoder are used.
 
-Search and filter the archive tree, then use Entry actions to preview or extract the selected entry. Replacement planning creates an inert JSON review plan with hashes, backup requirements, verification steps, and rollback information. It does not modify the archive.""",
+Search and filter the archive tree, then use Entry actions to preview or extract the selected entry. Replace, add, and delete planning creates an inert schema-v3 JSON plan and hashes the archive, original state, payload where applicable, edition, and authorized scope.
+
+A ready plan may be applied only inside the selected installation's mods directory or an external workspace explicitly authorized by the CLI. A nested change is performed inside the staged parent RPF and verified through that parent before commit. Transaction History provides verification, interrupted-receipt reconciliation, guarded rollback, and stale-lock inspection. Run disposable archive canary proves the real writer without changing the selected source.""",
         ("archive", "nested", "extract", "replacement", "rpf", "metadata"),
     ),
     HelpTopic(
         "recovery", "Safety & recovery", "Backups and recovery",
-        "Understand the SDK's read-only boundary and generated safety artifacts.",
-        """The SDK does not install gameplay content. Package scans, native previews, RPF indexes, extracted copies, and linker reports are read-only operations.
+        "Understand RPF transaction ownership, verification, and rollback.",
+        """Package scans, native previews, RPF indexes, extracted copies, linker reports, and replacement-plan creation are read-only operations.
 
-RPF replacement creates a plan containing source/destination hashes, backup requirements, verification steps, and rollback expectations. The plan never modifies an archive and is not an install receipt.""",
+An applied RPF plan stores its complete pre-write archive, an exact payload snapshot, the reviewed plan, and a receipt under the ALLIN1 SDK user-data directory. Verify transaction receipt proves whether the archive is still applied, already original, or externally modified and checks the rollback snapshot and exact entry.
+
+Rollback is refused if another tool changed the archive after ALLIN1 applied it. A rollback restores the complete snapshot through a staged copy and verifies the original entry before changing the receipt to rolled_back. Failed commits automatically attempt the same restoration and preserve their receipt for diagnosis.
+
+Only one ALLIN1 transaction can own an archive at a time. Transaction History can reconcile an interrupted receipt without completing an uncommitted write. It clears an .allin1.lock only after proving that its owner process is gone, GTA V is closed, and the archive remains inside its authorized scope.""",
         ("backup", "rollback", "restore", "safety", "receipt"),
     ),
     HelpTopic(

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/ALLIN1.png" alt="ALLIN1" width="180" />
+  <img src="assets/ALLIN1_SDK.png" alt="ALLIN1 SDK" width="260" />
 </p>
 
 # ALLIN1 SDK — GTA V Mod Developer Tools
@@ -12,7 +12,7 @@ make weapons, vehicles, archives, and other add-ons work coherently.
 ALLIN1 SDK supports GTA V Legacy and GTA V Enhanced. Its inspection and planning
 workflows are designed for Story Mode mod development.
 
-> **Current public release:** **0.4.8**. Install it from ALLIN1 Launcher or
+> **Current public release:** **0.4.9**. Install it from ALLIN1 Launcher or
 > download the self-contained Windows package from
 > [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases).
 
@@ -38,7 +38,18 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   and generate YTD texture contact sheets without executing package code.
 - **RPF Explorer** — search root and nested RPFs as one hierarchy, inspect entry
   metadata, export JSON/CSV indexes, extract an exact entry, and generate a
-  checksummed replacement plan without modifying the archive.
+  checksummed replace/add/delete plan without modifying the archive. Reviewed root
+  and one-level nested-entry plans targeting an exact `mods` or explicitly isolated
+  workspace copy use full outer-archive staging, pre/post-write verification,
+  durable receipts, guarded rollback, progress UI, transaction history, interrupted
+  receipt recovery, and stale-lock inspection.
+- **Real-archive canary** — copy a genuine Legacy or Enhanced RPF outside the game,
+  exercise real replace/add/delete writes, verify each exact entry, roll everything
+  back, and prove the final archive SHA-256 matches the untouched source.
+- **Structured META/XML tools** — compare authored metadata by element, attribute,
+  and value rather than formatting, and validate parse/serialize/reparse semantic
+  equivalence before packaging. Binary PSO/RBF assets remain routed through Native
+  Asset Viewer instead of being misidentified as XML.
 - **DLC inventory** — compare DLC folders with `dlclist.xml`, edition support,
   missing registrations, incomplete payloads, duplicates, and managed-package
   ownership.
@@ -68,7 +79,7 @@ ALLIN1 SDK
   Vehicle Data Compiler
                      |
                      v
-Reviewable manifests, inventories, reports, and safe install plans
+Reviewable manifests, reports, safe plans, and receipt-owned RPF transactions
 ```
 
 The launcher owns player-facing setup and package lifecycle operations. The SDK
@@ -80,7 +91,7 @@ submodule, and RPF helper.
 
 - Windows 10 or Windows 11 for the self-contained desktop release.
 - GTA V Legacy or GTA V Enhanced when inspecting installed game content.
-- ALLIN1 Launcher 0.4.8 or newer for managed install, update, repair, and removal.
+- ALLIN1 Launcher 0.4.9 or newer for managed install, update, repair, and removal.
 - Python 3.10 or newer only when running the SDK from source.
 - .NET 8 SDK only when rebuilding `RpfPatcher` from source.
 
@@ -114,9 +125,15 @@ button rows:
 
 - **Content** opens manifests, packages, folders, and installed DLC sources.
 - **Review** validates links, explains fields, and exports reports.
-- **Package Intelligence** opens OIV, DLC inventory, and vehicle compiler tools.
-- **Archive / Entry** controls RPF search, metadata, preview, extraction, and
-  replacement planning.
+- **Package Intelligence** opens OIV, DLC inventory, vehicle compiler, and structured
+  META/XML tools.
+- **Tools → SDK Console** opens the complete CLI inside the desktop app. Its
+  Source-style completion list narrows as you type, suggests commands, options,
+  paths, and history, and runs work off the UI thread. Press Ctrl+backtick to open it,
+  `Tab` to accept a completion, arrows to navigate, and `Ctrl+L` to clear output.
+- **Archive / Entry** controls RPF search, metadata, preview, extraction,
+  replace/add/delete planning, guarded application, canaries, transaction history,
+  receipt recovery, stale-lock review, verification, and rollback.
 - **Help** provides contextual guidance for each workspace and its safety limits.
 
 User-created projects and remembered paths are stored separately from the
@@ -124,7 +141,9 @@ application under `%LOCALAPPDATA%\ALLIN1-SDK`.
 
 ## Command line
 
-Source installations also expose `allin1-sdk`:
+Source installations also expose `allin1-sdk`. The packaged desktop app exposes
+the same commands through **Tools → SDK Console**, so a separate Python terminal
+is not required:
 
 ```powershell
 allin1-sdk list
@@ -134,6 +153,15 @@ allin1-sdk import-package C:\Mods\Example -o C:\Mods\Example\addon.json
 allin1-sdk audit-folder C:\Mods\TestMods -o package-audit.md
 allin1-sdk dlc-inventory "D:\Games\GTA V Enhanced" -o dlc-inventory.md
 allin1-sdk index-rpf C:\Mods\Example\dlc.rpf --gta-path "D:\Games\GTA V Enhanced" -o index.json
+allin1-sdk plan-rpf-replacement "D:\Games\GTA V Enhanced\mods\update\update.rpf" common/data/example.meta C:\Mods\example.meta --gta-path "D:\Games\GTA V Enhanced" -o replacement-plan.json
+allin1-sdk plan-rpf-add "D:\Games\GTA V Enhanced\mods\update\update.rpf" common/data/new.meta C:\Mods\new.meta --gta-path "D:\Games\GTA V Enhanced" -o add-plan.json
+allin1-sdk plan-rpf-delete "D:\Games\GTA V Enhanced\mods\update\update.rpf" common/data/old.meta --gta-path "D:\Games\GTA V Enhanced" -o delete-plan.json
+allin1-sdk apply-rpf-plan replacement-plan.json --gta-path "D:\Games\GTA V Enhanced" --acknowledge-write
+allin1-sdk verify-rpf-transaction receipt.json --gta-path "D:\Games\GTA V Enhanced"
+allin1-sdk rollback-rpf-transaction receipt.json --gta-path "D:\Games\GTA V Enhanced" --acknowledge-write
+allin1-sdk canary-rpf-transaction "D:\Games\GTA V Enhanced\x64\audio\sfx\ANIMALS.rpf" --gta-path "D:\Games\GTA V Enhanced" --acknowledge-write
+allin1-sdk diff-meta original.meta modified.meta -o structured-diff.md
+allin1-sdk validate-meta-roundtrip handling.meta -o roundtrip.json
 allin1-sdk compile-vehicle-data C:\Mods\Example -o compiled-vehicle-data
 ```
 
@@ -144,8 +172,26 @@ surface and options.
 
 - Package inspection does not execute DLL, ASI, script, or shader payloads.
 - RPF exploration and extraction are read-only.
-- RPF replacement remains plan-only until a transactional writer can guarantee
-  backup, verification, rollback, and ownership boundaries.
+- Creating an RPF replace/add/delete plan is read-only and never authorizes a write.
+- Applying a plan is limited to the selected GTA V installation's `mods` directory
+  or an external workspace explicitly authorized for that invocation. Workspace
+  authorization cannot point at stock game folders. GTA V must be closed and the
+  archive, original state, payload, edition, target scope, and plan identity must
+  still match their reviewed hashes.
+- Application copies the complete archive and payload into a transaction directory,
+  modifies and verifies a same-volume staged archive, commits it, verifies it again,
+  and retains a receipt-owned rollback snapshot. NG-encrypted archives retain their
+  exact filename while staged because Rockstar's key selection is filename-sensitive.
+  Failed post-commit checks restore the snapshot automatically.
+- A per-archive exclusive lock prevents two ALLIN1 transactions from staging the same
+  RPF concurrently. An interrupted lock is never guessed away; verify the associated
+  receipt and archive state before removing it.
+- Rollback is refused if the applied archive was subsequently changed by another
+  tool. A one-level nested write extracts and changes the nested RPF inside the staged
+  copy, replaces it in the staged parent, verifies the nested entry through the outer
+  archive, and commits or rolls back the complete outer archive as one transaction.
+- Canary mode never writes its selected source. It uses a generated external copy and
+  is successful only after replace, add, delete, and exact final-hash rollback checks.
 - OIV conversion stops when an operation cannot be represented safely.
 - Temporary archive extraction is bounded and removed after inspection.
 - Edition uncertainty remains visible instead of silently selecting Legacy or
@@ -159,7 +205,7 @@ surface and options.
 - **RAGE/RPF tooling:** .NET 8 and a pinned Enhanced-aware CodeWalker core.
 - **Windows distribution:** PyInstaller one-directory application plus a
   self-contained `RpfPatcher` runtime.
-- **Testing:** pytest with branch coverage, real-package canaries, release
+- **Testing:** pytest with branch coverage, real-package and real-RPF canaries, release
   packaging contracts, and GitHub Actions on Windows.
 
 ## Repository layout

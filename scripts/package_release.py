@@ -29,6 +29,7 @@ def _copy_runtime(root: Path, app_dir: Path, rpf_dir: Path) -> None:
     if not (rpf_dir / "RpfPatcher.exe").is_file():
         raise ValueError(f"RpfPatcher runtime is missing: {rpf_dir}")
     shutil.copytree(root / "sdk", app_dir / "sdk", dirs_exist_ok=True)
+    shutil.copytree(root / "assets", app_dir / "assets", dirs_exist_ok=True)
     shutil.copytree(rpf_dir, app_dir / "tools" / "RpfPatcher", dirs_exist_ok=True)
     for name in ("README.md", "LICENSE"):
         shutil.copy2(root / name, app_dir / name)

@@ -14,6 +14,7 @@ from allin1_sdk.addon_importer import (
 from allin1_sdk.addon_sdk import AddonLinker, AddonManifest, AddonSdkCatalog
 from allin1_sdk.detector import detect_gta_path
 from allin1_sdk.dlc_inventory import DlcInventory
+from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
 from allin1_sdk.oiv_workbench import OivWorkbench
 from allin1_sdk.paths import project_root
 from allin1_sdk.processes import run_hidden
@@ -50,6 +51,17 @@ def _entry(service: RpfExplorerService, archive: Path, archive_path: str, path: 
             "Entry was not found uniquely; export an index and use its exact archive/path."
         )
     return index, matches[0]
+
+
+def _rpf_service(
+    gta_path: Path | None, workspace_root: Path | None = None,
+) -> RpfExplorerService:
+    roots = (workspace_root.resolve(),) if workspace_root else ()
+    return RpfExplorerService(PROJECT_ROOT, _game_path(gta_path), workspace_roots=roots)
+
+
+def _progress(message: str, percent: int) -> None:
+    click.echo(f"[{percent:3d}%] {message}")
 
 
 @click.group()
@@ -321,22 +333,263 @@ def extract_rpf_entry(
 @click.argument("payload", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--archive-path", default="")
 @click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--workspace-root", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
 def plan_rpf_replacement(
     archive: Path, entry_path: str, payload: Path, archive_path: str,
-    gta_path: Path | None, output: Path,
+    gta_path: Path | None, workspace_root: Path | None, output: Path,
 ) -> None:
     """Create a checksummed replacement plan without writing the archive."""
-    service = RpfExplorerService(PROJECT_ROOT, _game_path(gta_path))
+    service = _rpf_service(gta_path, workspace_root)
     try:
         index, entry = _entry(service, archive, archive_path, entry_path)
         plan = service.replacement_plan(index, entry, payload)
         destination = output.resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
-    except (OSError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"Wrote plan only; no archive was changed: {destination}")
+    click.echo(
+        f"Wrote {plan['status']} plan; no archive was changed: {destination}"
+    )
+
+
+@main.command("plan-rpf-add")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("entry_path")
+@click.argument("payload", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--archive-path", default="")
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--workspace-root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def plan_rpf_add(
+    archive: Path, entry_path: str, payload: Path, archive_path: str,
+    gta_path: Path | None, workspace_root: Path | None, output: Path,
+) -> None:
+    """Create a checksummed plan to add a root or nested RPF entry."""
+    service = _rpf_service(gta_path, workspace_root)
+    try:
+        index = service.index(archive)
+        plan = service.addition_plan(
+            index, entry_path, payload, archive_path=archive_path,
+        )
+        destination = output.resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Wrote {plan['status']} add plan; no archive was changed: {destination}")
+
+
+@main.command("plan-rpf-delete")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("entry_path")
+@click.option("--archive-path", default="")
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--workspace-root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def plan_rpf_delete(
+    archive: Path, entry_path: str, archive_path: str,
+    gta_path: Path | None, workspace_root: Path | None, output: Path,
+) -> None:
+    """Create a checksummed plan to delete a root or nested RPF entry."""
+    service = _rpf_service(gta_path, workspace_root)
+    try:
+        index, entry = _entry(service, archive, archive_path, entry_path)
+        plan = service.deletion_plan(index, entry)
+        destination = output.resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Wrote {plan['status']} delete plan; no archive was changed: {destination}"
+    )
+
+
+@main.command("apply-rpf-plan")
+@click.argument("plan", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--workspace-root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--receipt-dir", type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--acknowledge-write", is_flag=True,
+    help="Confirm that GTA V is closed and authorize the guarded mods-copy write.",
+)
+def apply_rpf_plan(
+    plan: Path, gta_path: Path | None, workspace_root: Path | None,
+    receipt_dir: Path | None,
+    acknowledge_write: bool,
+) -> None:
+    """Apply a ready RPF plan through backup, staging, verification, and receipt."""
+    if not acknowledge_write:
+        raise click.ClickException(
+            "RPF writes require --acknowledge-write after reviewing the plan"
+        )
+    service = _rpf_service(gta_path, workspace_root)
+    try:
+        receipt = service.apply_change_plan(
+            plan, receipt_root=receipt_dir, progress=_progress,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Applied and verified RPF transaction. Receipt: {receipt}")
+
+
+@main.command("verify-rpf-transaction")
+@click.argument("receipt", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--workspace-root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", type=click.Path(path_type=Path))
+def verify_rpf_transaction(
+    receipt: Path, gta_path: Path | None, workspace_root: Path | None,
+    output: Path | None,
+) -> None:
+    """Verify a transaction's archive, entry, and rollback snapshot."""
+    service = _rpf_service(gta_path, workspace_root)
+    try:
+        result = service.verify_transaction(receipt)
+        rendered = json.dumps(result, indent=2) + "\n"
+        if output:
+            destination = output.resolve()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(rendered, encoding="utf-8")
+        else:
+            click.echo(rendered, nl=False)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not result["healthy"]:
+        raise click.ClickException(
+            f"Transaction verification failed ({result['archive_state']})"
+        )
+    if output:
+        click.echo(f"Transaction is healthy ({result['archive_state']}): {destination}")
+
+
+@main.command("rollback-rpf-transaction")
+@click.argument("receipt", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--workspace-root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--acknowledge-write", is_flag=True,
+    help="Confirm that GTA V is closed and authorize restoration of the snapshot.",
+)
+def rollback_rpf_transaction(
+    receipt: Path, gta_path: Path | None, workspace_root: Path | None,
+    acknowledge_write: bool,
+) -> None:
+    """Roll back an applied receipt if the archive is still transaction-owned."""
+    if not acknowledge_write:
+        raise click.ClickException(
+            "RPF rollback requires --acknowledge-write after reviewing the receipt"
+        )
+    service = _rpf_service(gta_path, workspace_root)
+    try:
+        updated = service.rollback_transaction(receipt, progress=_progress)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Rolled back and verified RPF transaction: {updated}")
+
+
+@main.command("recover-rpf-transaction")
+@click.argument("receipt", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--workspace-root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+def recover_rpf_transaction(
+    receipt: Path, gta_path: Path | None, workspace_root: Path | None,
+) -> None:
+    """Reconcile an interrupted receipt without committing an archive write."""
+    try:
+        result = _rpf_service(gta_path, workspace_root).recover_transaction(receipt)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, indent=2))
+
+
+@main.command("list-rpf-transactions")
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--receipt-dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", type=click.Path(path_type=Path))
+def list_rpf_transactions(
+    gta_path: Path | None, receipt_dir: Path | None, output: Path | None,
+) -> None:
+    """List guarded RPF transaction history, including malformed receipts."""
+    try:
+        history = _rpf_service(gta_path).list_transactions(receipt_dir)
+        rendered = json.dumps(history, indent=2) + "\n"
+        if output:
+            destination = output.resolve()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(rendered, encoding="utf-8")
+            click.echo(f"Wrote {len(history)} transaction record(s): {destination}")
+        else:
+            click.echo(rendered, nl=False)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@main.command("canary-rpf-transaction")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output-dir", type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--acknowledge-write", is_flag=True,
+    help="Authorize writes only to a generated disposable copy outside GTA V.",
+)
+def canary_rpf_transaction(
+    archive: Path, gta_path: Path | None, output_dir: Path | None,
+    acknowledge_write: bool,
+) -> None:
+    """Prove real RPF apply/verify/rollback behavior on an isolated archive copy."""
+    if not acknowledge_write:
+        raise click.ClickException(
+            "The disposable canary requires --acknowledge-write; its source remains read-only"
+        )
+    try:
+        report = _rpf_service(gta_path).run_canary(
+            archive, output_root=output_dir, progress=_progress,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Real-archive canary passed: {report}")
+
+
+@main.command("diff-meta")
+@click.argument("before", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("after", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def diff_meta_command(before: Path, after: Path, output: Path) -> None:
+    """Write a path-aware semantic diff for authored META/XML files."""
+    try:
+        report = diff_meta(before, after)
+        written = report.write(output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Wrote {len(report.changes)} semantic change(s): {written}")
+
+
+@main.command("validate-meta-roundtrip")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--serialized-output", type=click.Path(path_type=Path))
+@click.option("--output", "-o", type=click.Path(path_type=Path))
+def validate_meta_roundtrip_command(
+    source: Path, serialized_output: Path | None, output: Path | None,
+) -> None:
+    """Prove parse/serialize/reparse semantic equivalence for authored metadata."""
+    try:
+        result = validate_meta_roundtrip(source, serialized_output=serialized_output)
+        rendered = json.dumps(result, indent=2) + "\n"
+        if output:
+            destination = output.resolve()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(rendered, encoding="utf-8")
+            click.echo(f"Wrote META round-trip report: {destination}")
+        else:
+            click.echo(rendered, nl=False)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not result["semantically_equivalent"]:
+        raise click.ClickException("Metadata changed semantically during round trip")
 
 
 @main.command("inspect-package-rpfs")
@@ -381,7 +634,10 @@ def sdk_compatibility_group() -> None:
 for _command in (
     list_examples, validate, link, import_package, audit_folder, oiv_plan,
     inspect_rpf, dlc_inventory, compile_vehicle_data, index_rpf, extract_rpf_entry,
-    plan_rpf_replacement, inspect_package_rpfs,
+    plan_rpf_replacement, plan_rpf_add, plan_rpf_delete, apply_rpf_plan,
+    verify_rpf_transaction, rollback_rpf_transaction, recover_rpf_transaction,
+    list_rpf_transactions, canary_rpf_transaction, diff_meta_command,
+    validate_meta_roundtrip_command, inspect_package_rpfs,
 ):
     sdk_compatibility_group.add_command(_command)
 

@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           dotnet publish tools/RpfPatcher/RpfPatcher.csproj -c Release --nologo --self-contained true -r win-x64 -o build/rpf
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name ALLIN1-SDK --distpath build/app --workpath build/pyinstaller --specpath build src/allin1_sdk/app.py
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name ALLIN1-SDK --icon "${{ github.workspace }}/assets/favicon.ico" --add-data "${{ github.workspace }}/assets;assets" --distpath build/app --workpath build/pyinstaller --specpath build src/allin1_sdk/app.py
           python scripts/package_release.py --app-dir build/app/ALLIN1-SDK --rpf-dir build/rpf --output build/releases --version "${{ github.ref_name }}"
 
       - name: Publish tagged SDK release
