@@ -17,7 +17,7 @@ from allin1_sdk import __version__
 from allin1_sdk.addon_importer import AddonDraftBuilder, AddonPackageInspector, PackageScan
 from allin1_sdk.branding import apply_sdk_window_icon
 from allin1_sdk.asset_viewer import AssetViewerDialog
-from allin1_sdk.rpf_explorer import RpfExplorerDialog
+from allin1_sdk.rpf_explorer import RpfExplorerDialog, RpfProgressDialog
 from allin1_sdk.sdk_console import SdkConsoleDialog
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.help_center import HelpCenterDialog
@@ -652,7 +652,7 @@ class AddonSdkDialog(tk.Toplevel):
             messagebox.showinfo(
                 "OIV review required",
                 f"The operation plan was written to:\n{report}\n\n"
-                "At least one unsafe delete, merge, archive creation, missing source, or "
+                "At least one unsafe delete, merge, unbounded archive creation, missing source, or "
                 "unknown operation must be resolved manually.", parent=self,
             )
             return
@@ -683,6 +683,45 @@ class AddonSdkDialog(tk.Toplevel):
                     f"Exported {len(manifests)} outer-archive manifest(s). Open the "
                     "matching archive in RPF Explorer and choose Create multi-entry "
                     "plan.", parent=self,
+                )
+        if plan.created_archive_operations and messagebox.askyesno(
+            "Verified created-RPF export available",
+            "This recipe declares bounded createIfNotExist archives. Extract only its "
+            "declared payloads, build every archive, verify the recursive tree and "
+            "exact payload hashes, and create a managed package?",
+            parent=self,
+        ):
+            game = self.installation_roots[0] if len(self.installation_roots) == 1 else None
+            if game is None:
+                selected_game = filedialog.askdirectory(
+                    parent=self,
+                    title="Select matching GTA V Legacy or Enhanced installation",
+                )
+                game = Path(selected_game) if selected_game else None
+            package_dir = filedialog.askdirectory(
+                parent=self, title="Select a new created-RPF package folder",
+                mustexist=False,
+            ) if game is not None else ""
+            if game is not None and package_dir:
+                def completed(manifest) -> None:
+                    self.status.set(f"Verified created-RPF package: {manifest}")
+                    messagebox.showinfo(
+                        "Created RPF package exported",
+                        "Every new archive passed recursive and exact-payload "
+                        f"verification.\n\nManifest: {manifest}\n\nReview it before "
+                        "using Import & install.", parent=self,
+                    )
+
+                RpfProgressDialog(
+                    self, "Building verified OIV archives",
+                    lambda _progress: workbench.export_created_rpf_package(
+                        plan, package_dir, project_root=self.project_root,
+                        gta_path=game,
+                    ),
+                    completed,
+                    lambda exc: messagebox.showerror(
+                        "Created RPF export failed", str(exc), parent=self,
+                    ),
                 )
         if not plan.managed_exportable:
             self.status.set(f"OIV atomic RPF plan written: {report.name}")

@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import shutil
+import tempfile
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
@@ -39,6 +40,7 @@ class OivOperation:
     archives: tuple[str, ...]
     supported: bool
     detail: str
+    creates_archive: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,9 +59,25 @@ class OivPlan:
 
     @property
     def rpf_batch_operations(self) -> tuple[OivOperation, ...]:
+        created = self._created_archive_chains()
         return tuple(
             item for item in self.operations
             if item.kind in {"add", "delete"} and item.archives
+            and not any(
+                item.archives[:len(chain)] == chain for chain in created
+            )
+        )
+
+    @property
+    def created_archive_operations(self) -> tuple[OivOperation, ...]:
+        return tuple(
+            item for item in self.operations
+            if item.kind == "archive" and item.creates_archive
+        )
+
+    def _created_archive_chains(self) -> tuple[tuple[str, ...], ...]:
+        return tuple(
+            item.archives + (item.target,) for item in self.created_archive_operations
         )
 
     @property
@@ -73,11 +91,14 @@ class OivPlan:
 
     @property
     def managed_exportable(self) -> bool:
-        return self.translatable and bool(self.add_operations) and all(
+        return (
+            self.translatable and bool(self.add_operations)
+            and not self.created_archive_operations and all(
             item.kind in {"archive", "add"}
             and (item.kind != "add" or len(item.archives) <= 1)
             and (item.kind != "archive" or not item.archives)
             for item in self.operations
+            )
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -92,7 +113,13 @@ class OivPlan:
         }
 
     def to_markdown(self) -> str:
-        result = "MANAGED EXPORT READY" if self.translatable else "REVIEW REQUIRED"
+        result = (
+            "MANAGED EXPORT READY" if self.managed_exportable
+            else "CREATED RPF EXPORT READY" if self.translatable
+            and self.created_archive_operations
+            else "ATOMIC RPF EXPORT READY" if self.translatable
+            else "REVIEW REQUIRED"
+        )
         lines = [
             f"# OIV operation plan: {self.name}", "",
             f"- Source: `{self.source}`",
@@ -124,7 +151,7 @@ class OivPlan:
             "This report does not execute the OIV. Managed export is available only "
             "when every declared operation can be represented as an owned file copy, "
             "exact RPF-entry transaction, or atomic nested-RPF batch. Wildcard text "
-            "edits, XPath/PSO merges, archive creation, and unknown commands remain "
+            "edits, XPath/PSO merges, unbounded archive creation, and unknown commands remain "
             "blocked.", "",
         ])
         return "\n".join(lines)
@@ -189,7 +216,7 @@ class OivWorkbench:
             ))
         else:
             for child in content:
-                self._walk(child, (), entries, operations, findings)
+                self._walk(child, (), (), entries, operations, findings)
         if not any(item.kind == "add" for item in operations):
             findings.append(OivFinding(
                 "warning", "no_managed_payload",
@@ -201,7 +228,8 @@ class OivWorkbench:
         )
 
     def _walk(
-        self, node: ET.Element, archives: tuple[str, ...], entries: set[str],
+        self, node: ET.Element, archives: tuple[str, ...],
+        created_archives: tuple[bool, ...], entries: set[str],
         operations: list[OivOperation], findings: list[OivFinding],
     ) -> None:
         kind = _local_name(node.tag).casefold()
@@ -211,27 +239,45 @@ class OivWorkbench:
             path = self._target_path(raw_path, mods=not archives)
             create = node.attrib.get("createIfNotExist", "false").casefold() == "true"
             nested = archives + ((path or raw_path),)
-            supported = (
-                bool(path) and path.casefold().endswith(".rpf")
-                and len(nested) <= 9 and not create
+            parent_is_created = any(created_archives)
+            safe_archive = bool(path) and path.casefold().endswith(".rpf")
+            safe_creation_target = (
+                parent_is_created or len(archives) <= 1
+            ) and (
+                bool(archives) or (
+                    self._managed_file_target(path)
+                    and path.casefold().startswith("mods/")
+                )
+            )
+            supported = bool(
+                safe_archive and len(nested) <= 9
+                and ((create and safe_creation_target) or (not create and not parent_is_created))
             )
             operations.append(OivOperation(
                 number, kind, "", path, archives, supported,
                 "RPF operation container" + ("; creates archive" if create else ""),
+                create,
             ))
             if not supported:
                 code = (
-                    "archive_creation" if create else "archive_depth"
+                    "archive_creation_depth" if create and len(archives) > 1
+                    and not parent_is_created else "archive_creation_target" if create
+                    else "missing_archive_creation" if parent_is_created
+                    else "archive_depth"
                     if len(nested) > 9 else "unsafe_archive"
                 )
                 findings.append(OivFinding(
                     "error", code,
-                    "The archive container is unsafe, newly created, or deeper than "
-                    "the eight nested levels supported by atomic RPF transactions.",
+                    "The archive container is unsafe, has ambiguous creation ancestry, "
+                    "or is deeper than the eight nested levels supported by atomic RPF "
+                    "transactions.",
                     number,
                 ))
             for child in node:
-                self._walk(child, nested, entries, operations, findings)
+                self._walk(
+                    child, nested, created_archives + (create,),
+                    entries, operations, findings,
+                )
             return
 
         source = node.attrib.get("source", "").strip() if kind == "add" else ""
@@ -256,6 +302,8 @@ class OivWorkbench:
                 source = f"content/{source_path}"
                 target = target_path
                 detail = "Managed file copy" if not archives else "Exact RPF entry replacement"
+                if any(created_archives):
+                    detail = "New RPF build payload"
                 if member not in entries:
                     findings.append(OivFinding(
                         "error", "missing_oiv_source",
@@ -272,7 +320,10 @@ class OivWorkbench:
                 ))
         elif kind == "delete":
             target_path = self._target_path(target, mods=False)
-            supported = bool(archives) and bool(target_path) and len(archives) <= 9
+            supported = (
+                bool(archives) and bool(target_path) and len(archives) <= 9
+                and not any(created_archives)
+            )
             target = target_path
             detail = "Exact RPF entry deletion"
             if not supported:
@@ -334,6 +385,163 @@ class OivWorkbench:
     def _text(cls, parent: ET.Element | None, name: str) -> str:
         child = cls._child(parent, name)
         return (child.text or "").strip() if child is not None else ""
+
+    def export_created_rpf_package(
+        self, plan: OivPlan, destination: str | Path, *,
+        project_root: str | Path, gta_path: str | Path,
+    ) -> Path:
+        """Build createIfNotExist trees into a verified managed package.
+
+        Every new archive is produced by :class:`RpfArchiveBuilder`; OIV recipe
+        text is never executed. Creation roots may be installed as a new managed
+        file or as one exact entry in an existing outer RPF.
+        """
+        if not plan.translatable or not plan.created_archive_operations:
+            raise ValueError("OIV plan has no fully translatable created-RPF workflow")
+        created = {
+            operation.archives + (operation.target,): operation
+            for operation in plan.created_archive_operations
+        }
+        roots = tuple(
+            operation for chain, operation in created.items()
+            if operation.archives not in created
+        )
+        if any(len(operation.archives) > 1 for operation in roots):
+            raise ValueError(
+                "Created RPF roots deeper than one existing archive require a batch bundle"
+            )
+        for operation in plan.operations:
+            if operation.kind == "delete":
+                raise ValueError("A created-RPF managed package cannot include deletions")
+            if operation.kind == "add" and operation.archives and not any(
+                operation.archives[:len(chain)] == chain for chain in created
+            ):
+                raise ValueError(
+                    "Existing-RPF changes must be exported as a separate atomic batch"
+                )
+
+        root = Path(destination).expanduser().resolve()
+        if root.exists() or root.is_symlink():
+            raise ValueError("Created-RPF package destination must not already exist")
+        root.parent.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(
+            prefix=f".{root.name}.created-rpf-", dir=root.parent,
+        )).resolve()
+        try:
+            payload_root = stage / "payload"
+            authoring_root = stage / "rpf-sources"
+            payload_root.mkdir()
+            authoring_root.mkdir()
+            files: list[tuple[str, str, str]] = []
+            entries: list[tuple[str, str, str, str]] = []
+
+            for number, operation in enumerate(roots, start=1):
+                root_chain = operation.archives + (operation.target,)
+                loose = authoring_root / f"{number:03d}_{PurePosixPath(operation.target).stem}"
+                loose.mkdir()
+
+                def archive_source(chain: tuple[str, ...]) -> Path:
+                    current = loose
+                    for archive_path in chain[len(root_chain):]:
+                        relative = _safe_member_path(archive_path)
+                        current = current.joinpath(
+                            *relative.parent.parts, f"{relative.name}.source",
+                        )
+                    return current
+
+                for chain in sorted(created, key=lambda item: (len(item), item)):
+                    if chain[:len(root_chain)] != root_chain or chain == root_chain:
+                        continue
+                    archive_source(chain).mkdir(parents=True, exist_ok=True)
+
+                for add in plan.add_operations:
+                    if add.archives[:len(root_chain)] != root_chain:
+                        continue
+                    target = _safe_member_path(add.target)
+                    output = archive_source(add.archives).joinpath(*target.parts)
+                    if output.exists() or output.is_symlink():
+                        raise ValueError(
+                            f"Created RPF recipe has a duplicate output: {add.target}"
+                        )
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    self._copy_member(plan.source, add.source, output)
+
+                archive_name = PurePosixPath(operation.target).name
+                built_relative = f"payload/{number:03d}_{archive_name}"
+                built = stage.joinpath(*PurePosixPath(built_relative).parts)
+                from allin1_sdk.rpf_builder import RpfArchiveBuilder
+                RpfArchiveBuilder(project_root, gta_path).build(loose, built)
+                digest = self._sha256(built)
+                if operation.archives:
+                    entries.append((
+                        built_relative, operation.archives[0], operation.target, digest,
+                    ))
+                else:
+                    files.append((built_relative, operation.target, digest))
+
+            for number, operation in enumerate(
+                (item for item in plan.add_operations if not item.archives), start=1,
+            ):
+                name = PurePosixPath(operation.source).name
+                relative = f"payload/file_{number:03d}_{name}"
+                output = stage.joinpath(*PurePosixPath(relative).parts)
+                self._copy_member(plan.source, operation.source, output)
+                files.append((relative, operation.target, self._sha256(output)))
+
+            dlc_packs: list[str] = []
+            pattern = re.compile(
+                r"^mods/update/x64/dlcpacks/([a-z0-9._-]+)/dlc\.rpf$", re.I,
+            )
+            for _, target, _ in files:
+                match = pattern.fullmatch(target)
+                if match:
+                    dlc_packs.append(match.group(1))
+            dependencies = ["openrpf"] if entries or any(
+                target.casefold().startswith("mods/") for _, target, _ in files
+            ) else []
+            mod_type = self._mod_type(files, entries)
+            mod_id = re.sub(
+                r"[^a-z0-9._-]+", "-", plan.name.casefold(),
+            ).strip("-._")
+            mod_id = (mod_id or "imported-oiv")[:64]
+            lines = [
+                "schema_version = 1", f"id = {json.dumps(mod_id)}",
+                f"name = {json.dumps(plan.name)}",
+                f"version = {json.dumps(plan.version or '1.0')}",
+                f"type = {json.dumps(mod_type)}",
+                "description = \"Converted from a verified OIV created-RPF recipe; review before installation.\"",
+                "editions = [" + ", ".join(
+                    json.dumps(value) for value in plan.editions
+                ) + "]",
+                "dependencies = [" + ", ".join(
+                    json.dumps(value) for value in dependencies
+                ) + "]",
+                "dlc_packs = [" + ", ".join(
+                    json.dumps(value) for value in dlc_packs
+                ) + "]",
+            ]
+            for source, target, digest in files:
+                lines.extend([
+                    "", "[[files]]", f"source = {json.dumps(source)}",
+                    f"destination = {json.dumps(target)}",
+                    f"sha256 = {json.dumps(digest)}",
+                ])
+            for source, archive, entry, digest in entries:
+                lines.extend([
+                    "", "[[rpf_entries]]", f"source = {json.dumps(source)}",
+                    f"archive = {json.dumps(archive)}", f"entry = {json.dumps(entry)}",
+                    f"sha256 = {json.dumps(digest)}",
+                ])
+            manifest = stage / "mod.toml"
+            manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            from allin1_sdk.mods import ModManifest
+            ModManifest.load(manifest)
+            stage.rename(root)
+            return root / "mod.toml"
+        except Exception:
+            if stage.is_dir() and stage.parent == root.parent:
+                shutil.rmtree(stage)
+            raise
 
     def export_rpf_batch_manifests(
         self, plan: OivPlan, destination: str | Path,

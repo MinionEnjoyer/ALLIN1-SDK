@@ -327,9 +327,15 @@ def audit_folder(folder: Path, output: Path, draft_dir: Path | None) -> None:
 @click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
 @click.option("--managed-package", type=click.Path(file_okay=False, path_type=Path))
 @click.option("--rpf-batches", type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--created-rpf-package", type=click.Path(file_okay=False, path_type=Path),
+    help="Build verified createIfNotExist archives into a managed package.",
+)
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
 def oiv_plan(
     source: Path, output: Path, managed_package: Path | None,
-    rpf_batches: Path | None,
+    rpf_batches: Path | None, created_rpf_package: Path | None,
+    gta_path: Path | None,
 ) -> None:
     """Preview an OIV recipe without executing it."""
     try:
@@ -337,6 +343,11 @@ def oiv_plan(
         written = plan.write_report(output)
         if managed_package:
             OivWorkbench().export_managed_package(plan, managed_package)
+        if created_rpf_package:
+            OivWorkbench().export_created_rpf_package(
+                plan, created_rpf_package, project_root=PROJECT_ROOT,
+                gta_path=_game_path(gta_path),
+            )
         batch_manifests = (
             OivWorkbench().export_rpf_batch_manifests(plan, rpf_batches)
             if rpf_batches else ()
@@ -345,6 +356,8 @@ def oiv_plan(
         raise click.ClickException(str(exc)) from exc
     state = (
         "managed export ready" if plan.managed_exportable
+        else "created RPF export ready" if plan.created_archive_operations
+        and plan.translatable
         else "atomic RPF export ready" if plan.translatable
         else "manual review required"
     )

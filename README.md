@@ -190,6 +190,7 @@ allin1-sdk extract-rpf-subtree C:\Mods\Example\dlc.rpf --archive-path x64\textur
 allin1-sdk plan-rpf-sync C:\Mods\Example\dlc.rpf C:\Mods\Exports\vehicle --gta-path "D:\Games\GTA V Enhanced" --workspace-root C:\Mods -o subtree-sync-plan.json
 allin1-sdk diff-rpf C:\Mods\Before\dlc.rpf C:\Mods\After\dlc.rpf --exact-content --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Reports\archive-diff.json
 allin1-sdk oiv-plan C:\Mods\Example.oiv -o oiv-plan.md --rpf-batches C:\Mods\Example-rpf-batches
+allin1-sdk oiv-plan C:\Mods\NewDlc.oiv -o new-dlc-plan.md --created-rpf-package C:\Mods\NewDlc-managed --gta-path "D:\Games\GTA V Enhanced"
 allin1-sdk plan-rpf-batch "D:\Games\GTA V Enhanced\mods\update\update.rpf" C:\Mods\Example-rpf-batches\01-update-xxxxxxxx\changes.json --gta-path "D:\Games\GTA V Enhanced" -o atomic-plan.json
 allin1-sdk plan-rpf-replacement "D:\Games\GTA V Enhanced\mods\update\update.rpf" common/data/example.meta C:\Mods\example.meta --gta-path "D:\Games\GTA V Enhanced" -o replacement-plan.json
 allin1-sdk plan-rpf-add "D:\Games\GTA V Enhanced\mods\update\update.rpf" common/data/new.meta C:\Mods\new.meta --gta-path "D:\Games\GTA V Enhanced" -o add-plan.json
@@ -248,6 +249,12 @@ service used by the launcher.
   output overwrite, source mutation, and oversized inputs; it recursively indexes
   the completed archive, extracts and hashes every payload, and publishes only after
   its file, directory, archive, and content trees match the source exactly.
+- Bounded OIV `createIfNotExist` containers are translated into retained loose
+  `.rpf.source` workspaces and passed through that same builder. Safe top-level
+  archives and new archives one level inside an existing RPF become validated,
+  checksum-owned package payloads. Recipe code is never executed; ambiguous ancestry,
+  deletes inside new archives, deep existing-archive creation roots, and merge/edit
+  commands remain blocked.
 - Native workspaces retain an immutable source snapshot, editable CodeWalker XML and
   dependencies, edition metadata, and hashes. Build refuses path escapes, links,
   collisions, source tampering, unsupported types, oversized inputs, and any result

@@ -101,7 +101,7 @@ def test_oiv_plan_blocks_destructive_merge_and_unknown_operations(
         OivWorkbench().export_managed_package(plan, tmp_path / "blocked")
 
 
-def test_oiv_plan_blocks_missing_sources_and_created_archives(tmp_path):
+def test_oiv_plan_blocks_missing_sources_but_recognizes_safe_archive_creation(tmp_path):
     assembly = """<package><content>
       <add source="missing.bin">scripts/missing.bin</add>
       <archive path="update/update.rpf"><archive path="nested.rpf">
@@ -110,9 +110,111 @@ def test_oiv_plan_blocks_missing_sources_and_created_archives(tmp_path):
     </content></package>"""
     plan = OivWorkbench().inspect(_oiv_folder(tmp_path, assembly))
     codes = {item.code for item in plan.findings}
-    assert {"missing_oiv_source", "archive_creation"} <= codes
+    assert "missing_oiv_source" in codes
+    assert "archive_creation_target" not in codes
+    assert plan.created_archive_operations[0].target == "mods/new.rpf"
+    assert plan.created_archive_operations[0].supported
     assert "nested_archive" not in codes
     assert not plan.translatable
+
+
+def test_oiv_builds_safe_created_archive_tree_into_managed_package(
+    tmp_path, monkeypatch,
+):
+    assembly = """<package><metadata><name>Created DLC</name><gameversion>enhanced</gameversion></metadata><content>
+      <archive path="update/x64/dlcpacks/created/dlc.rpf" createIfNotExist="true">
+        <add source="data.xml">common/data/setup.xml</add>
+        <archive path="x64/models.rpf" createIfNotExist="true">
+          <add source="plugin.dll">vehicles/created.yft</add>
+        </archive>
+      </archive>
+    </content></package>"""
+    source = _oiv_folder(tmp_path, assembly)
+    plan = OivWorkbench().inspect(source)
+    assert plan.translatable
+    assert not plan.managed_exportable
+    assert len(plan.created_archive_operations) == 2
+    assert not plan.rpf_batch_operations
+
+    seen: dict[str, Path] = {}
+
+    class FakeBuilder:
+        def __init__(self, project_root, gta_path):
+            seen["project"] = Path(project_root)
+            seen["game"] = Path(gta_path)
+
+        def build(self, loose, output):
+            loose = Path(loose)
+            assert (loose / "common" / "data" / "setup.xml").is_file()
+            assert (
+                loose / "x64" / "models.rpf.source" / "vehicles" / "created.yft"
+            ).is_file()
+            output = Path(output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"RPF7-verified")
+            report = output.with_name(f"{output.name}.validation.json")
+            report.write_text("{}", encoding="utf-8")
+            return output, report
+
+    monkeypatch.setattr("allin1_sdk.rpf_builder.RpfArchiveBuilder", FakeBuilder)
+    game = tmp_path / "game"
+    game.mkdir()
+    manifest_path = OivWorkbench().export_created_rpf_package(
+        plan, tmp_path / "managed-created", project_root=tmp_path / "project",
+        gta_path=game,
+    )
+    manifest = ModManifest.load(manifest_path)
+    assert manifest.mod_type == "rpf"
+    assert manifest.dlc_packs == ("created",)
+    assert manifest.files[0].destination.as_posix() == (
+        "mods/update/x64/dlcpacks/created/dlc.rpf"
+    )
+    assert manifest.files[0].sha256
+    assert (manifest_path.parent / "rpf-sources").is_dir()
+    assert seen["game"] == game
+
+
+def test_oiv_created_parent_requires_nested_archive_creation_declaration(tmp_path):
+    assembly = """<package><content>
+      <archive path="update/x64/dlcpacks/created/dlc.rpf" createIfNotExist="true">
+        <archive path="x64/models.rpf">
+          <add source="data.xml">setup.xml</add>
+        </archive>
+      </archive>
+    </content></package>"""
+    plan = OivWorkbench().inspect(_oiv_folder(tmp_path, assembly))
+    assert not plan.translatable
+    assert "missing_archive_creation" in {item.code for item in plan.findings}
+
+
+def test_oiv_created_rpf_cli_routes_game_and_package_destination(tmp_path, monkeypatch):
+    assembly = """<package><content>
+      <archive path="mods/update/x64/dlcpacks/created/dlc.rpf" createIfNotExist="true">
+        <add source="data.xml">setup.xml</add>
+      </archive>
+    </content></package>"""
+    source = _oiv_folder(tmp_path, assembly)
+    game = tmp_path / "game"
+    game.mkdir()
+    destination = tmp_path / "created-package"
+
+    def fake_export(self, plan, selected, *, project_root, gta_path):
+        assert plan.created_archive_operations
+        assert Path(selected) == destination
+        assert Path(gta_path) == game
+        destination.mkdir()
+        manifest = destination / "mod.toml"
+        manifest.write_text("routed", encoding="utf-8")
+        return manifest
+
+    monkeypatch.setattr(OivWorkbench, "export_created_rpf_package", fake_export)
+    result = CliRunner().invoke(main, [
+        "sdk", "oiv-plan", str(source), "-o", str(tmp_path / "plan.md"),
+        "--created-rpf-package", str(destination), "--gta-path", str(game),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "created RPF export ready" in result.output
+    assert (destination / "mod.toml").read_text(encoding="utf-8") == "routed"
 
 
 def test_oiv_nested_add_and_exact_delete_export_atomic_rpf_batch(tmp_path):

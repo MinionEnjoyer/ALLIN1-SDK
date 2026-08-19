@@ -100,7 +100,7 @@ Generated addon.json files are drafts. Resolve their warnings and linker errors 
 
 Import a DLC folder or archive, inspect its integration graph, then select nodes and fields for explanations. Package Intelligence contains OIV preview, DLC inventory, vehicle-data compilation, and structured META/XML comparison and round-trip tools.
 
-OIV preview keeps unsafe text, XPath, PSO, archive-creation, and unknown operations blocked. Exact adds/replacements/deletes inside existing nested RPF trees can be exported as payload-backed batch manifests. Open the matching outer archive in RPF Explorer to turn one of those manifests into a guarded atomic plan.""",
+OIV preview keeps unsafe text, XPath, PSO, unbounded archive-creation, and unknown operations blocked. Bounded createIfNotExist recipes can become exactly verified managed packages, while exact adds/replacements/deletes inside existing nested RPF trees can be exported as payload-backed batch manifests. Open the matching outer archive in RPF Explorer to turn one of those manifests into a guarded atomic plan.""",
         ("authoring", "addon", "dlc", "audit", "linker", "developer"),
     ),
     HelpTopic(
@@ -121,6 +121,8 @@ File > Open YTD texture workspace switches this same window into a searchable te
 Search and filter the archive tree, then use Entry actions to preview or extract the selected entry. A selected directory can be exported recursively, and File > Extract current archive tree exports the root of the outer archive. Each subtree export scans the outer RPF once, writes into a new staged folder, refuses output collisions, verifies that its source did not change, and records source and per-file SHA-256 values in .allin1-rpf-export.json. Nested RPF files remain files in their parent export; select that virtual archive explicitly to export its internal tree.
 
 File > Build new RPF from folder creates a brand-new OPEN archive outside the GTA V installation without touching an existing archive or game file. Name a loose directory example.rpf.source to author it as a nested example.rpf. The builder refuses precompiled nested RPFs, links, path collisions, output overwrite, source changes, excessive depth or size, and any result whose recursive index, directory tree, or exact extracted payload hashes differ from the source. A verified JSON report is published beside the new archive; install it later through a validated, receipt-owned package.
+
+OIV preview recognizes bounded createIfNotExist recipes instead of executing them. The CLI's --created-rpf-package workflow extracts only declared content members into retained loose authoring sources, builds all nested archives through the same exact-verification engine, and emits a validated mod.toml package. Text/XML/PSO edits, deletes inside a new archive, missing nested creation declarations, and creation roots deeper than one existing archive remain blocked.
 
 Supported native files expose Entry > Export editable native workspace. After editing its XML or dependencies, Entry > Plan replacement from native workspace rebuilds the binary, reparses it through CodeWalker, keeps the payload and validation report beside the inert plan, and binds their hashes to the selected root or nested entry. The archive is still unchanged until the normal reviewed apply step.
 
