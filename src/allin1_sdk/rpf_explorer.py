@@ -698,6 +698,10 @@ class RpfExplorerDialog(ttk.Frame):
         graph_menu.add_command(
             label="Create empty graph…", command=self._create_empty_rpf_graph,
         )
+        graph_menu.add_command(
+            label="Import opened RPF…", command=self._import_open_rpf_graph,
+            state="disabled",
+        )
         graph_menu.add_command(label="Open graph…", command=self._open_rpf_graph)
         menu.add_cascade(label="RPF package node graph", menu=graph_menu)
         menu.add_command(
@@ -822,6 +826,8 @@ class RpfExplorerDialog(ttk.Frame):
             menu.entryconfigure("Plan new directory…", state=state)
             menu.entryconfigure("Plan subtree workspace sync…", state=state)
             menu.entryconfigure("Run disposable archive canary…", state=state)
+            graph_menu = menu.nametowidget(menu.entrycget("RPF package node graph", "menu"))
+            graph_menu.entryconfigure("Import opened RPF…", state=state)
 
     def _set_entry_actions(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -942,6 +948,40 @@ class RpfExplorerDialog(ttk.Frame):
             return
         self.status.set(f"Created empty RPF package graph: {graph}")
         self._open_graph_dialog(graph)
+
+    def _import_open_rpf_graph(self) -> None:
+        if self.index is None or self.service is None:
+            return
+        parent = filedialog.askdirectory(
+            parent=self, title="Select parent folder for imported RPF graph workspace",
+        )
+        if not parent:
+            return
+        name = simpledialog.askstring(
+            "Import existing RPF",
+            "New workspace folder name:",
+            initialvalue=f"{self.index.source.stem}-rpf-graph-workspace",
+            parent=self,
+        )
+        if not name:
+            return
+        destination = Path(parent) / name
+        index, service = self.index, self.service
+
+        def completed(graph: Path) -> None:
+            self.status.set(f"Imported existing RPF into external graph workspace: {graph}")
+            self._open_graph_dialog(graph)
+
+        RpfProgressDialog(
+            self, "Importing RPF package graph",
+            lambda _progress: RpfPackageGraph.import_archive(
+                index, service, destination,
+            ),
+            completed,
+            lambda exc: messagebox.showerror(
+                "RPF graph import failed", str(exc), parent=self,
+            ),
+        )
 
     def _open_rpf_graph(self) -> None:
         selected = filedialog.askopenfilename(

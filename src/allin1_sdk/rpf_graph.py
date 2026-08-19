@@ -21,6 +21,7 @@ from allin1_sdk.rpf_builder import (
     MAX_RPF_BUILD_FILE_BYTES,
     RpfArchiveBuilder,
 )
+from allin1_sdk.rpf_tools import RpfExplorerService, RpfIndex
 
 
 RPF_GRAPH_SCHEMA = 1
@@ -226,6 +227,63 @@ class RpfPackageGraph:
         scan(source, "root", "", 1)
         return cls._publish_new(destination, payload)
 
+    @classmethod
+    def import_archive(
+        cls, index: RpfIndex, service: RpfExplorerService,
+        destination: str | Path,
+    ) -> Path:
+        """Expand an existing recursive RPF into a retained external graph workspace."""
+        output = Path(destination).expanduser().resolve()
+        if output.exists() or output.is_symlink():
+            raise FileExistsError(f"RPF graph import workspace already exists: {output}")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(
+            prefix=f".{output.name}.rpf-graph-import-", dir=output.parent,
+        )).resolve()
+        published = False
+        try:
+            loose, export_report = service.extract_authoring_tree(
+                index, staging / "source",
+            )
+            graph = cls.create_from_folder(
+                loose, staging / "rpf-graph.json", root_name=index.source.name,
+            )
+            _graph, payload = cls._read(graph)
+            payload["origin"] = {
+                "type": "rpf_archive_import",
+                **export_report["source"],
+                "archives": export_report["summary"]["archives"],
+                "files": export_report["summary"]["files"],
+            }
+            for node in payload["nodes"]:
+                if node["type"] != "file":
+                    continue
+                relative = Path(node["source"]).resolve().relative_to(staging)
+                node["source"] = str(output / relative)
+            cls._normalize(payload, verify_sources=False)
+            _write_json_atomic(graph, payload)
+            staging.replace(output)
+            published = True
+            final_graph = output / graph.name
+            state = cls.validate(final_graph, verify_sources=True)
+            report = {
+                **export_report,
+                "operation": "rpf_graph_archive_import",
+                "graph": {
+                    "path": str(final_graph), "sha256": state["graph_sha256"],
+                    "nodes": len(state["nodes"]), "root_node": state["root_id"],
+                },
+                "workspace": str(output),
+                "stock_game_files_modified": False,
+            }
+            _write_json_atomic(output / "rpf-graph-import.json", report)
+            return final_graph
+        except Exception:
+            cleanup = output if published else staging
+            if cleanup.is_dir() and cleanup.parent == output.parent:
+                shutil.rmtree(cleanup)
+            raise
+
     @staticmethod
     def _read(path: str | Path) -> tuple[Path, dict[str, Any]]:
         source = Path(path).expanduser().resolve()
@@ -248,6 +306,26 @@ class RpfPackageGraph:
             or payload.get("operation") != RPF_GRAPH_OPERATION
         ):
             raise ValueError("Unsupported RPF package graph schema")
+        origin = payload.get("origin")
+        if origin is not None:
+            if (
+                not isinstance(origin, dict)
+                or origin.get("type") != "rpf_archive_import"
+                or not isinstance(origin.get("path"), str)
+                or not Path(origin["path"]).is_absolute()
+                or not isinstance(origin.get("edition"), str)
+                or not isinstance(origin.get("size"), int)
+                or isinstance(origin.get("size"), bool)
+                or origin["size"] < 0
+                or not _is_sha256(origin.get("sha256"))
+                or not isinstance(origin.get("archives"), int)
+                or isinstance(origin.get("archives"), bool)
+                or origin["archives"] < 1
+                or not isinstance(origin.get("files"), int)
+                or isinstance(origin.get("files"), bool)
+                or origin["files"] < 0
+            ):
+                raise ValueError("RPF graph has invalid archive-import provenance")
         authored_nodes = payload.get("nodes")
         authored_edges = payload.get("edges")
         if (
@@ -402,6 +480,7 @@ class RpfPackageGraph:
             },
             "nodes": list(state["nodes"].values()),
             "edges": list(state["payload"]["edges"]),
+            "origin": state["payload"].get("origin"),
         }
 
     @classmethod

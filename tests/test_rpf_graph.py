@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -141,6 +142,54 @@ def test_graph_build_binds_report_and_discards_output_on_graph_drift(tmp_path):
     assert not output.with_name(f"{output.name}.validation.json").exists()
 
 
+def test_import_archive_creates_retained_provenance_bound_graph_workspace(tmp_path):
+    archive = tmp_path / "existing.rpf"
+    archive.write_bytes(b"RPF7-existing")
+    index = SimpleNamespace(source=archive)
+
+    class FakeService:
+        def extract_authoring_tree(self, loaded, destination):
+            assert loaded is index
+            source = Path(destination)
+            (source / "common").mkdir(parents=True)
+            (source / "common" / "setup.xml").write_text("setup", encoding="utf-8")
+            nested = source / "x64" / "vehicles.rpf.source"
+            nested.mkdir(parents=True)
+            (nested / "model.yft").write_bytes(b"model")
+            return source, {
+                "schema_version": 1,
+                "operation": "rpf_authoring_tree_export",
+                "created_utc": "2026-08-19T00:00:00+00:00",
+                "source": {
+                    "path": str(archive.resolve()), "edition": "Enhanced",
+                    "size": archive.stat().st_size,
+                    "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                },
+                "summary": {
+                    "archives": 2, "directories": 3,
+                    "files": 2, "logical_bytes": 10,
+                },
+                "directories": ["common", "x64", "x64/vehicles.rpf.source"],
+                "files": [],
+            }
+
+    workspace = tmp_path / "imported"
+    graph = RpfPackageGraph.import_archive(index, FakeService(), workspace)
+    state = RpfPackageGraph.validate(graph)
+    report = json.loads((workspace / "rpf-graph-import.json").read_text(encoding="utf-8"))
+    assert graph == workspace / "rpf-graph.json"
+    assert state["archive_count"] == 2 and state["file_count"] == 2
+    assert state["payload"]["origin"]["sha256"] == hashlib.sha256(
+        archive.read_bytes()
+    ).hexdigest()
+    assert all(
+        Path(node["source"]).is_relative_to(workspace)
+        for node in state["nodes"].values() if node["type"] == "file"
+    )
+    assert report["operation"] == "rpf_graph_archive_import"
+    assert report["graph"]["sha256"] == hashlib.sha256(graph.read_bytes()).hexdigest()
+
+
 def test_rpf_graph_cli_covers_create_mutate_inspect_materialize_and_build(
     tmp_path, monkeypatch,
 ):
@@ -225,6 +274,50 @@ def test_rpf_graph_cli_covers_create_mutate_inspect_materialize_and_build(
     assert removed.exit_code == 0 and "source files unchanged" in removed.output
 
 
+def test_import_rpf_graph_cli_and_agent_command_surface(tmp_path, monkeypatch):
+    archive = tmp_path / "existing.rpf"
+    archive.write_bytes(b"RPF7")
+    game = tmp_path / "game"
+    game.mkdir()
+    index = SimpleNamespace(source=archive)
+
+    class FakeService:
+        def __init__(self, _project, selected_game):
+            assert Path(selected_game) == game
+
+        def index(self, selected):
+            assert Path(selected) == archive
+            return index
+
+        def extract_authoring_tree(self, loaded, destination):
+            assert loaded is index
+            source = Path(destination)
+            source.mkdir(parents=True)
+            (source / "content.bin").write_bytes(b"content")
+            return source, {
+                "schema_version": 1, "operation": "rpf_authoring_tree_export",
+                "created_utc": "2026-08-19T00:00:00+00:00",
+                "source": {
+                    "path": str(archive.resolve()), "edition": "Legacy",
+                    "size": 4, "sha256": hashlib.sha256(b"RPF7").hexdigest(),
+                },
+                "summary": {
+                    "archives": 1, "directories": 0,
+                    "files": 1, "logical_bytes": 7,
+                },
+                "directories": [], "files": [],
+            }
+
+    monkeypatch.setattr("allin1_sdk.cli.RpfExplorerService", FakeService)
+    result = CliRunner().invoke(main, [
+        "sdk", "import-rpf-graph", str(archive), "--gta-path", str(game),
+        "--output", str(tmp_path / "workspace"),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "Source archive unchanged" in result.output
+    assert (tmp_path / "workspace" / "rpf-graph.json").is_file()
+
+
 def test_rpf_graph_desktop_surface_uses_ports_and_shared_graph_model():
     source = (
         Path(__file__).parents[1] / "src" / "allin1_sdk" / "rpf_graph_ui.py"
@@ -234,3 +327,6 @@ def test_rpf_graph_desktop_surface_uses_ports_and_shared_graph_model():
     assert "RpfPackageGraph.reparent_node" in source
     assert "RpfPackageGraph.materialize" in source
     assert "RpfPackageGraph.build" in source
+    assert "RpfPackageGraph.import_archive" in (
+        Path(__file__).parents[1] / "src" / "allin1_sdk" / "rpf_explorer.py"
+    ).read_text(encoding="utf-8")

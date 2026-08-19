@@ -209,6 +209,66 @@ def test_rpf_service_indexes_extracts_and_builds_plan(tmp_path, monkeypatch):
     assert plan["safety"]["writes_performed"] is False
 
 
+def test_extract_authoring_tree_expands_recursively_indexed_archives(tmp_path, monkeypatch):
+    service, archive, _patcher = _service(tmp_path)
+    payload = _index_payload(archive)
+    payload["archive_size"] = archive.stat().st_size
+    payload["archives"][0]["size"] = archive.stat().st_size
+    index = RpfIndex.load(_write_index(tmp_path, payload))
+    content = {
+        ("", "common/data/test.ymap"): b"root resource",
+        ("x64/textures.rpf", "vehicle.ytd"): b"nested texture",
+    }
+
+    def fake_run(args, **_kwargs):
+        assert args[1] == "extract-virtual-entries"
+        output = Path(args[5])
+        for line in Path(args[4]).read_text(encoding="utf-8").splitlines():
+            archive_path, entry_path, relative = line.split("\t")
+            target = output / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content[(archive_path, entry_path)])
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(rpf_tools, "run_hidden", fake_run)
+    source, report = service.extract_authoring_tree(index, tmp_path / "authoring")
+    assert (source / "common" / "data" / "test.ymap").read_bytes() == b"root resource"
+    assert (
+        source / "x64" / "textures.rpf.source" / "vehicle.ytd"
+    ).read_bytes() == b"nested texture"
+    assert not (source / "x64" / "textures.rpf").exists()
+    assert report["summary"] == {
+        "archives": 2, "directories": 2, "files": 2,
+        "logical_bytes": 12_288,
+    }
+    assert report["source"]["sha256"] == hashlib.sha256(b"RPF7").hexdigest()
+
+
+def test_extract_authoring_tree_refuses_unindexed_nested_archive(tmp_path):
+    service, archive, _patcher = _service(tmp_path)
+    payload = _index_payload(archive, nested=False)
+    payload["archive_size"] = archive.stat().st_size
+    payload["archives"][0]["size"] = archive.stat().st_size
+    index = RpfIndex.load(_write_index(tmp_path, payload))
+    with pytest.raises(ValueError, match="recursively indexed"):
+        service.extract_authoring_tree(index, tmp_path / "authoring")
+
+
+def test_extract_authoring_tree_refuses_loose_nested_source_collision(tmp_path):
+    service, archive, _patcher = _service(tmp_path)
+    payload = _index_payload(archive)
+    payload["archive_size"] = archive.stat().st_size
+    payload["archives"][0]["size"] = archive.stat().st_size
+    payload["entries"].append({
+        "id": "::x64/textures.rpf.source", "archive_path": "",
+        "path": "x64/textures.rpf.source", "name": "textures.rpf.source",
+        "kind": "directory", "size": 0, "stored_size": 0, "child_count": 0,
+    })
+    index = RpfIndex.load(_write_index(tmp_path, payload))
+    with pytest.raises(ValueError, match="output collision"):
+        service.extract_authoring_tree(index, tmp_path / "authoring")
+
+
 def test_rpf_binary_workspace_exports_patches_and_builds_bound_plan(
     tmp_path, monkeypatch,
 ):

@@ -41,6 +41,11 @@ _MAX_MULTI_ENTRY_CHANGES = 1_000
 _RPF_ACTIONS = {"replace", "add", "delete"}
 _RPF_TREE_ACTIONS = {"mkdir", "rmdir", "rename"}
 _RPF_MULTI_ACTIONS = _RPF_ACTIONS | _RPF_TREE_ACTIONS
+_WINDOWS_RESERVED_COMPONENTS = frozenset({
+    "con", "prn", "aux", "nul",
+    *(f"com{number}" for number in range(1, 10)),
+    *(f"lpt{number}" for number in range(1, 10)),
+})
 _RPF_DIFF_ENTRY_FIELDS = (
     "archive_path", "path", "kind", "size", "stored_size", "name_hash",
     "short_name_hash", "encrypted", "compressed", "resource_version",
@@ -170,6 +175,22 @@ def _safe_virtual_path(value: str, *, allow_empty: bool = False) -> str:
         part in {"", ".", ".."} for part in normalized.replace("!", "/").split("/")
     )):
         raise ValueError(f"Unsafe RPF virtual path: {value!r}")
+    return normalized
+
+
+def _safe_materialized_path(value: str) -> str:
+    """Validate a virtual path that will become a real Windows loose-source path."""
+    normalized = _safe_virtual_path(value)
+    for component in PurePosixPath(normalized).parts:
+        if (
+            any(character in '<>:"\\|?*' for character in component)
+            or component.rstrip(" .") != component
+            or len(component.encode("utf-16-le")) // 2 > 255
+            or component.split(".", 1)[0].casefold() in _WINDOWS_RESERVED_COMPONENTS
+        ):
+            raise ValueError(
+                f"RPF path cannot be materialized safely on Windows: {normalized}"
+            )
     return normalized
 
 
@@ -832,6 +853,168 @@ class RpfExplorerService:
             _write_json_atomic(staging / ".allin1-rpf-export.json", export_manifest)
             staging.replace(target)
             return target
+        except Exception:
+            if staging.is_dir() and staging.parent == target.parent:
+                shutil.rmtree(staging)
+            raise
+
+    def extract_authoring_tree(
+        self, index: RpfIndex, destination: str | Path,
+    ) -> tuple[Path, dict[str, Any]]:
+        """Expand a complete recursive RPF index into a loose nested authoring tree."""
+        self._require_tool()
+        target = Path(destination).expanduser().resolve()
+        if target.exists() or target.is_symlink():
+            raise ValueError(f"RPF authoring-tree destination already exists: {target}")
+        if not index.source.is_file() or index.source.stat().st_size != index.archive_size:
+            raise ValueError("RPF source changed after indexing; index it again")
+        source_sha256 = _sha256_file(index.source)
+        archive_paths = {archive.path.casefold() for archive in index.archives}
+
+        def archive_prefix(archive_path: str) -> str:
+            if not archive_path:
+                return ""
+            output_parts: list[str] = []
+            for nested in archive_path.split("!"):
+                parts = list(PurePosixPath(_safe_virtual_path(nested)).parts)
+                if not parts or not parts[-1].casefold().endswith(".rpf"):
+                    raise ValueError(f"Invalid nested RPF authoring path: {archive_path}")
+                output_parts.extend(parts[:-1])
+                output_parts.append(f"{parts[-1]}.source")
+            return "/".join(output_parts)
+
+        paths: dict[str, str] = {}
+        directories: set[str] = set()
+
+        def register(relative: str, kind: str) -> str:
+            safe = _safe_materialized_path(relative)
+            folded = safe.casefold()
+            previous = paths.get(folded)
+            if previous is not None:
+                raise ValueError(
+                    f"RPF authoring tree has a case-insensitive output collision: {safe}"
+                )
+            paths[folded] = kind
+            if kind == "directory":
+                directories.add(safe)
+            return safe
+
+        exports: list[tuple[RpfEntryRecord, str]] = []
+        for entry in sorted(index.entries, key=lambda item: item.id.casefold()):
+            prefix = archive_prefix(entry.archive_path)
+            relative = f"{prefix}/{entry.path}" if prefix else entry.path
+            if entry.kind == "directory":
+                register(relative, "directory")
+                continue
+            if entry.kind == "archive":
+                nested_archive_path = (
+                    entry.path if not entry.archive_path
+                    else f"{entry.archive_path}!{entry.path}"
+                )
+                if nested_archive_path.casefold() not in archive_paths:
+                    raise ValueError(
+                        "RPF authoring import requires every nested archive to be "
+                        f"recursively indexed: {nested_archive_path}"
+                    )
+                register(f"{relative}.source", "directory")
+                continue
+            exports.append((entry, register(relative, "file")))
+
+        ordered_paths = sorted(paths)
+        for position, folded in enumerate(ordered_paths):
+            kind = paths[folded]
+            parts = PurePosixPath(folded).parts
+            for depth in range(1, len(parts)):
+                ancestor = "/".join(parts[:depth])
+                if paths.get(ancestor) == "file":
+                    raise ValueError(
+                        "RPF authoring tree has a file used as a directory: "
+                        f"{ancestor}"
+                    )
+            if (
+                kind == "file" and position + 1 < len(ordered_paths)
+                and ordered_paths[position + 1].startswith(f"{folded}/")
+            ):
+                raise ValueError(
+                    f"RPF authoring tree has descendants beneath a file: {folded}"
+                )
+
+        if len(exports) > _MAX_SUBTREE_FILES:
+            raise ValueError(
+                f"RPF authoring import exceeds the {_MAX_SUBTREE_FILES:,}-file limit"
+            )
+        logical_bytes = sum(entry.size for entry, _relative in exports)
+        if logical_bytes > _MAX_SUBTREE_LOGICAL_BYTES:
+            raise ValueError(
+                "RPF authoring import exceeds the guarded logical-byte limit"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(
+            prefix=f".{target.name}.rpf-authoring-", dir=target.parent,
+        )).resolve()
+        try:
+            if shutil.disk_usage(staging).free < logical_bytes + _COPY_MARGIN_BYTES:
+                raise ValueError("Not enough temporary disk space for RPF authoring import")
+            for relative in sorted(
+                directories, key=lambda value: (len(PurePosixPath(value).parts), value.casefold()),
+            ):
+                (staging / Path(relative)).mkdir(parents=True, exist_ok=True)
+            if exports:
+                with tempfile.TemporaryDirectory(prefix="allin1-rpf-authoring-manifest-") as temporary:
+                    manifest = Path(temporary) / "entries.tsv"
+                    manifest.write_text("".join(
+                        f"{entry.archive_path}\t{entry.path}\t{relative}\n"
+                        for entry, relative in exports
+                    ), encoding="utf-8")
+                    completed = run_hidden(
+                        [
+                            self.patcher, "extract-virtual-entries", self.gta_path,
+                            index.source, manifest, staging,
+                        ],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    )
+                if completed.returncode:
+                    detail = (
+                        completed.stderr or completed.stdout or "unknown helper error"
+                    ).strip()
+                    raise ValueError(f"RPF authoring-tree extraction failed: {detail}")
+
+            files: list[dict[str, Any]] = []
+            for entry, relative in exports:
+                output = (staging / Path(relative)).resolve()
+                if not output.is_relative_to(staging) or not output.is_file():
+                    raise ValueError(
+                        f"RPF helper omitted an authoring-tree payload: {entry.id}"
+                    )
+                files.append({
+                    "archive_path": entry.archive_path,
+                    "entry_path": entry.path,
+                    "relative_path": relative,
+                    "kind": entry.kind,
+                    "actual_size": output.stat().st_size,
+                    "sha256": _sha256_file(output),
+                })
+            if _sha256_file(index.source) != source_sha256:
+                raise RuntimeError(
+                    "RPF source changed during authoring import; output was discarded"
+                )
+            report = {
+                "schema_version": 1,
+                "operation": "rpf_authoring_tree_export",
+                "created_utc": datetime.now(timezone.utc).isoformat(),
+                "source": {
+                    "path": str(index.source), "edition": index.edition,
+                    "size": index.archive_size, "sha256": source_sha256,
+                },
+                "summary": {
+                    "archives": len(index.archives), "directories": len(directories),
+                    "files": len(files), "logical_bytes": logical_bytes,
+                },
+                "directories": sorted(directories, key=str.casefold),
+                "files": files,
+            }
+            staging.replace(target)
+            return target, report
         except Exception:
             if staging.is_dir() and staging.parent == target.parent:
                 shutil.rmtree(staging)

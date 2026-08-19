@@ -37,7 +37,8 @@ def test_catalog_is_structured_and_classifies_risk():
     assert catalog["list-gxt2-entries"]["risk"] == "read_only"
     assert catalog["set-gxt2-text"]["risk"] == "authoring_write"
     for command in (
-        "create-rpf-graph", "add-rpf-graph-container", "add-rpf-graph-file",
+        "create-rpf-graph", "import-rpf-graph",
+        "add-rpf-graph-container", "add-rpf-graph-file",
         "rename-rpf-graph-node", "reparent-rpf-graph-node",
         "position-rpf-graph-node", "remove-rpf-graph-node",
         "layout-rpf-graph",

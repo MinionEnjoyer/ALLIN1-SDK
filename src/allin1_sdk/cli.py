@@ -549,6 +549,23 @@ def create_rpf_graph(source: Path | None, root_name: str, output: Path) -> None:
     click.echo(f"Created validated RPF package graph: {graph}")
 
 
+@main.command("import-rpf-graph")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(file_okay=False, path_type=Path))
+def import_rpf_graph(archive: Path, gta_path: Path | None, output: Path) -> None:
+    """Expand an existing recursive RPF into an external visual graph workspace."""
+    try:
+        service = RpfExplorerService(PROJECT_ROOT, _game_path(gta_path))
+        graph = RpfPackageGraph.import_archive(
+            service.index(archive), service, output,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Imported existing RPF into external graph workspace: {graph}")
+    click.echo("Source archive unchanged; import report: " + str(graph.parent / "rpf-graph-import.json"))
+
+
 def _write_rpf_graph_report(report: dict, output: Path | None) -> None:
     rendered = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
     if output is None:
@@ -1716,7 +1733,7 @@ for _command in (
     list_examples, validate, link, import_package, audit_folder, oiv_plan,
     inspect_rpf, dlc_inventory, compile_vehicle_data, index_rpf, catalog_rpfs,
     search_rpf_catalog, build_rpf_tree,
-    create_rpf_graph, inspect_rpf_graph, validate_rpf_graph,
+    create_rpf_graph, import_rpf_graph, inspect_rpf_graph, validate_rpf_graph,
     add_rpf_graph_container, add_rpf_graph_file, rename_rpf_graph_node,
     reparent_rpf_graph_node, position_rpf_graph_node, remove_rpf_graph_node,
     layout_rpf_graph, refresh_rpf_graph_sources, materialize_rpf_graph, build_rpf_graph,

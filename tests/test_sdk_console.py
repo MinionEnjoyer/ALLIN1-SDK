@@ -15,6 +15,7 @@ def test_command_catalog_combines_cli_and_console_builtins():
     assert catalog["help"].syntax == "help [command]"
     assert "clear" in catalog
     assert "create-rpf-graph" in catalog
+    assert "import-rpf-graph" in catalog
     assert "reparent-rpf-graph-node" in catalog
 
 

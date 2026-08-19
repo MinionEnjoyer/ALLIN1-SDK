@@ -53,6 +53,7 @@ AUTHORING_COMMANDS = frozenset({
     "export-rpf-native-workspace",
     "import-package",
     "index-rpf",
+    "import-rpf-graph",
     "inspect-package-rpfs",
     "link",
     "layout-rpf-graph",

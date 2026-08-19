@@ -72,6 +72,10 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   every source hash, emits nested `.rpf.source` trees, and builds through the exact
   recursive archive verifier. Validation reports identify every payload as either
   byte-exact or canonical RSC7 (identical resource header plus decompressed bytes).
+  An already-built RPF can also be recursively expanded into a retained external
+  graph workspace: nested archives become editable `.rpf.source` branches, the
+  untouched origin hash remains in the graph, and one import report accounts for
+  every extracted payload.
 - **Real-archive canary** — copy a genuine Legacy or Enhanced RPF outside the game,
   exercise real replace/add/delete writes, verify each exact entry, roll everything
   back, and prove the final archive SHA-256 matches the untouched source.
@@ -197,6 +201,7 @@ allin1-sdk catalog-rpfs "D:\Games\GTA V Enhanced\mods" --gta-path "D:\Games\GTA 
 allin1-sdk search-rpf-catalog C:\Mods\Indexes\enhanced.sqlite police --suffix ytd -o C:\Mods\Indexes\police-textures.json
 allin1-sdk build-rpf-tree C:\Mods\Example\dlc.rpf.source --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Build\dlc.rpf
 allin1-sdk create-rpf-graph C:\Mods\Example\dlc.rpf.source --root-name dlc.rpf -o C:\Work\dlc-rpf-graph.json
+allin1-sdk import-rpf-graph C:\Mods\Example\dlc.rpf --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\dlc-imported-graph
 allin1-sdk add-rpf-graph-container C:\Work\dlc-rpf-graph.json root x64 --x 380 --y 100 --acknowledge-edit
 allin1-sdk add-rpf-graph-file C:\Work\dlc-rpf-graph.json root C:\Art\readme.txt --name readme.txt --acknowledge-edit
 allin1-sdk reparent-rpf-graph-node C:\Work\dlc-rpf-graph.json f_NODE_ID d_PARENT_ID --acknowledge-edit
@@ -297,6 +302,11 @@ service used by the launcher.
   and recursive graph removal never move or delete source files. Materialization uses
   a new staged folder; graph builds recheck the graph and all sources after the normal
   exact RPF build, and discard the output if either changed during creation.
+  Existing-archive import is read-only: it requires every nested RPF to be recursively
+  indexed, extracts all leaf payloads in one bounded helper pass, rejects paths that
+  cannot be safely materialized on Windows, and writes only to a new external
+  workspace. The graph retains the origin archive path, edition, size, and SHA-256;
+  rebuilding still creates a separate new archive outside the game installation.
 - Bounded OIV `createIfNotExist` containers are translated into retained loose
   `.rpf.source` workspaces and passed through that same builder. Safe top-level
   archives and new archives one level inside an existing RPF become validated,
