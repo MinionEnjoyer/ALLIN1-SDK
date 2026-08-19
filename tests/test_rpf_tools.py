@@ -474,6 +474,90 @@ def test_rpf_transaction_applies_verifies_and_rolls_back(tmp_path, monkeypatch):
     assert service.verify_transaction(receipt)["archive_state"] == "original"
 
 
+def test_rpf_integrity_report_verifies_recursive_structure_and_exact_payloads(
+    tmp_path, monkeypatch,
+):
+    service, archive, _entry, _runner = _transaction_service(
+        tmp_path, monkeypatch, nested=True,
+    )
+    index = service.index(archive)
+    output, report = service.verify_archive_integrity(
+        index, tmp_path / "integrity.json",
+    )
+    assert output.is_file()
+    assert report["status"] == "verified"
+    assert report["summary"]["archives"] == 2
+    assert report["summary"]["payloads"] == 3
+    assert report["summary"]["payloads_exactly_extracted"] == 3
+    assert report["summary"]["structural_issues"] == 0
+    assert all(item["sha256"] for item in report["payloads"])
+    assert report["safety"]["writes_to_source"] is False
+    with pytest.raises(ValueError, match="already exists"):
+        service.verify_archive_integrity(index, output)
+
+
+def test_rpf_integrity_report_records_orphaned_structure(tmp_path, monkeypatch):
+    service, archive, _ = _service(tmp_path)
+
+    def fake_run(args, **_kwargs):
+        if args[1] == "index-json":
+            Path(args[4]).write_text(
+                json.dumps(_index_payload(archive)), encoding="utf-8",
+            )
+        elif args[1] == "extract-virtual-entries":
+            output = Path(args[5])
+            for line in Path(args[4]).read_text(encoding="utf-8").splitlines():
+                _archive_path, _entry_path, relative = line.split("\t", 2)
+                target = output / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(relative.encode("utf-8"))
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(rpf_tools, "run_hidden", fake_run)
+    _output, report = service.verify_archive_integrity(
+        service.index(archive), tmp_path / "issues.json",
+    )
+    assert report["status"] == "structural_issues"
+    codes = {item["code"] for item in report["structural_issues"]}
+    assert "missing_parent_directory" in codes
+
+
+def test_rpf_integrity_cli_routes_report(tmp_path, monkeypatch):
+    game = tmp_path / "game"
+    game.mkdir()
+    archive = tmp_path / "archive.rpf"
+    archive.write_bytes(b"RPF7")
+    output = tmp_path / "integrity.json"
+
+    class FakeService:
+        def __init__(self, _project, selected_game, **_kwargs):
+            assert Path(selected_game) == game
+
+        def index(self, selected):
+            assert Path(selected) == archive
+            return object()
+
+        def verify_archive_integrity(self, _index, selected_output):
+            report = {
+                "status": "verified",
+                "summary": {
+                    "archives": 2, "payloads_exactly_extracted": 7,
+                    "structural_issues": 0,
+                },
+            }
+            Path(selected_output).write_text(json.dumps(report), encoding="utf-8")
+            return Path(selected_output), report
+
+    monkeypatch.setattr("allin1_sdk.cli.RpfExplorerService", FakeService)
+    result = CliRunner().invoke(main, [
+        "sdk", "verify-rpf-archive", str(archive),
+        "--gta-path", str(game), "-o", str(output),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "7 exact payload(s)" in result.output
+    assert output.is_file()
+
+
 def test_rpf_transaction_recovers_interrupted_post_staging_receipt(
     tmp_path, monkeypatch,
 ):

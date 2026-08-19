@@ -919,6 +919,119 @@ class RpfExplorerService:
             index, selected, expected_source_sha256=source_sha256,
         )
 
+    def verify_archive_integrity(
+        self, index: RpfIndex, destination: str | Path,
+    ) -> tuple[Path, dict[str, Any]]:
+        """Prove recursive structure and exact extraction for an existing RPF."""
+        output = Path(destination).expanduser().resolve()
+        if output.suffix.casefold() != ".json":
+            raise ValueError("RPF integrity report must use a .json extension")
+        if output.exists() or output.is_symlink():
+            raise ValueError(f"RPF integrity report already exists: {output}")
+        source_hash = _sha256_file(index.source)
+        issues: list[dict[str, str]] = []
+        entries = {entry.id.casefold(): entry for entry in index.entries}
+        archives = {archive.path.casefold(): archive for archive in index.archives}
+
+        for entry in index.entries:
+            parent = PurePosixPath(entry.path).parent.as_posix()
+            if parent == ".":
+                continue
+            parent_id = f"{entry.archive_path}::{parent}".casefold()
+            parent_entry = entries.get(parent_id)
+            if parent_entry is None:
+                issues.append({
+                    "code": "missing_parent_directory",
+                    "entry": entry.id,
+                    "message": f"Indexed parent directory is absent: {parent}",
+                })
+            elif parent_entry.kind != "directory":
+                issues.append({
+                    "code": "parent_is_not_directory",
+                    "entry": entry.id,
+                    "message": f"Indexed parent is not a directory: {parent_entry.id}",
+                })
+
+        for archive in index.archives:
+            if not archive.path:
+                continue
+            levels = archive.path.split("!")
+            parent_archive = "!".join(levels[:-1])
+            archive_entry_id = f"{parent_archive}::{levels[-1]}".casefold()
+            archive_entry = entries.get(archive_entry_id)
+            if archive_entry is None or archive_entry.kind != "archive":
+                issues.append({
+                    "code": "orphan_nested_archive",
+                    "entry": archive.path,
+                    "message": "Nested archive has no matching archive entry in its parent.",
+                })
+        for entry in (item for item in index.entries if item.kind == "archive"):
+            nested = entry.path if not entry.archive_path else f"{entry.archive_path}!{entry.path}"
+            if nested.casefold() not in archives:
+                issues.append({
+                    "code": "unindexed_archive_entry",
+                    "entry": entry.id,
+                    "message": "Archive entry was not recursively indexed.",
+                })
+
+        content_hashes = self.entry_content_hashes(index)
+        if set(content_hashes) != {
+            entry.id for entry in index.entries if entry.kind != "directory"
+        }:
+            raise ValueError("Exact integrity extraction omitted one or more RPF payloads")
+        if _sha256_file(index.source) != source_hash:
+            raise RuntimeError("RPF changed during integrity verification")
+        duplicate_groups: dict[str, list[str]] = {}
+        for entry_id, digest in content_hashes.items():
+            duplicate_groups.setdefault(digest, []).append(entry_id)
+        duplicates = [
+            {"sha256": digest, "entries": sorted(entry_ids, key=str.casefold)}
+            for digest, entry_ids in duplicate_groups.items() if len(entry_ids) > 1
+        ]
+        files = [entry for entry in index.entries if entry.kind != "directory"]
+        logical = sum(entry.size for entry in files)
+        stored = sum(entry.stored_size for entry in files)
+        report: dict[str, Any] = {
+            "schema_version": 1,
+            "operation": "rpf_archive_integrity_verification",
+            "status": "verified" if not issues else "structural_issues",
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "source": {
+                "path": str(index.source), "edition": index.edition,
+                "size": index.archive_size, "sha256": source_hash,
+            },
+            "summary": {
+                "archives": len(index.archives),
+                "directories": sum(
+                    entry.kind == "directory" for entry in index.entries
+                ),
+                "payloads": len(files),
+                "payloads_exactly_extracted": len(content_hashes),
+                "logical_bytes": logical,
+                "stored_bytes": stored,
+                "duplicate_payload_groups": len(duplicates),
+                "structural_issues": len(issues),
+            },
+            "index_warnings": list(index.warnings),
+            "structural_issues": issues,
+            "duplicate_payloads": duplicates,
+            "payloads": [
+                {
+                    "id": entry.id, "kind": entry.kind,
+                    "logical_size": entry.size, "stored_size": entry.stored_size,
+                    "sha256": content_hashes[entry.id],
+                }
+                for entry in files
+            ],
+            "safety": {
+                "archive_unchanged": True,
+                "exact_payload_extraction": True,
+                "writes_to_source": False,
+            },
+        }
+        _write_json_atomic(output, report)
+        return output, report
+
     @staticmethod
     def export_diff(
         report: dict[str, Any], destination: str | Path,

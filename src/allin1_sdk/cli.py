@@ -655,6 +655,28 @@ def diff_rpf(
     )
 
 
+@main.command("verify-rpf-archive")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def verify_rpf_archive(
+    archive: Path, gta_path: Path | None, output: Path,
+) -> None:
+    """Verify recursive structure and exact extraction of every RPF payload."""
+    service = _rpf_service(gta_path)
+    try:
+        index = service.index(archive)
+        report_path, report = service.verify_archive_integrity(index, output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    summary = report["summary"]
+    click.echo(
+        f"RPF integrity {report['status']}: {summary['archives']} archive(s), "
+        f"{summary['payloads_exactly_extracted']} exact payload(s), "
+        f"{summary['structural_issues']} structural issue(s); {report_path}"
+    )
+
+
 @main.command("plan-rpf-replacement")
 @click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("entry_path")
@@ -1290,7 +1312,7 @@ def sdk_compatibility_group() -> None:
 for _command in (
     list_examples, validate, link, import_package, audit_folder, oiv_plan,
     inspect_rpf, dlc_inventory, compile_vehicle_data, index_rpf, catalog_rpfs,
-    search_rpf_catalog, build_rpf_tree,
+    search_rpf_catalog, build_rpf_tree, verify_rpf_archive,
     extract_rpf_entry,
     extract_rpf_subtree, export_rpf_native_workspace,
     export_rpf_binary_workspace, diff_rpf,

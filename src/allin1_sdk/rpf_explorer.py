@@ -489,6 +489,10 @@ class RpfExplorerDialog(ttk.Frame):
             label="Compare with archive…",
             command=self._compare_archive, state="disabled",
         )
+        menu.add_command(
+            label="Verify full archive integrity…",
+            command=self._verify_archive_integrity, state="disabled",
+        )
         menu.add_separator()
         menu.add_command(
             label="Build/update global RPF catalog…", command=self._build_catalog,
@@ -580,6 +584,7 @@ class RpfExplorerDialog(ttk.Frame):
             menu.entryconfigure("Export index…", state=state)
             menu.entryconfigure("Extract current archive tree…", state=state)
             menu.entryconfigure("Compare with archive…", state=state)
+            menu.entryconfigure("Verify full archive integrity…", state=state)
             menu.entryconfigure("Create multi-entry plan…", state=state)
             menu.entryconfigure("Plan new directory…", state=state)
             menu.entryconfigure("Plan subtree workspace sync…", state=state)
@@ -1130,6 +1135,47 @@ class RpfExplorerDialog(ttk.Frame):
         self.status.set(
             f"RPF diff: {summary['added']} added · {summary['removed']} removed · "
             f"{summary['modified']} modified · {json_path}"
+        )
+
+    def _verify_archive_integrity(self) -> None:
+        if self.index is None or self.service is None:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save full RPF integrity report",
+            initialfile=f"{self.index.source.stem}-integrity.json",
+            defaultextension=".json", filetypes=(("JSON", "*.json"),),
+        )
+        if not output:
+            return
+        self.status.set("Extracting and hashing every recursive RPF payload…")
+
+        def completed(result) -> None:
+            report_path, report = result
+            summary = report["summary"]
+            self.status.set(
+                f"RPF integrity {report['status']} · "
+                f"{summary['payloads_exactly_extracted']} exact payloads · "
+                f"{summary['structural_issues']} structural issues"
+            )
+            self._show_text(json.dumps(report, indent=2))
+            messagebox.showinfo(
+                "RPF integrity verification complete",
+                f"Status: {report['status']}\n"
+                f"Exact payloads: {summary['payloads_exactly_extracted']}\n"
+                f"Structural issues: {summary['structural_issues']}\n\n"
+                f"Report: {report_path}",
+                parent=self,
+            )
+
+        RpfProgressDialog(
+            self, "Verifying complete RPF integrity",
+            lambda _progress: self.service.verify_archive_integrity(
+                self.index, output,
+            ),
+            completed,
+            lambda exc: messagebox.showerror(
+                "RPF integrity verification failed", str(exc), parent=self,
+            ),
         )
 
     def _extract_selected_subtree(self) -> None:

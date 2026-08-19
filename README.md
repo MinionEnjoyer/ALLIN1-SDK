@@ -195,6 +195,7 @@ allin1-sdk undo-ytd-texture-edit C:\Work\vehicle-ytd-workspace --acknowledge-edi
 allin1-sdk extract-rpf-subtree C:\Mods\Example\dlc.rpf --archive-path x64\textures.rpf --directory vehicle --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Exports\vehicle
 allin1-sdk plan-rpf-sync C:\Mods\Example\dlc.rpf C:\Mods\Exports\vehicle --gta-path "D:\Games\GTA V Enhanced" --workspace-root C:\Mods -o subtree-sync-plan.json
 allin1-sdk diff-rpf C:\Mods\Before\dlc.rpf C:\Mods\After\dlc.rpf --exact-content --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Reports\archive-diff.json
+allin1-sdk verify-rpf-archive C:\Mods\Example\dlc.rpf --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Reports\dlc-integrity.json
 allin1-sdk oiv-plan C:\Mods\Example.oiv -o oiv-plan.md --rpf-batches C:\Mods\Example-rpf-batches
 allin1-sdk oiv-plan C:\Mods\NewDlc.oiv -o new-dlc-plan.md --created-rpf-package C:\Mods\NewDlc-managed --gta-path "D:\Games\GTA V Enhanced"
 allin1-sdk plan-rpf-batch "D:\Games\GTA V Enhanced\mods\update\update.rpf" C:\Mods\Example-rpf-batches\01-update-xxxxxxxx\changes.json --gta-path "D:\Games\GTA V Enhanced" -o atomic-plan.json
@@ -292,6 +293,10 @@ service used by the launcher.
 - RPF diffing leaves both sources untouched. Metadata mode compares recursive entry
   and archive records; exact mode batch-extracts each side once into bounded temporary
   storage and hashes every payload to expose same-size content changes.
+- Full archive integrity verification checks directory ancestry and bidirectional
+  parent-entry/nested-archive relationships, exact-extracts and hashes every payload,
+  rechecks the unchanged source hash, and reports size/compression totals, duplicate
+  payload groups, helper warnings, and structural findings in portable JSON.
 - Creating an RPF file or directory-tree plan is read-only and never authorizes a
   write. Batch manifests may use `add`, `replace`, `delete`, `mkdir`, `rmdir`,
   `rename` (with `new_entry`), or `upsert`; plan creation resolves each exact indexed

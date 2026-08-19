@@ -64,6 +64,7 @@ AUTHORING_COMMANDS = frozenset({
     "undo-ytd-texture-edit",
     "undo-binary-workspace",
     "validate-meta-roundtrip",
+    "verify-rpf-archive",
 })
 
 
