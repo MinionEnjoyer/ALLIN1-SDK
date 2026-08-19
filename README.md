@@ -21,6 +21,17 @@ workflows are designed for Story Mode mod development.
 If ALLIN1 Launcher and SDK are useful to you, project support is available through
 [Buy Me a Coffee](https://buymeacoffee.com/minionenjoyer).
 
+## Code signing policy
+
+The project has applied for free public release signing through SignPath Foundation.
+Until that application and the verified build integration are approved, release files
+must be treated as unsigned and verified with their published SHA-256 manifests.
+
+The complete [code signing policy](CODE_SIGNING_POLICY.md) identifies the release
+roles, build-origin controls, privacy behavior, and exact artifacts eligible for
+signing. Once approved, signed releases will carry this disclosure: **Free code
+signing provided by SignPath.io, certificate by SignPath Foundation.**
+
 ## Features
 
 - **Integration Linker** — validate `addon.json`, follow references across

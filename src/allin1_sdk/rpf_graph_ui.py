@@ -27,6 +27,9 @@ NODE_WIDTH = 270
 NODE_HEIGHT = 82
 CANVAS_LIMIT = 2500
 MAX_QUEUED_ASSET_PREVIEWS = 96
+MIN_ZOOM = 0.35
+MAX_ZOOM = 2.0
+ZOOM_FACTOR = 1.2
 
 
 class _GraphWorkDialog(tk.Toplevel):
@@ -105,6 +108,8 @@ class RpfPackageGraphDialog(tk.Toplevel):
         self.connecting_parent: str | None = None
         self.connection_line: int | None = None
         self.query = tk.StringVar()
+        self.zoom = 1.0
+        self.zoom_text = tk.StringVar(value="100%")
         self.status = tk.StringVar(value="Loading validated package graph…")
         self.detail_name = tk.StringVar(value="Nothing selected")
         self.detail_type = tk.StringVar(value="")
@@ -117,6 +122,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
         ] = queue.Queue()
         self._preview_pending: set[str] = set()
         self._preview_keys: dict[str, str] = {}
+        self._preview_images: dict[str, Image.Image] = {}
         self._preview_photos: dict[str, ImageTk.PhotoImage] = {}
         self._preview_messages: dict[str, str] = {}
         self._preview_worker_thread = threading.Thread(
@@ -131,6 +137,10 @@ class RpfPackageGraphDialog(tk.Toplevel):
         self.after_idle(self._focus_initial_view)
         self.after(150, self._focus_initial_view)
         self.after(90, self._poll_asset_previews)
+        self.bind("<Control-plus>", lambda _event: self._zoom_by(ZOOM_FACTOR))
+        self.bind("<Control-equal>", lambda _event: self._zoom_by(ZOOM_FACTOR))
+        self.bind("<Control-minus>", lambda _event: self._zoom_by(1 / ZOOM_FACTOR))
+        self.bind("<Control-0>", lambda _event: self._reset_zoom())
 
     def _focus_initial_view(self) -> None:
         if not self.winfo_exists():
@@ -179,6 +189,20 @@ class RpfPackageGraphDialog(tk.Toplevel):
         entry.pack(side="left", fill="x", expand=True, padx=8)
         entry.bind("<Return>", lambda _event: self._focus_search())
         ttk.Button(search, text="Focus", command=self._focus_search).pack(side="left")
+        ttk.Separator(search, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Button(
+            search, text="−", width=3, command=lambda: self._zoom_by(1 / ZOOM_FACTOR),
+        ).pack(side="left")
+        ttk.Label(search, textvariable=self.zoom_text, width=6, anchor="center").pack(
+            side="left", padx=3,
+        )
+        ttk.Button(
+            search, text="+", width=3, command=lambda: self._zoom_by(ZOOM_FACTOR),
+        ).pack(side="left")
+        ttk.Button(search, text="Fit", command=self._fit_graph).pack(side="left", padx=(6, 0))
+        ttk.Button(search, text="100%", command=self._reset_zoom).pack(
+            side="left", padx=(4, 0),
+        )
         ttk.Label(
             search, text="Drag cards · drag an output port onto another card to reparent",
             foreground="#52635c",
@@ -203,6 +227,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
         self.canvas.bind("<ButtonRelease-1>", self._release)
         self.canvas.bind("<MouseWheel>", self._mousewheel)
         self.canvas.bind("<Shift-MouseWheel>", self._shift_mousewheel)
+        self.canvas.bind("<Control-MouseWheel>", self._zoom_mousewheel)
 
         ttk.Label(
             inspector, text="Node inspector", font=("Segoe UI Semibold", 14),
@@ -264,7 +289,8 @@ class RpfPackageGraphDialog(tk.Toplevel):
         valid_nodes = set(self.graph_state["nodes"])
         self._preview_pending.intersection_update(valid_nodes)
         for cache in (
-            self._preview_keys, self._preview_photos, self._preview_messages,
+            self._preview_keys, self._preview_images, self._preview_photos,
+            self._preview_messages,
         ):
             for node_id in tuple(cache):
                 if node_id not in valid_nodes:
@@ -284,10 +310,16 @@ class RpfPackageGraphDialog(tk.Toplevel):
         self.visible = set(ordered[:CANVAS_LIMIT])
         max_x = max((self.graph_state["nodes"][node]["x"] for node in self.visible), default=0)
         max_y = max((self.graph_state["nodes"][node]["y"] for node in self.visible), default=0)
-        width, height = max(2600, int(max_x + 500)), max(1800, int(max_y + 300))
-        for x in range(0, width + 1, 100):
+        width = max(
+            self.canvas.winfo_width(), int((max_x + 500) * self.zoom),
+        )
+        height = max(
+            self.canvas.winfo_height(), int((max_y + 300) * self.zoom),
+        )
+        grid = max(35, round(100 * self.zoom))
+        for x in range(0, width + 1, grid):
             self.canvas.create_line(x, 0, x, height, fill="#18211D", tags=("grid",))
-        for y in range(0, height + 1, 100):
+        for y in range(0, height + 1, grid):
             self.canvas.create_line(0, y, width, y, fill="#18211D", tags=("grid",))
         self.canvas.configure(scrollregion=(0, 0, width, height))
         self.edge_items.clear()
@@ -313,46 +345,63 @@ class RpfPackageGraphDialog(tk.Toplevel):
 
     def _draw_node(self, node_id: str) -> None:
         node = self.graph_state["nodes"][node_id]
-        x, y = node["x"], node["y"]
+        x, y = node["x"] * self.zoom, node["y"] * self.zoom
+        node_width, node_height = NODE_WIDTH * self.zoom, NODE_HEIGHT * self.zoom
+        shadow = max(2, 5 * self.zoom)
+        header_height = 27 * self.zoom
+        font_header = max(6, round(9 * self.zoom))
+        font_name = max(6, round(10 * self.zoom))
+        font_detail = max(5, round(8 * self.zoom))
         header, body = self.COLORS[node["type"]]
         tags = ("node", f"node:{node_id}")
         self.canvas.create_rectangle(
-            x + 5, y + 6, x + NODE_WIDTH + 5, y + NODE_HEIGHT + 6,
+            x + shadow, y + shadow, x + node_width + shadow, y + node_height + shadow,
             fill="#080C0A", outline="", tags=tags,
         )
         self.canvas.create_rectangle(
-            x, y, x + NODE_WIDTH, y + NODE_HEIGHT,
+            x, y, x + node_width, y + node_height,
             fill=body, outline="#E7B94B" if node_id == self.selected else "#53635C",
             width=3 if node_id == self.selected else 1, tags=tags,
         )
         self.canvas.create_rectangle(
-            x, y, x + NODE_WIDTH, y + 27, fill=header, outline="", tags=tags,
+            x, y, x + node_width, y + header_height,
+            fill=header, outline="", tags=tags,
         )
         self.canvas.create_text(
-            x + 10, y + 13, text=node["type"].upper(), anchor="w",
-            fill="#FFFFFF", font=("Segoe UI Semibold", 9), tags=tags,
+            x + 10 * self.zoom, y + 13 * self.zoom,
+            text=node["type"].upper(), anchor="w",
+            fill="#FFFFFF", font=("Segoe UI Semibold", font_header), tags=tags,
         )
         is_file = node["type"] == "file"
-        text_width = NODE_WIDTH - 116 if is_file else NODE_WIDTH - 20
+        text_width = (NODE_WIDTH - 116 if is_file else NODE_WIDTH - 20) * self.zoom
         self.canvas.create_text(
-            x + 10, y + 49, text=node["name"], anchor="w", width=text_width,
-            fill="#F0F5F2", font=("Segoe UI Semibold", 10), tags=tags,
+            x + 10 * self.zoom, y + 49 * self.zoom,
+            text=node["name"], anchor="w", width=text_width,
+            fill="#F0F5F2", font=("Segoe UI Semibold", font_name), tags=tags,
         )
         subtitle = node_id if not is_file else f"{node['size']:,} bytes"
         self.canvas.create_text(
-            x + 10, y + 68, text=subtitle, anchor="w", width=text_width,
-            fill="#9FB0A8", font=("Consolas", 8), tags=tags,
+            x + 10 * self.zoom, y + 68 * self.zoom,
+            text=subtitle, anchor="w", width=text_width,
+            fill="#9FB0A8", font=("Consolas", font_detail), tags=tags,
         )
         if is_file:
             self._draw_asset_preview(node_id, node, x, y, tags)
         if node_id != self.graph_state["root_id"]:
+            port_radius = max(4, 7 * self.zoom)
+            port_y = y + 41 * self.zoom
             self.canvas.create_oval(
-                x - 7, y + 34, x + 7, y + 48, fill="#D9E4DF", outline="#111714",
+                x - port_radius, port_y - port_radius,
+                x + port_radius, port_y + port_radius,
+                fill="#D9E4DF", outline="#111714",
                 width=2, tags=(*tags, f"in:{node_id}"),
             )
         if node["type"] != "file":
+            port_radius = max(4, 7 * self.zoom)
+            port_x, port_y = x + node_width, y + 41 * self.zoom
             self.canvas.create_oval(
-                x + NODE_WIDTH - 7, y + 34, x + NODE_WIDTH + 7, y + 48,
+                port_x - port_radius, port_y - port_radius,
+                port_x + port_radius, port_y + port_radius,
                 fill="#E7B94B", outline="#111714", width=2,
                 tags=(*tags, f"out:{node_id}"),
             )
@@ -361,16 +410,26 @@ class RpfPackageGraphDialog(tk.Toplevel):
         self, node_id: str, node: dict, x: float, y: float,
         tags: tuple[str, ...],
     ) -> None:
-        left = x + NODE_WIDTH - ASSET_PREVIEW_WIDTH - 8
-        top = y + 31
+        preview_width = max(1, round(ASSET_PREVIEW_WIDTH * self.zoom))
+        preview_height = max(1, round(ASSET_PREVIEW_HEIGHT * self.zoom))
+        left = x + (NODE_WIDTH - ASSET_PREVIEW_WIDTH - 8) * self.zoom
+        top = y + 31 * self.zoom
+        border = max(1, 2 * self.zoom)
         self.canvas.create_rectangle(
-            left - 2, top - 2,
-            left + ASSET_PREVIEW_WIDTH + 2, top + ASSET_PREVIEW_HEIGHT + 2,
+            left - border, top - border,
+            left + preview_width + border, top + preview_height + border,
             fill="#09100D", outline="#466258", width=1, tags=tags,
         )
         self._queue_asset_preview(node_id, node)
-        photo = self._preview_photos.get(node_id)
-        if photo is not None:
+        preview_image = self._preview_images.get(node_id)
+        if preview_image is not None:
+            photo = ImageTk.PhotoImage(
+                preview_image.resize(
+                    (preview_width, preview_height), Image.Resampling.LANCZOS,
+                ),
+                master=self,
+            )
+            self._preview_photos[node_id] = photo
             self.canvas.create_image(
                 left, top, image=photo, anchor="nw", tags=tags,
             )
@@ -378,10 +437,10 @@ class RpfPackageGraphDialog(tk.Toplevel):
             suffix = Path(str(node.get("name", ""))).suffix.upper().lstrip(".")
             label = "…" if node_id in self._preview_pending else (suffix or "FILE")
             self.canvas.create_text(
-                left + ASSET_PREVIEW_WIDTH / 2,
-                top + ASSET_PREVIEW_HEIGHT / 2,
+                left + preview_width / 2,
+                top + preview_height / 2,
                 text=label[:9], fill="#B8CDC2",
-                font=("Segoe UI Semibold", 8), tags=tags,
+                font=("Segoe UI Semibold", max(5, round(8 * self.zoom))), tags=tags,
             )
 
     def _graph_edition(self) -> str:
@@ -410,7 +469,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
             f"{source}|{expected_size}|{expected_hash}|{edition}".encode("utf-8")
         ).hexdigest()
         if self._preview_keys.get(node_id) == key and (
-            node_id in self._preview_photos or node_id in self._preview_messages
+            node_id in self._preview_images or node_id in self._preview_messages
         ):
             return
         if node_id in self._preview_pending and self._preview_keys.get(node_id) == key:
@@ -419,6 +478,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
             self._preview_messages[node_id] = "Preview queue limit reached"
             return
         self._preview_keys[node_id] = key
+        self._preview_images.pop(node_id, None)
         self._preview_photos.pop(node_id, None)
         self._preview_messages.pop(node_id, None)
         self._preview_pending.add(node_id)
@@ -463,7 +523,8 @@ class RpfPackageGraphDialog(tk.Toplevel):
             try:
                 with Image.open(io.BytesIO(preview)) as image:
                     rendered = image.convert("RGB").copy()
-                self._preview_photos[node_id] = ImageTk.PhotoImage(rendered, master=self)
+                self._preview_images[node_id] = rendered
+                self._preview_photos.pop(node_id, None)
                 self._preview_messages.pop(node_id, None)
                 changed = True
             except (
@@ -478,8 +539,10 @@ class RpfPackageGraphDialog(tk.Toplevel):
     def _update_edges(self) -> None:
         for (parent, child), item in self.edge_items.items():
             source, target = self.graph_state["nodes"][parent], self.graph_state["nodes"][child]
-            x1, y1 = source["x"] + NODE_WIDTH, source["y"] + 41
-            x2, y2 = target["x"], target["y"] + 41
+            x1 = (source["x"] + NODE_WIDTH) * self.zoom
+            y1 = (source["y"] + 41) * self.zoom
+            x2 = target["x"] * self.zoom
+            y2 = (target["y"] + 41) * self.zoom
             curve = max(60, abs(x2 - x1) * 0.45)
             self.canvas.coords(item, x1, y1, x1 + curve, y1, x2 - curve, y2, x2, y2)
 
@@ -511,7 +574,8 @@ class RpfPackageGraphDialog(tk.Toplevel):
         if output:
             self.connecting_parent = output
             source = self.graph_state["nodes"][output]
-            x1, y1 = source["x"] + NODE_WIDTH, source["y"] + 41
+            x1 = (source["x"] + NODE_WIDTH) * self.zoom
+            y1 = (source["y"] + 41) * self.zoom
             self.connection_line = self.canvas.create_line(
                 x1, y1, x, y, fill="#E7B94B", width=3, dash=(7, 4),
                 tags=("connection-preview",),
@@ -525,14 +589,18 @@ class RpfPackageGraphDialog(tk.Toplevel):
         if self.connecting_parent and self.connection_line:
             source = self.graph_state["nodes"][self.connecting_parent]
             self.canvas.coords(
-                self.connection_line, source["x"] + NODE_WIDTH, source["y"] + 41, x, y,
+                self.connection_line,
+                (source["x"] + NODE_WIDTH) * self.zoom,
+                (source["y"] + 41) * self.zoom, x, y,
             )
             return
         if not self.dragging:
             return
         dx, dy = x - self.drag_last[0], y - self.drag_last[1]
         node = self.graph_state["nodes"][self.dragging]
-        node["x"], node["y"] = node["x"] + dx, node["y"] + dy
+        node["x"], node["y"] = (
+            node["x"] + dx / self.zoom, node["y"] + dy / self.zoom,
+        )
         self.canvas.move(f"node:{self.dragging}", dx, dy)
         self.drag_last = (x, y)
         self._update_edges()
@@ -567,6 +635,59 @@ class RpfPackageGraphDialog(tk.Toplevel):
 
     def _shift_mousewheel(self, event: tk.Event) -> None:
         self.canvas.xview_scroll(-1 if event.delta > 0 else 1, "units")
+
+    def _zoom_mousewheel(self, event: tk.Event) -> str:
+        self._zoom_by(
+            ZOOM_FACTOR if event.delta > 0 else 1 / ZOOM_FACTOR,
+            event.x, event.y,
+        )
+        return "break"
+
+    def _zoom_by(
+        self, factor: float, focus_x: float | None = None,
+        focus_y: float | None = None,
+    ) -> None:
+        self._set_zoom(self.zoom * factor, focus_x, focus_y)
+
+    def _set_zoom(
+        self, value: float, focus_x: float | None = None,
+        focus_y: float | None = None,
+    ) -> None:
+        target = max(MIN_ZOOM, min(MAX_ZOOM, value))
+        if abs(target - self.zoom) < 0.001:
+            return
+        view_x = self.canvas.winfo_width() / 2 if focus_x is None else focus_x
+        view_y = self.canvas.winfo_height() / 2 if focus_y is None else focus_y
+        logical_x = self.canvas.canvasx(view_x) / self.zoom
+        logical_y = self.canvas.canvasy(view_y) / self.zoom
+        self.zoom = target
+        self.zoom_text.set(f"{round(self.zoom * 100):d}%")
+        self._preview_photos.clear()
+        self._render()
+        region = [float(value) for value in self.canvas.cget("scrollregion").split()]
+        width, height = max(1.0, region[2]), max(1.0, region[3])
+        left = logical_x * self.zoom - view_x
+        top = logical_y * self.zoom - view_y
+        self.canvas.xview_moveto(max(0.0, min(1.0, left / width)))
+        self.canvas.yview_moveto(max(0.0, min(1.0, top / height)))
+
+    def _reset_zoom(self) -> None:
+        self._set_zoom(1.0)
+
+    def _fit_graph(self) -> None:
+        if not self.visible:
+            return
+        max_x = max(self.graph_state["nodes"][node]["x"] for node in self.visible)
+        max_y = max(self.graph_state["nodes"][node]["y"] for node in self.visible)
+        available_width = max(1, self.canvas.winfo_width() - 40)
+        available_height = max(1, self.canvas.winfo_height() - 40)
+        target = min(
+            available_width / max(1, max_x + NODE_WIDTH + 20),
+            available_height / max(1, max_y + NODE_HEIGHT + 20),
+        )
+        self._set_zoom(target, 0, 0)
+        self.canvas.xview_moveto(0.0)
+        self.canvas.yview_moveto(0.0)
 
     def _select(self, node_id: str | None) -> None:
         self.selected = node_id
@@ -610,8 +731,8 @@ class RpfPackageGraphDialog(tk.Toplevel):
         node = self.graph_state["nodes"][found]
         region = self.canvas.cget("scrollregion").split()
         width, height = max(1.0, float(region[2])), max(1.0, float(region[3]))
-        self.canvas.xview_moveto(max(0, (node["x"] - 100) / width))
-        self.canvas.yview_moveto(max(0, (node["y"] - 100) / height))
+        self.canvas.xview_moveto(max(0, (node["x"] * self.zoom - 100) / width))
+        self.canvas.yview_moveto(max(0, (node["y"] * self.zoom - 100) / height))
 
     def _container_parent(self) -> str:
         selected = self.selected or self.graph_state["root_id"]

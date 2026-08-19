@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -83,6 +85,38 @@ def _progress(message: str, percent: int) -> None:
     click.echo(f"[{percent:3d}%] {message}")
 
 
+def _open_graph_window(graph: Path, gta_path: Path | None = None) -> int:
+    """Start the desktop graph editor without routing paths through a shell."""
+    resolved = graph.expanduser().resolve(strict=True)
+    RpfPackageGraph.validate(resolved, verify_sources=False)
+    selected_game = gta_path.expanduser().resolve(strict=True) if gta_path else None
+
+    executable = Path(sys.executable).resolve()
+    if getattr(sys, "frozen", False):
+        desktop = executable.with_name("ALLIN1-SDK.exe")
+        if executable.name.casefold() == "allin1-sdk.exe":
+            desktop = executable
+        if not desktop.is_file():
+            raise FileNotFoundError(f"SDK desktop executable was not found: {desktop}")
+        command = [str(desktop), "--rpf-graph", str(resolved)]
+    else:
+        interpreter = executable
+        if os.name == "nt":
+            windowed = executable.with_name("pythonw.exe")
+            if windowed.is_file():
+                interpreter = windowed
+        command = [
+            str(interpreter), "-m", "allin1_sdk.app", "--rpf-graph", str(resolved),
+        ]
+    if selected_game is not None:
+        command.extend(("--gta-path", str(selected_game)))
+    options: dict[str, object] = {}
+    if os.name == "nt":
+        options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = subprocess.Popen(command, cwd=PROJECT_ROOT, **options)
+    return process.pid
+
+
 def _native_report_payload(
     report: NativeAssetReport, *, source: str, edition: str,
     binding: dict[str, object] | None = None,
@@ -157,6 +191,25 @@ def agent_api(allow_game_writes: bool) -> None:
     from allin1_sdk.agent_api import serve_stdio
 
     serve_stdio(sys.stdin, sys.stdout, allow_game_writes=allow_game_writes)
+
+
+@main.command("open-rpf-graph")
+@click.argument(
+    "graph", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation for encrypted/native asset previews.",
+)
+def open_rpf_graph(graph: Path, gta_path: Path | None) -> None:
+    """Open an RPF package graph in the desktop node editor."""
+    try:
+        pid = _open_graph_window(graph, gta_path)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "open_rpf_graph", "graph": str(graph.resolve()), "pid": pid,
+    }, indent=2))
 
 
 @main.command("list-installed-packages")

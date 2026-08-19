@@ -480,6 +480,9 @@ def test_rpf_graph_desktop_surface_uses_ports_and_shared_graph_model():
     assert "_asset_preview_worker" in source
     assert "render_asset_preview" in source
     assert "_focus_initial_view" in source
+    assert "_zoom_mousewheel" in source
+    assert "_fit_graph" in source
+    assert 'text="100%"' in source
     assert "self.state" not in source
     assert "RpfPackageGraph.import_archive" in (
         Path(__file__).parents[1] / "src" / "allin1_sdk" / "rpf_explorer.py"
