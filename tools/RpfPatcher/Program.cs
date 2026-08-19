@@ -10,6 +10,7 @@
 //   RpfPatcher.exe register-dlc <gta_path> <pack_name>    — register a manifest-owned add-on pack
 //   RpfPatcher.exe unregister-dlc <gta_path> <pack_name>  — unregister a manifest-owned add-on pack
 //   RpfPatcher.exe build-dlc    <loose_folder> <output_rpf> [--embed-rpf <src_folder> <dest_path>]
+//   RpfPatcher.exe defragment-copy <gta_path> <input_rpf> <output_rpf> <report_json>
 //   RpfPatcher.exe verify-dlc   <dlc_rpf> <ytd_folder>      — verify a preview DLC and its dictionaries
 //   RpfPatcher.exe convert-gen9 <ytd_folder>              — convert .ytd files from Legacy to Enhanced format
 //   RpfPatcher.exe inspect      <gta_path> <rpf_path>    — dump RPF structure + XML contents
@@ -68,6 +69,7 @@ namespace RpfPatcher
                     "  RpfPatcher.exe register-dlc <gta_path> <pack_name>\n" +
                     "  RpfPatcher.exe unregister-dlc <gta_path> <pack_name>\n" +
                     "  RpfPatcher.exe build-dlc    <loose_folder> <output_rpf> [--embed-rpf <src> <dest>]\n" +
+                    "  RpfPatcher.exe defragment-copy <gta_path> <input_rpf> <output_rpf> <report_json>\n" +
                     "  RpfPatcher.exe verify-dlc   <dlc_rpf> <ytd_folder>\n" +
                     "  RpfPatcher.exe verify-map-dlc <dlc_rpf> <manifest_tsv>\n" +
                     "  RpfPatcher.exe convert-gen9 <ytd_folder>\n" +
@@ -122,6 +124,8 @@ namespace RpfPatcher
                 return VerifyYtd(args);
             if (command == "build-dlc")
                 return BuildDlc(args);
+            if (command == "defragment-copy")
+                return DefragmentCopy(args);
             if (command == "verify-dlc")
                 return VerifyDlc(args);
             if (command == "verify-map-dlc")
@@ -623,6 +627,158 @@ namespace RpfPatcher
             {
                 Console.Error.WriteLine($"ERROR: {ex.Message}");
                 Console.Error.WriteLine(ex.StackTrace);
+                return 99;
+            }
+        }
+
+        // ================================================================
+        //  defragment-copy: Compact a new copy while preserving the source
+        // ================================================================
+
+        static int DefragmentCopy(string[] args)
+        {
+            if (args.Length != 5)
+            {
+                Console.Error.WriteLine(
+                    "Usage: RpfPatcher.exe defragment-copy <gta_path> <input_rpf> " +
+                    "<output_rpf> <report_json>");
+                return 1;
+            }
+
+            string gtaPath = Path.GetFullPath(args[1]);
+            string inputPath = Path.GetFullPath(args[2]);
+            string outputPath = Path.GetFullPath(args[3]);
+            string reportPath = Path.GetFullPath(args[4]);
+            string stagingPath = null;
+            string stagingReport = null;
+            bool outputPublished = false;
+            bool reportPublished = false;
+            try
+            {
+                if (!Directory.Exists(gtaPath))
+                    throw new DirectoryNotFoundException($"GTA V directory not found: {gtaPath}");
+                if (!File.Exists(inputPath))
+                    throw new FileNotFoundException("Input RPF was not found.", inputPath);
+                if (!Path.GetExtension(inputPath).Equals(".rpf", StringComparison.OrdinalIgnoreCase) ||
+                    !Path.GetExtension(outputPath).Equals(".rpf", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Input and output must use the .rpf extension.");
+                if (inputPath.Equals(outputPath, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Defragmentation output must differ from input.");
+                if (reportPath.Equals(inputPath, StringComparison.OrdinalIgnoreCase) ||
+                    reportPath.Equals(outputPath, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Report path must differ from archive paths.");
+                if (File.Exists(outputPath) || Directory.Exists(outputPath))
+                    throw new IOException($"Output already exists: {outputPath}");
+                if (File.Exists(reportPath) || Directory.Exists(reportPath))
+                    throw new IOException($"Report already exists: {reportPath}");
+
+                string outputDirectory = Path.GetDirectoryName(outputPath);
+                string reportDirectory = Path.GetDirectoryName(reportPath);
+                if (string.IsNullOrEmpty(outputDirectory) || string.IsNullOrEmpty(reportDirectory))
+                    throw new InvalidDataException("Output and report require parent directories.");
+                Directory.CreateDirectory(outputDirectory);
+                Directory.CreateDirectory(reportDirectory);
+                stagingPath = Path.Combine(
+                    outputDirectory,
+                    $".{Path.GetFileNameWithoutExtension(outputPath)}.allin1-defrag-" +
+                    $"{Guid.NewGuid():N}.rpf");
+                stagingReport = Path.Combine(
+                    reportDirectory,
+                    $".{Path.GetFileName(reportPath)}.allin1-{Guid.NewGuid():N}.tmp");
+
+                long beforeSize = new FileInfo(inputPath).Length;
+                string beforeHash = Sha256File(inputPath);
+                File.Copy(inputPath, stagingPath, false);
+                string copiedHash = Sha256File(stagingPath);
+                if (!beforeHash.Equals(copiedHash, StringComparison.Ordinal))
+                    throw new InvalidDataException("Copied RPF does not match the input SHA-256.");
+
+                bool isGen9 = File.Exists(Path.Combine(gtaPath, "GTA5_Enhanced.exe"))
+                           || File.Exists(Path.Combine(gtaPath, "eboot.bin"));
+                var warnings = new List<string>();
+                try
+                {
+                    GTA5Keys.LoadFromPath(gtaPath, isGen9, null);
+                }
+                catch (Exception ex)
+                {
+                    warnings.Add("Encryption keys could not be loaded: " + ex.Message);
+                }
+
+                var archive = new RpfFile(stagingPath, Path.GetFileName(outputPath));
+                archive.ScanStructure(null, warning => warnings.Add(warning));
+                if (archive.AllEntries == null || archive.Root == null)
+                    throw new InvalidDataException("RPF scan did not produce a complete tree.");
+                int beforeEntries = archive.AllEntries.Count;
+                long predictedSize = archive.GetDefragmentedFileSize(true);
+                RpfFile.Defragment(archive, null, true);
+
+                var verified = new RpfFile(stagingPath, Path.GetFileName(outputPath));
+                verified.ScanStructure(null, warning => warnings.Add(warning));
+                if (verified.AllEntries == null || verified.Root == null)
+                    throw new InvalidDataException("Defragmented RPF did not rescan.");
+                long afterSize = new FileInfo(stagingPath).Length;
+                if (afterSize != predictedSize)
+                    throw new InvalidDataException(
+                        $"Defragmented size mismatch: expected {predictedSize:N0}, got {afterSize:N0}.");
+                if (afterSize > beforeSize)
+                    throw new InvalidDataException("Defragmentation increased the archive size.");
+                string afterHash = Sha256File(stagingPath);
+                string inputHashAfter = Sha256File(inputPath);
+                if (!beforeHash.Equals(inputHashAfter, StringComparison.Ordinal))
+                    throw new IOException("Input RPF changed during defragmentation.");
+
+                var report = new Dictionary<string, object>
+                {
+                    { "schema_version", 1 },
+                    { "operation", "rpf_defragment_copy" },
+                    { "source", inputPath },
+                    { "source_size", beforeSize },
+                    { "source_sha256", beforeHash },
+                    { "output", outputPath },
+                    { "output_size", afterSize },
+                    { "output_sha256", afterHash },
+                    { "predicted_output_size", predictedSize },
+                    { "bytes_saved", beforeSize - afterSize },
+                    { "recursive", true },
+                    { "edition", isGen9 ? "Enhanced" : "Legacy" },
+                    { "entries_before", beforeEntries },
+                    { "entries_after", verified.AllEntries.Count },
+                    { "warnings", warnings },
+                    { "source_unchanged", true },
+                };
+                File.WriteAllText(
+                    stagingReport,
+                    JsonSerializer.Serialize(report, new JsonSerializerOptions
+                    {
+                        WriteIndented = true,
+                    }) + Environment.NewLine,
+                    new UTF8Encoding(false));
+                File.Move(stagingPath, outputPath, false);
+                outputPublished = true;
+                File.Move(stagingReport, reportPath, false);
+                reportPublished = true;
+                Console.WriteLine(
+                    $"Defragmented verified copy: {beforeSize:N0} -> {afterSize:N0} bytes " +
+                    $"({beforeSize - afterSize:N0} saved)");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    if (!string.IsNullOrEmpty(stagingPath) && File.Exists(stagingPath))
+                        File.Delete(stagingPath);
+                    if (!string.IsNullOrEmpty(stagingReport) && File.Exists(stagingReport))
+                        File.Delete(stagingReport);
+                    if (outputPublished && !reportPublished && File.Exists(outputPath))
+                        File.Delete(outputPath);
+                }
+                catch
+                {
+                    // Preserve the original error; Python performs an additional cleanup pass.
+                }
+                Console.Error.WriteLine($"ERROR: RPF defragment-copy failed: {ex.Message}");
                 return 99;
             }
         }
@@ -4049,6 +4205,14 @@ namespace RpfPatcher
         {
             using (SHA256 algorithm = SHA256.Create())
                 return BitConverter.ToString(algorithm.ComputeHash(data))
+                    .Replace("-", "").ToLowerInvariant();
+        }
+
+        static string Sha256File(string path)
+        {
+            using (FileStream stream = File.OpenRead(path))
+            using (SHA256 algorithm = SHA256.Create())
+                return BitConverter.ToString(algorithm.ComputeHash(stream))
                     .Replace("-", "").ToLowerInvariant();
         }
 

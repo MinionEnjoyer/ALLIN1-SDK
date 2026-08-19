@@ -51,6 +51,7 @@ def test_catalog_is_structured_and_classifies_risk():
     assert catalog["inspect-binary-workspace"]["risk"] == "read_only"
     assert catalog["patch-binary-workspace"]["risk"] == "authoring_write"
     assert catalog["verify-rpf-archive"]["risk"] == "authoring_write"
+    assert catalog["defragment-rpf"]["risk"] == "authoring_write"
     assert catalog["list-ytd-textures"]["risk"] == "authoring_write"
     assert catalog["replace-ytd-texture"]["risk"] == "authoring_write"
     assert catalog["undo-ytd-texture-edit"]["risk"] == "authoring_write"

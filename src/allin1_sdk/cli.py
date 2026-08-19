@@ -27,6 +27,7 @@ from allin1_sdk.rage_data_compiler import RageVehicleDataCompiler
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_catalog import RpfCatalogService
 from allin1_sdk.rpf_graph import RpfPackageGraph
+from allin1_sdk.rpf_program import NODE_SPECS, RpfPackageProgram
 from allin1_sdk.rpf_tools import RpfExplorerService, _running_gta_processes
 from allin1_sdk.texture_workspace import TextureDictionaryWorkspace
 
@@ -847,6 +848,219 @@ def plan_rpf_graph_origin(graph: Path, gta_path: Path | None, output: Path) -> N
     click.echo("Origin archive unchanged; applying remains a separate guarded action")
 
 
+def _program_config(value: str) -> dict:
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"Invalid RPF program config JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise click.ClickException("RPF program config JSON must be an object")
+    return payload
+
+
+@main.command("create-rpf-program")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(dir_okay=False, path_type=Path))
+def create_rpf_program(graph: Path, output: Path) -> None:
+    """Create a typed visual build program bound to one RPF package graph."""
+    try:
+        program = RpfPackageProgram.create(graph, output)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Created RPF package node program: {program}")
+    click.echo("Default flow: Package graph -> Validate package")
+
+
+@main.command("inspect-rpf-program")
+@click.argument("program", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--verify-graph", is_flag=True, help="Hash every package source file.")
+@click.option("--output", "-o", type=click.Path(dir_okay=False, path_type=Path))
+def inspect_rpf_program(program: Path, verify_graph: bool, output: Path | None) -> None:
+    """Inspect typed nodes, links, readiness issues, and execution order."""
+    try:
+        report = RpfPackageProgram.describe(program, verify_graph=verify_graph)
+        rendered = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+        if output is None:
+            click.echo(rendered, nl=False)
+        else:
+            destination = output.resolve()
+            if destination.exists() or destination.is_symlink():
+                raise FileExistsError(f"RPF program report already exists: {destination}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(rendered, encoding="utf-8")
+            click.echo(f"Wrote RPF program inspection: {destination}")
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@main.command("add-rpf-program-node")
+@click.argument("program", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("node_type", type=click.Choice(sorted(
+    item for item in NODE_SPECS if item != "package_source"
+)))
+@click.option("--config-json", default="{}", show_default=True)
+@click.option("--x", default=0.0, type=float, show_default=True)
+@click.option("--y", default=0.0, type=float, show_default=True)
+@click.option("--acknowledge-edit", is_flag=True)
+def add_rpf_program_node(
+    program: Path, node_type: str, config_json: str,
+    x: float, y: float, acknowledge_edit: bool,
+) -> None:
+    """Add a typed operation node; the package and game remain unchanged."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        node_id = RpfPackageProgram.add_node(
+            program, node_type, config=_program_config(config_json), x=x, y=y,
+        )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Added RPF program node: {node_id} ({node_type})")
+
+
+@main.command("configure-rpf-program-node")
+@click.argument("program", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("node_id")
+@click.argument("config_json")
+@click.option("--acknowledge-edit", is_flag=True)
+def configure_rpf_program_node(
+    program: Path, node_id: str, config_json: str, acknowledge_edit: bool,
+) -> None:
+    """Replace one operation node's validated JSON configuration."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        RpfPackageProgram.configure_node(
+            program, node_id, _program_config(config_json),
+        )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Configured RPF program node: {node_id}")
+
+
+@main.command("connect-rpf-program-nodes")
+@click.argument("program", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("from_node")
+@click.argument("to_node")
+@click.option("--acknowledge-edit", is_flag=True)
+def connect_rpf_program_nodes(
+    program: Path, from_node: str, to_node: str, acknowledge_edit: bool,
+) -> None:
+    """Connect typed artifact/output pins and replace the target input link."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        RpfPackageProgram.connect(program, from_node, to_node)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Connected RPF program nodes: {from_node} -> {to_node}")
+
+
+@main.command("disconnect-rpf-program-node")
+@click.argument("program", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("node_id")
+@click.option("--acknowledge-edit", is_flag=True)
+def disconnect_rpf_program_node(
+    program: Path, node_id: str, acknowledge_edit: bool,
+) -> None:
+    """Disconnect one node's typed input without removing the node."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        RpfPackageProgram.disconnect(program, node_id)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Disconnected RPF program node input: {node_id}")
+
+
+@main.command("position-rpf-program-node")
+@click.argument("program", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("node_id")
+@click.argument("x", type=float)
+@click.argument("y", type=float)
+@click.option("--acknowledge-edit", is_flag=True)
+def position_rpf_program_node(
+    program: Path, node_id: str, x: float, y: float, acknowledge_edit: bool,
+) -> None:
+    """Persist one operation node's canvas position."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        RpfPackageProgram.set_position(program, node_id, x, y)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Positioned RPF program node {node_id} at {x}, {y}")
+
+
+@main.command("layout-rpf-program")
+@click.argument("program", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--acknowledge-edit", is_flag=True)
+def layout_rpf_program(program: Path, acknowledge_edit: bool) -> None:
+    """Apply deterministic left-to-right layout to the operation graph."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        count = RpfPackageProgram.auto_layout(program)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Positioned {count} RPF program node(s)")
+
+
+@main.command("remove-rpf-program-node")
+@click.argument("program", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("node_id")
+@click.option("--acknowledge-edit", is_flag=True)
+def remove_rpf_program_node(
+    program: Path, node_id: str, acknowledge_edit: bool,
+) -> None:
+    """Remove one operation node and its links without deleting artifacts."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        RpfPackageProgram.remove_node(program, node_id)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Removed RPF program node: {node_id}; artifacts unchanged")
+
+
+@main.command("plan-rpf-program")
+@click.argument("program", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(dir_okay=False, path_type=Path))
+def plan_rpf_program(program: Path, output: Path) -> None:
+    """Compile and bind a dry-run plan without executing operation nodes."""
+    try:
+        plan_path, plan = RpfPackageProgram.plan(program, output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Compiled ready RPF node program: {len(plan['nodes'])} node(s), "
+        f"{len(plan['outputs'])} new output(s); {plan_path}"
+    )
+    click.echo("No program operation was executed and no game archive was changed")
+
+
+@main.command("run-rpf-program")
+@click.argument("program", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--report", required=True, type=click.Path(dir_okay=False, path_type=Path))
+@click.option(
+    "--acknowledge-execution", is_flag=True,
+    help="Acknowledge creation of the program's external authored outputs.",
+)
+def run_rpf_program(
+    program: Path, report: Path, acknowledge_execution: bool,
+) -> None:
+    """Execute a ready external-authoring graph with exact failure cleanup."""
+    if not acknowledge_execution:
+        raise click.ClickException(
+            "RPF program execution requires --acknowledge-execution; stock/game "
+            "archive writes are not part of this command"
+        )
+    try:
+        report_path, result = RpfPackageProgram.execute(
+            program, PROJECT_ROOT, report,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Executed and verified {len(result['nodes'])} RPF program node(s); "
+        f"{len(result['artifacts'])} artifact(s); {report_path}"
+    )
+    click.echo("Stock/game archives unchanged")
+
+
 @main.command("extract-rpf-entry")
 @click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("entry_path")
@@ -1021,6 +1235,38 @@ def verify_rpf_archive(
         f"{summary['payloads_exactly_extracted']} exact payload(s), "
         f"{summary['structural_issues']} structural issue(s); {report_path}"
     )
+
+
+@main.command("defragment-rpf")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--output", "-o", required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--report", required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+def defragment_rpf(
+    archive: Path, gta_path: Path | None, output: Path, report: Path,
+) -> None:
+    """Create a smaller external RPF copy and exactly verify every leaf payload."""
+    service = _rpf_service(gta_path)
+    try:
+        index = service.index(archive)
+        written, report_path, result = service.defragment_verified_copy(
+            index, output, report,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    summary = result["summary"]
+    click.echo(
+        f"Verified defragmented RPF copy: {written} · "
+        f"{summary['bytes_saved']:,} bytes saved · "
+        f"{summary['leaf_payloads_verified']:,} leaf payload(s) exact"
+    )
+    click.echo(f"Source archive unchanged; verification report: {report_path}")
 
 
 @main.command("plan-rpf-replacement")
@@ -1796,7 +2042,12 @@ for _command in (
     reparent_rpf_graph_node, position_rpf_graph_node, remove_rpf_graph_node,
     layout_rpf_graph, refresh_rpf_graph_sources, materialize_rpf_graph, build_rpf_graph,
     plan_rpf_graph_origin,
-    verify_rpf_archive,
+    create_rpf_program, inspect_rpf_program, add_rpf_program_node,
+    configure_rpf_program_node, connect_rpf_program_nodes,
+    disconnect_rpf_program_node, position_rpf_program_node,
+    layout_rpf_program, remove_rpf_program_node, plan_rpf_program,
+    run_rpf_program,
+    verify_rpf_archive, defragment_rpf,
     extract_rpf_entry,
     extract_rpf_subtree, export_rpf_native_workspace,
     export_rpf_binary_workspace, export_rpf_gxt2_workspace, diff_rpf,

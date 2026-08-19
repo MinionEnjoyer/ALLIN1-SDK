@@ -663,6 +663,185 @@ def test_rpf_integrity_cli_routes_report(tmp_path, monkeypatch):
     assert output.is_file()
 
 
+def _defragment_fixture(tmp_path, monkeypatch, *, corrupt_leaf=False):
+    service, archive, _patcher = _service(tmp_path)
+    archive.write_bytes(b"RPF7" + (b"\0" * 896))
+    payload = _index_payload(archive)
+    index = RpfIndex.load(_write_index(tmp_path, payload))
+    source_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+
+    def fake_run(args, **_kwargs):
+        assert args[1] == "defragment-copy"
+        assert Path(args[3]) == archive
+        staged = Path(args[4])
+        helper_report = Path(args[5])
+        staged.write_bytes(b"RPF7")
+        helper_report.write_text(json.dumps({
+            "schema_version": 1,
+            "operation": "rpf_defragment_copy",
+            "source": str(archive.resolve()),
+            "output": str(staged.resolve()),
+            "source_size": 900,
+            "output_size": 4,
+            "predicted_output_size": 4,
+            "source_sha256": source_sha256,
+            "output_sha256": hashlib.sha256(b"RPF7").hexdigest(),
+            "source_unchanged": True,
+            "recursive": True,
+        }), encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    def compacted_index(selected):
+        if Path(selected).resolve() == archive.resolve():
+            return index
+        archives = tuple(
+            type(item)(
+                path=item.path, name=(Path(selected).name if not item.path else item.name),
+                version=item.version, encryption=item.encryption,
+                size=4 if not item.path else min(item.size, 400),
+                entry_count=item.entry_count,
+            )
+            for item in index.archives
+        )
+        return RpfIndex(
+            source=Path(selected).resolve(), edition=index.edition,
+            archive_size=4, archives=archives, entries=index.entries,
+            warnings=index.warnings,
+        )
+
+    calls = 0
+
+    def fingerprints(loaded, entries):
+        nonlocal calls
+        calls += 1
+        digest = "b" * 64 if corrupt_leaf and calls == 2 else "a" * 64
+        return {
+            entry.id: {
+                "raw_sha256": digest,
+                "canonical_sha256": digest,
+                "logical_size": entry.size,
+            }
+            for entry in entries
+        }
+
+    monkeypatch.setattr(rpf_tools, "run_hidden", fake_run)
+    monkeypatch.setattr(service, "index", compacted_index)
+    monkeypatch.setattr(service, "entry_content_fingerprints", fingerprints)
+    return service, archive, index, source_sha256
+
+
+def test_rpf_defragment_verified_copy_binds_tree_payloads_and_source(
+    tmp_path, monkeypatch,
+):
+    service, archive, index, source_sha256 = _defragment_fixture(
+        tmp_path, monkeypatch,
+    )
+    output = tmp_path / "authored" / "compact.rpf"
+    report_path = tmp_path / "reports" / "compact.json"
+
+    written, report_written, report = service.defragment_verified_copy(
+        index, output, report_path,
+    )
+
+    assert written == output.resolve() and written.read_bytes() == b"RPF7"
+    assert report_written == report_path.resolve() and report_written.is_file()
+    assert report["status"] == "verified"
+    assert report["source"]["sha256"] == source_sha256
+    assert report["summary"]["bytes_saved"] == 896
+    assert report["summary"]["leaf_payloads_verified"] == 2
+    assert report["verification"]["leaf_payloads_raw_exact"] is True
+    assert report["verification"]["writes_inside_gta_installation"] is False
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == source_sha256
+    assert not any(output.parent.glob(".*.allin1-defrag-*"))
+
+
+def test_rpf_defragment_verified_copy_rejects_payload_drift_and_cleans_output(
+    tmp_path, monkeypatch,
+):
+    service, archive, index, source_sha256 = _defragment_fixture(
+        tmp_path, monkeypatch, corrupt_leaf=True,
+    )
+    output = tmp_path / "compact.rpf"
+    report = tmp_path / "compact.json"
+
+    with pytest.raises(ValueError, match="changed leaf payload bytes"):
+        service.defragment_verified_copy(index, output, report)
+
+    assert not output.exists() and not report.exists()
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == source_sha256
+    assert not any(tmp_path.glob(".*.allin1-defrag-*"))
+
+
+def test_rpf_defragment_verified_copy_blocks_game_and_existing_outputs(
+    tmp_path, monkeypatch,
+):
+    service, _archive, index, _source_sha256 = _defragment_fixture(
+        tmp_path, monkeypatch,
+    )
+    outside = tmp_path / "outside.rpf"
+    outside.write_bytes(b"occupied")
+    with pytest.raises(ValueError, match="already exists"):
+        service.defragment_verified_copy(index, outside, tmp_path / "new.json")
+    with pytest.raises(ValueError, match="outside the GTA V installation"):
+        service.defragment_verified_copy(
+            index, service.gta_path / "mods" / "compact.rpf",
+            tmp_path / "game-report.json",
+        )
+
+
+def test_rpf_defragment_verified_copy_reindexes_source_before_authoring(
+    tmp_path, monkeypatch,
+):
+    service, _archive, index, _source_sha256 = _defragment_fixture(
+        tmp_path, monkeypatch,
+    )
+    changed = RpfIndex(
+        source=index.source, edition=index.edition, archive_size=index.archive_size,
+        archives=index.archives, entries=index.entries[:-1], warnings=index.warnings,
+    )
+    monkeypatch.setattr(service, "index", lambda _selected: changed)
+    with pytest.raises(ValueError, match="source index changed"):
+        service.defragment_verified_copy(
+            index, tmp_path / "compact.rpf", tmp_path / "compact.json",
+        )
+
+
+def test_rpf_defragment_cli_routes_verified_external_copy(tmp_path, monkeypatch):
+    game = tmp_path / "game"
+    game.mkdir()
+    archive = tmp_path / "source.rpf"
+    archive.write_bytes(b"RPF7")
+    output = tmp_path / "compact.rpf"
+    report = tmp_path / "compact.json"
+
+    class FakeService:
+        def __init__(self, _project, selected_game, **_kwargs):
+            assert Path(selected_game) == game
+
+        def index(self, selected):
+            assert Path(selected) == archive
+            return object()
+
+        def defragment_verified_copy(self, _index, selected_output, selected_report):
+            assert Path(selected_output) == output
+            assert Path(selected_report) == report
+            output.write_bytes(b"RPF7")
+            report.write_text('{"status":"verified"}', encoding="utf-8")
+            return output, report, {
+                "summary": {"bytes_saved": 4096, "leaf_payloads_verified": 7},
+            }
+
+    monkeypatch.setattr("allin1_sdk.cli.RpfExplorerService", FakeService)
+    result = CliRunner().invoke(main, [
+        "sdk", "defragment-rpf", str(archive), "--gta-path", str(game),
+        "--output", str(output), "--report", str(report),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "4,096 bytes saved" in result.output
+    assert "Source archive unchanged" in result.output
+    assert output.is_file() and report.is_file()
+
+
 def test_rpf_transaction_recovers_interrupted_post_staging_receipt(
     tmp_path, monkeypatch,
 ):

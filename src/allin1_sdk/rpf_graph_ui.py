@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_graph import RpfPackageGraph
+from allin1_sdk.rpf_program_ui import RpfProgramFrame
 
 
 NODE_WIDTH = 230
@@ -122,7 +123,14 @@ class RpfPackageGraphDialog(tk.Toplevel):
             side="right", padx=(0, 6),
         )
 
-        work = ttk.Panedwindow(outer, orient="horizontal")
+        notebook = ttk.Notebook(outer)
+        notebook.pack(fill="both", expand=True)
+        layout_tab = ttk.Frame(notebook, padding=4)
+        program_tab = ttk.Frame(notebook, padding=4)
+        notebook.add(layout_tab, text="Package Layout")
+        notebook.add(program_tab, text="Build Flow")
+
+        work = ttk.Panedwindow(layout_tab, orient="horizontal")
         work.pack(fill="both", expand=True)
         canvas_frame = ttk.Frame(work)
         inspector = ttk.Frame(work, padding=(14, 4, 4, 4), width=315)
@@ -204,6 +212,9 @@ class RpfPackageGraphDialog(tk.Toplevel):
         ttk.Button(inspector, text="Close", command=self.destroy).pack(
             fill="x", pady=(20, 0),
         )
+        RpfProgramFrame(
+            program_tab, self.graph, self.project_root, self.game_path,
+        ).pack(fill="both", expand=True)
         ttk.Label(outer, textvariable=self.status, foreground="#52635c").pack(
             fill="x", pady=(7, 0),
         )

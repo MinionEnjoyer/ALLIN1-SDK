@@ -80,6 +80,20 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   every extracted payload. Imported graphs can build/diff against that origin and
   emit a normal inert multi-entry plan; changes inside a nested archive collapse to
   one reviewed parent-container replacement instead of an order-dependent deep edit.
+  The graph window also includes an embedded **Build Flow** workspace: a UE-style
+  operation canvas with typed artifact pins for package source, validation, loose-tree
+  materialization, exact RPF build, verified defragmentation, imported-origin planning,
+  and named outputs. Invalid type connections and cycles are rejected at edit time.
+  Dry-run compilation binds the program JSON, package graph, source hashes, execution
+  order, and every expected output without running a node. Explicit execution can only
+  create new artifacts outside GTA V, removes outputs created by a failed run, and emits
+  one verification report. Every node/configure/connect/disconnect/layout/plan/run action
+  is available through the persistent console and structured Agent API.
+- **Verified RPF defragmentation** — recursively compact a new external archive copy,
+  rescan both archive trees, compare preserved metadata, extract every non-container
+  leaf, and require both raw and canonical logical hashes to match before publishing.
+  The source is hash-checked before and after, and neither the desktop nor
+  `defragment-rpf` command can place the authored copy inside a GTA V installation.
 - **Real-archive canary** — copy a genuine Legacy or Enhanced RPF outside the game,
   exercise real replace/add/delete writes, verify each exact entry, roll everything
   back, and prove the final archive SHA-256 matches the untouched source.
@@ -318,6 +332,15 @@ service used by the launcher.
   payload evidence, and emits only the existing guarded multi-entry plan format.
   It refuses source drift, outer-archive renames, case-only paths, type changes, and
   no-op graphs; applying remains a separate receipt-owned operation.
+- RPF build-flow programs use a separate versioned JSON document bound to a package
+  graph. The only valid wire is an output artifact into a compatible typed input; every
+  non-source node has at most one input, cycles are blocked, and incomplete configuration
+  remains visible but cannot plan or run. Programs support branching external-authoring
+  pipelines, preflight all primary and sidecar outputs, block path collisions and any
+  output under a configured GTA root, and recheck both program and package-graph hashes
+  after execution. The CLI/API surface includes `create-rpf-program`, inspect/add/
+  configure/connect/disconnect/position/layout/remove operations, `plan-rpf-program`,
+  and acknowledgement-gated `run-rpf-program`.
 - Bounded OIV `createIfNotExist` containers are translated into retained loose
   `.rpf.source` workspaces and passed through that same builder. Safe top-level
   archives and new archives one level inside an existing RPF become validated,

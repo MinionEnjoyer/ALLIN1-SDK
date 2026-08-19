@@ -722,6 +722,10 @@ class RpfExplorerDialog(ttk.Frame):
             label="Verify full archive integrity…",
             command=self._verify_archive_integrity, state="disabled",
         )
+        menu.add_command(
+            label="Build verified defragmented copy…",
+            command=self._defragment_archive_copy, state="disabled",
+        )
         menu.add_separator()
         menu.add_command(
             label="Build/update global RPF catalog…", command=self._build_catalog,
@@ -822,6 +826,7 @@ class RpfExplorerDialog(ttk.Frame):
             menu.entryconfigure("Extract current archive tree…", state=state)
             menu.entryconfigure("Compare with archive…", state=state)
             menu.entryconfigure("Verify full archive integrity…", state=state)
+            menu.entryconfigure("Build verified defragmented copy…", state=state)
             menu.entryconfigure("Create multi-entry plan…", state=state)
             menu.entryconfigure("Plan new directory…", state=state)
             menu.entryconfigure("Plan subtree workspace sync…", state=state)
@@ -1585,6 +1590,52 @@ class RpfExplorerDialog(ttk.Frame):
             completed,
             lambda exc: messagebox.showerror(
                 "RPF integrity verification failed", str(exc), parent=self,
+            ),
+        )
+
+    def _defragment_archive_copy(self) -> None:
+        if self.index is None or self.service is None:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Build external verified defragmented RPF copy",
+            initialfile=f"{self.index.source.stem}-defragmented.rpf",
+            defaultextension=".rpf",
+            filetypes=(("Rockstar archive", "*.rpf"),),
+        )
+        if not output:
+            return
+        destination = Path(output).resolve()
+        report = destination.with_name(f"{destination.name}.defragment.json")
+        self.status.set("Compacting an external copy and verifying every recursive leaf…")
+
+        def completed(result) -> None:
+            archive, report_path, evidence = result
+            summary = evidence["summary"]
+            self.status.set(
+                f"Verified defragmented copy · {summary['bytes_saved']:,} bytes saved · "
+                f"{summary['leaf_payloads_verified']:,} exact leaves"
+            )
+            self._show_text(json.dumps(evidence, indent=2))
+            messagebox.showinfo(
+                "Verified RPF copy complete",
+                f"Archive: {archive}\nReport: {report_path}\n\n"
+                f"Saved: {summary['bytes_saved']:,} bytes\n"
+                f"Exact leaf payloads: {summary['leaf_payloads_verified']:,}\n\n"
+                "The opened source archive was not changed.",
+                parent=self,
+            )
+
+        RpfProgressDialog(
+            self, "Building verified defragmented RPF copy",
+            lambda _progress: self.service.defragment_verified_copy(
+                self.index, destination, report,
+            ),
+            completed,
+            lambda exc: (
+                self.status.set("RPF defragmentation was refused or failed safely."),
+                messagebox.showerror(
+                    "RPF defragmentation failed", str(exc), parent=self,
+                ),
             ),
         )
 

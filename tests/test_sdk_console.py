@@ -18,13 +18,18 @@ def test_command_catalog_combines_cli_and_console_builtins():
     assert "import-rpf-graph" in catalog
     assert "plan-rpf-graph-origin" in catalog
     assert "reparent-rpf-graph-node" in catalog
+    assert "create-rpf-program" in catalog
+    assert "connect-rpf-program-nodes" in catalog
+    assert "run-rpf-program" in catalog
+    assert "defragment-rpf" in catalog
 
 
 def test_progressive_command_option_and_alias_suggestions(tmp_path):
     commands = suggestions_for("ins", cwd=tmp_path)
     assert [item.replacement for item in commands] == [
         "inspect-binary-workspace ", "inspect-package-rpfs ",
-        "inspect-rpf ", "inspect-rpf-graph ", "install-package ",
+        "inspect-rpf ", "inspect-rpf-graph ", "inspect-rpf-program ",
+        "install-package ",
     ]
 
     options = suggestions_for("inspect-rpf --g", cwd=tmp_path)

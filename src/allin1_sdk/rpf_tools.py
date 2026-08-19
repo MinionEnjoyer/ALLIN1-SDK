@@ -34,6 +34,7 @@ RPF_MULTI_TRANSACTION_RECEIPT_SCHEMA = 2
 _GTA_PROCESS_NAMES = {"gta5.exe", "gta5_enhanced.exe"}
 _COPY_MARGIN_BYTES = 64 * 1024 * 1024
 _MAX_CANARY_ARCHIVE_BYTES = 512 * 1024 * 1024
+_MAX_DEFRAGMENT_ARCHIVE_BYTES = 32 * 1024 * 1024 * 1024
 _MAX_NESTED_WRITE_DEPTH = 8
 _MAX_SUBTREE_FILES = 25_000
 _MAX_SUBTREE_LOGICAL_BYTES = 16 * 1024 * 1024 * 1024
@@ -1426,6 +1427,251 @@ class RpfExplorerService:
         }
         _write_json_atomic(output, report)
         return output, report
+
+    def defragment_verified_copy(
+        self, index: RpfIndex, destination: str | Path, report_path: str | Path,
+    ) -> tuple[Path, Path, dict[str, Any]]:
+        """Recursively compact a new external copy and prove leaf fidelity."""
+        self._require_tool()
+        source = index.source.resolve()
+        if not source.is_file() or source.suffix.casefold() != ".rpf":
+            raise ValueError("RPF defragmentation requires a loose source archive")
+        if source.stat().st_size != index.archive_size:
+            raise ValueError("RPF source changed after indexing; index it again")
+        if index.archive_size > _MAX_DEFRAGMENT_ARCHIVE_BYTES:
+            raise ValueError(
+                f"RPF defragmentation is limited to "
+                f"{_MAX_DEFRAGMENT_ARCHIVE_BYTES:,} bytes"
+            )
+        authored_output = Path(destination).expanduser()
+        authored_report = Path(report_path).expanduser()
+        if authored_output.is_symlink() or authored_report.is_symlink():
+            raise ValueError("RPF defragmentation outputs cannot be symbolic links")
+        output = authored_output.resolve()
+        report_output = authored_report.resolve()
+        if output.suffix.casefold() != ".rpf":
+            raise ValueError("Defragmented archive output must use the .rpf extension")
+        if report_output.suffix.casefold() != ".json":
+            raise ValueError("Defragmentation report must use the .json extension")
+        if output == source or report_output in {source, output}:
+            raise ValueError("Defragmentation output and report must use new paths")
+        if output.exists() or output.is_symlink():
+            raise ValueError(f"Defragmented archive output already exists: {output}")
+        if report_output.exists() or report_output.is_symlink():
+            raise ValueError(f"Defragmentation report already exists: {report_output}")
+        if output.is_relative_to(self.gta_path) or report_output.is_relative_to(
+            self.gta_path
+        ):
+            raise ValueError(
+                "Verified defragmentation writes only outside the GTA V installation; "
+                "install or replace the reviewed copy through a separate guarded workflow"
+            )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        report_output.parent.mkdir(parents=True, exist_ok=True)
+        required_space = index.archive_size + _COPY_MARGIN_BYTES
+        if shutil.disk_usage(output.parent).free < required_space:
+            raise ValueError("Not enough free space for a verified RPF defragmented copy")
+
+        current_index = self.index(source)
+        if (
+            current_index.source != source
+            or current_index.edition.casefold() != index.edition.casefold()
+            or current_index.archive_size != index.archive_size
+            or current_index.archives != index.archives
+            or current_index.entries != index.entries
+        ):
+            raise ValueError(
+                "RPF source index changed before defragmentation; index it again"
+            )
+        index = current_index
+        source_sha256 = _sha256_file(source)
+        source_leaves = tuple(
+            entry for entry in index.entries
+            if entry.kind not in {"directory", "archive"}
+        )
+        source_fingerprints = self.entry_content_fingerprints(index, source_leaves)
+        temporary = Path(tempfile.mkdtemp(
+            prefix=f".{output.stem}.allin1-defrag-", dir=output.parent,
+        )).resolve()
+        staged_output = temporary / output.name
+        helper_report_path = temporary / "helper-report.json"
+        published = False
+        try:
+            completed = run_hidden(
+                [
+                    self.patcher, "defragment-copy", self.gta_path, source,
+                    staged_output, helper_report_path,
+                ],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            if completed.returncode or not staged_output.is_file() or not (
+                helper_report_path.is_file()
+            ):
+                detail = (
+                    completed.stderr or completed.stdout or "unknown helper error"
+                ).strip()
+                raise ValueError(f"RPF defragmentation failed: {detail}")
+            helper = _read_json_object(
+                helper_report_path, "RPF defragmentation helper report",
+            )
+            staged_sha256 = _sha256_file(staged_output)
+            if (
+                helper.get("schema_version") != 1
+                or helper.get("operation") != "rpf_defragment_copy"
+                or Path(str(helper.get("source", ""))).resolve() != source
+                or Path(str(helper.get("output", ""))).resolve() != staged_output
+                or helper.get("source_sha256") != source_sha256
+                or helper.get("output_sha256") != staged_sha256
+                or helper.get("source_size") != index.archive_size
+                or helper.get("output_size") != staged_output.stat().st_size
+                or helper.get("predicted_output_size") != staged_output.stat().st_size
+                or helper.get("source_unchanged") is not True
+                or helper.get("recursive") is not True
+            ):
+                raise ValueError("RPF defragmentation helper report failed binding checks")
+            if staged_output.stat().st_size > index.archive_size:
+                raise ValueError("Defragmented RPF is larger than its source")
+
+            compacted = self.index(staged_output)
+            before_entries = {
+                (entry.archive_path.casefold(), entry.path.casefold()): entry
+                for entry in index.entries
+            }
+            after_entries = {
+                (entry.archive_path.casefold(), entry.path.casefold()): entry
+                for entry in compacted.entries
+            }
+            if before_entries.keys() != after_entries.keys():
+                raise ValueError("Defragmented RPF changed the recursive entry tree")
+            preserved_fields = (
+                "archive_path", "path", "name", "kind", "name_hash",
+                "short_name_hash", "encrypted", "compressed", "resource_version",
+                "system_size", "graphics_size", "system_flags", "graphics_flags",
+                "child_count",
+            )
+            for identity, before in before_entries.items():
+                after = after_entries[identity]
+                changed = [
+                    field_name for field_name in preserved_fields
+                    if getattr(before, field_name) != getattr(after, field_name)
+                ]
+                if before.kind != "archive" and before.size != after.size:
+                    changed.append("size")
+                if changed:
+                    raise ValueError(
+                        "Defragmented RPF changed entry metadata "
+                        f"{before.virtual_name}: {', '.join(changed)}"
+                    )
+
+            before_archives = {
+                item.path.casefold(): item for item in index.archives
+            }
+            after_archives = {
+                item.path.casefold(): item for item in compacted.archives
+            }
+            if before_archives.keys() != after_archives.keys():
+                raise ValueError("Defragmented RPF changed the nested archive tree")
+            for identity, before in before_archives.items():
+                after = after_archives[identity]
+                if (
+                    before.path != after.path or before.version != after.version
+                    or before.encryption != after.encryption
+                    or before.entry_count != after.entry_count
+                    or (identity and before.name != after.name)
+                ):
+                    raise ValueError(
+                        f"Defragmented RPF changed archive metadata: {before.path or 'root'}"
+                    )
+                if after.size > before.size:
+                    raise ValueError(
+                        f"Defragmented nested archive grew: {before.path or 'root'}"
+                    )
+
+            compacted_leaves = tuple(
+                entry for entry in compacted.entries
+                if entry.kind not in {"directory", "archive"}
+            )
+            compacted_fingerprints = self.entry_content_fingerprints(
+                compacted, compacted_leaves,
+            )
+            if source_fingerprints.keys() != compacted_fingerprints.keys():
+                raise ValueError("Defragmented RPF omitted one or more leaf payloads")
+            for entry_id, before in source_fingerprints.items():
+                after = compacted_fingerprints[entry_id]
+                if (
+                    before["raw_sha256"] != after["raw_sha256"]
+                    or before["canonical_sha256"] != after["canonical_sha256"]
+                    or before["logical_size"] != after["logical_size"]
+                ):
+                    raise ValueError(
+                        f"Defragmented RPF changed leaf payload bytes: {entry_id}"
+                    )
+            if _sha256_file(source) != source_sha256:
+                raise RuntimeError("RPF source changed during verified defragmentation")
+            if _sha256_file(staged_output) != staged_sha256:
+                raise RuntimeError("Defragmented RPF changed during verification")
+
+            if output.exists() or report_output.exists():
+                raise FileExistsError(
+                    "Defragmentation destination appeared during verification"
+                )
+            staged_output.rename(output)
+            published = True
+            bytes_saved = index.archive_size - output.stat().st_size
+            report: dict[str, Any] = {
+                "schema_version": 1,
+                "operation": "rpf_verified_defragment_copy",
+                "status": "verified",
+                "created_utc": datetime.now(timezone.utc).isoformat(),
+                "source": {
+                    "path": str(source), "edition": index.edition,
+                    "size": index.archive_size, "sha256": source_sha256,
+                },
+                "output": {
+                    "path": str(output), "edition": compacted.edition,
+                    "size": output.stat().st_size, "sha256": staged_sha256,
+                },
+                "summary": {
+                    "archives": len(index.archives),
+                    "directories": sum(
+                        entry.kind == "directory" for entry in index.entries
+                    ),
+                    "entries": len(index.entries),
+                    "leaf_payloads_verified": len(source_fingerprints),
+                    "bytes_saved": bytes_saved,
+                    "space_reduction_percent": round(
+                        (bytes_saved / index.archive_size * 100.0)
+                        if index.archive_size else 0.0, 4,
+                    ),
+                },
+                "helper": helper,
+                "verification": {
+                    "source_unchanged": True,
+                    "recursive_tree_exact": True,
+                    "archive_metadata_preserved": True,
+                    "entry_metadata_preserved": True,
+                    "leaf_payloads_raw_exact": True,
+                    "leaf_payloads_canonical_exact": True,
+                    "output_rescanned": True,
+                    "writes_to_source": False,
+                    "writes_inside_gta_installation": False,
+                },
+            }
+            try:
+                _write_json_atomic(report_output, report)
+            except Exception:
+                if output.is_file():
+                    output.unlink()
+                published = False
+                raise
+            return output, report_output, report
+        except Exception:
+            if published and output.is_file() and not report_output.is_file():
+                output.unlink()
+            raise
+        finally:
+            if temporary.is_dir() and temporary.parent == output.parent:
+                shutil.rmtree(temporary)
 
     @staticmethod
     def export_diff(
