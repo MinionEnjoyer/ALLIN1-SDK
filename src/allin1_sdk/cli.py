@@ -26,6 +26,7 @@ from allin1_sdk.processes import run_hidden
 from allin1_sdk.rage_data_compiler import RageVehicleDataCompiler
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_catalog import RpfCatalogService
+from allin1_sdk.rpf_change_set import CHANGE_ACTIONS, RpfChangeSet
 from allin1_sdk.rpf_graph import RpfPackageGraph
 from allin1_sdk.rpf_program import NODE_SPECS, PROGRAM_TEMPLATES, RpfPackageProgram
 from allin1_sdk.rpf_tools import RpfExplorerService, _running_gta_processes
@@ -1086,6 +1087,129 @@ def run_rpf_program(
     click.echo("Stock/game archives unchanged")
 
 
+@main.command("create-rpf-change-set")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(dir_okay=False, path_type=Path))
+def create_rpf_change_set(
+    archive: Path, gta_path: Path | None, output: Path,
+) -> None:
+    """Create an inert source-bound workspace for staged atomic RPF changes."""
+    service = _rpf_service(gta_path)
+    try:
+        change_set = RpfChangeSet.create(service.index(archive), output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Created empty RPF change set: {change_set}")
+    click.echo("Source archive unchanged; stage and review actions before compiling a plan")
+
+
+@main.command("inspect-rpf-change-set")
+@click.argument("change_set", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--verify-files", is_flag=True, help="Hash the archive and staged payloads.")
+@click.option("--output", "-o", type=click.Path(dir_okay=False, path_type=Path))
+def inspect_rpf_change_set(
+    change_set: Path, verify_files: bool, output: Path | None,
+) -> None:
+    """Inspect staged actions and optional source/payload verification."""
+    try:
+        report = RpfChangeSet.describe(change_set, verify_files=verify_files)
+        rendered = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+        if output is None:
+            click.echo(rendered, nl=False)
+        else:
+            destination = output.resolve()
+            if destination.exists() or destination.is_symlink():
+                raise FileExistsError(f"RPF change-set report already exists: {destination}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(rendered, encoding="utf-8")
+            click.echo(f"Wrote RPF change-set inspection: {destination}")
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@main.command("stage-rpf-change")
+@click.argument("change_set", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("action", type=click.Choice(sorted(CHANGE_ACTIONS)))
+@click.argument("entry")
+@click.option("--archive-path", default="", help="Nested RPF path using ! separators.")
+@click.option("--payload", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--new-entry", help="Destination path for a rename action.")
+@click.option("--acknowledge-edit", is_flag=True)
+def stage_rpf_change(
+    change_set: Path, action: str, entry: str, archive_path: str,
+    payload: Path | None, new_entry: str | None, acknowledge_edit: bool,
+) -> None:
+    """Stage one inert action in a persistent RPF change-set workspace."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        action_id = RpfChangeSet.stage(
+            change_set, action, entry, archive_path=archive_path,
+            payload=payload, new_entry=new_entry,
+        )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Staged RPF change-set action: {action_id} ({action})")
+
+
+@main.command("unstage-rpf-change")
+@click.argument("change_set", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("action_id")
+@click.option("--acknowledge-edit", is_flag=True)
+def unstage_rpf_change(
+    change_set: Path, action_id: str, acknowledge_edit: bool,
+) -> None:
+    """Remove one inert action without changing its archive or payload."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        RpfChangeSet.remove(change_set, action_id)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Removed staged RPF action: {action_id}; archive unchanged")
+
+
+@main.command("move-rpf-change")
+@click.argument("change_set", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("action_id")
+@click.argument("position", type=click.IntRange(min=1))
+@click.option("--acknowledge-edit", is_flag=True)
+def move_rpf_change(
+    change_set: Path, action_id: str, position: int, acknowledge_edit: bool,
+) -> None:
+    """Move one staged action to a one-based review position."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        RpfChangeSet.move(change_set, action_id, position)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Moved staged RPF action {action_id} to position {position}")
+
+
+@main.command("plan-rpf-change-set")
+@click.argument("change_set", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--workspace-root", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Explicitly authorize one external authoring root for this plan.",
+)
+@click.option("--output", "-o", required=True, type=click.Path(dir_okay=False, path_type=Path))
+def plan_rpf_change_set(
+    change_set: Path, gta_path: Path | None, workspace_root: Path | None,
+    output: Path,
+) -> None:
+    """Compile a verified change set into the normal guarded atomic RPF plan."""
+    service = _rpf_service(gta_path, workspace_root)
+    try:
+        plan_path, plan = RpfChangeSet.compile_plan(change_set, service, output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Compiled {len(plan['changes'])} staged action(s) into "
+        f"{plan['status']} atomic plan: {plan_path}"
+    )
+    click.echo("Archive unchanged; application remains a separate reviewed transaction")
+
+
 @main.command("extract-rpf-entry")
 @click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("entry_path")
@@ -2082,6 +2206,8 @@ for _command in (
     disconnect_rpf_program_node, position_rpf_program_node,
     layout_rpf_program, remove_rpf_program_node, plan_rpf_program,
     run_rpf_program,
+    create_rpf_change_set, inspect_rpf_change_set, stage_rpf_change,
+    unstage_rpf_change, move_rpf_change, plan_rpf_change_set,
     verify_rpf_archive, defragment_rpf,
     extract_rpf_entry,
     extract_rpf_subtree, export_rpf_native_workspace,

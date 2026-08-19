@@ -24,6 +24,7 @@ from allin1_sdk.native_assets import (
 from allin1_sdk.paths import user_data_root
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_catalog import RpfCatalogResult, RpfCatalogService
+from allin1_sdk.rpf_change_set_ui import RpfChangeSetFrame
 from allin1_sdk.rpf_graph import RpfPackageGraph
 from allin1_sdk.rpf_graph_ui import RpfPackageGraphDialog
 from allin1_sdk.rpf_tools import RpfEntryRecord, RpfExplorerService, RpfIndex
@@ -629,7 +630,14 @@ class RpfExplorerDialog(ttk.Frame):
         self.kind.trace_add("write", lambda *_: self._populate())
         self.suffix.trace_add("write", lambda *_: self._populate())
 
-        panes = ttk.Panedwindow(outer, orient="horizontal")
+        self.workspace_tabs = ttk.Notebook(outer)
+        self.workspace_tabs.pack(fill="both", expand=True)
+        browser_tab = ttk.Frame(self.workspace_tabs)
+        changes_tab = ttk.Frame(self.workspace_tabs)
+        self.workspace_tabs.add(browser_tab, text="Archive Browser")
+        self.workspace_tabs.add(changes_tab, text="Visual Change Set")
+
+        panes = ttk.Panedwindow(browser_tab, orient="horizontal")
         panes.pack(fill="both", expand=True)
         browser = ttk.LabelFrame(panes, text="Archive tree", padding=8)
         preview = ttk.LabelFrame(panes, text="Entry inspector", padding=10)
@@ -684,6 +692,13 @@ class RpfExplorerDialog(ttk.Frame):
             background="#ffffff", foreground="#1e2925",
             font=("Cascadia Mono", 9), padx=10, pady=10, state="disabled",
         )
+        self.change_set_frame = RpfChangeSetFrame(
+            changes_tab,
+            get_index=lambda: self.index,
+            get_service=lambda: self.service,
+            get_selected=self._selected,
+        )
+        self.change_set_frame.pack(fill="both", expand=True)
 
     def _file_menu(self, parent: tk.Misc) -> tk.Menu:
         menu = tk.Menu(parent, tearoff=False)
@@ -1083,6 +1098,7 @@ class RpfExplorerDialog(ttk.Frame):
             return
         self.service = service
         self.index = index
+        self.change_set_frame.archive_changed()
         suffixes = tuple(index.suffix_counts())
         self.suffix_combo.configure(values=("All",) + suffixes)
         self.suffix.set("All")

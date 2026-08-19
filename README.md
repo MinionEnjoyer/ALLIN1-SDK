@@ -102,6 +102,12 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   RSC7 headers plus decompressed resource bytes so compressor-level changes do not hide
   real edits or create noisy false positives; desktop, `diff-rpf --logical-content`, and
   the Agent API emit the same JSON and Markdown evidence.
+- **Visual atomic RPF change sets** — stage replace, add, delete, directory create/
+  remove, and same-parent rename actions in an embedded Explorer workspace. Change-set
+  JSON binds the source archive and every payload by size and SHA-256, supports review
+  ordering, and compiles into the existing guarded multi-entry plan without writing the
+  archive. Create/inspect/stage/unstage/move/plan commands are mirrored by the SDK
+  Console and Agent API; application still requires the separate receipt-owned writer.
 - **Real-archive canary** — copy a genuine Legacy or Enhanced RPF outside the game,
   exercise real replace/add/delete writes, verify each exact entry, roll everything
   back, and prove the final archive SHA-256 matches the untouched source.
@@ -349,6 +355,11 @@ service used by the launcher.
   after execution. The CLI/API surface includes reusable template discovery,
   `create-rpf-program`, inspect/add/configure/connect/disconnect/position/layout/remove
   operations, `plan-rpf-program`, and acknowledgement-gated `run-rpf-program`.
+- RPF visual change sets are inert, versioned documents bound to one archive hash and
+  edition. Payload actions retain absolute path, size, and SHA-256 evidence; documents
+  and files are rechecked after plan compilation. They only emit the normal atomic plan,
+  so game writes, closed-process enforcement, snapshots, post-write verification,
+  receipts, recovery, and rollback remain centralized in the guarded transaction layer.
 - Bounded OIV `createIfNotExist` containers are translated into retained loose
   `.rpf.source` workspaces and passed through that same builder. Safe top-level
   archives and new archives one level inside an existing RPF become validated,

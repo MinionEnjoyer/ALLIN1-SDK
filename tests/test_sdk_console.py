@@ -29,7 +29,8 @@ def test_progressive_command_option_and_alias_suggestions(tmp_path):
     commands = suggestions_for("ins", cwd=tmp_path)
     assert [item.replacement for item in commands] == [
         "inspect-binary-workspace ", "inspect-package-rpfs ",
-        "inspect-rpf ", "inspect-rpf-graph ", "inspect-rpf-program ",
+        "inspect-rpf ", "inspect-rpf-change-set ", "inspect-rpf-graph ",
+        "inspect-rpf-program ",
         "install-package ",
     ]
 
