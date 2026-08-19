@@ -1989,6 +1989,45 @@ def test_native_asset_helper_renders_bounded_model_geometry(tmp_path, monkeypatc
     assert report.metadata["model_preview"] == "isometric geometry diagnostic"
 
 
+def test_native_asset_helper_renders_collision_geometry(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    patcher = project / "tools" / "RpfPatcher" / "RpfPatcher.exe"
+    patcher.parent.mkdir(parents=True)
+    patcher.write_bytes(b"exe")
+    collision_xml = """<?xml version="1.0"?>
+<BoundsFile><Bounds type="Composite"><Children><Item type="GeometryBVH">
+ <GeometryCenter x="100" y="200" z="5" />
+ <Materials><Item><Type value="27" /></Item></Materials>
+ <Vertices>
+0, 0, 0
+1, 0, 0
+1, 1, 0
+0, 1, 0
+0.5, 0.5, 1
+ </Vertices>
+ <Polygons>
+  <Triangle m="0" v1="0" v2="1" v3="4" f1="0" f2="0" f3="0" />
+  <Box m="0" v1="0" v2="1" v3="2" v4="4" />
+ </Polygons>
+</Item></Children></Bounds></BoundsFile>"""
+
+    def convert(args, **_kwargs):
+        Path(args[3]).write_text(collision_xml, encoding="utf-8")
+        Path(args[4]).mkdir(parents=True)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(native_assets, "run_hidden", convert)
+    report = NativeAssetInspector(project).inspect_bytes("collision.ybn", b"RSC8" + b"\0" * 32)
+    assert report.image_png.startswith(b"\x89PNG")
+    assert report.metadata["collision_geometry_count"] == 1
+    assert report.metadata["collision_vertex_count"] == 5
+    assert report.metadata["collision_polygon_count"] == 2
+    assert report.metadata["collision_material_count"] == 1
+    assert report.metadata["collision_primitives"] == "Box: 1, Triangle: 1"
+    assert report.metadata["collision_render_triangles"] == 5
+    assert report.metadata["collision_preview"] == "isometric geometry diagnostic"
+
+
 def test_native_model_preview_rejects_dtd_and_bad_indices(tmp_path):
     dtd = tmp_path / "unsafe.ydr.xml"
     dtd.write_text(

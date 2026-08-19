@@ -48,6 +48,7 @@ MAX_NATIVE_WORKSPACE_FILES = 10_000
 MAX_NATIVE_WORKSPACE_BYTES = 2 * 1024 * 1024 * 1024
 NATIVE_WORKSPACE_SCHEMA = 1
 MODEL_PREVIEW_SUFFIXES = frozenset({".ydr", ".ydd", ".yft"})
+COLLISION_PREVIEW_SUFFIXES = frozenset({".ybn"})
 MAX_MODEL_XML_BYTES = 192 * 1024 * 1024
 MAX_MODEL_VERTICES = 1_000_000
 MAX_MODEL_TRIANGLES = 1_000_000
@@ -338,7 +339,8 @@ def _project_model_point(
 
 
 def _render_model_wireframe(
-    geometries: list[_ModelGeometry], name: str,
+    geometries: list[_ModelGeometry], name: str, *,
+    title: str = "MODEL PREVIEW", geometry_label: str = "geometries",
 ) -> tuple[bytes, dict[str, Any]]:
     vertices = [point for geometry in geometries for point in geometry.vertices]
     minima = tuple(min(point[axis] for point in vertices) for axis in range(3))
@@ -413,11 +415,11 @@ def _render_model_wireframe(
             for point in points[::max(1, len(points) // 12_000)]:
                 x, y, _depth = point
                 draw.ellipse((x - 1, y - 1, x + 1, y + 1), fill="#5bd995")
-    draw.text((38, 24), f"MODEL PREVIEW  |  {name[:72]}", fill="#E8F2EC")
+    draw.text((38, 24), f"{title}  |  {name[:72]}", fill="#E8F2EC")
     draw.text(
         (38, height - 32),
         f"{len(vertices):,} vertices  |  {total_triangles:,} triangles  |  "
-        f"{len(geometries):,} geometries  |  isometric diagnostic view",
+        f"{len(geometries):,} {geometry_label}  |  isometric diagnostic view",
         fill="#AFC5B9",
     )
     output = io.BytesIO()
@@ -437,25 +439,30 @@ def _render_model_wireframe(
     }
 
 
+def _safe_codewalker_xml(xml: Path) -> etree._ElementTree:
+    size = xml.stat().st_size
+    if not 0 < size <= MAX_MODEL_XML_BYTES:
+        raise ValueError("CodeWalker XML exceeds the guarded preview limit")
+    with xml.open("rb") as stream:
+        prefix = stream.read(65_536).upper()
+    if b"<!DOCTYPE" in prefix or b"<!ENTITY" in prefix:
+        raise ValueError("CodeWalker XML contains a prohibited DTD or entity declaration")
+    parser = etree.XMLParser(
+        resolve_entities=False, no_network=True, load_dtd=False,
+        recover=False, huge_tree=True,
+    )
+    tree = etree.parse(str(xml), parser)
+    if tree.docinfo.doctype:
+        raise ValueError("CodeWalker XML contains a prohibited document type")
+    return tree
+
+
 def _model_preview_from_xml(
     xml: Path, name: str,
 ) -> tuple[bytes | None, dict[str, Any], str | None]:
     """Build a bounded diagnostic preview from CodeWalker model XML."""
-    size = xml.stat().st_size
-    if not 0 < size <= MAX_MODEL_XML_BYTES:
-        return None, {}, "Model XML exceeds the guarded preview limit"
-    with xml.open("rb") as stream:
-        prefix = stream.read(65_536).upper()
-    if b"<!DOCTYPE" in prefix or b"<!ENTITY" in prefix:
-        return None, {}, "Model XML contains a prohibited DTD or entity declaration"
     try:
-        parser = etree.XMLParser(
-            resolve_entities=False, no_network=True, load_dtd=False,
-            recover=False, huge_tree=True,
-        )
-        tree = etree.parse(str(xml), parser)
-        if tree.docinfo.doctype:
-            raise ValueError("Model XML contains a prohibited document type")
+        tree = _safe_codewalker_xml(xml)
         root = tree.getroot()
         geometries: list[_ModelGeometry] = []
         total_vertices = 0
@@ -485,6 +492,141 @@ def _model_preview_from_xml(
         return image, metadata, None
     except (OSError, ValueError, etree.XMLSyntaxError, OverflowError) as exc:
         return None, {}, f"Model preview unavailable: {exc}"
+
+
+def _vector_attributes(
+    element: etree._Element | None,
+) -> tuple[float, float, float]:
+    if element is None:
+        return 0.0, 0.0, 0.0
+    try:
+        point = tuple(float(element.get(axis, "0")) for axis in ("x", "y", "z"))
+    except ValueError as exc:
+        raise ValueError("Collision geometry center is non-numeric") from exc
+    if not all(math.isfinite(value) for value in point):
+        raise ValueError("Collision geometry center is non-finite")
+    return point[0], point[1], point[2]
+
+
+def _collision_vertices(
+    element: etree._Element, center: tuple[float, float, float],
+) -> tuple[tuple[float, float, float], ...]:
+    vertices: list[tuple[float, float, float]] = []
+    for line in (element.text or "").splitlines():
+        fields = [part.strip() for part in line.split(",")]
+        if not fields or all(not part for part in fields):
+            continue
+        if len(fields) != 3:
+            raise ValueError("Collision vertex row does not contain three coordinates")
+        try:
+            local = tuple(float(value) for value in fields)
+        except ValueError as exc:
+            raise ValueError("Collision vertex contains a non-numeric coordinate") from exc
+        if not all(math.isfinite(value) for value in local):
+            raise ValueError("Collision vertex contains a non-finite coordinate")
+        vertices.append(tuple(local[axis] + center[axis] for axis in range(3)))
+        if len(vertices) > MAX_MODEL_VERTICES:
+            raise ValueError("Collision preview exceeds the guarded vertex limit")
+    return tuple(vertices)
+
+
+def _collision_index(
+    polygon: etree._Element, attribute: str, vertex_count: int,
+) -> int:
+    value = polygon.get(attribute)
+    if value is None:
+        raise ValueError(f"Collision {polygon.tag} is missing {attribute}")
+    try:
+        index = int(value, 10)
+    except ValueError as exc:
+        raise ValueError(f"Collision {polygon.tag} has a non-integer index") from exc
+    if index < 0 or index >= vertex_count:
+        raise ValueError(f"Collision {polygon.tag} references a missing vertex")
+    return index
+
+
+def _collision_preview_from_xml(
+    xml: Path, name: str,
+) -> tuple[bytes | None, dict[str, Any], str | None]:
+    """Render bounded YBN triangle and primitive diagnostics."""
+    try:
+        root = _safe_codewalker_xml(xml).getroot()
+        geometries: list[_ModelGeometry] = []
+        polygon_counts: dict[str, int] = {}
+        skipped_polygons = 0
+        total_vertices = 0
+        total_render_triangles = 0
+        for vertices_element in root.xpath(".//*[local-name()='Vertices']"):
+            owner = vertices_element.getparent()
+            if owner is None:
+                continue
+            polygons = owner.find("./Polygons")
+            if polygons is None:
+                continue
+            center = _vector_attributes(owner.find("./GeometryCenter"))
+            vertices = _collision_vertices(vertices_element, center)
+            if not vertices:
+                continue
+            triangles: list[tuple[int, int, int]] = []
+            for polygon in polygons:
+                if not isinstance(polygon.tag, str):
+                    continue
+                kind = _local_name(polygon)
+                polygon_counts[kind] = polygon_counts.get(kind, 0) + 1
+                if kind == "Triangle":
+                    triangles.append(tuple(
+                        _collision_index(polygon, attribute, len(vertices))
+                        for attribute in ("v1", "v2", "v3")
+                    ))
+                elif kind == "Box":
+                    box = tuple(
+                        _collision_index(polygon, attribute, len(vertices))
+                        for attribute in ("v1", "v2", "v3", "v4")
+                    )
+                    # Four YBN box control vertices describe one oriented primitive.
+                    # A tetrahedral diagnostic hull exposes its placement without
+                    # claiming to be the exact physics-engine surface tessellation.
+                    triangles.extend((
+                        (box[0], box[1], box[2]), (box[0], box[1], box[3]),
+                        (box[0], box[2], box[3]), (box[1], box[2], box[3]),
+                    ))
+                elif kind not in {"Sphere", "Capsule", "Cylinder"}:
+                    skipped_polygons += 1
+            total_vertices += len(vertices)
+            total_render_triangles += len(triangles)
+            if total_vertices > MAX_MODEL_VERTICES:
+                raise ValueError("Collision preview exceeds the guarded vertex limit")
+            if total_render_triangles > MAX_MODEL_TRIANGLES:
+                raise ValueError("Collision preview exceeds the guarded triangle limit")
+            geometries.append(_ModelGeometry(vertices, tuple(triangles), _local_name(owner)))
+        material_count = len(root.xpath(
+            ".//*[local-name()='Materials']/*[local-name()='Item']"
+        ))
+        metadata: dict[str, Any] = {
+            "collision_geometry_count": len(geometries),
+            "collision_vertex_count": total_vertices,
+            "collision_polygon_count": sum(polygon_counts.values()),
+            "collision_material_count": material_count,
+            "collision_primitives": ", ".join(
+                f"{kind}: {count}" for kind, count in sorted(polygon_counts.items())
+            ) or "none",
+        }
+        if skipped_polygons:
+            metadata["collision_skipped_polygons"] = skipped_polygons
+        if not geometries:
+            metadata["collision_preview"] = "No supported collision geometry was found"
+            return None, metadata, None
+        image, rendered = _render_model_wireframe(
+            geometries, name, title="COLLISION PREVIEW", geometry_label="collision groups",
+        )
+        metadata.update({
+            "collision_bounds": rendered["model_bounds"],
+            "collision_render_triangles": rendered["model_triangle_count"],
+            "collision_preview": "isometric geometry diagnostic",
+        })
+        return image, metadata, None
+    except (OSError, ValueError, etree.XMLSyntaxError, OverflowError) as exc:
+        return None, {}, f"Collision preview unavailable: {exc}"
 
 
 class NativeAssetInspector:
@@ -565,13 +707,20 @@ class NativeAssetInspector:
                 )
             xml_size = xml.stat().st_size
             preview_metadata: dict[str, Any] = {}
-            model_image: bytes | None = None
-            if Path(name).suffix.casefold() in MODEL_PREVIEW_SUFFIXES:
-                model_image, preview_metadata, model_warning = _model_preview_from_xml(
+            geometry_image: bytes | None = None
+            suffix = Path(name).suffix.casefold()
+            if suffix in MODEL_PREVIEW_SUFFIXES:
+                geometry_image, preview_metadata, preview_warning = _model_preview_from_xml(
                     xml, Path(name).name,
                 )
-                if model_warning:
-                    preview_metadata["model_preview"] = model_warning
+                if preview_warning:
+                    preview_metadata["model_preview"] = preview_warning
+            elif suffix in COLLISION_PREVIEW_SUFFIXES:
+                geometry_image, preview_metadata, preview_warning = _collision_preview_from_xml(
+                    xml, Path(name).name,
+                )
+                if preview_warning:
+                    preview_metadata["collision_preview"] = preview_warning
             with xml.open("r", encoding="utf-8", errors="replace") as stream:
                 text = stream.read(2_000_000)
             if xml_size > 2_000_000:
@@ -581,7 +730,7 @@ class NativeAssetInspector:
                 )
             texture_image, count = _texture_contact_sheet(assets)
             return _ConvertedAsset(
-                text, model_image or texture_image, count,
+                text, geometry_image or texture_image, count,
                 metadata=preview_metadata,
             )
 
