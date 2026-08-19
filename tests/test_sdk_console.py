@@ -14,13 +14,15 @@ def test_command_catalog_combines_cli_and_console_builtins():
     assert catalog["index-rpf"].syntax.startswith("index-rpf <ARCHIVE>")
     assert catalog["help"].syntax == "help [command]"
     assert "clear" in catalog
+    assert "create-rpf-graph" in catalog
+    assert "reparent-rpf-graph-node" in catalog
 
 
 def test_progressive_command_option_and_alias_suggestions(tmp_path):
     commands = suggestions_for("ins", cwd=tmp_path)
     assert [item.replacement for item in commands] == [
         "inspect-binary-workspace ", "inspect-package-rpfs ",
-        "inspect-rpf ", "install-package ",
+        "inspect-rpf ", "inspect-rpf-graph ", "install-package ",
     ]
 
     options = suggestions_for("inspect-rpf --g", cwd=tmp_path)

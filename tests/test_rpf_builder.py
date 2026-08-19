@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import struct
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +14,7 @@ from click.testing import CliRunner
 from allin1_sdk import rpf_builder, rpf_tools
 from allin1_sdk.cli import main
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
+from allin1_sdk.rpf_tools import _content_fingerprint
 
 
 def _encode(entries: dict[str, bytes]) -> bytes:
@@ -93,6 +96,12 @@ def _builder_runner(args, **_kwargs):
     assert args[1] == "build-dlc"
     Path(args[3]).write_bytes(_pack_folder(Path(args[2])))
     return SimpleNamespace(returncode=0, stdout="built", stderr="")
+
+
+def _rsc7(payload: bytes, level: int) -> bytes:
+    compressor = zlib.compressobj(level, zlib.DEFLATED, -zlib.MAX_WBITS)
+    compressed = compressor.compress(payload) + compressor.flush()
+    return b"RSC7" + struct.pack("<III", 162, 0xA0000541, 0x20000000) + compressed
 
 
 def _reader_runner(args, **_kwargs):
@@ -202,6 +211,55 @@ def test_discards_build_when_exact_readback_is_wrong(tmp_path, monkeypatch):
         builder.build(source, output)
     assert not output.exists()
     assert not builder.validation_path(output).exists()
+
+
+def test_accepts_recompressed_resource_only_after_canonical_payload_match(
+    tmp_path, monkeypatch,
+):
+    builder = _service(tmp_path, monkeypatch)
+    source = tmp_path / "source"
+    source.mkdir()
+    logical = (b"resource-payload-" * 100_000) + bytes(range(256))
+    authored = _rsc7(logical, 1)
+    recompressed = _rsc7(logical, 9)
+    assert authored != recompressed
+    (source / "model.yft").write_bytes(authored)
+
+    def recompressing_builder(args, **_kwargs):
+        assert args[1] == "build-dlc"
+        Path(args[3]).write_bytes(_encode({"model.yft": recompressed}))
+        return SimpleNamespace(returncode=0, stdout="built", stderr="")
+
+    monkeypatch.setattr(rpf_builder, "run_hidden", recompressing_builder)
+    archive, report_path = builder.build(source, tmp_path / "resource.rpf")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert _decode(archive)["model.yft"] == recompressed
+    recompressed_file = tmp_path / "recompressed.yft"
+    recompressed_file.write_bytes(recompressed)
+    assert _content_fingerprint(source / "model.yft")["canonical_sha256"] == (
+        _content_fingerprint(recompressed_file)["canonical_sha256"]
+    )
+    assert _content_fingerprint(source / "model.yft")["raw_sha256"] != (
+        _content_fingerprint(recompressed_file)["raw_sha256"]
+    )
+    assert report["summary"]["canonical_resource_payloads"] == 1
+    assert report["summary"]["byte_exact_payloads"] == 0
+
+
+def test_resource_fingerprint_accepts_only_a_valid_adler32_trailer(tmp_path):
+    logical = b"real-resource-content" * 10_000
+    authored = _rsc7(logical, 6)
+    trailer = struct.pack(">I", zlib.adler32(logical) & 0xFFFFFFFF)
+    with_trailer = tmp_path / "valid.yft"
+    with_trailer.write_bytes(authored + trailer)
+    fingerprint = _content_fingerprint(with_trailer)
+    assert fingerprint["mode"] == "rsc7_canonical"
+    assert fingerprint["resource_adler32_trailer"] is True
+
+    invalid = tmp_path / "invalid.yft"
+    invalid.write_bytes(authored + b"nope")
+    with pytest.raises(ValueError, match="Invalid or trailing RSC7"):
+        _content_fingerprint(invalid)
 
 
 def test_build_rpf_tree_cli_and_compatibility_alias(tmp_path, monkeypatch):

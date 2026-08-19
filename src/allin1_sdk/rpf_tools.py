@@ -7,7 +7,9 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import tempfile
+import zlib
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -57,6 +59,56 @@ def _sha256_file(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _content_fingerprint(path: str | Path) -> dict[str, Any]:
+    """Hash raw bytes and canonical logical bytes for recompressible RSC7 resources."""
+    source = Path(path).resolve()
+    raw = hashlib.sha256()
+    canonical = hashlib.sha256()
+    size = source.stat().st_size
+    with source.open("rb") as stream:
+        header = stream.read(16)
+        raw.update(header)
+        if len(header) == 16 and header[:4] == b"RSC7":
+            canonical.update(header)
+            inflater = zlib.decompressobj(-zlib.MAX_WBITS)
+            logical_size = 0
+            adler32 = 1
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                raw.update(block)
+                expanded = inflater.decompress(block)
+                logical_size += len(expanded)
+                canonical.update(expanded)
+                adler32 = zlib.adler32(expanded, adler32)
+            expanded = inflater.flush()
+            logical_size += len(expanded)
+            canonical.update(expanded)
+            adler32 = zlib.adler32(expanded, adler32)
+            trailer = inflater.unused_data
+            if not inflater.eof or (
+                trailer and trailer != struct.pack(">I", adler32 & 0xFFFFFFFF)
+            ):
+                raise ValueError(f"Invalid or trailing RSC7 deflate stream: {source}")
+            return {
+                "mode": "rsc7_canonical", "size": size,
+                "logical_size": logical_size,
+                "raw_sha256": raw.hexdigest(),
+                "canonical_sha256": canonical.hexdigest(),
+                "resource_header_sha256": hashlib.sha256(header).hexdigest(),
+                "resource_adler32_trailer": bool(trailer),
+            }
+        canonical.update(header)
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            raw.update(block)
+            canonical.update(block)
+    return {
+        "mode": "byte_exact", "size": size, "logical_size": size,
+        "raw_sha256": raw.hexdigest(),
+        "canonical_sha256": canonical.hexdigest(),
+        "resource_header_sha256": None,
+        "resource_adler32_trailer": False,
+    }
 
 
 def _is_sha256(value: object) -> bool:
@@ -994,6 +1046,60 @@ class RpfExplorerService:
             raise RuntimeError("RPF changed during exact content extraction")
         return hashes
 
+    def _batch_content_fingerprints(
+        self, index: RpfIndex, entries: Iterable[RpfEntryRecord], *,
+        expected_source_sha256: str,
+    ) -> dict[str, dict[str, Any]]:
+        selected = tuple(entries)
+        if len(selected) > _MAX_SUBTREE_FILES:
+            raise ValueError(
+                f"Exact RPF verification contains {len(selected):,} files; "
+                f"the guarded limit is {_MAX_SUBTREE_FILES:,}"
+            )
+        logical_bytes = sum(entry.size for entry in selected)
+        if logical_bytes > _MAX_SUBTREE_LOGICAL_BYTES:
+            raise ValueError(
+                f"Exact RPF verification requires {logical_bytes:,} logical bytes; "
+                f"the guarded limit is {_MAX_SUBTREE_LOGICAL_BYTES:,}"
+            )
+        if not selected:
+            return {}
+        with tempfile.TemporaryDirectory(prefix="allin1-rpf-fingerprint-") as temporary:
+            root = Path(temporary)
+            if shutil.disk_usage(root).free < logical_bytes + _COPY_MARGIN_BYTES:
+                raise ValueError("Not enough temporary disk space for RPF verification")
+            manifest = root / "entries.tsv"
+            output_root = root / "content"
+            manifest.write_text("".join(
+                f"{entry.archive_path}\t{entry.path}\t{number:08d}.bin\n"
+                for number, entry in enumerate(selected)
+            ), encoding="utf-8")
+            completed = run_hidden(
+                [
+                    self.patcher, "extract-virtual-entries", self.gta_path,
+                    index.source, manifest, output_root,
+                ],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            if completed.returncode:
+                detail = (
+                    completed.stderr or completed.stdout or "unknown helper error"
+                ).strip()
+                raise ValueError(f"RPF fingerprint extraction failed: {detail}")
+            fingerprints: dict[str, dict[str, Any]] = {}
+            for number, entry in enumerate(selected):
+                output = output_root / f"{number:08d}.bin"
+                if not output.is_file():
+                    raise ValueError(
+                        f"RPF verification did not extract the expected entry: {entry.id}"
+                    )
+                fingerprint = _content_fingerprint(output)
+                fingerprint["entry_kind"] = entry.kind
+                fingerprints[entry.id] = fingerprint
+        if _sha256_file(index.source) != expected_source_sha256:
+            raise RuntimeError("RPF changed during content fingerprinting")
+        return fingerprints
+
     def entry_content_hashes(
         self, index: RpfIndex, entries: Iterable[RpfEntryRecord] | None = None,
     ) -> dict[str, str]:
@@ -1008,6 +1114,21 @@ class RpfExplorerService:
         source_sha256 = _sha256_file(index.source)
         return self._batch_content_hashes(
             index, selected, expected_source_sha256=source_sha256,
+        )
+
+    def entry_content_fingerprints(
+        self, index: RpfIndex, entries: Iterable[RpfEntryRecord] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Hash raw and canonical logical content for exact resource-safe verification."""
+        selected = tuple(
+            entry for entry in (entries if entries is not None else index.entries)
+            if entry.kind != "directory"
+        )
+        indexed = {entry.id for entry in index.entries}
+        if any(entry.id not in indexed for entry in selected):
+            raise ValueError("Fingerprint entry does not belong to this RPF index")
+        return self._batch_content_fingerprints(
+            index, selected, expected_source_sha256=_sha256_file(index.source),
         )
 
     def verify_archive_integrity(

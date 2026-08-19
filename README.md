@@ -64,6 +64,14 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   source and hash-chained undo history, add/remove/edit UTF-8 labels, and rebuild only
   after a strict semantic reparse. The rebuilt payload, validation report, outer-archive
   hash, virtual entry, and edition remain bound to an inert reviewed replacement plan.
+- **Visual RPF package graphs** — import an existing loose tree or author one from an
+  empty root on a UE-style dark node canvas. Archive, directory, and source-file cards
+  use input/output ports for validated containment links; cards can be positioned,
+  searched, renamed, reparented, and removed without touching referenced files. The
+  same graph document is fully scriptable through the console and agent API, tracks
+  every source hash, emits nested `.rpf.source` trees, and builds through the exact
+  recursive archive verifier. Validation reports identify every payload as either
+  byte-exact or canonical RSC7 (identical resource header plus decompressed bytes).
 - **Real-archive canary** — copy a genuine Legacy or Enhanced RPF outside the game,
   exercise real replace/add/delete writes, verify each exact entry, roll everything
   back, and prove the final archive SHA-256 matches the untouched source.
@@ -188,6 +196,13 @@ allin1-sdk index-rpf C:\Mods\Example\dlc.rpf --gta-path "D:\Games\GTA V Enhanced
 allin1-sdk catalog-rpfs "D:\Games\GTA V Enhanced\mods" --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Indexes\enhanced.sqlite
 allin1-sdk search-rpf-catalog C:\Mods\Indexes\enhanced.sqlite police --suffix ytd -o C:\Mods\Indexes\police-textures.json
 allin1-sdk build-rpf-tree C:\Mods\Example\dlc.rpf.source --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Build\dlc.rpf
+allin1-sdk create-rpf-graph C:\Mods\Example\dlc.rpf.source --root-name dlc.rpf -o C:\Work\dlc-rpf-graph.json
+allin1-sdk add-rpf-graph-container C:\Work\dlc-rpf-graph.json root x64 --x 380 --y 100 --acknowledge-edit
+allin1-sdk add-rpf-graph-file C:\Work\dlc-rpf-graph.json root C:\Art\readme.txt --name readme.txt --acknowledge-edit
+allin1-sdk reparent-rpf-graph-node C:\Work\dlc-rpf-graph.json f_NODE_ID d_PARENT_ID --acknowledge-edit
+allin1-sdk layout-rpf-graph C:\Work\dlc-rpf-graph.json --acknowledge-edit
+allin1-sdk validate-rpf-graph C:\Work\dlc-rpf-graph.json -o C:\Work\dlc-rpf-graph-validation.json
+allin1-sdk build-rpf-graph C:\Work\dlc-rpf-graph.json --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Build\dlc.rpf
 allin1-sdk export-rpf-native-workspace C:\Mods\Example\dlc.rpf common/data/model.ydr --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\model-workspace
 allin1-sdk plan-rpf-native-workspace C:\Mods\Example\dlc.rpf common/data/model.ydr C:\Work\model-workspace --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\model-plan.json
 allin1-sdk export-rpf-binary-workspace C:\Mods\Example\dlc.rpf common/data/table.bin --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\table-binary
@@ -272,7 +287,16 @@ service used by the launcher.
   builder refuses prebuilt nested RPF payloads, links, authored-name collisions,
   output overwrite, source mutation, and oversized inputs; it recursively indexes
   the completed archive, extracts and hashes every payload, and publishes only after
-  its file, directory, archive, and content trees match the source exactly.
+  its file, directory, archive, and logical-content trees match the source. Ordinary
+  files remain byte-exact; recompressed RSC7 resources must retain the exact header
+  and decompressed bytes. The report records both raw and canonical hashes per entry.
+- RPF package graphs use one versioned JSON document for the canvas, CLI, and agent
+  API. Validation requires one rooted containment tree, one parent per non-root node,
+  no cycles, safe and case-unique sibling names, bounded coordinates, at most eight
+  nested archives, and current size/SHA-256 values for every real source. Reparenting
+  and recursive graph removal never move or delete source files. Materialization uses
+  a new staged folder; graph builds recheck the graph and all sources after the normal
+  exact RPF build, and discard the output if either changed during creation.
 - Bounded OIV `createIfNotExist` containers are translated into retained loose
   `.rpf.source` workspaces and passed through that same builder. Safe top-level
   archives and new archives one level inside an existing RPF become validated,

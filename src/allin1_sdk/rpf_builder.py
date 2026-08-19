@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from allin1_sdk.processes import run_hidden
-from allin1_sdk.rpf_tools import RpfExplorerService
+from allin1_sdk.rpf_tools import RpfExplorerService, _content_fingerprint
 
 
-RPF_BUILD_REPORT_SCHEMA = 1
+RPF_BUILD_REPORT_SCHEMA = 2
 MAX_RPF_BUILD_FILES = 25_000
 MAX_RPF_BUILD_BYTES = 16 * 1024 * 1024 * 1024
 MAX_RPF_BUILD_FILE_BYTES = 512 * 1024 * 1024
@@ -152,30 +152,6 @@ class RpfArchiveBuilder:
         scan(root, Path(), 0)
         return _SourceSnapshot(tuple(rows), file_count, byte_count, archive_count)
 
-    @staticmethod
-    def _source_leaf_hashes(snapshot: _SourceSnapshot) -> dict[str, str]:
-        """Translate loose provenance paths into their recursive RPF entry IDs."""
-        result: dict[str, str] = {}
-        for path, kind, _size, digest in snapshot.rows:
-            if kind != "file":
-                continue
-            archive_path = ""
-            inside: list[str] = []
-            parts = path.split("/")
-            for part in parts[:-1]:
-                if part.casefold().endswith(_NESTED_SOURCE_SUFFIX):
-                    archive_name = part[:-len(".source")]
-                    entry_path = "/".join((*inside, archive_name))
-                    archive_path = (
-                        f"{archive_path}!{entry_path}" if archive_path else entry_path
-                    )
-                    inside = []
-                else:
-                    inside.append(part)
-            entry_path = "/".join((*inside, parts[-1]))
-            result[_entry_id(archive_path, entry_path).casefold()] = digest
-        return result
-
     def _run_builder(self, loose: Path, output: Path) -> None:
         completed = run_hidden(
             [
@@ -190,7 +166,7 @@ class RpfArchiveBuilder:
 
     def _materialize_and_build(
         self, source: Path, loose: Path, output: Path, *, archive_path: str,
-        expected_files: dict[str, str], expected_directories: set[str],
+        expected_files: dict[str, dict[str, Any]], expected_directories: set[str],
         expected_archives: set[str],
     ) -> None:
         loose.mkdir(parents=True)
@@ -213,8 +189,8 @@ class RpfArchiveBuilder:
                 )
                 shutil.rmtree(nested_loose)
                 expected_archives.add(nested_archive_path)
-                expected_files[_entry_id(archive_path, virtual_path)] = _sha256_file(
-                    archive_file
+                expected_files[_entry_id(archive_path, virtual_path)] = (
+                    _content_fingerprint(archive_file)
                 )
                 continue
             if child.is_dir():
@@ -231,12 +207,16 @@ class RpfArchiveBuilder:
                 continue
             destination = loose / child.name
             shutil.copyfile(child, destination)
-            expected_files[_entry_id(archive_path, child.name)] = _sha256_file(destination)
+            if _sha256_file(child) != _sha256_file(destination):
+                raise RuntimeError(f"RPF source copy did not preserve bytes: {child}")
+            expected_files[_entry_id(archive_path, child.name)] = (
+                _content_fingerprint(destination)
+            )
         self._run_builder(loose, output)
 
     def _copy_directory(
         self, source: Path, destination: Path, *, archive_path: str, prefix: str,
-        expected_files: dict[str, str], expected_directories: set[str],
+        expected_files: dict[str, dict[str, Any]], expected_directories: set[str],
         expected_archives: set[str],
     ) -> None:
         for child in sorted(source.iterdir(), key=lambda item: item.name.casefold()):
@@ -258,8 +238,8 @@ class RpfArchiveBuilder:
                 )
                 shutil.rmtree(nested_loose)
                 expected_archives.add(nested_archive_path)
-                expected_files[_entry_id(archive_path, virtual_path)] = _sha256_file(
-                    archive_file
+                expected_files[_entry_id(archive_path, virtual_path)] = (
+                    _content_fingerprint(archive_file)
                 )
             elif child.is_dir():
                 target = destination / child.name
@@ -274,7 +254,11 @@ class RpfArchiveBuilder:
             else:
                 target = destination / child.name
                 shutil.copyfile(child, target)
-                expected_files[_entry_id(archive_path, virtual_path)] = _sha256_file(target)
+                if _sha256_file(child) != _sha256_file(target):
+                    raise RuntimeError(f"RPF source copy did not preserve bytes: {child}")
+                expected_files[_entry_id(archive_path, virtual_path)] = (
+                    _content_fingerprint(target)
+                )
 
     def build(self, source_folder: str | Path, output_rpf: str | Path) -> tuple[Path, Path]:
         """Create, recursively re-read, and atomically publish a brand-new RPF."""
@@ -309,7 +293,7 @@ class RpfArchiveBuilder:
         stage_archive = stage_root / output.name
         stage_report = stage_root / report_path.name
         try:
-            expected_files: dict[str, str] = {}
+            expected_files: dict[str, dict[str, Any]] = {}
             expected_directories: set[str] = set()
             expected_archives = {""}
             self._materialize_and_build(
@@ -318,15 +302,6 @@ class RpfArchiveBuilder:
                 expected_directories=expected_directories,
                 expected_archives=expected_archives,
             )
-            source_leaf_hashes = self._source_leaf_hashes(before)
-            copied_leaf_hashes = {
-                entry_id.casefold(): digest for entry_id, digest in expected_files.items()
-                if entry_id.casefold() in source_leaf_hashes
-            }
-            if copied_leaf_hashes != source_leaf_hashes:
-                raise RuntimeError(
-                    "RPF source changed while it was being staged; output was discarded"
-                )
             after = self._snapshot(source)
             if before != after:
                 raise RuntimeError("RPF source changed during creation; output was discarded")
@@ -347,15 +322,27 @@ class RpfArchiveBuilder:
             }
             if actual_directories != {item.casefold() for item in expected_directories}:
                 raise ValueError("Built RPF directory tree does not match its source")
-            actual_hashes = {
-                entry_id.casefold(): digest
-                for entry_id, digest in self.service.entry_content_hashes(index).items()
+            actual_fingerprints = {
+                entry_id.casefold(): fingerprint
+                for entry_id, fingerprint in self.service.entry_content_fingerprints(
+                    index
+                ).items()
             }
-            expected_hashes = {
-                entry_id.casefold(): digest for entry_id, digest in expected_files.items()
+            expected_fingerprints = {
+                entry_id.casefold(): fingerprint
+                for entry_id, fingerprint in expected_files.items()
             }
-            if actual_hashes != expected_hashes:
+            verification_fields = ("mode", "logical_size", "canonical_sha256")
+            if any(
+                any(actual_fingerprints[entry_id][field] != expected[field]
+                    for field in verification_fields)
+                for entry_id, expected in expected_fingerprints.items()
+            ):
                 raise ValueError("Built RPF payload hashes do not match their source")
+            canonical_resources = sum(
+                fingerprint["mode"] == "rsc7_canonical"
+                for fingerprint in actual_fingerprints.values()
+            )
 
             report: dict[str, Any] = {
                 "schema_version": RPF_BUILD_REPORT_SCHEMA,
@@ -376,8 +363,21 @@ class RpfArchiveBuilder:
                     "archives": len(index.archives),
                     "directories": len(actual_directories),
                     "entries": len(actual_files),
-                    "payloads_exactly_verified": len(actual_hashes),
+                    "payloads_exactly_verified": len(actual_fingerprints),
+                    "byte_exact_payloads": len(actual_fingerprints) - canonical_resources,
+                    "canonical_resource_payloads": canonical_resources,
                 },
+                "payload_verification": [
+                    {
+                        "entry": entry_id,
+                        "mode": fingerprint["mode"],
+                        "raw_size": fingerprint["size"],
+                        "logical_size": fingerprint["logical_size"],
+                        "raw_sha256": fingerprint["raw_sha256"],
+                        "canonical_sha256": fingerprint["canonical_sha256"],
+                    }
+                    for entry_id, fingerprint in sorted(actual_fingerprints.items())
+                ],
                 "source_snapshot": [
                     {"path": row[0], "kind": row[1], "size": row[2], "sha256": row[3]}
                     for row in before.rows
@@ -386,7 +386,8 @@ class RpfArchiveBuilder:
                     "output_was_new": True,
                     "source_unchanged": True,
                     "recursive_index_verified": True,
-                    "exact_payload_hashes_verified": True,
+                    "exact_logical_payload_hashes_verified": True,
+                    "resource_recompression_normalized": canonical_resources,
                     "stock_game_files_modified": False,
                 },
             }

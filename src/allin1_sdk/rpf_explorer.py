@@ -24,6 +24,8 @@ from allin1_sdk.native_assets import (
 from allin1_sdk.paths import user_data_root
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_catalog import RpfCatalogResult, RpfCatalogService
+from allin1_sdk.rpf_graph import RpfPackageGraph
+from allin1_sdk.rpf_graph_ui import RpfPackageGraphDialog
 from allin1_sdk.rpf_tools import RpfEntryRecord, RpfExplorerService, RpfIndex
 from allin1_sdk.help_center import HelpCenterDialog
 
@@ -689,6 +691,15 @@ class RpfExplorerDialog(ttk.Frame):
         menu.add_command(
             label="Build new RPF from folder…", command=self._build_new_archive,
         )
+        graph_menu = tk.Menu(menu, tearoff=False)
+        graph_menu.add_command(
+            label="Create from folder…", command=self._create_rpf_graph_from_folder,
+        )
+        graph_menu.add_command(
+            label="Create empty graph…", command=self._create_empty_rpf_graph,
+        )
+        graph_menu.add_command(label="Open graph…", command=self._open_rpf_graph)
+        menu.add_cascade(label="RPF package node graph", menu=graph_menu)
         menu.add_command(
             label="Open GXT2 text workspace…", command=self._open_gxt2_workspace,
         )
@@ -862,6 +873,89 @@ class RpfExplorerDialog(ttk.Frame):
         )
         if selected:
             self._load_archive(Path(selected))
+
+    def _graph_game_path(self) -> Path | None:
+        authored = self.game_path.get().strip()
+        selected = Path(authored).resolve() if authored else None
+        return selected if selected and selected.is_dir() else None
+
+    def _open_graph_dialog(self, graph: str | Path) -> None:
+        RpfPackageGraphDialog(
+            self, graph, self.project_root, self._graph_game_path(),
+        )
+
+    def _create_rpf_graph_from_folder(self) -> None:
+        source = filedialog.askdirectory(
+            parent=self, title="Select loose RPF source folder",
+        )
+        if not source:
+            return
+        folder = Path(source)
+        inferred = (
+            folder.name[:-len(".source")]
+            if folder.name.casefold().endswith(".rpf.source")
+            else f"{folder.name}.rpf"
+        )
+        root_name = simpledialog.askstring(
+            "Root archive node", "Root archive name:",
+            initialvalue=inferred, parent=self,
+        )
+        if not root_name:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save RPF package graph",
+            initialfile=f"{Path(root_name).stem}-rpf-graph.json",
+            defaultextension=".json", filetypes=(("RPF package graph", "*.json"),),
+        )
+        if not output:
+            return
+        try:
+            graph = RpfPackageGraph.create_from_folder(
+                source, output, root_name=root_name,
+            )
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Could not create RPF graph", str(exc), parent=self)
+            return
+        self.status.set(f"Created validated RPF package graph: {graph}")
+        self._open_graph_dialog(graph)
+
+    def _create_empty_rpf_graph(self) -> None:
+        root_name = simpledialog.askstring(
+            "New RPF package graph", "Root archive name ending in .rpf:",
+            initialvalue="dlc.rpf", parent=self,
+        )
+        if not root_name:
+            return
+        if not root_name.casefold().endswith(".rpf"):
+            root_name += ".rpf"
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save empty RPF package graph",
+            initialfile=f"{Path(root_name).stem}-rpf-graph.json",
+            defaultextension=".json", filetypes=(("RPF package graph", "*.json"),),
+        )
+        if not output:
+            return
+        try:
+            graph = RpfPackageGraph.create_empty(root_name, output)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Could not create RPF graph", str(exc), parent=self)
+            return
+        self.status.set(f"Created empty RPF package graph: {graph}")
+        self._open_graph_dialog(graph)
+
+    def _open_rpf_graph(self) -> None:
+        selected = filedialog.askopenfilename(
+            parent=self, title="Open RPF package node graph",
+            filetypes=(("RPF package graph", "*.json"),),
+        )
+        if not selected:
+            return
+        try:
+            RpfPackageGraph.validate(selected, verify_sources=False)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Invalid RPF package graph", str(exc), parent=self)
+            return
+        self._open_graph_dialog(selected)
 
     def _open_gxt2_workspace(self) -> None:
         selected = filedialog.askdirectory(

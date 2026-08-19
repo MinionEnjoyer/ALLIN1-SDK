@@ -26,6 +26,7 @@ from allin1_sdk.processes import run_hidden
 from allin1_sdk.rage_data_compiler import RageVehicleDataCompiler
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_catalog import RpfCatalogService
+from allin1_sdk.rpf_graph import RpfPackageGraph
 from allin1_sdk.rpf_tools import RpfExplorerService, _running_gta_processes
 from allin1_sdk.texture_workspace import TextureDictionaryWorkspace
 
@@ -523,6 +524,253 @@ def build_rpf_tree(source: Path, gta_path: Path | None, output: Path) -> None:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Built and exactly verified new RPF: {archive}")
     click.echo(f"Validation report: {report}")
+
+
+@main.command("create-rpf-graph")
+@click.argument(
+    "source", required=False,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option("--root-name", default="", help="Root archive name ending in .rpf.")
+@click.option("--output", "-o", required=True, type=click.Path(dir_okay=False, path_type=Path))
+def create_rpf_graph(source: Path | None, root_name: str, output: Path) -> None:
+    """Create an empty or folder-imported visual RPF package graph."""
+    try:
+        if source is None:
+            if not root_name:
+                raise ValueError("An empty RPF graph requires --root-name")
+            graph = RpfPackageGraph.create_empty(root_name, output)
+        else:
+            graph = RpfPackageGraph.create_from_folder(
+                source, output, root_name=root_name,
+            )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Created validated RPF package graph: {graph}")
+
+
+def _write_rpf_graph_report(report: dict, output: Path | None) -> None:
+    rendered = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+    if output is None:
+        click.echo(rendered, nl=False)
+        return
+    destination = output.resolve()
+    if destination.exists() or destination.is_symlink():
+        raise ValueError(f"RPF graph report already exists: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(rendered, encoding="utf-8")
+    click.echo(f"Wrote validated RPF graph report: {destination}")
+
+
+@main.command("inspect-rpf-graph")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--output", "-o", type=click.Path(dir_okay=False, path_type=Path))
+def inspect_rpf_graph(graph: Path, output: Path | None) -> None:
+    """Inspect nodes, edges, source hashes, and summary for one package graph."""
+    try:
+        _write_rpf_graph_report(RpfPackageGraph.describe(graph), output)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@main.command("validate-rpf-graph")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--output", "-o", type=click.Path(dir_okay=False, path_type=Path))
+def validate_rpf_graph(graph: Path, output: Path | None) -> None:
+    """Validate the complete graph tree and every referenced source hash."""
+    try:
+        report = RpfPackageGraph.describe(graph)
+        _write_rpf_graph_report({
+            "schema_version": report["schema_version"],
+            "operation": "rpf_package_graph_validation",
+            "status": report["status"], "graph": report["graph"],
+            "graph_sha256": report["graph_sha256"], "root": report["root"],
+            "summary": report["summary"],
+        }, output)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _require_rpf_graph_edit_acknowledgement(acknowledged: bool) -> None:
+    if not acknowledged:
+        raise click.ClickException(
+            "RPF graph mutations require --acknowledge-edit; referenced source files "
+            "and game archives remain unchanged"
+        )
+
+
+@main.command("add-rpf-graph-container")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("parent_id")
+@click.argument("name")
+@click.option("--archive", is_flag=True, help="Create a nested RPF node.")
+@click.option("--x", default=0.0, type=float, show_default=True)
+@click.option("--y", default=0.0, type=float, show_default=True)
+@click.option("--acknowledge-edit", is_flag=True)
+def add_rpf_graph_container(
+    graph: Path, parent_id: str, name: str, archive: bool,
+    x: float, y: float, acknowledge_edit: bool,
+) -> None:
+    """Add a directory or nested archive below a graph parent node."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        node_id = RpfPackageGraph.add_container(
+            graph, parent_id, name, archive=archive, x=x, y=y,
+        )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Added RPF graph {'archive' if archive else 'directory'} node: {node_id}")
+
+
+@main.command("add-rpf-graph-file")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("parent_id")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--name", default="", help="Authored name inside the RPF.")
+@click.option("--x", default=0.0, type=float, show_default=True)
+@click.option("--y", default=0.0, type=float, show_default=True)
+@click.option("--acknowledge-edit", is_flag=True)
+def add_rpf_graph_file(
+    graph: Path, parent_id: str, source: Path, name: str,
+    x: float, y: float, acknowledge_edit: bool,
+) -> None:
+    """Add a source-hashed file below a graph parent node."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        node_id = RpfPackageGraph.add_file(
+            graph, parent_id, source, name=name, x=x, y=y,
+        )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Added RPF graph file node: {node_id}")
+
+
+@main.command("rename-rpf-graph-node")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("node_id")
+@click.argument("name")
+@click.option("--acknowledge-edit", is_flag=True)
+def rename_rpf_graph_node(
+    graph: Path, node_id: str, name: str, acknowledge_edit: bool,
+) -> None:
+    """Rename one graph node with sibling collision validation."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        RpfPackageGraph.rename_node(graph, node_id, name)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Renamed RPF graph node: {node_id}")
+
+
+@main.command("reparent-rpf-graph-node")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("node_id")
+@click.argument("parent_id")
+@click.option("--acknowledge-edit", is_flag=True)
+def reparent_rpf_graph_node(
+    graph: Path, node_id: str, parent_id: str, acknowledge_edit: bool,
+) -> None:
+    """Reconnect a graph node to a validated archive or directory parent."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        RpfPackageGraph.reparent_node(graph, node_id, parent_id)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Reparented RPF graph node {node_id} under {parent_id}")
+
+
+@main.command("position-rpf-graph-node")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("node_id")
+@click.argument("x", type=float)
+@click.argument("y", type=float)
+@click.option("--acknowledge-edit", is_flag=True)
+def position_rpf_graph_node(
+    graph: Path, node_id: str, x: float, y: float, acknowledge_edit: bool,
+) -> None:
+    """Persist one node's visual canvas position."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        RpfPackageGraph.set_position(graph, node_id, x, y)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Positioned RPF graph node {node_id} at {x}, {y}")
+
+
+@main.command("layout-rpf-graph")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--x-spacing", default=300.0, type=float, show_default=True)
+@click.option("--y-spacing", default=112.0, type=float, show_default=True)
+@click.option("--acknowledge-edit", is_flag=True)
+def layout_rpf_graph(
+    graph: Path, x_spacing: float, y_spacing: float, acknowledge_edit: bool,
+) -> None:
+    """Apply a deterministic readable tree layout to all graph nodes."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        count = RpfPackageGraph.auto_layout(
+            graph, x_spacing=x_spacing, y_spacing=y_spacing,
+        )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Positioned {count} RPF graph node(s) with deterministic tree layout")
+
+
+@main.command("remove-rpf-graph-node")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("node_id")
+@click.option("--acknowledge-edit", is_flag=True)
+def remove_rpf_graph_node(
+    graph: Path, node_id: str, acknowledge_edit: bool,
+) -> None:
+    """Remove a graph node and its descendants without deleting source files."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        removed = RpfPackageGraph.remove_node(graph, node_id)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Removed {len(removed)} RPF graph node(s); source files unchanged")
+
+
+@main.command("refresh-rpf-graph-sources")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--acknowledge-edit", is_flag=True)
+def refresh_rpf_graph_sources(graph: Path, acknowledge_edit: bool) -> None:
+    """Explicitly accept current size/hash values for changed graph sources."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        changed = RpfPackageGraph.refresh_sources(graph)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Refreshed {changed} changed RPF graph source record(s)")
+
+
+@main.command("materialize-rpf-graph")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(file_okay=False, path_type=Path))
+def materialize_rpf_graph(graph: Path, output: Path) -> None:
+    """Create a new provenance-safe loose tree with nested *.rpf.source folders."""
+    try:
+        written = RpfPackageGraph.materialize(graph, output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Materialized verified RPF graph source tree: {written}")
+
+
+@main.command("build-rpf-graph")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(dir_okay=False, path_type=Path))
+def build_rpf_graph(graph: Path, gta_path: Path | None, output: Path) -> None:
+    """Materialize, build, exactly verify, and bind a graph-authored RPF."""
+    try:
+        archive, report = RpfPackageGraph.build(
+            graph, RpfArchiveBuilder(PROJECT_ROOT, _game_path(gta_path)), output,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Built graph-authored and exactly verified RPF: {archive}")
+    click.echo(f"Graph-bound validation report: {report}")
 
 
 @main.command("extract-rpf-entry")
@@ -1467,7 +1715,12 @@ def sdk_compatibility_group() -> None:
 for _command in (
     list_examples, validate, link, import_package, audit_folder, oiv_plan,
     inspect_rpf, dlc_inventory, compile_vehicle_data, index_rpf, catalog_rpfs,
-    search_rpf_catalog, build_rpf_tree, verify_rpf_archive,
+    search_rpf_catalog, build_rpf_tree,
+    create_rpf_graph, inspect_rpf_graph, validate_rpf_graph,
+    add_rpf_graph_container, add_rpf_graph_file, rename_rpf_graph_node,
+    reparent_rpf_graph_node, position_rpf_graph_node, remove_rpf_graph_node,
+    layout_rpf_graph, refresh_rpf_graph_sources, materialize_rpf_graph, build_rpf_graph,
+    verify_rpf_archive,
     extract_rpf_entry,
     extract_rpf_subtree, export_rpf_native_workspace,
     export_rpf_binary_workspace, export_rpf_gxt2_workspace, diff_rpf,

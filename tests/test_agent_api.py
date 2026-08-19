@@ -36,6 +36,16 @@ def test_catalog_is_structured_and_classifies_risk():
     assert catalog["plan-rpf-gxt2-workspace"]["risk"] == "authoring_write"
     assert catalog["list-gxt2-entries"]["risk"] == "read_only"
     assert catalog["set-gxt2-text"]["risk"] == "authoring_write"
+    for command in (
+        "create-rpf-graph", "add-rpf-graph-container", "add-rpf-graph-file",
+        "rename-rpf-graph-node", "reparent-rpf-graph-node",
+        "position-rpf-graph-node", "remove-rpf-graph-node",
+        "layout-rpf-graph",
+        "refresh-rpf-graph-sources", "materialize-rpf-graph", "build-rpf-graph",
+    ):
+        assert catalog[command]["risk"] == "authoring_write"
+    assert catalog["inspect-rpf-graph"]["risk"] == "read_only"
+    assert catalog["validate-rpf-graph"]["risk"] == "read_only"
     assert catalog["inspect-binary-workspace"]["risk"] == "read_only"
     assert catalog["patch-binary-workspace"]["risk"] == "authoring_write"
     assert catalog["verify-rpf-archive"]["risk"] == "authoring_write"
@@ -80,6 +90,36 @@ def test_execute_uses_cli_without_shell_and_audits(tmp_path):
     record = json.loads(audit.read_text(encoding="utf-8").splitlines()[0])
     assert record["request_id"] == "list-1"
     assert record["command"] == "list"
+
+
+def test_agent_api_authors_and_inspects_rpf_node_graph(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "content.bin").write_bytes(b"content")
+    graph = tmp_path / "graph.json"
+    audit = tmp_path / "audit.jsonl"
+    created = execute_request({
+        "id": "graph-create", "action": "execute", "command": "create-rpf-graph",
+        "args": [str(source), "--root-name", "dlc.rpf", "--output", str(graph)],
+    }, audit_path=audit)
+    assert created["ok"] is True and created["risk"] == "authoring_write"
+    refused = execute_request({
+        "id": "graph-refused", "action": "execute",
+        "command": "add-rpf-graph-container",
+        "args": [str(graph), "root", "common"],
+    }, audit_path=audit)
+    assert refused["ok"] is False and "--acknowledge-edit" in refused["result"]["output"]
+    added = execute_request({
+        "id": "graph-add", "action": "execute",
+        "command": "add-rpf-graph-container",
+        "args": [str(graph), "root", "common", "--acknowledge-edit"],
+    }, audit_path=audit)
+    assert added["ok"] is True
+    inspected = execute_request({
+        "id": "graph-inspect", "action": "execute", "command": "inspect-rpf-graph",
+        "args": [str(graph)],
+    }, audit_path=audit)
+    assert inspected["ok"] is True and '"nodes": 3' in inspected["result"]["output"]
 
 
 def test_game_write_requires_process_opt_in_and_command_acknowledgement(tmp_path):
