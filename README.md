@@ -136,7 +136,7 @@ content with large button rows:
 - **Package Intelligence** opens OIV, DLC inventory, vehicle compiler, and structured
   META/XML tools.
 - **The bottom SDK Console dock** keeps the complete CLI available from every
-  workspace. Its Source-style completion list narrows as you type, suggests commands,
+  workspace. Its completion list narrows as you type, suggests commands,
   options, paths, and history, and runs work off the UI thread. Press Ctrl+backtick to focus or expand it,
   `Tab` to accept a completion, arrows to navigate, and `Ctrl+L` to clear output.
 - **Archive / Entry** controls RPF search, metadata, preview, extraction,
