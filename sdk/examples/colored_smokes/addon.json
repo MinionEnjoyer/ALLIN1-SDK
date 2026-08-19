@@ -11,7 +11,7 @@
       "kind": "weapon",
       "label": "Seven custom weapon records",
       "description": "Cloned from WEAPON_SMOKEGRENADE, then assigned independent hashes, wheel slots, ammo pools, labels, and stat keys.",
-      "source": "tools/RpfPatcher/Program.cs",
+      "source": "sdk/examples/colored_smokes/sources/SmokeRpfIntegration.cs",
       "fields": {
         "Name": ["WEAPON_ALLIN1_SMOKE_WHITE", "WEAPON_ALLIN1_SMOKE_RED", "WEAPON_ALLIN1_SMOKE_ORANGE", "WEAPON_ALLIN1_SMOKE_YELLOW", "WEAPON_ALLIN1_SMOKE_GREEN", "WEAPON_ALLIN1_SMOKE_BLUE", "WEAPON_ALLIN1_SMOKE_PURPLE"],
         "Slot": ["SLOT_ALLIN1_SMOKE_WHITE", "SLOT_ALLIN1_SMOKE_RED", "SLOT_ALLIN1_SMOKE_ORANGE", "SLOT_ALLIN1_SMOKE_YELLOW", "SLOT_ALLIN1_SMOKE_GREEN", "SLOT_ALLIN1_SMOKE_BLUE", "SLOT_ALLIN1_SMOKE_PURPLE"],
@@ -26,7 +26,7 @@
       "kind": "ammo",
       "label": "Independent five-round ammo pools",
       "description": "Each color is a native inventory type capped at five. Native smoke deployment is disabled so the runtime layer owns color and timing.",
-      "source": "tools/RpfPatcher/Program.cs",
+      "source": "sdk/examples/colored_smokes/sources/SmokeRpfIntegration.cs",
       "fields": {
         "Name": ["AMMO_ALLIN1_SMOKE_WHITE", "AMMO_ALLIN1_SMOKE_RED", "AMMO_ALLIN1_SMOKE_ORANGE", "AMMO_ALLIN1_SMOKE_YELLOW", "AMMO_ALLIN1_SMOKE_GREEN", "AMMO_ALLIN1_SMOKE_BLUE", "AMMO_ALLIN1_SMOKE_PURPLE"],
         "Model": "w_ex_grenadesmoke",
@@ -42,7 +42,7 @@
       "kind": "animation",
       "label": "Throwable animation mappings",
       "description": "Every custom hash needs the stock smoke mapping in all six animation sets or equipping can produce a T-pose.",
-      "source": "tools/RpfPatcher/Program.cs",
+      "source": "sdk/examples/colored_smokes/sources/SmokeRpfIntegration.cs",
       "fields": {
         "WeaponNames": ["WEAPON_ALLIN1_SMOKE_WHITE", "WEAPON_ALLIN1_SMOKE_RED", "WEAPON_ALLIN1_SMOKE_ORANGE", "WEAPON_ALLIN1_SMOKE_YELLOW", "WEAPON_ALLIN1_SMOKE_GREEN", "WEAPON_ALLIN1_SMOKE_BLUE", "WEAPON_ALLIN1_SMOKE_PURPLE"],
         "Template": "WEAPON_SMOKEGRENADE",
@@ -54,7 +54,7 @@
       "kind": "text_label",
       "label": "Native weapon-wheel labels",
       "description": "The seven GXT keys are merged into the current build's global.gxt2 rather than painted over the HUD by script.",
-      "source": "tools/RpfPatcher/Program.cs",
+      "source": "sdk/examples/colored_smokes/sources/SmokeRpfIntegration.cs",
       "fields": {
         "Labels": {"WT_A1SMWHI": "White Smoke", "WT_A1SMRED": "Red Smoke", "WT_A1SMORA": "Orange Smoke", "WT_A1SMYEL": "Yellow Smoke", "WT_A1SMGRE": "Green Smoke", "WT_A1SMBLU": "Blue Smoke", "WT_A1SMPUR": "Purple Smoke"},
         "Archive": "x64/patch/data/lang/american_rel.rpf",
@@ -66,7 +66,7 @@
       "kind": "hud_alias",
       "label": "BZ Gas weapon-wheel artwork aliases",
       "description": "Scaleform chooses weapon artwork by signed weapon hash. Both BZ Gas HUD timelines receive frame-label aliases for each custom hash; StatName does not control this icon.",
-      "source": "tools/RpfPatcher/Program.cs",
+      "source": "sdk/examples/colored_smokes/sources/SmokeRpfIntegration.cs",
       "fields": {
         "SourceWeaponNames": ["WEAPON_ALLIN1_SMOKE_WHITE", "WEAPON_ALLIN1_SMOKE_RED", "WEAPON_ALLIN1_SMOKE_ORANGE", "WEAPON_ALLIN1_SMOKE_YELLOW", "WEAPON_ALLIN1_SMOKE_GREEN", "WEAPON_ALLIN1_SMOKE_BLUE", "WEAPON_ALLIN1_SMOKE_PURPLE"],
         "FrameTemplate": "INT-1600701090",
@@ -117,28 +117,28 @@
       "id": "archive.weapons",
       "kind": "archive",
       "label": "Base weapon metadata merge",
-      "source": "tools/RpfPatcher/Program.cs",
+      "source": "sdk/examples/colored_smokes/sources/SmokeRpfIntegration.cs",
       "fields": {"Path": "mods/update/update.rpf", "Entry": "common/data/ai/weapons.meta", "MergeStrategy": "Clone current-build WEAPON_SMOKEGRENADE records and append validated definitions.", "Backup": "Exact entry backup plus pre-merge update.rpf snapshot."}
     },
     {
       "id": "archive.animations",
       "kind": "archive",
       "label": "Base animation metadata merge",
-      "source": "tools/RpfPatcher/Program.cs",
+      "source": "sdk/examples/colored_smokes/sources/SmokeRpfIntegration.cs",
       "fields": {"Path": "mods/update/update.rpf", "Entry": "common/data/ai/weaponanimations.meta", "MergeStrategy": "Clone the stock mapping in every compatible set and change only its key.", "Backup": "Exact entry backup plus pre-merge update.rpf snapshot."}
     },
     {
       "id": "archive.language",
       "kind": "archive",
       "label": "Nested language archive merge",
-      "source": "tools/RpfPatcher/Program.cs",
+      "source": "sdk/examples/colored_smokes/sources/SmokeRpfIntegration.cs",
       "fields": {"Path": "mods/update/update.rpf", "Entry": "x64/patch/data/lang/american_rel.rpf/global.gxt2", "MergeStrategy": "Open nested archive under its exact filename and append seven hashed GXT entries.", "Backup": "Exact american_rel.rpf backup plus pre-merge update.rpf snapshot."}
     },
     {
       "id": "archive.hud",
       "kind": "archive",
       "label": "Nested Scaleform HUD merge",
-      "source": "tools/RpfPatcher/Program.cs",
+      "source": "sdk/examples/colored_smokes/sources/SmokeRpfIntegration.cs",
       "fields": {"Path": "mods/update/update.rpf", "Entry": "x64/data/cdimages/scaleform_generic.rpf/hud.gfx", "MergeStrategy": "Add only the seven FrameLabel tags beside each BZ Gas frame and prove stripping them reproduces the original bytes.", "Backup": "Exact scaleform_generic.rpf backup plus pre-merge update.rpf snapshot."}
     },
     {
@@ -158,12 +158,12 @@
     {"id": "weapon-gbay", "source": "smoke.weapons", "source_field": "Name", "target": "smoke.gbay", "target_field": "WeaponNames", "relationship": "sold_by", "description": "Every weapon is independently purchasable and save-backed in GBAY."}
   ],
   "install_steps": [
-    {"id": "metadata", "order": 10, "title": "Link weapon and ammo definitions", "target": "common/data/ai/weapons.meta", "strategy": "validated current-build XML merge", "source": "tools/RpfPatcher/Program.cs", "description": "Clone the installed stock smoke records, assign independent identifiers, and verify removing the additions reproduces the original XML."},
-    {"id": "animations", "order": 20, "title": "Link throwable animations", "target": "common/data/ai/weaponanimations.meta", "strategy": "validated mapping clones", "source": "tools/RpfPatcher/Program.cs", "description": "Add 42 mappings: seven weapons across six animation sets."},
-    {"id": "labels", "order": 30, "title": "Link native wheel text", "target": "x64/patch/data/lang/american_rel.rpf/global.gxt2", "strategy": "isolated nested-RPF merge", "source": "tools/RpfPatcher/Program.cs", "description": "Append seven GXT entries without replacing Rockstar text."},
-    {"id": "hud", "order": 40, "title": "Link BZ Gas wheel artwork", "target": "x64/data/cdimages/scaleform_generic.rpf/hud.gfx", "strategy": "Scaleform FrameLabel aliases", "source": "tools/RpfPatcher/Program.cs", "description": "Map each INT<signed hash> label to both BZ Gas artwork frames."},
+    {"id": "metadata", "order": 10, "title": "Link weapon and ammo definitions", "target": "common/data/ai/weapons.meta", "strategy": "validated current-build XML merge", "source": "sdk/examples/colored_smokes/sources/SmokeRpfIntegration.cs", "description": "Clone the installed stock smoke records, assign independent identifiers, and verify removing the additions reproduces the original XML."},
+    {"id": "animations", "order": 20, "title": "Link throwable animations", "target": "common/data/ai/weaponanimations.meta", "strategy": "validated mapping clones", "source": "sdk/examples/colored_smokes/sources/SmokeRpfIntegration.cs", "description": "Add 42 mappings: seven weapons across six animation sets."},
+    {"id": "labels", "order": 30, "title": "Link native wheel text", "target": "x64/patch/data/lang/american_rel.rpf/global.gxt2", "strategy": "isolated nested-RPF merge", "source": "sdk/examples/colored_smokes/sources/SmokeRpfIntegration.cs", "description": "Append seven GXT entries without replacing Rockstar text."},
+    {"id": "hud", "order": 40, "title": "Link BZ Gas wheel artwork", "target": "x64/data/cdimages/scaleform_generic.rpf/hud.gfx", "strategy": "Scaleform FrameLabel aliases", "source": "sdk/examples/colored_smokes/sources/SmokeRpfIntegration.cs", "description": "Map each INT<signed hash> label to both BZ Gas artwork frames."},
     {"id": "runtime", "order": 50, "title": "Link grounded smoke behavior", "target": "scripts/ALLIN1.dll", "strategy": "ScriptHookVDotNet runtime controller", "source": "sdk/examples/colored_smokes/sources/EnhancedSmokeController.cs", "description": "Deploy colored plumes after the thrown object settles and remove the rolling audio source."},
     {"id": "storefront", "order": 60, "title": "Link GBAY and save persistence", "target": "GBAY weapon catalog and character inventory", "strategy": "save-bound application state", "source": "sdk/examples/colored_smokes/sources/SmokeGrenadeCatalog.cs", "description": "Expose separate five-packs and commit transactions only when Story Mode saves."},
-    {"id": "transaction", "order": 70, "title": "Install transactionally", "target": "mods/update/update.rpf", "strategy": "exact backups, hash verification, snapshot rollback", "source": "tools/RpfPatcher/Program.cs", "description": "Refuse live-game writes, verify every installed entry, and restore the full snapshot on any failure."}
+    {"id": "transaction", "order": 70, "title": "Install transactionally", "target": "mods/update/update.rpf", "strategy": "exact backups, hash verification, snapshot rollback", "source": "sdk/examples/colored_smokes/sources/SmokeRpfIntegration.cs", "description": "Refuse live-game writes, verify every installed entry, and restore the full snapshot on any failure."}
   ]
 }

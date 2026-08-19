@@ -18,6 +18,42 @@ def _version(value: str) -> str:
     return normalized
 
 
+def _validate_example_sources(root: Path) -> None:
+    """Refuse a release whose bundled examples point outside its payload."""
+    source_root = root.resolve()
+    examples_root = source_root / "sdk" / "examples"
+    if not examples_root.is_dir():
+        return
+    missing: list[str] = []
+    for manifest_path in sorted(examples_root.glob("*/addon.json")):
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Bundled SDK example is not valid JSON: {manifest_path}: {exc}"
+            ) from exc
+        records = [
+            *data.get("nodes", []), *data.get("install_steps", []),
+        ]
+        for record in records:
+            if not isinstance(record, dict) or not record.get("source"):
+                continue
+            relative = Path(str(record["source"]))
+            candidate = (source_root / relative).resolve()
+            try:
+                candidate.relative_to(source_root)
+            except ValueError:
+                missing.append(f"{manifest_path.name}: unsafe source {relative}")
+                continue
+            if not candidate.is_file():
+                missing.append(f"{manifest_path.name}: missing source {relative}")
+    if missing:
+        raise ValueError(
+            "Bundled SDK examples have unresolved source files:\n- "
+            + "\n- ".join(missing)
+        )
+
+
 def _copy_runtime(root: Path, app_dir: Path, rpf_dir: Path) -> None:
     for name in ("ALLIN1-SDK.exe", "ALLIN1-SDK-Agent.exe"):
         executable = app_dir / name
@@ -43,6 +79,7 @@ def _iter_payload(app_dir: Path):
 
 
 def package_release(root: Path, app_dir: Path, rpf_dir: Path, output: Path, version: str) -> tuple[Path, Path]:
+    _validate_example_sources(root)
     _copy_runtime(root, app_dir, rpf_dir)
     metadata = {
         "product": "ALLIN1-SDK",

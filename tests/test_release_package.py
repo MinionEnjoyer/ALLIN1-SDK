@@ -4,7 +4,9 @@ import hashlib
 import json
 import zipfile
 
-from scripts.package_release import package_release
+import pytest
+
+from scripts.package_release import _validate_example_sources, package_release
 
 
 def test_release_package_contains_launcher_contract_and_checksums(tmp_path):
@@ -50,3 +52,16 @@ def test_release_package_contains_launcher_contract_and_checksums(tmp_path):
             hashlib.sha256(package.read(name)).hexdigest() == digest
             for name, digest in checksums.items()
         )
+
+
+def test_release_rejects_bundled_example_with_missing_source(tmp_path):
+    root = tmp_path / "source"
+    example = root / "sdk" / "examples" / "broken"
+    example.mkdir(parents=True)
+    (example / "addon.json").write_text(json.dumps({
+        "nodes": [{"id": "node", "source": "tools/missing.cs"}],
+        "install_steps": [{"id": "step", "source": "tools/missing.cs"}],
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="missing source tools.missing.cs"):
+        _validate_example_sources(root)
