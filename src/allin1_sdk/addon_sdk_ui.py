@@ -652,9 +652,40 @@ class AddonSdkDialog(tk.Toplevel):
             messagebox.showinfo(
                 "OIV review required",
                 f"The operation plan was written to:\n{report}\n\n"
-                "At least one delete, merge, nested archive, missing source, or "
+                "At least one unsafe delete, merge, archive creation, missing source, or "
                 "unknown operation must be resolved manually.", parent=self,
             )
+            return
+        needs_batch = any(
+            item.kind == "delete" or len(item.archives) > 1
+            for item in plan.rpf_batch_operations
+        )
+        if needs_batch and messagebox.askyesno(
+            "Atomic RPF export available",
+            "This recipe contains exact deletes or nested RPF changes. Export "
+            "payload-backed batch manifests for review and atomic planning?",
+            parent=self,
+        ):
+            batch_dir = filedialog.askdirectory(
+                parent=self, title="Select a new or empty RPF batch folder",
+                mustexist=False,
+            )
+            if batch_dir:
+                try:
+                    manifests = workbench.export_rpf_batch_manifests(plan, batch_dir)
+                except (OSError, ValueError) as exc:
+                    messagebox.showerror(
+                        "RPF batch export failed", str(exc), parent=self,
+                    )
+                    return
+                messagebox.showinfo(
+                    "Atomic RPF batches exported",
+                    f"Exported {len(manifests)} outer-archive manifest(s). Open the "
+                    "matching archive in RPF Explorer and choose Create multi-entry "
+                    "plan.", parent=self,
+                )
+        if not plan.managed_exportable:
+            self.status.set(f"OIV atomic RPF plan written: {report.name}")
             return
         if not messagebox.askyesno(
             "Managed export available",

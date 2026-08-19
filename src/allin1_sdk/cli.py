@@ -323,17 +323,35 @@ def audit_folder(folder: Path, output: Path, draft_dir: Path | None) -> None:
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
 @click.option("--managed-package", type=click.Path(file_okay=False, path_type=Path))
-def oiv_plan(source: Path, output: Path, managed_package: Path | None) -> None:
+@click.option("--rpf-batches", type=click.Path(file_okay=False, path_type=Path))
+def oiv_plan(
+    source: Path, output: Path, managed_package: Path | None,
+    rpf_batches: Path | None,
+) -> None:
     """Preview an OIV recipe without executing it."""
     try:
         plan = OivWorkbench().inspect(source)
         written = plan.write_report(output)
         if managed_package:
             OivWorkbench().export_managed_package(plan, managed_package)
+        batch_manifests = (
+            OivWorkbench().export_rpf_batch_manifests(plan, rpf_batches)
+            if rpf_batches else ()
+        )
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
-    state = "managed export ready" if plan.translatable else "manual review required"
-    click.echo(f"Wrote OIV plan ({state}): {written}")
+    state = (
+        "managed export ready" if plan.managed_exportable
+        else "atomic RPF export ready" if plan.translatable
+        else "manual review required"
+    )
+    click.echo(
+        f"Wrote OIV plan ({state}): {written}"
+        + (
+            f"; {len(batch_manifests)} atomic RPF batch manifest(s)"
+            if batch_manifests else ""
+        )
+    )
 
 
 @main.command("inspect-rpf")
@@ -432,6 +450,71 @@ def extract_rpf_entry(
     click.echo(f"Extracted read-only copy: {written}")
 
 
+@main.command("extract-rpf-subtree")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--directory", default="",
+    help="Directory inside the selected virtual archive; blank exports its root.",
+)
+@click.option(
+    "--archive-path", default="",
+    help="Nested RPF path using ! between archive levels; blank means root.",
+)
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--output", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+def extract_rpf_subtree(
+    archive: Path, directory: str, archive_path: str,
+    gta_path: Path | None, output: Path,
+) -> None:
+    """Recursively export one root or nested-RPF directory with a hash manifest."""
+    service = RpfExplorerService(PROJECT_ROOT, _game_path(gta_path))
+    try:
+        index = service.index(archive)
+        written = service.extract_subtree(
+            index, output, archive_path=archive_path, directory_path=directory,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        "Extracted read-only RPF subtree and verification manifest: "
+        f"{written}"
+    )
+
+
+@main.command("diff-rpf")
+@click.argument("left", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("right", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--exact-content", is_flag=True,
+    help="Extract and hash entries to detect changes hidden by identical metadata.",
+)
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def diff_rpf(
+    left: Path, right: Path, exact_content: bool,
+    gta_path: Path | None, output: Path,
+) -> None:
+    """Compare two recursive RPF trees and export JSON and Markdown reports."""
+    service = RpfExplorerService(PROJECT_ROOT, _game_path(gta_path))
+    try:
+        left_index = service.index(left)
+        right_index = service.index(right)
+        report = service.compare_indexes(
+            left_index, right_index, exact_content=exact_content,
+        )
+        json_path, markdown_path = service.export_diff(report, output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    summary = report["summary"]
+    click.echo(
+        f"RPF diff: {summary['added']} added, {summary['removed']} removed, "
+        f"{summary['modified']} modified; {json_path} and {markdown_path}"
+    )
+
+
 @main.command("plan-rpf-replacement")
 @click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("entry_path")
@@ -509,6 +592,48 @@ def plan_rpf_delete(
         raise click.ClickException(str(exc)) from exc
     click.echo(
         f"Wrote {plan['status']} delete plan; no archive was changed: {destination}"
+    )
+
+
+@main.command("plan-rpf-batch")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument(
+    "change_manifest", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--workspace-root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def plan_rpf_batch(
+    archive: Path, change_manifest: Path, gta_path: Path | None,
+    workspace_root: Path | None, output: Path,
+) -> None:
+    """Create one guarded atomic plan from a JSON list of entry changes."""
+    service = _rpf_service(gta_path, workspace_root)
+    try:
+        authored = json.loads(change_manifest.read_text(encoding="utf-8"))
+        changes = authored.get("changes") if isinstance(authored, dict) else authored
+        if not isinstance(changes, list):
+            raise ValueError("RPF batch manifest must be a list or contain a changes list")
+        resolved_changes = []
+        for item in changes:
+            if not isinstance(item, dict):
+                raise ValueError("Every RPF batch change must be an object")
+            normalized = dict(item)
+            if normalized.get("payload"):
+                payload = Path(str(normalized["payload"])).expanduser()
+                if not payload.is_absolute():
+                    payload = change_manifest.resolve().parent / payload
+                normalized["payload"] = str(payload.resolve())
+            resolved_changes.append(normalized)
+        plan = service.multi_change_plan(service.index(archive), resolved_changes)
+        destination = output.resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+    except (json.JSONDecodeError, OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Wrote {plan['status']} atomic plan for {len(plan['changes'])} changes; "
+        f"no archive was changed: {destination}"
     )
 
 
@@ -739,7 +864,9 @@ def sdk_compatibility_group() -> None:
 for _command in (
     list_examples, validate, link, import_package, audit_folder, oiv_plan,
     inspect_rpf, dlc_inventory, compile_vehicle_data, index_rpf, extract_rpf_entry,
-    plan_rpf_replacement, plan_rpf_add, plan_rpf_delete, apply_rpf_plan,
+    extract_rpf_subtree, diff_rpf,
+    plan_rpf_replacement, plan_rpf_add, plan_rpf_delete, plan_rpf_batch,
+    apply_rpf_plan,
     verify_rpf_transaction, rollback_rpf_transaction, recover_rpf_transaction,
     list_rpf_transactions, canary_rpf_transaction, diff_meta_command,
     validate_meta_roundtrip_command, inspect_package_rpfs,

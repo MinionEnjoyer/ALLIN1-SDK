@@ -101,7 +101,7 @@ def test_oiv_plan_blocks_destructive_merge_and_unknown_operations(
         OivWorkbench().export_managed_package(plan, tmp_path / "blocked")
 
 
-def test_oiv_plan_blocks_missing_sources_nested_and_created_archives(tmp_path):
+def test_oiv_plan_blocks_missing_sources_and_created_archives(tmp_path):
     assembly = """<package><content>
       <add source="missing.bin">scripts/missing.bin</add>
       <archive path="update/update.rpf"><archive path="nested.rpf">
@@ -110,8 +110,44 @@ def test_oiv_plan_blocks_missing_sources_nested_and_created_archives(tmp_path):
     </content></package>"""
     plan = OivWorkbench().inspect(_oiv_folder(tmp_path, assembly))
     codes = {item.code for item in plan.findings}
-    assert {"missing_oiv_source", "nested_archive", "archive_creation"} <= codes
+    assert {"missing_oiv_source", "archive_creation"} <= codes
+    assert "nested_archive" not in codes
     assert not plan.translatable
+
+
+def test_oiv_nested_add_and_exact_delete_export_atomic_rpf_batch(tmp_path):
+    assembly = """<package><metadata><name>Nested batch</name></metadata><content>
+      <archive path="update/update.rpf"><archive path="x64/data/nested.rpf">
+        <add source="data.xml">common/data/new.xml</add>
+        <delete>common/data/old.xml</delete>
+      </archive></archive>
+    </content></package>"""
+    source = _oiv_folder(tmp_path, assembly)
+    plan = OivWorkbench().inspect(source)
+    assert plan.translatable
+    assert not plan.managed_exportable
+    assert len(plan.rpf_batch_operations) == 2
+    manifests = OivWorkbench().export_rpf_batch_manifests(
+        plan, tmp_path / "batches",
+    )
+    assert len(manifests) == 1
+    authored = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert authored["outer_archive"] == "mods/update/update.rpf"
+    assert [item["action"] for item in authored["changes"]] == ["upsert", "delete"]
+    assert {item["archive_path"] for item in authored["changes"]} == {
+        "x64/data/nested.rpf"
+    }
+    payload = manifests[0].parent / authored["changes"][0]["payload"]
+    assert payload.read_text(encoding="utf-8") == "<data />"
+    with pytest.raises(ValueError, match="atomic nested-RPF"):
+        OivWorkbench().export_managed_package(plan, tmp_path / "managed-nested")
+
+    result = CliRunner().invoke(main, [
+        "sdk", "oiv-plan", str(source), "-o", str(tmp_path / "nested-plan.md"),
+        "--rpf-batches", str(tmp_path / "cli-batches"),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "1 atomic RPF batch manifest(s)" in result.output
 
 
 def test_oiv_plan_blocks_destinations_outside_managed_roots(tmp_path):

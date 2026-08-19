@@ -50,9 +50,9 @@ The native viewers remain useful without the helper for lightweight header inspe
     HelpTopic(
         "gameplay", "Automation", "Command-line workflows",
         "Run validation and inspection in scripts or continuous integration.",
-        """The allin1-sdk command exposes package import, manifest validation, link reports, OIV plans, DLC inventory, vehicle compilation, and RPF indexing/extraction.
+        """The allin1-sdk command exposes package import, manifest validation, link reports, OIV plans, DLC inventory, vehicle compilation, and RPF indexing, exact-entry extraction, verified directory-subtree export, and archive diffing.
 
-Commands return non-zero exit codes for invalid or unsafe inputs. Creating an entry-change plan never authorizes a write. Applying or rolling back a ready plan is a separate command and requires --acknowledge-write, a closed game, an authorized target, and unchanged input hashes. Real-archive canary mode proves replace/add/delete and rollback on a disposable copy.""",
+Commands return non-zero exit codes for invalid or unsafe inputs. Creating a single or multi-entry change plan never authorizes a write. plan-rpf-batch accepts a JSON changes list, resolves upsert actions against the exact index, and produces one guarded plan for up to 1,000 root or deeply nested operations. Applying or rolling back a ready plan is a separate command and requires --acknowledge-write, a closed game, an authorized target, and unchanged input hashes. Real-archive canary mode proves replace/add/delete and rollback on a disposable copy.""",
         ("cli", "automation", "continuous integration", "script", "exit code"),
     ),
     HelpTopic(
@@ -98,7 +98,9 @@ Generated addon.json files are drafts. Resolve their warnings and linker errors 
         "Trace game-facing fields and audit add-on integration before installation.",
         """The Add-on SDK links authored package fields to metadata, native UI text, animations, runtime behavior, packaging, and rollback expectations.
 
-Import a DLC folder or archive, inspect its integration graph, then select nodes and fields for explanations. Package Intelligence contains OIV preview, DLC inventory, vehicle-data compilation, and structured META/XML comparison and round-trip tools.""",
+Import a DLC folder or archive, inspect its integration graph, then select nodes and fields for explanations. Package Intelligence contains OIV preview, DLC inventory, vehicle-data compilation, and structured META/XML comparison and round-trip tools.
+
+OIV preview keeps unsafe text, XPath, PSO, archive-creation, and unknown operations blocked. Exact adds/replacements/deletes inside existing nested RPF trees can be exported as payload-backed batch manifests. Open the matching outer archive in RPF Explorer to turn one of those manifests into a guarded atomic plan.""",
         ("authoring", "addon", "dlc", "audit", "linker", "developer"),
     ),
     HelpTopic(
@@ -114,7 +116,13 @@ The viewer is read-only. Compiled DLL, ASI, and script payloads are never execut
         "Search archives, inspect metadata, and transact guarded root or nested changes.",
         """Select the matching GTA V installation before opening an RPF so the correct encryption keys and resource decoder are used.
 
-Search and filter the archive tree, then use Entry actions to preview or extract the selected entry. Replace, add, and delete planning creates an inert schema-v3 JSON plan and hashes the archive, original state, payload where applicable, edition, and authorized scope.
+Search and filter the archive tree, then use Entry actions to preview or extract the selected entry. A selected directory can be exported recursively, and File > Extract current archive tree exports the root of the outer archive. Each subtree export scans the outer RPF once, writes into a new staged folder, refuses output collisions, verifies that its source did not change, and records source and per-file SHA-256 values in .allin1-rpf-export.json. Nested RPF files remain files in their parent export; select that virtual archive explicitly to export its internal tree.
+
+File > Compare with archive indexes both recursive trees. Metadata mode is fast and reports added, removed, modified, and unchanged archive/entry records. Exact-content mode batch-extracts each side into bounded temporary storage and compares SHA-256 values, detecting payload changes even when size and resource metadata are identical. JSON and Markdown reports are written together, and both source hashes are rechecked before the report is accepted.
+
+Replace, add, and delete planning creates an inert schema-v3 JSON plan and hashes the archive, original state, payload where applicable, edition, and authorized scope.
+
+File > Create multi-entry plan accepts a JSON list of add, replace, delete, or upsert actions. Upsert becomes add or replace only after the exact target is indexed. A ready atomic plan snapshots every payload, processes each nested RPF once from deepest to outermost, commits the outer archive once, verifies every changed entry, and owns one full rollback receipt. An archive entry cannot be replaced in the same plan that edits its internal tree.
 
 A ready plan may be applied only inside the selected installation's mods directory or an external workspace explicitly authorized by the CLI. A nested change walks a bounded chain of up to eight RPF levels inside the staged outer copy, verifies the deepest change, and verifies every child while reassembling its parent before commit. Transaction History provides verification, interrupted-receipt reconciliation, guarded rollback, and stale-lock inspection. Run disposable archive canary proves the real writer without changing the selected source.""",
         ("archive", "nested", "extract", "replacement", "rpf", "metadata"),

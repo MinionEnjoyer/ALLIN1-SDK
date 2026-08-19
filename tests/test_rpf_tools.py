@@ -297,6 +297,20 @@ def _fake_archive_runner(args, **_kwargs):
             for nested_entry_path in archive_path.split("!"):
                 state = _decode_archive_bytes(state[nested_entry_path])
         Path(args[6]).write_bytes(state[entry_path])
+    elif command == "extract-virtual-entries":
+        source = Path(args[3])
+        output_root = Path(args[5])
+        for line in Path(args[4]).read_text(encoding="utf-8").splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            archive_path, entry_path, relative = line.split("\t", 2)
+            state = _decode_archive(source)
+            if archive_path:
+                for nested_entry_path in archive_path.split("!"):
+                    state = _decode_archive_bytes(state[nested_entry_path])
+            destination = output_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(state[entry_path])
     elif command == "replace-entry":
         source = Path(args[3])
         state = _decode_archive(source)
@@ -306,6 +320,19 @@ def _fake_archive_runner(args, **_kwargs):
         source = Path(args[3])
         state = _decode_archive(source)
         state.pop(str(args[4]).replace("\\", "/"), None)
+        source.write_bytes(_encode_archive(state))
+    elif command == "apply-entry-changes":
+        source = Path(args[3])
+        state = _decode_archive(source)
+        payload_root = Path(args[5])
+        for line in Path(args[4]).read_text(encoding="utf-8").splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            action, entry_path, relative = line.split("\t", 2)
+            if action == "delete":
+                state.pop(entry_path)
+            else:
+                state[entry_path] = (payload_root / relative).read_bytes()
         source.write_bytes(_encode_archive(state))
     return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
@@ -628,6 +655,279 @@ def test_deep_nested_rpf_replace_add_delete_reassemble_every_parent(
     assert "assets/target.ytd" not in level3
     service.rollback_transaction(receipt)
     assert archive.read_bytes() == original_outer
+
+
+def test_atomic_multi_entry_plan_batches_root_and_deep_changes_with_one_receipt(
+    tmp_path, monkeypatch,
+):
+    service, archive, _entry, _fake = _transaction_service(
+        tmp_path, monkeypatch, deep_nested=True,
+    )
+    state = _decode_archive(archive)
+    state["common/data/delete.bin"] = b"delete me"
+    archive.write_bytes(_encode_archive(state))
+    original = archive.read_bytes()
+    deep = "x64/textures.rpf!archives/level2.rpf!deep/level3.rpf"
+    root_replacement = tmp_path / "root.ymap"
+    root_replacement.write_bytes(b"new root")
+    root_addition = tmp_path / "new.bin"
+    root_addition.write_bytes(b"new root file")
+    deep_replacement = tmp_path / "target.ytd"
+    deep_replacement.write_bytes(b"new deep texture")
+    deep_addition = tmp_path / "extra.ytd"
+    deep_addition.write_bytes(b"extra deep texture")
+    plan = service.multi_change_plan(service.index(archive), [
+        {
+            "action": "upsert", "archive_path": "",
+            "entry": "common/data/test.ymap", "payload": root_replacement,
+        },
+        {
+            "action": "upsert", "archive_path": "",
+            "entry": "common/data/new.bin", "payload": root_addition,
+        },
+        {
+            "action": "delete", "archive_path": "",
+            "entry": "common/data/delete.bin",
+        },
+        {
+            "action": "replace", "archive_path": deep,
+            "entry": "assets/target.ytd", "payload": deep_replacement,
+        },
+        {
+            "action": "add", "archive_path": deep,
+            "entry": "assets/extra.ytd", "payload": deep_addition,
+        },
+    ])
+    assert plan["status"] == "ready"
+    assert plan["safety"]["single_outer_archive_commit"] is True
+    plan_path = tmp_path / "batch-plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    calls = []
+
+    def track_batch(args, **kwargs):
+        if args[1] == "apply-entry-changes":
+            calls.append(Path(args[3]))
+        return _fake_archive_runner(args, **kwargs)
+
+    monkeypatch.setattr(rpf_tools, "run_hidden", track_batch)
+    receipt_path = service.apply_change_plan(
+        plan_path, receipt_root=tmp_path / "transactions",
+    )
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["operation"] == "rpf_multi_entry_change"
+    assert receipt["action"] == "batch"
+    assert len(receipt["changes"]) == 5
+    # One helper session for the outer archive and each of the three nested
+    # containers, not one full outer reconstruction per authored change.
+    assert len(calls) == 4
+
+    applied = _decode_archive(archive)
+    assert applied["common/data/test.ymap"] == b"new root"
+    assert applied["common/data/new.bin"] == b"new root file"
+    assert "common/data/delete.bin" not in applied
+    level1 = _decode_archive_bytes(applied["x64/textures.rpf"])
+    level2 = _decode_archive_bytes(level1["archives/level2.rpf"])
+    level3 = _decode_archive_bytes(level2["deep/level3.rpf"])
+    assert level3["assets/target.ytd"] == b"new deep texture"
+    assert level3["assets/extra.ytd"] == b"extra deep texture"
+    assert service.verify_transaction(receipt_path)["healthy"] is True
+    service.rollback_transaction(receipt_path)
+    assert archive.read_bytes() == original
+
+
+def test_multi_entry_plan_rejects_conflicts_tampering_and_stale_payloads(
+    tmp_path, monkeypatch,
+):
+    service, archive, _entry, _fake = _transaction_service(
+        tmp_path, monkeypatch, deep_nested=True,
+    )
+    original = archive.read_bytes()
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"payload")
+    index = service.index(archive)
+    duplicate = [
+        {
+            "action": "replace", "entry": "common/data/test.ymap",
+            "payload": payload,
+        },
+        {
+            "action": "delete", "entry": "COMMON/DATA/TEST.YMAP",
+        },
+    ]
+    with pytest.raises(ValueError, match="more than once"):
+        service.multi_change_plan(index, duplicate)
+
+    deep = "x64/textures.rpf!archives/level2.rpf!deep/level3.rpf"
+    with pytest.raises(ValueError, match="replace an archive.*internal tree"):
+        service.multi_change_plan(index, [
+            {
+                "action": "replace", "entry": "x64/textures.rpf",
+                "payload": payload,
+            },
+            {
+                "action": "replace", "archive_path": deep,
+                "entry": "assets/target.ytd", "payload": payload,
+            },
+        ])
+
+    plan = service.multi_change_plan(index, [{
+        "action": "replace", "entry": "common/data/test.ymap",
+        "payload": payload,
+    }])
+    path = tmp_path / "batch.json"
+    plan["changes"][0]["entry"] = "common/data/forged.ymap"
+    path.write_text(json.dumps(plan), encoding="utf-8")
+    with pytest.raises(ValueError, match="identity does not match"):
+        service.apply_change_plan(path, receipt_root=tmp_path / "tampered")
+
+    plan = service.multi_change_plan(index, [{
+        "action": "replace", "entry": "common/data/test.ymap",
+        "payload": payload,
+    }])
+    path.write_text(json.dumps(plan), encoding="utf-8")
+    payload.write_bytes(b"changed")
+    with pytest.raises(RuntimeError, match="payload.*changed after planning"):
+        service.apply_change_plan(path, receipt_root=tmp_path / "stale")
+    assert archive.read_bytes() == original
+
+
+def test_rpf_subtree_export_handles_deep_archives_and_writes_hash_manifest(
+    tmp_path, monkeypatch,
+):
+    service, archive, _entry, _fake = _transaction_service(
+        tmp_path, monkeypatch, deep_nested=True,
+    )
+    archive_path = "x64/textures.rpf!archives/level2.rpf!deep/level3.rpf"
+    original = archive.read_bytes()
+    index = service.index(archive)
+    target = service.extract_subtree(
+        index, tmp_path / "deep-export", archive_path=archive_path,
+        directory_path="assets",
+    )
+
+    exported = target / "target.ytd"
+    assert exported.read_bytes() == b"original deeply nested texture"
+    manifest = json.loads(
+        (target / ".allin1-rpf-export.json").read_text(encoding="utf-8")
+    )
+    assert manifest["operation"] == "rpf_subtree_export"
+    assert manifest["selection"] == {
+        "archive_path": archive_path, "directory_path": "assets",
+    }
+    assert manifest["file_count"] == 1
+    assert manifest["files"][0]["relative_path"] == "target.ytd"
+    assert manifest["files"][0]["sha256"] == hashlib.sha256(
+        exported.read_bytes()
+    ).hexdigest()
+    assert manifest["source"]["sha256"] == hashlib.sha256(original).hexdigest()
+    assert archive.read_bytes() == original
+    assert not list(tmp_path.glob(".deep-export.allin1-stage-*"))
+
+    with pytest.raises(ValueError, match="already exists"):
+        service.extract_subtree(index, target, archive_path=archive_path)
+    with pytest.raises(ValueError, match="not a directory"):
+        service.extract_subtree(
+            index, tmp_path / "file-export", archive_path=archive_path,
+            directory_path="assets/target.ytd",
+        )
+    with pytest.raises(ValueError, match="was not indexed"):
+        service.extract_subtree(
+            index, tmp_path / "missing-export", archive_path="missing.rpf",
+        )
+
+
+def test_rpf_subtree_export_enforces_limits_and_cleans_failed_staging(
+    tmp_path, monkeypatch,
+):
+    service, archive, _entry, _fake = _transaction_service(
+        tmp_path, monkeypatch, deep_nested=True,
+    )
+    index = service.index(archive)
+    monkeypatch.setattr(rpf_tools, "_MAX_SUBTREE_FILES", 1)
+    with pytest.raises(ValueError, match="guarded export limit"):
+        service.extract_subtree(index, tmp_path / "too-many")
+
+    monkeypatch.setattr(rpf_tools, "_MAX_SUBTREE_FILES", 25_000)
+    monkeypatch.setattr(rpf_tools, "_MAX_SUBTREE_LOGICAL_BYTES", 1)
+    with pytest.raises(ValueError, match="logical bytes.*guarded export"):
+        service.extract_subtree(index, tmp_path / "too-large")
+    assert not (tmp_path / "too-large").exists()
+
+    monkeypatch.setattr(rpf_tools, "_MAX_SUBTREE_LOGICAL_BYTES", 16 * 1024**3)
+
+    def fail_batch(args, **kwargs):
+        if args[1] == "extract-virtual-entries":
+            return SimpleNamespace(returncode=7, stdout="", stderr="batch failed")
+        return _fake_archive_runner(args, **kwargs)
+
+    monkeypatch.setattr(rpf_tools, "run_hidden", fail_batch)
+    with pytest.raises(ValueError, match="batch failed"):
+        service.extract_subtree(index, tmp_path / "failed-export")
+    assert not (tmp_path / "failed-export").exists()
+    assert not list(tmp_path.glob(".failed-export.allin1-stage-*"))
+
+
+def test_rpf_diff_detects_tree_and_exact_content_changes_and_exports_reports(
+    tmp_path, monkeypatch,
+):
+    service, _archive, _entry, _fake = _transaction_service(tmp_path, monkeypatch)
+    left = tmp_path / "left.rpf"
+    right = tmp_path / "right.rpf"
+    left.write_bytes(_encode_archive({
+        "same.bin": b"same",
+        "changed.bin": b"one",
+        "removed.bin": b"gone",
+        "nested.rpf": _encode_archive({"inner.bin": b"A"}),
+    }))
+    right.write_bytes(_encode_archive({
+        "same.bin": b"same",
+        "changed.bin": b"two",
+        "added.bin": b"new!",
+        "nested.rpf": _encode_archive({"inner.bin": b"B"}),
+    }))
+    left_original = left.read_bytes()
+    right_original = right.read_bytes()
+    left_index = service.index(left)
+    right_index = service.index(right)
+
+    metadata = service.compare_indexes(left_index, right_index)
+    assert metadata["comparison_mode"] == "metadata"
+    assert metadata["summary"]["added"] == 1
+    assert metadata["summary"]["removed"] == 1
+    assert metadata["summary"]["modified"] == 0
+
+    exact = service.compare_indexes(left_index, right_index, exact_content=True)
+    assert exact["comparison_mode"] == "exact_content"
+    assert exact["summary"]["content_compared"] == 4
+    assert exact["summary"]["modified"] == 3
+    assert {
+        item["identity"]["path"] for item in exact["entries"]["modified"]
+    } == {"changed.bin", "nested.rpf", "inner.bin"}
+    assert all(
+        "sha256" in item["changes"] for item in exact["entries"]["modified"]
+    )
+    assert left.read_bytes() == left_original
+    assert right.read_bytes() == right_original
+
+    json_path, markdown_path = service.export_diff(
+        exact, tmp_path / "reports" / "archive-comparison.json",
+    )
+    assert json.loads(json_path.read_text(encoding="utf-8"))["summary"][
+        "modified"
+    ] == 3
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert "# RPF archive diff" in markdown
+    assert "changed.bin" in markdown
+
+
+def test_rpf_diff_refuses_stale_indexes_and_invalid_reports(tmp_path, monkeypatch):
+    service, archive, _entry, _fake = _transaction_service(tmp_path, monkeypatch)
+    index = service.index(archive)
+    archive.write_bytes(archive.read_bytes() + b"changed")
+    with pytest.raises(ValueError, match="changed after indexing"):
+        service.compare_indexes(index, index)
+    with pytest.raises(ValueError, match="Expected an RPF archive diff"):
+        service.export_diff({}, tmp_path / "invalid")
 
 
 def test_workspace_authorization_history_recovery_and_stale_lock(tmp_path, monkeypatch):
@@ -996,6 +1296,19 @@ def test_new_rpf_cli_index_extract_and_plan(tmp_path, monkeypatch):
             target.write_bytes(b"extracted")
             return target
 
+        def extract_subtree(
+            self, loaded, output, *, archive_path="", directory_path="",
+        ):
+            assert loaded is index
+            assert archive_path == "x64/textures.rpf"
+            assert directory_path == ""
+            target = Path(output)
+            target.mkdir()
+            (target / ".allin1-rpf-export.json").write_text(
+                "{}", encoding="utf-8",
+            )
+            return target
+
         def replacement_plan(self, loaded, entry, payload):
             assert loaded is index and entry.path == "common/data/test.ymap"
             return {"operation": "replace_rpf_entry", "status": "plan_only"}
@@ -1017,6 +1330,14 @@ def test_new_rpf_cli_index_extract_and_plan(tmp_path, monkeypatch):
     assert extracted.exit_code == 0, extracted.output
     assert (tmp_path / "test.ymap").read_bytes() == b"extracted"
 
+    subtree = runner.invoke(main, [
+        "sdk", "extract-rpf-subtree", str(archive),
+        "--archive-path", "x64/textures.rpf", "--gta-path", str(game),
+        "-o", str(tmp_path / "subtree"),
+    ])
+    assert subtree.exit_code == 0, subtree.output
+    assert (tmp_path / "subtree" / ".allin1-rpf-export.json").is_file()
+
     payload = tmp_path / "new.ymap"
     payload.write_bytes(b"new")
     planned = runner.invoke(main, [
@@ -1025,6 +1346,94 @@ def test_new_rpf_cli_index_extract_and_plan(tmp_path, monkeypatch):
     ])
     assert planned.exit_code == 0, planned.output
     assert json.loads((tmp_path / "plan.json").read_text(encoding="utf-8"))["status"] == "plan_only"
+
+
+def test_rpf_diff_cli_routes_exact_comparison_and_reports(tmp_path, monkeypatch):
+    game = tmp_path / "game"
+    game.mkdir()
+    left = tmp_path / "left.rpf"
+    right = tmp_path / "right.rpf"
+    left.write_bytes(b"RPF7-left")
+    right.write_bytes(b"RPF7-right")
+    left_index = object()
+    right_index = object()
+    report = {
+        "operation": "rpf_archive_diff",
+        "summary": {"added": 1, "removed": 2, "modified": 3},
+    }
+
+    class FakeService:
+        def __init__(self, _project_root, gta_path, **_kwargs):
+            assert Path(gta_path) == game
+
+        def index(self, source):
+            return left_index if Path(source) == left else right_index
+
+        def compare_indexes(self, first, second, *, exact_content=False):
+            assert first is left_index and second is right_index
+            assert exact_content is True
+            return report
+
+        def export_diff(self, authored, output):
+            assert authored is report
+            json_path = Path(output).with_suffix(".json")
+            markdown_path = Path(output).with_suffix(".md")
+            json_path.write_text("{}", encoding="utf-8")
+            markdown_path.write_text("# diff", encoding="utf-8")
+            return json_path, markdown_path
+
+    monkeypatch.setattr("allin1_sdk.cli.RpfExplorerService", FakeService)
+    result = CliRunner().invoke(main, [
+        "sdk", "diff-rpf", str(left), str(right), "--exact-content",
+        "--gta-path", str(game), "-o", str(tmp_path / "comparison.json"),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "1 added, 2 removed, 3 modified" in result.output
+    assert (tmp_path / "comparison.json").is_file()
+    assert (tmp_path / "comparison.md").is_file()
+
+
+def test_rpf_batch_cli_resolves_manifest_payloads_and_writes_plan(
+    tmp_path, monkeypatch,
+):
+    game = tmp_path / "game"
+    game.mkdir()
+    archive = tmp_path / "archive.rpf"
+    archive.write_bytes(b"RPF7")
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"payload")
+    manifest = tmp_path / "changes.json"
+    manifest.write_text(json.dumps({"changes": [{
+        "action": "add", "archive_path": "", "entry": "new.bin",
+        "payload": "payload.bin",
+    }]}), encoding="utf-8")
+    sentinel = object()
+
+    class FakeService:
+        def __init__(self, _project_root, gta_path, **_kwargs):
+            assert Path(gta_path) == game
+
+        def index(self, source):
+            assert Path(source) == archive
+            return sentinel
+
+        def multi_change_plan(self, index, changes):
+            assert index is sentinel
+            assert Path(changes[0]["payload"]) == payload
+            return {
+                "operation": "rpf_multi_entry_change", "status": "ready",
+                "changes": changes,
+            }
+
+    monkeypatch.setattr("allin1_sdk.cli.RpfExplorerService", FakeService)
+    output = tmp_path / "batch-plan.json"
+    result = CliRunner().invoke(main, [
+        "sdk", "plan-rpf-batch", str(archive), str(manifest),
+        "--gta-path", str(game), "-o", str(output),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "atomic plan for 1 changes" in result.output
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "ready"
 
 
 def test_new_rpf_cli_reports_missing_detection_and_unknown_entries(tmp_path, monkeypatch):

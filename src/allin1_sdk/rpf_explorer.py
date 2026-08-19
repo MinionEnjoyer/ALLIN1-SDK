@@ -470,7 +470,19 @@ class RpfExplorerDialog(ttk.Frame):
         menu.add_command(
             label="Export index…", command=self._export_index, state="disabled",
         )
+        menu.add_command(
+            label="Extract current archive tree…",
+            command=self._extract_current_archive, state="disabled",
+        )
+        menu.add_command(
+            label="Compare with archive…",
+            command=self._compare_archive, state="disabled",
+        )
         menu.add_separator()
+        menu.add_command(
+            label="Create multi-entry plan…", command=self._plan_batch,
+            state="disabled",
+        )
         menu.add_command(
             label="Apply entry-change plan…", command=self._apply_replacement_plan,
         )
@@ -497,6 +509,10 @@ class RpfExplorerDialog(ttk.Frame):
         menu.add_command(
             label="Extract selected…", command=self._extract_selected, state="disabled",
         )
+        menu.add_command(
+            label="Extract selected subtree…",
+            command=self._extract_selected_subtree, state="disabled",
+        )
         menu.add_separator()
         menu.add_command(
             label="Plan replacement…", command=self._plan_replacement, state="disabled",
@@ -514,6 +530,9 @@ class RpfExplorerDialog(ttk.Frame):
         state = "normal" if enabled else "disabled"
         for menu in self.file_menus:
             menu.entryconfigure("Export index…", state=state)
+            menu.entryconfigure("Extract current archive tree…", state=state)
+            menu.entryconfigure("Compare with archive…", state=state)
+            menu.entryconfigure("Create multi-entry plan…", state=state)
             menu.entryconfigure("Run disposable archive canary…", state=state)
 
     def _set_entry_actions(self, enabled: bool) -> None:
@@ -524,6 +543,11 @@ class RpfExplorerDialog(ttk.Frame):
             menu.entryconfigure("Plan replacement…", state=state)
             menu.entryconfigure("Plan new entry…", state=state)
             menu.entryconfigure("Plan deletion…", state=state)
+
+    def _set_subtree_action(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for menu in self.entry_action_menus:
+            menu.entryconfigure("Extract selected subtree…", state=state)
 
     def _choose_game(self) -> None:
         selected = filedialog.askdirectory(parent=self, title="Select GTA V installation")
@@ -636,6 +660,7 @@ class RpfExplorerDialog(ttk.Frame):
     def _select_entry(self, _event: object | None = None) -> None:
         entry = self._selected()
         self._set_entry_actions(bool(entry and entry.kind != "directory"))
+        self._set_subtree_action(bool(entry and entry.kind == "directory"))
         if entry is None:
             return
         self.asset_title.set(entry.name)
@@ -713,6 +738,93 @@ class RpfExplorerDialog(ttk.Frame):
             messagebox.showerror("Extraction failed", str(exc), parent=self)
             return
         self.status.set(f"Extracted read-only copy: {output}")
+
+    def _extract_current_archive(self) -> None:
+        if self.index is None:
+            return
+        self._extract_subtree(
+            archive_path="", directory_path="",
+            suggested_name=f"{self.index.source.stem}-rpf-export",
+        )
+
+    def _compare_archive(self) -> None:
+        if self.index is None or self.service is None:
+            return
+        selected = filedialog.askopenfilename(
+            parent=self, title="Select RPF archive to compare",
+            filetypes=(("Rockstar archive", "*.rpf"), ("All files", "*.*")),
+        )
+        if not selected:
+            return
+        exact = messagebox.askyesno(
+            "Exact content comparison",
+            "Extract and hash every file on both sides?\n\n"
+            "This detects payload changes even when indexed metadata is identical, "
+            "but requires more time and temporary disk space.",
+            parent=self,
+        )
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save RPF comparison reports",
+            initialfile=(
+                f"{self.index.source.stem}-vs-{Path(selected).stem}-rpf-diff.json"
+            ),
+            defaultextension=".json", filetypes=(("JSON", "*.json"),),
+        )
+        if not output:
+            return
+        self.status.set("Indexing and comparing recursive RPF trees…")
+        self.update_idletasks()
+        try:
+            other = self.service.index(selected)
+            report = self.service.compare_indexes(
+                self.index, other, exact_content=exact,
+            )
+            json_path, markdown_path = self.service.export_diff(report, output)
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.status.set("RPF comparison failed.")
+            messagebox.showerror("RPF comparison failed", str(exc), parent=self)
+            return
+        summary = report["summary"]
+        self._show_text(markdown_path.read_text(encoding="utf-8"))
+        self.status.set(
+            f"RPF diff: {summary['added']} added · {summary['removed']} removed · "
+            f"{summary['modified']} modified · {json_path}"
+        )
+
+    def _extract_selected_subtree(self) -> None:
+        entry = self._selected()
+        if entry is None or entry.kind != "directory":
+            return
+        self._extract_subtree(
+            archive_path=entry.archive_path, directory_path=entry.path,
+            suggested_name=f"{Path(entry.path).name}-rpf-export",
+        )
+
+    def _extract_subtree(
+        self, *, archive_path: str, directory_path: str, suggested_name: str,
+    ) -> None:
+        if self.index is None or self.service is None:
+            return
+        selected = filedialog.askdirectory(
+            parent=self, title="Select parent folder for the RPF subtree export",
+        )
+        if not selected:
+            return
+        destination = Path(selected) / suggested_name
+        self.status.set("Extracting and hashing RPF subtree…")
+        self.update_idletasks()
+        try:
+            output = self.service.extract_subtree(
+                self.index, destination, archive_path=archive_path,
+                directory_path=directory_path,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.status.set("RPF subtree extraction failed.")
+            messagebox.showerror("Subtree extraction failed", str(exc), parent=self)
+            return
+        self.status.set(
+            f"Extracted verified read-only subtree: {output}"
+        )
 
     def _plan_replacement(self) -> None:
         entry = self._selected()
@@ -825,6 +937,59 @@ class RpfExplorerDialog(ttk.Frame):
                 parent=self,
             )
 
+    def _plan_batch(self) -> None:
+        if self.index is None or self.service is None:
+            return
+        manifest = filedialog.askopenfilename(
+            parent=self, title="Open RPF multi-entry change manifest",
+            filetypes=(("JSON", "*.json"), ("All files", "*.*")),
+        )
+        if not manifest:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save atomic RPF multi-entry plan",
+            initialfile=f"{self.index.source.stem}-multi-entry-plan.json",
+            defaultextension=".json", filetypes=(("JSON", "*.json"),),
+        )
+        if not output:
+            return
+        try:
+            authored = json.loads(Path(manifest).read_text(encoding="utf-8"))
+            changes = authored.get("changes") if isinstance(authored, dict) else authored
+            if not isinstance(changes, list):
+                raise ValueError(
+                    "Batch manifest must be a list or contain a changes list"
+                )
+            resolved = []
+            for item in changes:
+                if not isinstance(item, dict):
+                    raise ValueError("Every batch change must be a JSON object")
+                normalized = dict(item)
+                if normalized.get("payload"):
+                    payload = Path(str(normalized["payload"])).expanduser()
+                    if not payload.is_absolute():
+                        payload = Path(manifest).resolve().parent / payload
+                    normalized["payload"] = str(payload.resolve())
+                resolved.append(normalized)
+            plan = self.service.multi_change_plan(self.index, resolved)
+            Path(output).write_text(
+                json.dumps(plan, indent=2) + "\n", encoding="utf-8",
+            )
+        except (json.JSONDecodeError, OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("Could not create batch plan", str(exc), parent=self)
+            return
+        self.status.set(
+            f"Wrote {plan['status']} atomic plan for {len(plan['changes'])} changes: "
+            f"{output}"
+        )
+        if plan["status"] == "blocked":
+            messagebox.showwarning(
+                "Multi-entry plan is blocked",
+                "No archive was changed. Resolve these items and create a new plan:\n\n"
+                + "\n".join(f"• {item}" for item in plan["blocking_reasons"]),
+                parent=self,
+            )
+
     def _transaction_service(self) -> RpfExplorerService | None:
         game = Path(self.game_path.get().strip())
         if not game.is_dir():
@@ -855,13 +1020,22 @@ class RpfExplorerDialog(ttk.Frame):
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             messagebox.showerror("Invalid replacement plan", str(exc), parent=self)
             return
+        is_batch = summary.get("operation") == "rpf_multi_entry_change"
+        change_count = len(summary.get("changes", ())) if is_batch else 1
+        target_summary = (
+            f"Entries: {change_count} reviewed changes"
+            if is_batch else (
+                f"Entry: {summary.get('archive_path') or 'root'}::{entry}"
+            )
+        )
         if not messagebox.askyesno(
             "Apply guarded RPF transaction?",
             "GTA V must be closed. ALLIN1 will copy the complete archive, modify a "
-            "staged copy, verify the exact entry, and retain a rollback receipt.\n\n"
-            f"Action: {summary.get('action', 'unknown')}\n"
+            "staged copy, verify every reviewed entry, and retain one rollback "
+            "receipt.\n\n"
+            f"Action: {'atomic batch' if is_batch else summary.get('action', 'unknown')}\n"
             f"Archive: {archive}\n"
-            f"Entry: {summary.get('archive_path') or 'root'}::{entry}\n\nContinue?",
+            f"{target_summary}\n\nContinue?",
             parent=self, icon="warning",
         ):
             return
@@ -875,14 +1049,15 @@ class RpfExplorerDialog(ttk.Frame):
             self.status.set(f"RPF transaction applied and verified: {receipt}")
             messagebox.showinfo(
                 "RPF transaction complete",
-                f"The staged archive and exact entry passed verification.\n\nReceipt: {receipt}",
+                f"The staged archive and all reviewed entries passed verification."
+                f"\n\nReceipt: {receipt}",
                 parent=self,
             )
             if self.index and Path(archive).resolve() == self.index.source:
                 self._load_archive(self.index.source)
 
         RpfProgressDialog(
-            self, "Applying RPF entry change",
+            self, "Applying RPF transaction",
             lambda progress: service.apply_change_plan(selected, progress=progress),
             completed, failed,
         )

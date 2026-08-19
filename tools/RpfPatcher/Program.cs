@@ -14,6 +14,8 @@
 //   RpfPatcher.exe convert-gen9 <ytd_folder>              — convert .ytd files from Legacy to Enhanced format
 //   RpfPatcher.exe inspect      <gta_path> <rpf_path>    — dump RPF structure + XML contents
 //   RpfPatcher.exe extract-entries <gta_path> <rpf_path> <manifest_tsv> <output_root>
+//   RpfPatcher.exe extract-virtual-entries <gta_path> <rpf_path> <manifest_tsv> <output_root>
+//   RpfPatcher.exe apply-entry-changes <gta_path> <rpf_path> <manifest_tsv> <payload_root>
 //   RpfPatcher.exe audit-seats  <gta_path> <output_json> [output_cs]
 //   RpfPatcher.exe install-euphoria <gta_path> <payload_folder> [--allow-enhanced]
 //   RpfPatcher.exe verify-euphoria  <gta_path> <payload_folder>
@@ -70,6 +72,7 @@ namespace RpfPatcher
                     "  RpfPatcher.exe inspect      <gta_path> <rpf_path>\n" +
                     "  RpfPatcher.exe index-json   <gta_path> <rpf_path> <output_json>\n" +
                     "  RpfPatcher.exe extract-virtual-entry <gta_path> <rpf_path> <archive_path> <entry_path> <output>\n" +
+                    "  RpfPatcher.exe extract-virtual-entries <gta_path> <rpf_path> <manifest_tsv> <output_root>\n" +
                     "  RpfPatcher.exe asset-xml    <input_asset> <output_xml> <asset_folder> [legacy|gen9]\n" +
                     "  RpfPatcher.exe audit-seats  <gta_path> <output_json> [output_cs]\n" +
                     "  RpfPatcher.exe build-ytd    <dds_folder> <output_ytd> [legacy|gen9]\n" +
@@ -77,6 +80,7 @@ namespace RpfPatcher
                     "  RpfPatcher.exe extract-entry <gta_path> <rpf_path> <name> <output>\n" +
                     "  RpfPatcher.exe replace-entry <gta_path> <rpf_path> <entry_path> <payload>\n" +
                     "  RpfPatcher.exe delete-entry <gta_path> <rpf_path> <entry_path>\n" +
+                    "  RpfPatcher.exe apply-entry-changes <gta_path> <rpf_path> <manifest_tsv> <payload_root>\n" +
                     "  RpfPatcher.exe extract-entries <gta_path> <rpf_path> <manifest_tsv> <output_root>\n" +
                     "  RpfPatcher.exe pso-to-xml <input_pso> <output_xml>\n" +
                     "  RpfPatcher.exe inspect-pso <input_pso>\n" +
@@ -127,6 +131,8 @@ namespace RpfPatcher
                 return IndexRpfJson(args);
             if (command == "extract-virtual-entry")
                 return ExtractVirtualEntry(args);
+            if (command == "extract-virtual-entries")
+                return ExtractVirtualEntries(args);
             if (command == "asset-xml")
                 return ExportAssetXml(args);
             if (command == "audit-seats")
@@ -141,6 +147,8 @@ namespace RpfPatcher
                 return ReplaceEntry(args);
             if (command == "delete-entry")
                 return DeleteEntry(args);
+            if (command == "apply-entry-changes")
+                return ApplyEntryChanges(args);
             if (command == "extract-entries")
                 return ExtractEntries(args);
             if (command == "pso-to-xml")
@@ -1461,6 +1469,135 @@ namespace RpfPatcher
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"ERROR: RPF extraction failed: {ex.Message}");
+                return 99;
+            }
+        }
+
+        // Extract exact entries from root or nested virtual archives while scanning
+        // the outer RPF only once. Each non-empty TSV line is:
+        // archive/path<TAB>entry/path<TAB>destination/path. An empty first field
+        // addresses the root archive.
+        static int ExtractVirtualEntries(string[] args)
+        {
+            if (args.Length < 5)
+            {
+                Console.Error.WriteLine(
+                    "Usage: RpfPatcher.exe extract-virtual-entries <gta_path> <rpf_path> <manifest_tsv> <output_root>");
+                return 1;
+            }
+
+            string gtaPath = Path.GetFullPath(args[1]);
+            string rpfPath = Path.GetFullPath(args[2]);
+            string manifestPath = Path.GetFullPath(args[3]);
+            string outputRoot = Path.GetFullPath(args[4]);
+            if (!File.Exists(rpfPath) || !File.Exists(manifestPath))
+            {
+                Console.Error.WriteLine("ERROR: Source RPF or extraction manifest not found.");
+                return 4;
+            }
+
+            try
+            {
+                var requests = File.ReadAllLines(manifestPath)
+                    .Where(line => !string.IsNullOrWhiteSpace(line)
+                        && !line.TrimStart().StartsWith("#"))
+                    .Select(line => line.Split(new[] { '\t' }, 3))
+                    .ToArray();
+                if (requests.Length == 0 || requests.Any(parts => parts.Length != 3))
+                {
+                    Console.Error.WriteLine(
+                        "ERROR: Virtual extraction manifest is empty or malformed.");
+                    return 4;
+                }
+
+                bool isGen9 = File.Exists(Path.Combine(gtaPath, "GTA5_Enhanced.exe"))
+                           || File.Exists(Path.Combine(gtaPath, "eboot.bin"));
+                GTA5Keys.LoadFromPath(gtaPath, isGen9, null);
+                var root = new RpfFile(rpfPath, Path.GetFileName(rpfPath));
+                root.ScanStructure(null,
+                    warning => Console.Error.WriteLine("RPF scan warning: " + warning));
+
+                Directory.CreateDirectory(outputRoot);
+                string outputPrefix = outputRoot.TrimEnd(
+                    Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    + Path.DirectorySeparatorChar;
+                var destinations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var archiveCache = new Dictionary<string, RpfFile>(
+                    StringComparer.OrdinalIgnoreCase)
+                {
+                    { string.Empty, root },
+                };
+                int extracted = 0;
+
+                foreach (string[] request in requests)
+                {
+                    string archivePath = request[0].Replace('\\', '/').Trim('/');
+                    string entryPath = request[1].Replace('\\', '/').Trim('/');
+                    string relativeDestination = request[2]
+                        .Replace('/', Path.DirectorySeparatorChar)
+                        .TrimStart(Path.DirectorySeparatorChar);
+                    if (string.IsNullOrEmpty(entryPath)
+                        || string.IsNullOrEmpty(relativeDestination))
+                    {
+                        Console.Error.WriteLine("ERROR: Empty entry or destination path.");
+                        return 4;
+                    }
+                    string destination = Path.GetFullPath(
+                        Path.Combine(outputRoot, relativeDestination));
+                    if (!destination.StartsWith(
+                            outputPrefix, StringComparison.OrdinalIgnoreCase)
+                        || !destinations.Add(destination))
+                    {
+                        Console.Error.WriteLine(
+                            $"ERROR: Unsafe or duplicate destination: {request[2]}");
+                        return 4;
+                    }
+
+                    if (!archiveCache.TryGetValue(archivePath, out RpfFile archive))
+                    {
+                        archive = FindVirtualArchive(root, archivePath);
+                        if (archive == null)
+                        {
+                            Console.Error.WriteLine(
+                                $"ERROR: Nested archive not found: {archivePath}");
+                            return 5;
+                        }
+                        archiveCache[archivePath] = archive;
+                    }
+                    RpfFileEntry entry = FindExactFileEntry(archive, entryPath);
+                    if (entry == null)
+                    {
+                        Console.Error.WriteLine(
+                            $"ERROR: Entry not found: {archivePath}::{entryPath}");
+                        return 5;
+                    }
+                    byte[] data = entry.File.ExtractFile(entry);
+                    if (data == null)
+                    {
+                        Console.Error.WriteLine(
+                            $"ERROR: Entry could not be extracted: {archivePath}::{entryPath}");
+                        return 5;
+                    }
+                    if (entry is RpfResourceFileEntry resource)
+                    {
+                        data = ResourceBuilder.AddResourceHeader(
+                            resource, ResourceBuilder.Compress(data));
+                    }
+                    string parent = Path.GetDirectoryName(destination);
+                    if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+                    File.WriteAllBytes(destination, data);
+                    extracted++;
+                    Console.WriteLine(
+                        $"Extracted {archivePath}::{entryPath} -> {request[2]} ({data.Length:N0} bytes)");
+                }
+
+                Console.WriteLine(
+                    $"Extracted {extracted:N0} virtual entries from {rpfPath}.");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"ERROR: Virtual RPF extraction failed: {ex.Message}");
                 return 99;
             }
         }
@@ -2891,6 +3028,159 @@ namespace RpfPatcher
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"ERROR: RPF entry deletion failed: {ex.Message}");
+                return 99;
+            }
+        }
+
+        // Apply a reviewed set of exact root-archive entry operations after one
+        // writable scan. Each TSV line is action<TAB>entry/path<TAB>payload/path;
+        // delete lines have an empty payload field. Nested archive orchestration
+        // is handled by the SDK transaction layer and reaches this command as a
+        // verified replacement of the immediate child RPF.
+        static int ApplyEntryChanges(string[] args)
+        {
+            if (args.Length < 5)
+            {
+                Console.Error.WriteLine(
+                    "Usage: RpfPatcher.exe apply-entry-changes <gta_path> <rpf_path> <manifest_tsv> <payload_root>");
+                return 1;
+            }
+            string gtaPath = Path.GetFullPath(args[1]);
+            string rpfPath = Path.GetFullPath(args[2]);
+            string manifestPath = Path.GetFullPath(args[3]);
+            string payloadRoot = Path.GetFullPath(args[4]);
+            if (!File.Exists(rpfPath) || !File.Exists(manifestPath)
+                || !Directory.Exists(payloadRoot))
+            {
+                Console.Error.WriteLine(
+                    "ERROR: RPF, change manifest, or payload root not found.");
+                return 4;
+            }
+            try
+            {
+                var changes = File.ReadAllLines(manifestPath)
+                    .Where(line => !string.IsNullOrWhiteSpace(line)
+                        && !line.TrimStart().StartsWith("#"))
+                    .Select(line => line.Split(new[] { '\t' }, 3))
+                    .ToArray();
+                if (changes.Length == 0 || changes.Any(parts => parts.Length != 3))
+                {
+                    Console.Error.WriteLine("ERROR: Entry-change manifest is empty or malformed.");
+                    return 4;
+                }
+                var targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                string payloadPrefix = payloadRoot.TrimEnd(
+                    Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    + Path.DirectorySeparatorChar;
+                foreach (string[] change in changes)
+                {
+                    string action = change[0].Trim().ToLowerInvariant();
+                    string entryPath = change[1].Replace('\\', '/').Trim('/');
+                    if (action != "replace" && action != "add" && action != "delete")
+                    {
+                        Console.Error.WriteLine($"ERROR: Invalid RPF action: {change[0]}");
+                        return 4;
+                    }
+                    if (string.IsNullOrWhiteSpace(entryPath)
+                        || entryPath.Contains("../") || entryPath.Contains("/..")
+                        || Path.IsPathRooted(entryPath) || !targets.Add(entryPath))
+                    {
+                        Console.Error.WriteLine(
+                            $"ERROR: Unsafe or duplicate RPF target: {change[1]}");
+                        return 4;
+                    }
+                    if (action == "delete")
+                    {
+                        if (!string.IsNullOrEmpty(change[2]))
+                        {
+                            Console.Error.WriteLine(
+                                $"ERROR: Delete action has a payload: {entryPath}");
+                            return 4;
+                        }
+                        continue;
+                    }
+                    string relative = change[2]
+                        .Replace('/', Path.DirectorySeparatorChar)
+                        .TrimStart(Path.DirectorySeparatorChar);
+                    string payload = Path.GetFullPath(Path.Combine(payloadRoot, relative));
+                    if (!payload.StartsWith(payloadPrefix, StringComparison.OrdinalIgnoreCase)
+                        || !File.Exists(payload))
+                    {
+                        Console.Error.WriteLine(
+                            $"ERROR: Unsafe or missing payload for {entryPath}: {change[2]}");
+                        return 4;
+                    }
+                }
+
+                var rpf = OpenWritableRpf(gtaPath, rpfPath);
+                // Validate the entire manifest before the first change. The SDK also
+                // operates only on a disposable staged archive, but this keeps the
+                // helper deterministic when called independently.
+                foreach (string[] change in changes)
+                {
+                    string action = change[0].Trim().ToLowerInvariant();
+                    string entryPath = change[1].Replace('\\', '/').Trim('/');
+                    var existing = FindExactFileEntry(rpf, entryPath);
+                    if (action == "add" && existing != null)
+                        throw new InvalidDataException(
+                            $"Add target already exists: {entryPath}");
+                    if ((action == "replace" || action == "delete") && existing == null)
+                        throw new InvalidDataException(
+                            $"{action} target does not exist: {entryPath}");
+                    if (action == "add")
+                    {
+                        int separator = entryPath.LastIndexOf('/');
+                        string parentPath = separator >= 0
+                            ? entryPath.Substring(0, separator) : string.Empty;
+                        if (FindExactDirectory(rpf, parentPath) == null)
+                            throw new InvalidDataException(
+                                $"RPF target directory not found: {parentPath}");
+                    }
+                }
+
+                int applied = 0;
+                foreach (string[] change in changes)
+                {
+                    string action = change[0].Trim().ToLowerInvariant();
+                    string entryPath = change[1].Replace('\\', '/').Trim('/');
+                    var existing = FindExactFileEntry(rpf, entryPath);
+                    if (action == "delete")
+                    {
+                        RpfFile.DeleteEntry(existing);
+                        Console.WriteLine($"Deleted RPF entry: {entryPath}");
+                    }
+                    else
+                    {
+                        string relative = change[2]
+                            .Replace('/', Path.DirectorySeparatorChar)
+                            .TrimStart(Path.DirectorySeparatorChar);
+                        byte[] data = File.ReadAllBytes(Path.Combine(payloadRoot, relative));
+                        if (action == "replace")
+                        {
+                            RpfFile.CreateFile(existing.Parent, existing.Name, data, true);
+                            Console.WriteLine(
+                                $"Replaced RPF entry: {entryPath} ({data.Length:N0} bytes)");
+                        }
+                        else
+                        {
+                            int separator = entryPath.LastIndexOf('/');
+                            string parentPath = separator >= 0
+                                ? entryPath.Substring(0, separator) : string.Empty;
+                            string name = entryPath.Split('/').Last();
+                            var parent = FindExactDirectory(rpf, parentPath);
+                            RpfFile.CreateFile(parent, name, data, true);
+                            Console.WriteLine(
+                                $"Added RPF entry: {entryPath} ({data.Length:N0} bytes)");
+                        }
+                    }
+                    applied++;
+                }
+                Console.WriteLine($"Applied {applied:N0} RPF entry changes in one session.");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"ERROR: RPF batch change failed: {ex.Message}");
                 return 99;
             }
         }

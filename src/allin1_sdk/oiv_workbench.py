@@ -56,10 +56,29 @@ class OivPlan:
         return tuple(item for item in self.operations if item.kind == "add")
 
     @property
+    def rpf_batch_operations(self) -> tuple[OivOperation, ...]:
+        return tuple(
+            item for item in self.operations
+            if item.kind in {"add", "delete"} and item.archives
+        )
+
+    @property
     def translatable(self) -> bool:
-        return bool(self.add_operations) and not any(
+        actionable = tuple(
+            item for item in self.operations if item.kind in {"add", "delete"}
+        )
+        return bool(actionable) and not any(
             not item.supported for item in self.operations
         ) and not any(item.severity == "error" for item in self.findings)
+
+    @property
+    def managed_exportable(self) -> bool:
+        return self.translatable and bool(self.add_operations) and all(
+            item.kind in {"archive", "add"}
+            and (item.kind != "add" or len(item.archives) <= 1)
+            and (item.kind != "archive" or not item.archives)
+            for item in self.operations
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -67,6 +86,7 @@ class OivPlan:
             "version": self.version, "author": self.author,
             "editions": list(self.editions),
             "translatable": self.translatable,
+            "managed_exportable": self.managed_exportable,
             "operations": [asdict(item) for item in self.operations],
             "findings": [asdict(item) for item in self.findings],
         }
@@ -102,9 +122,10 @@ class OivPlan:
         lines.extend([
             "", "## Safety boundary", "",
             "This report does not execute the OIV. Managed export is available only "
-            "when every declared operation can be represented as an owned file copy "
-            "or exact RPF-entry transaction. Deletes, wildcard text edits, XPath/PSO "
-            "merges, nested archives, and unknown commands remain blocked.", "",
+            "when every declared operation can be represented as an owned file copy, "
+            "exact RPF-entry transaction, or atomic nested-RPF batch. Wildcard text "
+            "edits, XPath/PSO merges, archive creation, and unknown commands remain "
+            "blocked.", "",
         ])
         return "\n".join(lines)
 
@@ -121,7 +142,7 @@ class OivPlan:
 class OivWorkbench:
     """Parse actual OIV 2.x operations without executing package code."""
 
-    _UNSUPPORTED = {"delete", "text", "xml", "pso", "defragmentation"}
+    _UNSUPPORTED = {"text", "xml", "pso", "defragmentation"}
 
     def inspect(self, source: str | Path) -> OivPlan:
         package = Path(source).expanduser().resolve()
@@ -187,20 +208,27 @@ class OivWorkbench:
         number = len(operations) + 1
         if kind == "archive":
             raw_path = node.attrib.get("path", "").strip()
-            path = self._target_path(raw_path, mods=True)
+            path = self._target_path(raw_path, mods=not archives)
             create = node.attrib.get("createIfNotExist", "false").casefold() == "true"
             nested = archives + ((path or raw_path),)
-            supported = bool(path) and len(nested) == 1 and not create
+            supported = (
+                bool(path) and path.casefold().endswith(".rpf")
+                and len(nested) <= 9 and not create
+            )
             operations.append(OivOperation(
                 number, kind, "", path, archives, supported,
                 "RPF operation container" + ("; creates archive" if create else ""),
             ))
             if not supported:
-                code = "nested_archive" if len(nested) > 1 else "archive_creation"
+                code = (
+                    "archive_creation" if create else "archive_depth"
+                    if len(nested) > 9 else "unsafe_archive"
+                )
                 findings.append(OivFinding(
                     "error", code,
-                    "Nested or newly created archives cannot be translated into an "
-                    "exact existing-RPF transaction.", number,
+                    "The archive container is unsafe, newly created, or deeper than "
+                    "the eight nested levels supported by atomic RPF transactions.",
+                    number,
                 ))
             for child in node:
                 self._walk(child, nested, entries, operations, findings)
@@ -217,7 +245,7 @@ class OivWorkbench:
                 source_path = _safe_member_path(source).as_posix()
                 member = f"content/{source_path}".casefold()
                 target_path = self._target_path(target, mods=not archives)
-                supported = bool(target_path) and member in entries and len(archives) <= 1
+                supported = bool(target_path) and member in entries and len(archives) <= 9
                 if not archives and target_path and not self._managed_file_target(target_path):
                     supported = False
                     findings.append(OivFinding(
@@ -241,6 +269,17 @@ class OivWorkbench:
             except ValueError as exc:
                 findings.append(OivFinding(
                     "error", "unsafe_source", str(exc), number,
+                ))
+        elif kind == "delete":
+            target_path = self._target_path(target, mods=False)
+            supported = bool(archives) and bool(target_path) and len(archives) <= 9
+            target = target_path
+            detail = "Exact RPF entry deletion"
+            if not supported:
+                findings.append(OivFinding(
+                    "error", "unsupported_delete",
+                    "Delete is supported only for an exact entry inside an existing "
+                    "RPF archive tree.", number,
                 ))
         elif kind in self._UNSUPPORTED:
             findings.append(OivFinding(
@@ -296,12 +335,78 @@ class OivWorkbench:
         child = cls._child(parent, name)
         return (child.text or "").strip() if child is not None else ""
 
+    def export_rpf_batch_manifests(
+        self, plan: OivPlan, destination: str | Path,
+    ) -> tuple[Path, ...]:
+        """Export the exact existing-RPF portion as atomic batch manifests."""
+        operations = plan.rpf_batch_operations
+        if not operations:
+            raise ValueError("OIV recipe contains no RPF entry changes")
+        if any(not item.supported for item in operations):
+            raise ValueError("OIV recipe contains an unsafe RPF entry operation")
+        root = Path(destination).expanduser().resolve()
+        if root.exists() and any(root.iterdir()):
+            raise ValueError("RPF batch destination must be empty")
+        root.mkdir(parents=True, exist_ok=True)
+        grouped: dict[str, list[OivOperation]] = {}
+        for operation in operations:
+            grouped.setdefault(operation.archives[0], []).append(operation)
+
+        written: list[Path] = []
+        for group_number, (outer_archive, changes) in enumerate(
+            sorted(grouped.items(), key=lambda item: item[0].casefold()), start=1,
+        ):
+            label = re.sub(
+                r"[^a-z0-9._-]+", "-", PurePosixPath(outer_archive).stem.casefold(),
+            ).strip("-._") or "archive"
+            discriminator = hashlib.sha256(outer_archive.casefold().encode("utf-8")).hexdigest()[:8]
+            group = root / f"{group_number:02d}-{label}-{discriminator}"
+            payload_root = group / "payloads"
+            payload_root.mkdir(parents=True)
+            authored_changes: list[dict[str, object]] = []
+            seen: set[tuple[str, str]] = set()
+            for change_number, operation in enumerate(changes, start=1):
+                archive_path = "!".join(operation.archives[1:])
+                identity = (archive_path.casefold(), operation.target.casefold())
+                if identity in seen:
+                    raise ValueError(
+                        "OIV recipe targets the same RPF entry more than once: "
+                        f"{archive_path}::{operation.target}"
+                    )
+                seen.add(identity)
+                item: dict[str, object] = {
+                    "action": "upsert" if operation.kind == "add" else "delete",
+                    "archive_path": archive_path,
+                    "entry": operation.target,
+                    "oiv_operation": operation.number,
+                }
+                if operation.kind == "add":
+                    name = PurePosixPath(operation.source).name
+                    payload = payload_root / f"{change_number:04d}_{name}"
+                    self._copy_member(plan.source, operation.source, payload)
+                    item["payload"] = f"payloads/{payload.name}"
+                    item["source_sha256"] = self._sha256(payload)
+                authored_changes.append(item)
+            manifest = group / "changes.json"
+            manifest.write_text(json.dumps({
+                "schema_version": 1,
+                "operation": "rpf_multi_entry_change_manifest",
+                "source_oiv": str(plan.source),
+                "outer_archive": outer_archive,
+                "changes": authored_changes,
+            }, indent=2) + "\n", encoding="utf-8")
+            written.append(manifest)
+        return tuple(written)
+
     def export_managed_package(
         self, plan: OivPlan, destination: str | Path,
     ) -> Path:
         """Extract only proven add sources and emit a validated local package."""
-        if not plan.translatable:
-            raise ValueError("OIV recipe still contains unsupported or unsafe operations")
+        if not plan.managed_exportable:
+            raise ValueError(
+                "OIV recipe still contains unsupported or unsafe operations, or "
+                "requires atomic nested-RPF batch manifests"
+            )
         root = Path(destination).expanduser().resolve()
         if root.exists() and any(root.iterdir()):
             raise ValueError("Managed-package destination must be empty")

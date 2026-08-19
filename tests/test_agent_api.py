@@ -17,6 +17,9 @@ def test_catalog_is_structured_and_classifies_risk():
     assert "agent-api" not in catalog
     assert catalog["validate"]["risk"] == "read_only"
     assert catalog["link"]["risk"] == "authoring_write"
+    assert catalog["extract-rpf-subtree"]["risk"] == "authoring_write"
+    assert catalog["diff-rpf"]["risk"] == "authoring_write"
+    assert catalog["plan-rpf-batch"]["risk"] == "authoring_write"
     assert catalog["apply-rpf-plan"]["risk"] == "game_write"
     assert catalog["install-package"]["risk"] == "game_write"
     assert catalog["list-installed-packages"]["risk"] == "read_only"
