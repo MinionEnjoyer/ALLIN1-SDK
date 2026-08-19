@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -18,7 +19,9 @@ from allin1_sdk.gxt2_workspace import Gxt2Workspace
 from allin1_sdk.detector import detect_gta_path
 from allin1_sdk.dlc_inventory import DlcInventory
 from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
-from allin1_sdk.native_assets import NativeAssetInspector
+from allin1_sdk.native_assets import (
+    MAX_NATIVE_PREVIEW_BYTES, NativeAssetInspector, NativeAssetReport,
+)
 from allin1_sdk.mods import ModIntegrationService, ModManifest
 from allin1_sdk.oiv_workbench import OivWorkbench
 from allin1_sdk.paths import project_root
@@ -77,6 +80,62 @@ def _mod_service(gta_path: Path | None) -> ModIntegrationService:
 
 def _progress(message: str, percent: int) -> None:
     click.echo(f"[{percent:3d}%] {message}")
+
+
+def _native_report_payload(
+    report: NativeAssetReport, *, source: str, edition: str,
+    binding: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "operation": "inspect_native_asset",
+        "source": source,
+        "edition": edition.title(),
+        "name": report.name,
+        "suffix": report.suffix,
+        "format": report.format_name,
+        "size": report.size,
+        "sha256": report.sha256,
+        "metadata": report.metadata,
+        "warnings": list(report.warnings),
+        "structured_preview_chars": len(report.structured_text or ""),
+        "has_image_preview": report.image_png is not None,
+        "output_dir": None,
+    }
+    if binding:
+        payload["binding"] = binding
+    return payload
+
+
+def _publish_native_report(
+    report: NativeAssetReport, payload: dict[str, object], output_dir: Path,
+) -> None:
+    destination = output_dir.expanduser().resolve()
+    if destination.exists() or destination.is_symlink():
+        raise ValueError(f"Native preview output already exists: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(
+        prefix=f".{destination.name}.allin1-stage-", dir=destination.parent,
+    ))
+    try:
+        outputs: list[str] = []
+        if report.structured_text is not None:
+            (staging / "structured-preview.txt").write_text(
+                report.structured_text, encoding="utf-8",
+            )
+            outputs.append("structured-preview.txt")
+        if report.image_png is not None:
+            (staging / "preview.png").write_bytes(report.image_png)
+            outputs.append("preview.png")
+        payload["output_dir"] = str(destination)
+        payload["outputs"] = outputs
+        (staging / "report.json").write_text(
+            json.dumps(payload, indent=2) + "\n", encoding="utf-8",
+        )
+        staging.rename(destination)
+    except Exception:
+        if staging.is_dir():
+            shutil.rmtree(staging)
+        raise
 
 
 @click.group()
@@ -1230,6 +1289,36 @@ def extract_rpf_entry(
     click.echo(f"Extracted read-only copy: {written}")
 
 
+@main.command("inspect-rpf-native-entry")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("entry_path")
+@click.option("--archive-path", default="")
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--output-dir", type=click.Path(file_okay=False, path_type=Path),
+    help="Publish a new report folder containing any XML/text and PNG preview.",
+)
+def inspect_rpf_native_entry(
+    archive: Path, entry_path: str, archive_path: str,
+    gta_path: Path | None, output_dir: Path | None,
+) -> None:
+    """Inspect an exact root or nested-RPF asset without modifying its archive."""
+    service = _rpf_service(gta_path)
+    try:
+        index, entry = _entry(service, archive, archive_path, entry_path)
+        report, binding = service.inspect_native_entry(index, entry)
+        payload = _native_report_payload(
+            report, source=entry.virtual_name, edition=index.edition,
+            binding=binding,
+        )
+        payload["operation"] = "inspect_rpf_native_entry"
+        if output_dir is not None:
+            _publish_native_report(report, payload, output_dir)
+        click.echo(json.dumps(payload, indent=2))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @main.command("export-rpf-native-workspace")
 @click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("entry_path")
@@ -1821,6 +1910,38 @@ def export_native_workspace(source: Path, edition: str, output: Path) -> None:
     click.echo(f"Exported verified native editing workspace: {workspace}")
 
 
+@main.command("inspect-native-asset")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--edition", type=click.Choice(("Legacy", "Enhanced"), case_sensitive=False),
+    default="Enhanced", show_default=True,
+)
+@click.option(
+    "--output-dir", type=click.Path(file_okay=False, path_type=Path),
+    help="Publish a new report folder containing any XML/text and PNG preview.",
+)
+def inspect_native_asset(source: Path, edition: str, output_dir: Path | None) -> None:
+    """Inspect one native asset and optionally publish its bounded preview bundle."""
+    try:
+        if source.is_symlink():
+            raise ValueError("Native inspection source cannot be a symbolic link")
+        resolved = source.resolve()
+        size = resolved.stat().st_size
+        if not 0 < size <= MAX_NATIVE_PREVIEW_BYTES:
+            raise ValueError("Native inspection source is empty or exceeds the 128 MiB limit")
+        report = NativeAssetInspector(PROJECT_ROOT).inspect_bytes(
+            resolved.name, resolved.read_bytes(), edition=edition,
+        )
+        payload = _native_report_payload(
+            report, source=str(resolved), edition=edition,
+        )
+        if output_dir is not None:
+            _publish_native_report(report, payload, output_dir)
+        click.echo(json.dumps(payload, indent=2))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @main.command("build-native-workspace")
 @click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
@@ -2209,7 +2330,7 @@ for _command in (
     create_rpf_change_set, inspect_rpf_change_set, stage_rpf_change,
     unstage_rpf_change, move_rpf_change, plan_rpf_change_set,
     verify_rpf_archive, defragment_rpf,
-    extract_rpf_entry,
+    extract_rpf_entry, inspect_rpf_native_entry,
     extract_rpf_subtree, export_rpf_native_workspace,
     export_rpf_binary_workspace, export_rpf_gxt2_workspace, diff_rpf,
     plan_rpf_replacement, plan_rpf_native_workspace,
@@ -2218,7 +2339,7 @@ for _command in (
     plan_rpf_sync, apply_rpf_plan,
     verify_rpf_transaction, rollback_rpf_transaction, recover_rpf_transaction,
     list_rpf_transactions, canary_rpf_transaction, diff_meta_command,
-    export_native_workspace, build_native_workspace,
+    inspect_native_asset, export_native_workspace, build_native_workspace,
     inspect_binary_workspace, patch_binary_workspace,
     undo_binary_workspace, build_binary_workspace,
     list_gxt2_entries, set_gxt2_text, add_gxt2_entry, remove_gxt2_entry,

@@ -19,7 +19,7 @@ from typing import Any, Callable, Iterable
 from allin1_sdk.native_assets import (
     MAX_NATIVE_PREVIEW_BYTES,
     NATIVE_XML_IMPORT_SUFFIXES,
-    NativeAssetInspector,
+    NativeAssetInspector, NativeAssetReport,
 )
 from allin1_sdk.binary_workspace import BinaryPatchWorkspace
 from allin1_sdk.gxt2_workspace import Gxt2Workspace, MAX_GXT2_BYTES
@@ -455,6 +455,35 @@ class RpfExplorerService:
         return NativeAssetInspector(self.project_root).export_workspace_bytes(
             entry.name, data, destination, edition=index.edition,
         )
+
+    def inspect_native_entry(
+        self, index: RpfIndex, entry: RpfEntryRecord,
+    ) -> tuple[NativeAssetReport, dict[str, object]]:
+        """Inspect one exact RPF member while proving the archive stayed unchanged."""
+        if entry.kind == "directory" or index.entry(entry.id) != entry:
+            raise ValueError("Entry does not belong to this RPF index")
+        if entry.size <= 0 or entry.size > MAX_NATIVE_PREVIEW_BYTES:
+            raise ValueError("Selected RPF asset is empty or exceeds the guarded limit")
+        archive_hash = _sha256_file(index.source)
+        with tempfile.TemporaryDirectory(prefix="allin1-rpf-native-inspect-") as temporary:
+            source = self.extract(index, entry, Path(temporary) / entry.name)
+            data = source.read_bytes()
+        if not data or len(data) > MAX_NATIVE_PREVIEW_BYTES:
+            raise RuntimeError("Extracted RPF asset is empty or exceeds the guarded limit")
+        if _sha256_file(index.source) != archive_hash:
+            raise RuntimeError("RPF changed during native asset inspection")
+        report = NativeAssetInspector(self.project_root).inspect_bytes(
+            entry.name, data, edition=index.edition,
+        )
+        return report, {
+            "outer_archive": str(index.source),
+            "outer_archive_sha256": archive_hash,
+            "archive_path": entry.archive_path,
+            "entry_path": entry.path,
+            "entry_id": entry.id,
+            "extracted_size": len(data),
+            "extracted_sha256": report.sha256,
+        }
 
     def export_binary_workspace(
         self, index: RpfIndex, entry: RpfEntryRecord, destination: str | Path,

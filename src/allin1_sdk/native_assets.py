@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import shutil
 import struct
 import tempfile
@@ -21,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from lxml import etree
 from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 
 from allin1_sdk.gxt2_workspace import Gxt2Workspace
@@ -45,6 +47,27 @@ MAX_NATIVE_PREVIEW_BYTES = 128 * 1024 * 1024
 MAX_NATIVE_WORKSPACE_FILES = 10_000
 MAX_NATIVE_WORKSPACE_BYTES = 2 * 1024 * 1024 * 1024
 NATIVE_WORKSPACE_SCHEMA = 1
+MODEL_PREVIEW_SUFFIXES = frozenset({".ydr", ".ydd", ".yft"})
+MAX_MODEL_XML_BYTES = 192 * 1024 * 1024
+MAX_MODEL_VERTICES = 1_000_000
+MAX_MODEL_TRIANGLES = 1_000_000
+MAX_RENDERED_TRIANGLES = 45_000
+
+
+@dataclass(frozen=True)
+class _ConvertedAsset:
+    structured_text: str
+    image_png: bytes | None
+    texture_count: int
+    metadata: dict[str, Any] = field(default_factory=dict)
+    conversion_error: str | None = None
+
+
+@dataclass(frozen=True)
+class _ModelGeometry:
+    vertices: tuple[tuple[float, float, float], ...]
+    triangles: tuple[tuple[int, int, int], ...]
+    lod: str
 
 
 def _sha256_file(path: Path) -> str:
@@ -191,6 +214,279 @@ def _texture_contact_sheet(folder: Path) -> tuple[bytes | None, int]:
     return output.getvalue(), len(candidates)
 
 
+def _local_name(element: etree._Element) -> str:
+    return etree.QName(element).localname
+
+
+def _model_position_offset(layout: etree._Element | None) -> int | None:
+    """Return the Position offset for known CodeWalker vertex semantics.
+
+    CodeWalker emits one vertex per line. We still refuse to guess when an
+    unknown semantic precedes Position so a malformed/custom layout cannot be
+    rendered as convincing but incorrect geometry.
+    """
+    if layout is None:
+        return None
+    offset = 0
+    for semantic in layout:
+        if not isinstance(semantic.tag, str):
+            continue
+        name = _local_name(semantic)
+        if name.casefold().startswith("position"):
+            return offset
+        folded = name.casefold()
+        if folded.startswith("texcoord"):
+            width = 2
+        elif folded.startswith("colour") or folded.startswith("color"):
+            width = 4
+        elif folded.startswith("blendweights") or folded.startswith("blendindices"):
+            width = 4
+        elif folded.startswith("normal") or folded.startswith("binormal"):
+            width = 3
+        elif folded.startswith("tangent"):
+            width = 4
+        else:
+            return None
+        offset += width
+    return None
+
+
+def _model_lod(vertex_buffer: etree._Element) -> str:
+    parent = vertex_buffer.getparent()
+    while parent is not None:
+        name = _local_name(parent)
+        if name.startswith("DrawableModels"):
+            return name.removeprefix("DrawableModels") or "Unknown"
+        parent = parent.getparent()
+    return "Default"
+
+
+def _read_model_geometry(
+    vertex_buffer: etree._Element,
+) -> _ModelGeometry | None:
+    layout = vertex_buffer.find("./Layout")
+    data = vertex_buffer.find("./Data")
+    offset = _model_position_offset(layout)
+    if data is None or not data.text or offset is None:
+        return None
+    vertices: list[tuple[float, float, float]] = []
+    for line in data.text.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        if len(fields) < offset + 3:
+            raise ValueError("A model vertex row is shorter than its declared layout")
+        try:
+            point = tuple(float(value) for value in fields[offset:offset + 3])
+        except ValueError as exc:
+            raise ValueError("A model vertex contains a non-numeric position") from exc
+        if not all(math.isfinite(value) for value in point):
+            raise ValueError("A model vertex contains a non-finite position")
+        vertices.append((point[0], point[1], point[2]))
+        if len(vertices) > MAX_MODEL_VERTICES:
+            raise ValueError("Model preview exceeds the guarded vertex limit")
+    if not vertices:
+        return None
+
+    geometry = vertex_buffer.getparent()
+    index_data = None if geometry is None else geometry.find("./IndexBuffer/Data")
+    if index_data is None or not index_data.text:
+        return _ModelGeometry(tuple(vertices), (), _model_lod(vertex_buffer))
+    indices: list[int] = []
+    triangles: list[tuple[int, int, int]] = []
+    for line in index_data.text.splitlines():
+        for token in line.split():
+            try:
+                indices.append(int(token, 10))
+            except ValueError as exc:
+                raise ValueError("A model index buffer contains a non-integer value") from exc
+            if len(indices) == 3:
+                triangle = (indices[0], indices[1], indices[2])
+                if any(index < 0 or index >= len(vertices) for index in triangle):
+                    raise ValueError("A model triangle references a missing vertex")
+                triangles.append(triangle)
+                indices.clear()
+                if len(triangles) > MAX_MODEL_TRIANGLES:
+                    raise ValueError("Model preview exceeds the guarded triangle limit")
+    if indices:
+        raise ValueError("A model index buffer does not contain complete triangles")
+    return _ModelGeometry(tuple(vertices), tuple(triangles), _model_lod(vertex_buffer))
+
+
+def _model_drawable_count(root: etree._Element) -> int:
+    name = _local_name(root)
+    if name == "DrawableDictionary":
+        return len(root.xpath("./*[local-name()='Item']"))
+    if name in {"Drawable", "Fragment"}:
+        return 1
+    count = len(root.xpath(".//*[local-name()='Drawable']"))
+    return count or 1
+
+
+def _project_model_point(
+    point: tuple[float, float, float],
+    center: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    x, y, z = (point[index] - center[index] for index in range(3))
+    yaw = math.radians(34.0)
+    pitch = math.radians(24.0)
+    rotated_x = (x * math.cos(yaw)) - (y * math.sin(yaw))
+    rotated_y = (x * math.sin(yaw)) + (y * math.cos(yaw))
+    screen_y = (z * math.cos(pitch)) - (rotated_y * math.sin(pitch))
+    depth = (rotated_y * math.cos(pitch)) + (z * math.sin(pitch))
+    return rotated_x, screen_y, depth
+
+
+def _render_model_wireframe(
+    geometries: list[_ModelGeometry], name: str,
+) -> tuple[bytes, dict[str, Any]]:
+    vertices = [point for geometry in geometries for point in geometry.vertices]
+    minima = tuple(min(point[axis] for point in vertices) for axis in range(3))
+    maxima = tuple(max(point[axis] for point in vertices) for axis in range(3))
+    center = tuple((minima[axis] + maxima[axis]) / 2.0 for axis in range(3))
+    projected = [_project_model_point(point, center) for point in vertices]
+    min_x = min(point[0] for point in projected)
+    max_x = max(point[0] for point in projected)
+    min_y = min(point[1] for point in projected)
+    max_y = max(point[1] for point in projected)
+    width, height = 960, 680
+    view_left, view_top, view_right, view_bottom = 38, 76, width - 38, height - 56
+    span_x = max(max_x - min_x, 1e-9)
+    span_y = max(max_y - min_y, 1e-9)
+    scale = min((view_right - view_left) / span_x, (view_bottom - view_top) / span_y)
+    center_x = (view_left + view_right) / 2.0
+    center_y = (view_top + view_bottom) / 2.0
+
+    def screen(point: tuple[float, float, float]) -> tuple[float, float, float]:
+        px, py, depth = _project_model_point(point, center)
+        return center_x + (px * scale), center_y - (py * scale), depth
+
+    total_triangles = sum(len(geometry.triangles) for geometry in geometries)
+    rendered: list[tuple[float, int, tuple[tuple[float, float], ...], float]] = []
+    for geometry_index, geometry in enumerate(geometries):
+        triangle_count = len(geometry.triangles)
+        if not triangle_count:
+            continue
+        quota = max(1, round(MAX_RENDERED_TRIANGLES * triangle_count / total_triangles))
+        stride = max(1, math.ceil(triangle_count / quota))
+        for triangle in geometry.triangles[::stride]:
+            raw = [geometry.vertices[index] for index in triangle]
+            transformed = [screen(point) for point in raw]
+            ax, ay, az = (raw[1][i] - raw[0][i] for i in range(3))
+            bx, by, bz = (raw[2][i] - raw[0][i] for i in range(3))
+            nx, ny, nz = (ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx)
+            magnitude = math.sqrt(nx * nx + ny * ny + nz * nz)
+            light = 0.3 if magnitude <= 1e-12 else abs(
+                ((nx * 0.32) + (ny * -0.42) + (nz * 0.85)) / magnitude
+            )
+            rendered.append((
+                sum(point[2] for point in transformed) / 3.0,
+                geometry_index,
+                tuple((point[0], point[1]) for point in transformed),
+                min(1.0, max(0.16, light)),
+            ))
+    rendered.sort(key=lambda item: item[0])
+
+    image = Image.new("RGB", (width, height), "#101714")
+    draw = ImageDraw.Draw(image)
+    for y in range(view_top, view_bottom + 1, 48):
+        draw.line((view_left, y, view_right, y), fill="#18231e", width=1)
+    for x in range(view_left, view_right + 1, 48):
+        draw.line((x, view_top, x, view_bottom), fill="#18231e", width=1)
+    draw.rectangle((view_left, view_top, view_right, view_bottom), outline="#2d4036")
+    for _depth, geometry_index, polygon, light in rendered:
+        accent = (geometry_index * 31) % 45
+        fill = (
+            int(17 + (22 * light)),
+            int(48 + accent + (70 * light)),
+            int(39 + (50 * light)),
+        )
+        outline = (
+            int(42 + (38 * light)),
+            int(112 + (92 * light)),
+            int(76 + (68 * light)),
+        )
+        draw.polygon(polygon, fill=fill, outline=outline)
+    if not rendered:
+        for geometry in geometries:
+            points = [screen(point) for point in geometry.vertices]
+            for point in points[::max(1, len(points) // 12_000)]:
+                x, y, _depth = point
+                draw.ellipse((x - 1, y - 1, x + 1, y + 1), fill="#5bd995")
+    draw.text((38, 24), f"MODEL PREVIEW  |  {name[:72]}", fill="#E8F2EC")
+    draw.text(
+        (38, height - 32),
+        f"{len(vertices):,} vertices  |  {total_triangles:,} triangles  |  "
+        f"{len(geometries):,} geometries  |  isometric diagnostic view",
+        fill="#AFC5B9",
+    )
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    lods: dict[str, int] = {}
+    for geometry in geometries:
+        lods[geometry.lod] = lods.get(geometry.lod, 0) + 1
+    return output.getvalue(), {
+        "model_geometry_count": len(geometries),
+        "model_vertex_count": len(vertices),
+        "model_triangle_count": total_triangles,
+        "model_lods": ", ".join(f"{name}: {count}" for name, count in sorted(lods.items())),
+        "model_bounds": " x ".join(
+            f"{maxima[axis] - minima[axis]:.4g}" for axis in range(3)
+        ),
+        "model_preview": "isometric geometry diagnostic",
+    }
+
+
+def _model_preview_from_xml(
+    xml: Path, name: str,
+) -> tuple[bytes | None, dict[str, Any], str | None]:
+    """Build a bounded diagnostic preview from CodeWalker model XML."""
+    size = xml.stat().st_size
+    if not 0 < size <= MAX_MODEL_XML_BYTES:
+        return None, {}, "Model XML exceeds the guarded preview limit"
+    with xml.open("rb") as stream:
+        prefix = stream.read(65_536).upper()
+    if b"<!DOCTYPE" in prefix or b"<!ENTITY" in prefix:
+        return None, {}, "Model XML contains a prohibited DTD or entity declaration"
+    try:
+        parser = etree.XMLParser(
+            resolve_entities=False, no_network=True, load_dtd=False,
+            recover=False, huge_tree=True,
+        )
+        tree = etree.parse(str(xml), parser)
+        if tree.docinfo.doctype:
+            raise ValueError("Model XML contains a prohibited document type")
+        root = tree.getroot()
+        geometries: list[_ModelGeometry] = []
+        total_vertices = 0
+        total_triangles = 0
+        skipped_layouts = 0
+        for vertex_buffer in root.xpath(".//*[local-name()='VertexBuffer']"):
+            geometry = _read_model_geometry(vertex_buffer)
+            if geometry is None:
+                skipped_layouts += 1
+                continue
+            total_vertices += len(geometry.vertices)
+            total_triangles += len(geometry.triangles)
+            if total_vertices > MAX_MODEL_VERTICES:
+                raise ValueError("Model preview exceeds the guarded vertex limit")
+            if total_triangles > MAX_MODEL_TRIANGLES:
+                raise ValueError("Model preview exceeds the guarded triangle limit")
+            geometries.append(geometry)
+        if not geometries:
+            return None, {
+                "model_drawable_count": _model_drawable_count(root),
+                "model_preview": "No supported position buffers were found",
+            }, None
+        image, metadata = _render_model_wireframe(geometries, name)
+        metadata["model_drawable_count"] = _model_drawable_count(root)
+        if skipped_layouts:
+            metadata["model_skipped_buffers"] = skipped_layouts
+        return image, metadata, None
+    except (OSError, ValueError, etree.XMLSyntaxError, OverflowError) as exc:
+        return None, {}, f"Model preview unavailable: {exc}"
+
+
 class NativeAssetInspector:
     """Describe native files and optionally invoke CodeWalker XML conversion."""
 
@@ -216,21 +512,23 @@ class NativeAssetInspector:
         if (not truncated and suffix in NATIVE_XML_SUFFIXES
                 and self.patcher.is_file()):
             converted = self._convert(name, data, edition)
-            if converted is not None and converted[3]:
+            if converted is not None and converted.conversion_error:
                 alternate = "Legacy" if edition.casefold() == "enhanced" else "Enhanced"
                 retried = self._convert(name, data, alternate)
-                if retried is not None and not retried[3]:
+                if retried is not None and not retried.conversion_error:
                     converted = retried
                     metadata["interpreted_edition"] = alternate
                     warnings.append(
                         f"Requested {edition} decoding failed; the resource parsed as {alternate}."
                     )
             if converted is not None:
-                structured, image_png, texture_count, conversion_warning = converted
-                if texture_count:
-                    metadata["exported_textures"] = texture_count
-                if conversion_warning:
-                    warnings.append(conversion_warning)
+                structured = converted.structured_text
+                image_png = converted.image_png
+                metadata.update(converted.metadata)
+                if converted.texture_count:
+                    metadata["exported_textures"] = converted.texture_count
+                if converted.conversion_error:
+                    warnings.append(converted.conversion_error)
         elif suffix in NATIVE_XML_SUFFIXES and not self.patcher.is_file():
             warnings.append(
                 "RpfPatcher is not built; run runtools.ps1 for structured CodeWalker preview."
@@ -244,7 +542,7 @@ class NativeAssetInspector:
 
     def _convert(
         self, name: str, data: bytes, edition: str,
-    ) -> tuple[str, bytes | None, int, str | None] | None:
+    ) -> _ConvertedAsset | None:
         with tempfile.TemporaryDirectory(prefix="allin1-native-asset-") as temporary:
             root = Path(temporary)
             safe_name = Path(name).name or f"asset{Path(name).suffix}"
@@ -261,10 +559,19 @@ class NativeAssetInspector:
             )
             if completed.returncode or not xml.is_file():
                 detail = (completed.stderr or completed.stdout or "conversion failed").strip()
-                return None if not detail else (
-                    "", None, 0, f"CodeWalker preview failed: {detail}"
+                return None if not detail else _ConvertedAsset(
+                    "", None, 0,
+                    conversion_error=f"CodeWalker preview failed: {detail}",
                 )
             xml_size = xml.stat().st_size
+            preview_metadata: dict[str, Any] = {}
+            model_image: bytes | None = None
+            if Path(name).suffix.casefold() in MODEL_PREVIEW_SUFFIXES:
+                model_image, preview_metadata, model_warning = _model_preview_from_xml(
+                    xml, Path(name).name,
+                )
+                if model_warning:
+                    preview_metadata["model_preview"] = model_warning
             with xml.open("r", encoding="utf-8", errors="replace") as stream:
                 text = stream.read(2_000_000)
             if xml_size > 2_000_000:
@@ -272,8 +579,11 @@ class NativeAssetInspector:
                     f"\n\n<!-- Preview truncated at 2,000,000 characters; "
                     f"full CodeWalker XML was {xml_size:,} bytes. -->\n"
                 )
-            image, count = _texture_contact_sheet(assets)
-            return text, image, count, None
+            texture_image, count = _texture_contact_sheet(assets)
+            return _ConvertedAsset(
+                text, model_image or texture_image, count,
+                metadata=preview_metadata,
+            )
 
     def export_workspace(
         self, source: str | Path, destination: str | Path, *, edition: str,

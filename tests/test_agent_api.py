@@ -22,6 +22,8 @@ def test_catalog_is_structured_and_classifies_risk():
     assert catalog["plan-rpf-batch"]["risk"] == "authoring_write"
     assert catalog["plan-rpf-sync"]["risk"] == "authoring_write"
     assert catalog["export-native-workspace"]["risk"] == "authoring_write"
+    assert catalog["inspect-native-asset"]["risk"] == "authoring_write"
+    assert catalog["inspect-rpf-native-entry"]["risk"] == "authoring_write"
     assert catalog["build-native-workspace"]["risk"] == "authoring_write"
     assert catalog["build-binary-workspace"]["risk"] == "authoring_write"
     assert catalog["build-gxt2-workspace"]["risk"] == "authoring_write"

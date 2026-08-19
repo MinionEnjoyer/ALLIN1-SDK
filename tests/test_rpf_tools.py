@@ -210,6 +210,31 @@ def test_rpf_service_indexes_extracts_and_builds_plan(tmp_path, monkeypatch):
     assert plan["safety"]["writes_performed"] is False
 
 
+def test_rpf_service_inspects_bound_native_entry_without_archive_write(tmp_path, monkeypatch):
+    service, archive, _ = _service(tmp_path)
+    index = RpfIndex.load(_write_index(tmp_path, _index_payload(archive)))
+    entry = index.entry("::common/data/test.ymap")
+    original = archive.read_bytes()
+
+    def fake_run(args, **_kwargs):
+        if args[1] == "extract-virtual-entry":
+            Path(args[6]).write_bytes(b"RSC7" + b"\0" * 28)
+        elif args[1] == "asset-xml":
+            Path(args[3]).write_text("<CMapData><entities /></CMapData>", encoding="utf-8")
+            Path(args[4]).mkdir(parents=True)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(rpf_tools, "run_hidden", fake_run)
+    monkeypatch.setattr(native_assets, "run_hidden", fake_run)
+    report, binding = service.inspect_native_entry(index, entry)
+    assert report.format_name == "Rockstar map placement"
+    assert report.structured_text.startswith("<CMapData>")
+    assert binding["outer_archive_sha256"] == hashlib.sha256(original).hexdigest()
+    assert binding["entry_path"] == "common/data/test.ymap"
+    assert binding["extracted_sha256"] == report.sha256
+    assert archive.read_bytes() == original
+
+
 def test_extract_authoring_tree_expands_recursively_indexed_archives(tmp_path, monkeypatch):
     service, archive, _patcher = _service(tmp_path)
     payload = _index_payload(archive)
@@ -1929,6 +1954,85 @@ def test_native_asset_helper_xml_and_texture_contact_sheet(tmp_path, monkeypatch
     assert report.image_png.startswith(b"\x89PNG")
 
 
+def test_native_asset_helper_renders_bounded_model_geometry(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    patcher = project / "tools" / "RpfPatcher" / "RpfPatcher.exe"
+    patcher.parent.mkdir(parents=True)
+    patcher.write_bytes(b"exe")
+    model_xml = """<?xml version="1.0"?>
+<Drawable>
+ <DrawableModelsHigh><Item><Geometries><Item>
+  <VertexBuffer><Layout type="GTAV1"><Position/><Normal/></Layout><Data>
+0 0 0  0 0 1
+1 0 0  0 0 1
+1 1 0  0 0 1
+0 1 0  0 0 1
+0.5 0.5 1  0 0 1
+  </Data></VertexBuffer>
+  <IndexBuffer><Data>0 1 4  1 2 4  2 3 4  3 0 4  0 3 2  2 1 0</Data></IndexBuffer>
+ </Item></Geometries></Item></DrawableModelsHigh>
+</Drawable>"""
+
+    def convert(args, **_kwargs):
+        Path(args[3]).write_text(model_xml, encoding="utf-8")
+        Path(args[4]).mkdir(parents=True)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(native_assets, "run_hidden", convert)
+    report = NativeAssetInspector(project).inspect_bytes("pyramid.ydr", b"RSC8" + b"\0" * 32)
+    assert report.image_png.startswith(b"\x89PNG")
+    assert report.metadata["model_drawable_count"] == 1
+    assert report.metadata["model_geometry_count"] == 1
+    assert report.metadata["model_vertex_count"] == 5
+    assert report.metadata["model_triangle_count"] == 6
+    assert report.metadata["model_lods"] == "High: 1"
+    assert report.metadata["model_preview"] == "isometric geometry diagnostic"
+
+
+def test_native_model_preview_rejects_dtd_and_bad_indices(tmp_path):
+    dtd = tmp_path / "unsafe.ydr.xml"
+    dtd.write_text(
+        '<!DOCTYPE x [<!ENTITY xxe SYSTEM "file:///windows/win.ini">]><Drawable>&xxe;</Drawable>',
+        encoding="utf-8",
+    )
+    image, metadata, warning = native_assets._model_preview_from_xml(dtd, "unsafe.ydr")
+    assert image is None and metadata == {}
+    assert "prohibited" in warning
+
+    invalid = tmp_path / "invalid.ydr.xml"
+    invalid.write_text(
+        "<Drawable><VertexBuffer><Layout><Position/></Layout><Data>0 0 0</Data>"
+        "</VertexBuffer><IndexBuffer><Data>0 1 2</Data></IndexBuffer></Drawable>",
+        encoding="utf-8",
+    )
+    image, metadata, warning = native_assets._model_preview_from_xml(invalid, "invalid.ydr")
+    assert image is None and metadata == {}
+    assert "missing vertex" in warning
+
+
+def test_inspect_native_asset_cli_publishes_portable_report(tmp_path):
+    source = tmp_path / "paint.dds"
+    data = bytearray(128)
+    data[:4] = b"DDS "
+    struct.pack_into("<II", data, 12, 32, 64)
+    data[84:88] = b"DXT1"
+    source.write_bytes(data)
+    destination = tmp_path / "native-report"
+    result = CliRunner().invoke(main, [
+        "inspect-native-asset", str(source), "--edition", "Legacy",
+        "--output-dir", str(destination),
+    ])
+    assert result.exit_code == 0, result.output
+    response = json.loads(result.output)
+    saved = json.loads((destination / "report.json").read_text(encoding="utf-8"))
+    assert response == saved
+    assert response["edition"] == "Legacy"
+    assert response["metadata"]["dimensions"] == "64 × 32"
+    assert response["has_image_preview"] is False
+    assert response["outputs"] == []
+    assert not (destination / "preview.png").exists()
+
+
 def test_native_asset_conversion_failure_retries_other_edition(tmp_path, monkeypatch):
     project = tmp_path / "project"
     patcher = project / "tools" / "RpfPatcher" / "RpfPatcher.exe"
@@ -2202,6 +2306,21 @@ def test_new_rpf_cli_index_extract_and_plan(tmp_path, monkeypatch):
             target.write_bytes(b"extracted")
             return target
 
+        def inspect_native_entry(self, loaded, entry):
+            assert loaded is index and entry.path == "common/data/test.ymap"
+            report = NativeAssetInspector(tmp_path).inspect_bytes(
+                entry.name, b"RSC7" + b"\0" * 28, edition=loaded.edition,
+            )
+            return report, {
+                "outer_archive": str(archive),
+                "outer_archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                "archive_path": entry.archive_path,
+                "entry_path": entry.path,
+                "entry_id": entry.id,
+                "extracted_size": report.size,
+                "extracted_sha256": report.sha256,
+            }
+
         def extract_subtree(
             self, loaded, output, *, archive_path="", directory_path="",
         ):
@@ -2255,6 +2374,17 @@ def test_new_rpf_cli_index_extract_and_plan(tmp_path, monkeypatch):
     ])
     assert extracted.exit_code == 0, extracted.output
     assert (tmp_path / "test.ymap").read_bytes() == b"extracted"
+
+    native_inspection = runner.invoke(main, [
+        "sdk", "inspect-rpf-native-entry", str(archive),
+        "common/data/test.ymap", "--gta-path", str(game),
+        "--output-dir", str(tmp_path / "native-inspection"),
+    ])
+    assert native_inspection.exit_code == 0, native_inspection.output
+    inspected = json.loads(native_inspection.output)
+    assert inspected["operation"] == "inspect_rpf_native_entry"
+    assert inspected["binding"]["entry_path"] == "common/data/test.ymap"
+    assert (tmp_path / "native-inspection" / "report.json").is_file()
 
     native_export = runner.invoke(main, [
         "sdk", "export-rpf-native-workspace", str(archive),

@@ -23,13 +23,17 @@ def test_command_catalog_combines_cli_and_console_builtins():
     assert "run-rpf-program" in catalog
     assert "list-rpf-program-templates" in catalog
     assert "defragment-rpf" in catalog
+    assert "inspect-native-asset" in catalog
+    assert "inspect-rpf-native-entry" in catalog
 
 
 def test_progressive_command_option_and_alias_suggestions(tmp_path):
     commands = suggestions_for("ins", cwd=tmp_path)
     assert [item.replacement for item in commands] == [
-        "inspect-binary-workspace ", "inspect-package-rpfs ",
+        "inspect-binary-workspace ", "inspect-native-asset ",
+        "inspect-package-rpfs ",
         "inspect-rpf ", "inspect-rpf-change-set ", "inspect-rpf-graph ",
+        "inspect-rpf-native-entry ",
         "inspect-rpf-program ",
         "install-package ",
     ]

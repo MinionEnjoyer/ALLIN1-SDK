@@ -38,8 +38,12 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   RPF into canonical-reparse-verified payloads and an inert hash-bound plan.
 - **Native Asset Viewer** — browse authored text and images, parse bounded RAGE
   resource headers, convert supported resources to structured CodeWalker XML,
-  generate YTD texture contact sheets, and export manifest-backed XML/dependency
+  generate YTD texture contact sheets, render bounded indexed-geometry previews for
+  YDR/YDD/YFT models with vertex, triangle, LOD, drawable, and bounds statistics, and
+  export manifest-backed XML/dependency
   workspaces that rebuild only after the compiled result parses back through CodeWalker.
+  The same read-only native inspection can publish a portable text/PNG/JSON bundle
+  through the SDK Console or structured Agent API.
   The embedded YTD editor catalogs and previews every DDS, imports common raster formats,
   synchronizes dimensions/mips/formats, supports add/replace/remove, and retains undo history.
 - **RPF Explorer** — search root and nested RPFs as one hierarchy, inspect entry
