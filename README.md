@@ -42,7 +42,10 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   YDR/YDD/YFT models with vertex, triangle, LOD, drawable, and bounds statistics, and
   visualize YBN collision meshes/primitives with geometry, material, and polygon counts.
   YMAP placement previews plot entities, archetypes, orientation, hierarchy links, and
-  world extents in a bounded top-down scene. The viewer can also
+  world extents in a bounded top-down scene. YNV navigation previews expose polygon
+  surfaces, edge references, portals, points, flags, and bounds; YND path previews map
+  vehicle/pedestrian nodes, internal and external links, junctions, street labels, and
+  declared-count inconsistencies. The viewer can also
   export manifest-backed XML/dependency
   workspaces that rebuild only after the compiled result parses back through CodeWalker.
   The same read-only native inspection can publish a portable text/PNG/JSON bundle

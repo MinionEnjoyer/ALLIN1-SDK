@@ -50,12 +50,24 @@ NATIVE_WORKSPACE_SCHEMA = 1
 MODEL_PREVIEW_SUFFIXES = frozenset({".ydr", ".ydd", ".yft"})
 COLLISION_PREVIEW_SUFFIXES = frozenset({".ybn"})
 MAP_PREVIEW_SUFFIXES = frozenset({".ymap"})
+NAVMESH_PREVIEW_SUFFIXES = frozenset({".ynv"})
+PATH_PREVIEW_SUFFIXES = frozenset({".ynd"})
 MAX_MODEL_XML_BYTES = 192 * 1024 * 1024
 MAX_MODEL_VERTICES = 1_000_000
 MAX_MODEL_TRIANGLES = 1_000_000
 MAX_RENDERED_TRIANGLES = 45_000
 MAX_MAP_ENTITIES = 250_000
 MAX_RENDERED_MAP_ENTITIES = 80_000
+MAX_NAV_POLYGONS = 300_000
+MAX_NAV_VERTICES = 2_000_000
+MAX_NAV_PORTALS = 300_000
+MAX_NAV_POINTS = 300_000
+MAX_RENDERED_NAV_POLYGONS = 60_000
+MAX_PATH_NODES = 500_000
+MAX_PATH_LINKS = 2_000_000
+MAX_PATH_JUNCTIONS = 250_000
+MAX_RENDERED_PATH_NODES = 90_000
+MAX_RENDERED_PATH_LINKS = 140_000
 
 
 @dataclass(frozen=True)
@@ -81,6 +93,53 @@ class _MapEntity:
     parent: int
     yaw: float
     scale: float
+
+
+@dataclass(frozen=True)
+class _NavPolygon:
+    vertices: tuple[tuple[float, float, float], ...]
+    flags: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _NavPortal:
+    position_from: tuple[float, float, float]
+    position_to: tuple[float, float, float]
+    portal_type: int
+
+
+@dataclass(frozen=True)
+class _NavPoint:
+    position: tuple[float, float, float]
+    angle: float
+    point_type: int
+
+
+@dataclass(frozen=True)
+class _PathLink:
+    to_area: int
+    to_node: int
+    flags: tuple[int, int, int]
+    length: int
+
+
+@dataclass(frozen=True)
+class _PathNode:
+    area_id: int
+    node_id: int
+    street: str
+    position: tuple[float, float, float]
+    flags: tuple[int, int, int, int, int, int]
+    links: tuple[_PathLink, ...]
+    vehicle: bool
+
+
+@dataclass(frozen=True)
+class _PathJunction:
+    position: tuple[float, float, float]
+    max_z: float
+    size_x: int
+    size_y: int
 
 
 def _sha256_file(path: Path) -> str:
@@ -858,6 +917,502 @@ def _map_preview_from_xml(
         return None, {}, f"Map preview unavailable: {exc}"
 
 
+def _numeric_child(
+    parent: etree._Element, name: str, *, context: str,
+    integer: bool = False, default: int | float | None = None,
+) -> int | float:
+    child = _direct_child(parent, name)
+    if child is None:
+        if default is not None:
+            return default
+        raise ValueError(f"{context} is missing {name}")
+    raw = child.get("value")
+    if raw is None:
+        raw = (child.text or "").strip()
+    try:
+        value = int(raw, 10) if integer else float(raw)
+    except ValueError as exc:
+        kind = "integer" if integer else "numeric"
+        raise ValueError(f"{context} {name} is non-{kind}") from exc
+    if not integer and not math.isfinite(value):
+        raise ValueError(f"{context} {name} is non-finite")
+    return value
+
+
+def _position_attributes(
+    element: etree._Element | None, *, context: str, dimensions: int = 3,
+) -> tuple[float, float, float]:
+    if element is None:
+        raise ValueError(f"{context} position is missing")
+    axes = ("x", "y", "z")[:dimensions]
+    try:
+        values = [float(element.get(axis, "0")) for axis in axes]
+    except ValueError as exc:
+        raise ValueError(f"{context} position is non-numeric") from exc
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError(f"{context} position is non-finite")
+    while len(values) < 3:
+        values.append(0.0)
+    return values[0], values[1], values[2]
+
+
+def _raw_vector_rows(
+    element: etree._Element | None, *, context: str,
+) -> tuple[tuple[float, float, float], ...]:
+    if element is None:
+        return ()
+    points: list[tuple[float, float, float]] = []
+    for line in (element.text or "").splitlines():
+        fields = [part.strip() for part in line.split(",")]
+        if not fields or all(not field for field in fields):
+            continue
+        if len(fields) != 3:
+            raise ValueError(f"{context} vertex row does not contain three coordinates")
+        try:
+            point = tuple(float(field) for field in fields)
+        except ValueError as exc:
+            raise ValueError(f"{context} vertex is non-numeric") from exc
+        if not all(math.isfinite(value) for value in point):
+            raise ValueError(f"{context} vertex is non-finite")
+        points.append((point[0], point[1], point[2]))
+    return tuple(points)
+
+
+def _raw_integer_values(
+    element: etree._Element | None, *, context: str,
+) -> tuple[int, ...]:
+    if element is None:
+        return ()
+    values: list[int] = []
+    for token in (element.text or "").replace(",", " ").split():
+        try:
+            values.append(int(token, 10))
+        except ValueError as exc:
+            raise ValueError(f"{context} contains a non-integer value") from exc
+    return tuple(values)
+
+
+def _item_children(parent: etree._Element, name: str) -> list[etree._Element]:
+    container = _direct_child(parent, name)
+    if container is None:
+        return []
+    return [
+        item for item in container
+        if isinstance(item.tag, str) and _local_name(item) == "Item"
+    ]
+
+
+def _navmesh_records(
+    root: etree._Element,
+) -> tuple[list[_NavPolygon], list[_NavPortal], list[_NavPoint], int, int]:
+    polygons: list[_NavPolygon] = []
+    portals: list[_NavPortal] = []
+    points: list[_NavPoint] = []
+    total_vertices = 0
+    edge_references = 0
+    skipped_polygons = 0
+    for item in _item_children(root, "Polygons"):
+        vertices = _raw_vector_rows(
+            _direct_child(item, "Vertices"), context="YNV polygon",
+        )
+        if not vertices:
+            skipped_polygons += 1
+            continue
+        flags = _raw_integer_values(_direct_child(item, "Flags"), context="YNV flags")
+        polygons.append(_NavPolygon(vertices, flags))
+        total_vertices += len(vertices)
+        edges = _direct_child(item, "Edges")
+        edge_references += sum(
+            1 for line in (edges.text or "").splitlines() if line.strip()
+        ) if edges is not None else 0
+        if len(polygons) > MAX_NAV_POLYGONS:
+            raise ValueError("YNV preview exceeds the guarded polygon limit")
+        if total_vertices > MAX_NAV_VERTICES:
+            raise ValueError("YNV preview exceeds the guarded vertex limit")
+    for item in _item_children(root, "Portals"):
+        portals.append(_NavPortal(
+            _position_attributes(
+                _direct_child(item, "PositionFrom"), context="YNV portal from",
+            ),
+            _position_attributes(
+                _direct_child(item, "PositionTo"), context="YNV portal to",
+            ),
+            int(_numeric_child(
+                item, "Type", context="YNV portal", integer=True, default=0,
+            )),
+        ))
+        if len(portals) > MAX_NAV_PORTALS:
+            raise ValueError("YNV preview exceeds the guarded portal limit")
+    for item in _item_children(root, "Points"):
+        points.append(_NavPoint(
+            _position_attributes(
+                _direct_child(item, "Position"), context="YNV point",
+            ),
+            float(_numeric_child(
+                item, "Angle", context="YNV point", default=0.0,
+            )),
+            int(_numeric_child(
+                item, "Type", context="YNV point", integer=True, default=0,
+            )),
+        ))
+        if len(points) > MAX_NAV_POINTS:
+            raise ValueError("YNV preview exceeds the guarded point limit")
+    return polygons, portals, points, edge_references, skipped_polygons
+
+
+def _nav_colour(flags: tuple[int, ...]) -> tuple[int, int, int]:
+    signature = ",".join(str(flag) for flag in flags).encode("ascii", errors="replace")
+    digest = hashlib.sha256(signature).digest()
+    return 31 + (digest[0] % 38), 72 + (digest[1] % 70), 63 + (digest[2] % 55)
+
+
+def _render_navmesh(
+    polygons: list[_NavPolygon], portals: list[_NavPortal], points: list[_NavPoint],
+    name: str,
+) -> tuple[bytes, dict[str, Any]]:
+    all_points = [point for polygon in polygons for point in polygon.vertices]
+    all_points.extend(portal.position_from for portal in portals)
+    all_points.extend(portal.position_to for portal in portals)
+    all_points.extend(point.position for point in points)
+    minima = tuple(min(point[axis] for point in all_points) for axis in range(3))
+    maxima = tuple(max(point[axis] for point in all_points) for axis in range(3))
+    width, height = 960, 680
+    left, top, right, bottom = 48, 78, 748, 616
+    span_x = max(maxima[0] - minima[0], 1.0)
+    span_y = max(maxima[1] - minima[1], 1.0)
+    pad_x, pad_y = max(span_x * 0.03, 0.5), max(span_y * 0.03, 0.5)
+
+    def screen(position: tuple[float, float, float]) -> tuple[float, float]:
+        x = left + (
+            (position[0] - minima[0] + pad_x) / (span_x + (2 * pad_x))
+        ) * (right - left)
+        y = bottom - (
+            (position[1] - minima[1] + pad_y) / (span_y + (2 * pad_y))
+        ) * (bottom - top)
+        return x, y
+
+    image = Image.new("RGB", (width, height), "#101714")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((left, top, right, bottom), fill="#121c18", outline="#31453a")
+    for division in range(1, 5):
+        x = left + ((right - left) * division / 5)
+        y = top + ((bottom - top) * division / 5)
+        draw.line((x, top, x, bottom), fill="#1e2d26")
+        draw.line((left, y, right, y), fill="#1e2d26")
+    draw.text((48, 24), f"YNV NAVMESH  |  {name[:70]}", fill="#E8F2EC")
+    polygon_stride = max(1, math.ceil(len(polygons) / MAX_RENDERED_NAV_POLYGONS))
+    for polygon in polygons[::polygon_stride]:
+        if len(polygon.vertices) < 3:
+            continue
+        colour = _nav_colour(polygon.flags)
+        draw.polygon(
+            [screen(point) for point in polygon.vertices],
+            fill=colour, outline=(min(255, colour[0] + 38),
+                                  min(255, colour[1] + 62),
+                                  min(255, colour[2] + 48)),
+        )
+    portal_stride = max(1, math.ceil(len(portals) / 30_000))
+    for portal in portals[::portal_stride]:
+        draw.line(
+            (*screen(portal.position_from), *screen(portal.position_to)),
+            fill="#F09972", width=2,
+        )
+    point_stride = max(1, math.ceil(len(points) / 45_000))
+    for point in points[::point_stride]:
+        x, y = screen(point.position)
+        draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill="#E7D875")
+        draw.line((
+            x, y, x + (math.cos(point.angle) * 7),
+            y - (math.sin(point.angle) * 7),
+        ), fill="#FFF4A9")
+    draw.text((776, 78), "NAVIGATION LAYERS", fill="#E8F2EC")
+    legend = (
+        ("Polygon surfaces", "#4D9279"),
+        ("Portal spans", "#F09972"),
+        ("Point nodes", "#E7D875"),
+    )
+    for row, (label, colour) in enumerate(legend):
+        y = 108 + (row * 32)
+        draw.rectangle((776, y + 2, 788, y + 14), fill=colour)
+        draw.text((798, y), label, fill="#C6D8CE")
+    draw.text((776, 220), "BOUNDS", fill="#E8F2EC")
+    for row, axis in enumerate("XYZ"):
+        draw.text(
+            (776, 248 + (row * 26)),
+            f"{axis} {minima[row]:.2f} .. {maxima[row]:.2f}", fill="#91AA9D",
+        )
+    draw.text(
+        (48, height - 25),
+        f"{len(polygons):,} polygons  |  "
+        f"{sum(len(polygon.vertices) for polygon in polygons):,} vertices  |  "
+        f"{len(portals):,} portals  |  {len(points):,} points  |  diagnostic view",
+        fill="#AFC5B9",
+    )
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue(), {
+        "navmesh_polygon_count": len(polygons),
+        "navmesh_vertex_count": sum(len(polygon.vertices) for polygon in polygons),
+        "navmesh_portal_count": len(portals),
+        "navmesh_point_count": len(points),
+        "navmesh_bounds": " x ".join(
+            f"{maxima[axis] - minima[axis]:.4g}" for axis in range(3)
+        ),
+        "navmesh_preview": "top-down polygon and portal diagnostic",
+    }
+
+
+def _navmesh_preview_from_xml(
+    xml: Path, name: str,
+) -> tuple[bytes | None, dict[str, Any], str | None]:
+    """Render a bounded CodeWalker YNV polygon, portal, and point overview."""
+    try:
+        root = _safe_codewalker_xml(xml).getroot()
+        polygons, portals, points, edge_references, skipped = _navmesh_records(root)
+        content = _direct_child(root, "ContentFlags")
+        metadata: dict[str, Any] = {
+            "navmesh_area_id": int(_numeric_child(
+                root, "AreaID", context="YNV", integer=True, default=0,
+            )),
+            "navmesh_content_flags": (
+                (content.text or "").strip() if content is not None else ""
+            ),
+            "navmesh_edge_references": edge_references,
+        }
+        if skipped:
+            metadata["navmesh_skipped_polygons"] = skipped
+        if not polygons and not portals and not points:
+            metadata.update({
+                "navmesh_polygon_count": 0,
+                "navmesh_portal_count": 0,
+                "navmesh_point_count": 0,
+                "navmesh_preview": "No navigation geometry was found",
+            })
+            return None, metadata, None
+        image, rendered = _render_navmesh(polygons, portals, points, name)
+        metadata.update(rendered)
+        return image, metadata, None
+    except (OSError, ValueError, etree.XMLSyntaxError, OverflowError) as exc:
+        return None, {}, f"Navigation mesh preview unavailable: {exc}"
+
+
+def _path_records(
+    root: etree._Element,
+) -> tuple[list[_PathNode], list[_PathJunction], int, int, int]:
+    declared_vehicle = int(_numeric_child(
+        root, "VehicleNodeCount", context="YND", integer=True, default=0,
+    ))
+    declared_ped = int(_numeric_child(
+        root, "PedNodeCount", context="YND", integer=True, default=0,
+    ))
+    nodes: list[_PathNode] = []
+    total_links = 0
+    for index, item in enumerate(_item_children(root, "Nodes")):
+        links: list[_PathLink] = []
+        for link in _item_children(item, "Links"):
+            links.append(_PathLink(
+                int(_numeric_child(
+                    link, "ToAreaID", context="YND link", integer=True,
+                )),
+                int(_numeric_child(
+                    link, "ToNodeID", context="YND link", integer=True,
+                )),
+                tuple(int(_numeric_child(
+                    link, f"Flags{flag}", context="YND link", integer=True,
+                    default=0,
+                )) for flag in range(3)),
+                int(_numeric_child(
+                    link, "LinkLength", context="YND link", integer=True,
+                    default=0,
+                )),
+            ))
+            total_links += 1
+            if total_links > MAX_PATH_LINKS:
+                raise ValueError("YND preview exceeds the guarded link limit")
+        street = _direct_child(item, "StreetName")
+        nodes.append(_PathNode(
+            int(_numeric_child(item, "AreaID", context="YND node", integer=True)),
+            int(_numeric_child(item, "NodeID", context="YND node", integer=True)),
+            ((street.text or "").strip() if street is not None else "") or "(unnamed)",
+            _position_attributes(
+                _direct_child(item, "Position"), context="YND node",
+            ),
+            tuple(int(_numeric_child(
+                item, f"Flags{flag}", context="YND node", integer=True, default=0,
+            )) for flag in range(6)),
+            tuple(links),
+            index < declared_vehicle,
+        ))
+        if len(nodes) > MAX_PATH_NODES:
+            raise ValueError("YND preview exceeds the guarded node limit")
+    junctions: list[_PathJunction] = []
+    for item in _item_children(root, "Junctions"):
+        position = _position_attributes(
+            _direct_child(item, "Position"), context="YND junction", dimensions=2,
+        )
+        min_z = float(_numeric_child(
+            item, "MinZ", context="YND junction", default=0.0,
+        ))
+        junctions.append(_PathJunction(
+            (position[0], position[1], min_z),
+            float(_numeric_child(
+                item, "MaxZ", context="YND junction", default=min_z,
+            )),
+            int(_numeric_child(
+                item, "SizeX", context="YND junction", integer=True, default=0,
+            )),
+            int(_numeric_child(
+                item, "SizeY", context="YND junction", integer=True, default=0,
+            )),
+        ))
+        if len(junctions) > MAX_PATH_JUNCTIONS:
+            raise ValueError("YND preview exceeds the guarded junction limit")
+    junction_refs = len(_item_children(root, "JunctionRefs"))
+    return nodes, junctions, declared_vehicle, declared_ped, junction_refs
+
+
+def _render_path_network(
+    nodes: list[_PathNode], junctions: list[_PathJunction], name: str,
+) -> tuple[bytes, dict[str, Any]]:
+    positioned = [node.position for node in nodes]
+    positioned.extend(junction.position for junction in junctions)
+    minima = tuple(min(point[axis] for point in positioned) for axis in range(3))
+    maxima = tuple(max(point[axis] for point in positioned) for axis in range(3))
+    width, height = 960, 680
+    left, top, right, bottom = 48, 78, 748, 616
+    span_x = max(maxima[0] - minima[0], 1.0)
+    span_y = max(maxima[1] - minima[1], 1.0)
+    pad_x, pad_y = max(span_x * 0.03, 0.5), max(span_y * 0.03, 0.5)
+
+    def screen(position: tuple[float, float, float]) -> tuple[float, float]:
+        x = left + (
+            (position[0] - minima[0] + pad_x) / (span_x + (2 * pad_x))
+        ) * (right - left)
+        y = bottom - (
+            (position[1] - minima[1] + pad_y) / (span_y + (2 * pad_y))
+        ) * (bottom - top)
+        return x, y
+
+    lookup: dict[tuple[int, int], _PathNode] = {}
+    duplicate_ids = 0
+    for node in nodes:
+        key = (node.area_id, node.node_id)
+        if key in lookup:
+            duplicate_ids += 1
+        else:
+            lookup[key] = node
+    internal_links: list[tuple[_PathNode, _PathNode]] = []
+    external_links = 0
+    for node in nodes:
+        for link in node.links:
+            target = lookup.get((link.to_area, link.to_node))
+            if target is None:
+                external_links += 1
+            else:
+                internal_links.append((node, target))
+
+    image = Image.new("RGB", (width, height), "#101714")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((left, top, right, bottom), fill="#121c18", outline="#31453a")
+    for division in range(1, 5):
+        x = left + ((right - left) * division / 5)
+        y = top + ((bottom - top) * division / 5)
+        draw.line((x, top, x, bottom), fill="#1e2d26")
+        draw.line((left, y, right, y), fill="#1e2d26")
+    draw.text((48, 24), f"YND PATH NETWORK  |  {name[:65]}", fill="#E8F2EC")
+    link_stride = max(1, math.ceil(len(internal_links) / MAX_RENDERED_PATH_LINKS))
+    for source, target in internal_links[::link_stride]:
+        draw.line(
+            (*screen(source.position), *screen(target.position)),
+            fill="#355246", width=1,
+        )
+    junction_stride = max(1, math.ceil(len(junctions) / 30_000))
+    for junction in junctions[::junction_stride]:
+        x, y = screen(junction.position)
+        radius = max(2, min(7, 2 + max(junction.size_x, junction.size_y) // 4))
+        draw.rectangle((x - radius, y - radius, x + radius, y + radius),
+                       outline="#F0A36F", fill="#774D35")
+    node_stride = max(1, math.ceil(len(nodes) / MAX_RENDERED_PATH_NODES))
+    for node in nodes[::node_stride]:
+        x, y = screen(node.position)
+        colour = "#72D39D" if node.vehicle else "#75A9E7"
+        draw.ellipse((x - 1.7, y - 1.7, x + 1.7, y + 1.7), fill=colour)
+    draw.text((776, 78), "PATH LAYERS", fill="#E8F2EC")
+    legend = (
+        ("Vehicle nodes", "#72D39D"),
+        ("Ped nodes", "#75A9E7"),
+        ("Junctions", "#F0A36F"),
+        ("Internal links", "#557564"),
+    )
+    for row, (label, colour) in enumerate(legend):
+        y = 108 + (row * 30)
+        draw.rectangle((776, y + 2, 788, y + 14), fill=colour)
+        draw.text((798, y), label, fill="#C6D8CE")
+    streets: dict[str, int] = {}
+    for node in nodes:
+        streets[node.street] = streets.get(node.street, 0) + 1
+    draw.text((776, 246), "TOP STREET LABELS", fill="#E8F2EC")
+    for row, (street, count) in enumerate(sorted(
+        streets.items(), key=lambda item: (-item[1], item[0].casefold()),
+    )[:10]):
+        y = 274 + (row * 27)
+        draw.text((776, y), street[:19], fill="#C6D8CE")
+        draw.text((914, y), str(count), fill="#91AA9D")
+    draw.text(
+        (48, height - 25),
+        f"{len(nodes):,} nodes  |  {len(internal_links):,} internal links  |  "
+        f"{external_links:,} external links  |  {len(junctions):,} junctions  |  diagnostic view",
+        fill="#AFC5B9",
+    )
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue(), {
+        "path_node_count": len(nodes),
+        "path_vehicle_nodes": sum(1 for node in nodes if node.vehicle),
+        "path_ped_nodes": sum(1 for node in nodes if not node.vehicle),
+        "path_link_count": sum(len(node.links) for node in nodes),
+        "path_internal_links": len(internal_links),
+        "path_external_links": external_links,
+        "path_junction_count": len(junctions),
+        "path_street_count": len(streets),
+        "path_duplicate_node_ids": duplicate_ids,
+        "path_bounds": " x ".join(
+            f"{maxima[axis] - minima[axis]:.4g}" for axis in range(3)
+        ),
+        "path_preview": "top-down node, link, and junction diagnostic",
+    }
+
+
+def _path_preview_from_xml(
+    xml: Path, name: str,
+) -> tuple[bytes | None, dict[str, Any], str | None]:
+    """Render a bounded CodeWalker YND node and link overview."""
+    try:
+        root = _safe_codewalker_xml(xml).getroot()
+        nodes, junctions, vehicle_count, ped_count, junction_refs = _path_records(root)
+        metadata: dict[str, Any] = {
+            "path_declared_vehicle_nodes": vehicle_count,
+            "path_declared_ped_nodes": ped_count,
+            "path_junction_references": junction_refs,
+        }
+        if not nodes and not junctions:
+            metadata.update({
+                "path_node_count": 0,
+                "path_link_count": 0,
+                "path_junction_count": 0,
+                "path_preview": "No path nodes or junctions were found",
+            })
+            return None, metadata, None
+        image, rendered = _render_path_network(nodes, junctions, name)
+        metadata.update(rendered)
+        metadata["path_declared_count_mismatch"] = (
+            (vehicle_count + ped_count) != len(nodes)
+        )
+        return image, metadata, None
+    except (OSError, ValueError, etree.XMLSyntaxError, OverflowError) as exc:
+        return None, {}, f"Path network preview unavailable: {exc}"
+
+
 class NativeAssetInspector:
     """Describe native files and optionally invoke CodeWalker XML conversion."""
 
@@ -956,6 +1511,18 @@ class NativeAssetInspector:
                 )
                 if preview_warning:
                     preview_metadata["map_preview"] = preview_warning
+            elif suffix in NAVMESH_PREVIEW_SUFFIXES:
+                geometry_image, preview_metadata, preview_warning = _navmesh_preview_from_xml(
+                    xml, Path(name).name,
+                )
+                if preview_warning:
+                    preview_metadata["navmesh_preview"] = preview_warning
+            elif suffix in PATH_PREVIEW_SUFFIXES:
+                geometry_image, preview_metadata, preview_warning = _path_preview_from_xml(
+                    xml, Path(name).name,
+                )
+                if preview_warning:
+                    preview_metadata["path_preview"] = preview_warning
             with xml.open("r", encoding="utf-8", errors="replace") as stream:
                 text = stream.read(2_000_000)
             if xml_size > 2_000_000:

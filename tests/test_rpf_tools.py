@@ -2067,6 +2067,107 @@ def test_native_asset_helper_renders_ymap_placement_overview(tmp_path, monkeypat
     assert report.metadata["map_preview"] == "top-down entity placement diagnostic"
 
 
+def test_native_asset_helper_renders_ynv_navigation_mesh(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    patcher = project / "tools" / "RpfPatcher" / "RpfPatcher.exe"
+    patcher.parent.mkdir(parents=True)
+    patcher.write_bytes(b"exe")
+    navmesh_xml = """<?xml version="1.0"?>
+<NavMesh><ContentFlags>Polygons, Portals</ContentFlags><AreaID value="42"/>
+ <BBMin x="0" y="0" z="0"/><BBMax x="20" y="10" z="1"/>
+ <BBSize x="20" y="10" z="1"/><Polygons>
+  <Item><Flags>1 2 3 4 5 6 7</Flags><Vertices>
+0, 0, 0
+10, 0, 0
+10, 10, 0
+0, 10, 0
+  </Vertices><Edges>
+42:0, 42:1
+42:1, 42:0
+  </Edges><EdgesFlags/></Item>
+  <Item><Flags>8 0 0 0 0 0 0</Flags><Vertices>
+10, 0, 0
+20, 0, 1
+20, 10, 1
+10, 10, 0
+  </Vertices><Edges/></Item>
+ </Polygons><Portals><Item><Type value="1"/><Angle value="0"/>
+  <PolyFrom value="0"/><PolyTo value="1"/>
+  <PositionFrom x="10" y="4" z="0"/><PositionTo x="10" y="6" z="0"/>
+ </Item></Portals><Points><Item><Type value="3"/><Angle value="1.5708"/>
+  <Position x="5" y="5" z="0"/></Item></Points></NavMesh>"""
+
+    def convert(args, **_kwargs):
+        Path(args[3]).write_text(navmesh_xml, encoding="utf-8")
+        Path(args[4]).mkdir(parents=True)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(native_assets, "run_hidden", convert)
+    report = NativeAssetInspector(project).inspect_bytes("sector.ynv", b"RSC8" + b"\0" * 32)
+    assert report.image_png.startswith(b"\x89PNG")
+    assert report.metadata["navmesh_area_id"] == 42
+    assert report.metadata["navmesh_content_flags"] == "Polygons, Portals"
+    assert report.metadata["navmesh_polygon_count"] == 2
+    assert report.metadata["navmesh_vertex_count"] == 8
+    assert report.metadata["navmesh_edge_references"] == 2
+    assert report.metadata["navmesh_portal_count"] == 1
+    assert report.metadata["navmesh_point_count"] == 1
+    assert report.metadata["navmesh_bounds"] == "20 x 10 x 1"
+    assert report.metadata["navmesh_preview"] == "top-down polygon and portal diagnostic"
+
+
+def test_native_asset_helper_renders_ynd_path_network(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    patcher = project / "tools" / "RpfPatcher" / "RpfPatcher.exe"
+    patcher.parent.mkdir(parents=True)
+    patcher.write_bytes(b"exe")
+    path_xml = """<?xml version="1.0"?>
+<NodeDictionary><VehicleNodeCount value="2"/><PedNodeCount value="1"/><Nodes>
+ <Item><AreaID value="7"/><NodeID value="1"/><StreetName>Main St</StreetName>
+  <Position x="0" y="0" z="0"/><Flags0 value="0"/><Flags1 value="0"/>
+  <Flags2 value="0"/><Flags3 value="0"/><Flags4 value="0"/><Flags5 value="0"/>
+  <Links><Item><ToAreaID value="7"/><ToNodeID value="2"/><Flags0 value="0"/>
+   <Flags1 value="0"/><Flags2 value="0"/><LinkLength value="10"/></Item></Links></Item>
+ <Item><AreaID value="7"/><NodeID value="2"/><StreetName>Main St</StreetName>
+  <Position x="10" y="0" z="1"/><Flags0 value="0"/><Flags1 value="0"/>
+  <Flags2 value="0"/><Flags3 value="0"/><Flags4 value="0"/><Flags5 value="0"/>
+  <Links><Item><ToAreaID value="7"/><ToNodeID value="3"/><Flags0 value="0"/>
+   <Flags1 value="0"/><Flags2 value="0"/><LinkLength value="10"/></Item>
+   <Item><ToAreaID value="99"/><ToNodeID value="1"/><Flags0 value="0"/>
+   <Flags1 value="0"/><Flags2 value="0"/><LinkLength value="20"/></Item></Links></Item>
+ <Item><AreaID value="7"/><NodeID value="3"/><StreetName>Footpath</StreetName>
+  <Position x="20" y="10" z="2"/><Flags0 value="0"/><Flags1 value="0"/>
+  <Flags2 value="0"/><Flags3 value="0"/><Flags4 value="0"/><Flags5 value="0"/>
+  <Links/></Item></Nodes><Junctions><Item><Position x="10" y="0"/>
+  <MinZ value="0"/><MaxZ value="3"/><SizeX value="4"/><SizeY value="6"/>
+  <Heightmap>00</Heightmap></Item></Junctions><JunctionRefs><Item>
+  <AreaID value="7"/><NodeID value="2"/><JunctionID value="0"/><Unk0 value="0"/>
+ </Item></JunctionRefs></NodeDictionary>"""
+
+    def convert(args, **_kwargs):
+        Path(args[3]).write_text(path_xml, encoding="utf-8")
+        Path(args[4]).mkdir(parents=True)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(native_assets, "run_hidden", convert)
+    report = NativeAssetInspector(project).inspect_bytes("roads.ynd", b"RSC8" + b"\0" * 32)
+    assert report.image_png.startswith(b"\x89PNG")
+    assert report.metadata["path_declared_vehicle_nodes"] == 2
+    assert report.metadata["path_declared_ped_nodes"] == 1
+    assert report.metadata["path_declared_count_mismatch"] is False
+    assert report.metadata["path_node_count"] == 3
+    assert report.metadata["path_vehicle_nodes"] == 2
+    assert report.metadata["path_ped_nodes"] == 1
+    assert report.metadata["path_link_count"] == 3
+    assert report.metadata["path_internal_links"] == 2
+    assert report.metadata["path_external_links"] == 1
+    assert report.metadata["path_junction_count"] == 1
+    assert report.metadata["path_junction_references"] == 1
+    assert report.metadata["path_street_count"] == 2
+    assert report.metadata["path_bounds"] == "20 x 10 x 2"
+    assert report.metadata["path_preview"] == "top-down node, link, and junction diagnostic"
+
+
 def test_native_model_preview_rejects_dtd_and_bad_indices(tmp_path):
     dtd = tmp_path / "unsafe.ydr.xml"
     dtd.write_text(
