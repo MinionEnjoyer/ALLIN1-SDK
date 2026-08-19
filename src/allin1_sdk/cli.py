@@ -23,6 +23,7 @@ from allin1_sdk.paths import project_root
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.rage_data_compiler import RageVehicleDataCompiler
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
+from allin1_sdk.rpf_catalog import RpfCatalogService
 from allin1_sdk.rpf_tools import RpfExplorerService, _running_gta_processes
 from allin1_sdk.texture_workspace import TextureDictionaryWorkspace
 
@@ -443,6 +444,63 @@ def index_rpf(archive: Path, gta_path: Path | None, output: Path) -> None:
     click.echo(
         f"Indexed {len(index.entries)} entries across {len(index.archives)} archive(s): "
         f"{json_path} and {csv_path}"
+    )
+
+
+@main.command("catalog-rpfs")
+@click.argument("source", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(dir_okay=False, path_type=Path))
+@click.option(
+    "--refresh", is_flag=True,
+    help="Re-index every archive instead of reusing unchanged cached indexes.",
+)
+def catalog_rpfs(
+    source: Path, gta_path: Path | None, output: Path, refresh: bool,
+) -> None:
+    """Build or incrementally refresh a global loose-RPF search catalog."""
+    try:
+        database, summary = RpfCatalogService(
+            PROJECT_ROOT, _game_path(gta_path),
+        ).build(source, output, refresh=refresh, progress=_progress)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Cataloged {summary['archives']} archive(s): {summary['indexed']} indexed, "
+        f"{summary['cached']} cached, {summary['failed']} failed; {database}"
+    )
+
+
+@main.command("search-rpf-catalog")
+@click.argument("catalog", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("query", required=False, default="")
+@click.option("--kind", default="")
+@click.option("--suffix", default="")
+@click.option("--limit", default=250, type=int, show_default=True)
+@click.option("--output", "-o", type=click.Path(dir_okay=False, path_type=Path))
+def search_rpf_catalog(
+    catalog: Path, query: str, kind: str, suffix: str, limit: int,
+    output: Path | None,
+) -> None:
+    """Search a global RPF catalog by archive, nested path, or entry name."""
+    try:
+        results = RpfCatalogService.search(
+            catalog, query, kind=kind, suffix=suffix, limit=limit,
+        )
+        report = (
+            RpfCatalogService.export_results(results, output, query=query)
+            if output else None
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    for item in results[:100] if not output else ():
+        click.echo(
+            f"{item.outer_archive} :: {item.archive_path or 'root'} :: "
+            f"{item.entry_path} [{item.kind}, {item.size:,} bytes]"
+        )
+    click.echo(
+        f"Found {len(results)} RPF catalog result(s)"
+        + (f": {report}" if report else "")
     )
 
 
@@ -1110,7 +1168,8 @@ def sdk_compatibility_group() -> None:
 
 for _command in (
     list_examples, validate, link, import_package, audit_folder, oiv_plan,
-    inspect_rpf, dlc_inventory, compile_vehicle_data, index_rpf, build_rpf_tree,
+    inspect_rpf, dlc_inventory, compile_vehicle_data, index_rpf, catalog_rpfs,
+    search_rpf_catalog, build_rpf_tree,
     extract_rpf_entry,
     extract_rpf_subtree, export_rpf_native_workspace, diff_rpf,
     plan_rpf_replacement, plan_rpf_native_workspace,

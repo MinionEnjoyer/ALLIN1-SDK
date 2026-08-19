@@ -180,6 +180,8 @@ allin1-sdk import-package C:\Mods\Example -o C:\Mods\Example\addon.json
 allin1-sdk audit-folder C:\Mods\TestMods -o package-audit.md
 allin1-sdk dlc-inventory "D:\Games\GTA V Enhanced" -o dlc-inventory.md
 allin1-sdk index-rpf C:\Mods\Example\dlc.rpf --gta-path "D:\Games\GTA V Enhanced" -o index.json
+allin1-sdk catalog-rpfs "D:\Games\GTA V Enhanced\mods" --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Indexes\enhanced.sqlite
+allin1-sdk search-rpf-catalog C:\Mods\Indexes\enhanced.sqlite police --suffix ytd -o C:\Mods\Indexes\police-textures.json
 allin1-sdk build-rpf-tree C:\Mods\Example\dlc.rpf.source --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Build\dlc.rpf
 allin1-sdk export-rpf-native-workspace C:\Mods\Example\dlc.rpf common/data/model.ydr --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\model-workspace
 allin1-sdk plan-rpf-native-workspace C:\Mods\Example\dlc.rpf common/data/model.ydr C:\Work\model-workspace --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\model-plan.json
@@ -242,6 +244,12 @@ service used by the launcher.
 - RPF exploration and extraction are read-only. Subtree extraction scans the outer
   archive once, refuses existing output folders, verifies that the source hash did
   not change, and emits `.allin1-rpf-export.json` with every exported file hash.
+- Global RPF catalogs atomically index up to 512 loose outer archives and all nested
+  entries into a portable SQLite database outside the game. Incremental refresh
+  reuses unchanged size/mtime records; `--refresh` reindexes and hashes everything.
+  Failed archives remain visible in catalog statistics, while searches can filter
+  entry names and virtual paths by kind or suffix. Desktop results open the exact
+  outer archive and select the matching root or nested entry on double-click.
 - New-archive authoring accepts only a loose source tree and a new `.rpf` output
   outside the GTA V installation. Installation remains a separate receipt-owned step.
   Directories ending in `.rpf.source` become nested archives, to eight levels. The

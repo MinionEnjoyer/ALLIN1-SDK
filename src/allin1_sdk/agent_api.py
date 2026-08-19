@@ -33,6 +33,7 @@ AUTHORING_COMMANDS = frozenset({
     "audit-folder",
     "build-native-workspace",
     "build-rpf-tree",
+    "catalog-rpfs",
     "canary-rpf-transaction",
     "compile-vehicle-data",
     "diff-meta",

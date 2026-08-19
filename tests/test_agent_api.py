@@ -24,6 +24,8 @@ def test_catalog_is_structured_and_classifies_risk():
     assert catalog["export-native-workspace"]["risk"] == "authoring_write"
     assert catalog["build-native-workspace"]["risk"] == "authoring_write"
     assert catalog["build-rpf-tree"]["risk"] == "authoring_write"
+    assert catalog["catalog-rpfs"]["risk"] == "authoring_write"
+    assert catalog["search-rpf-catalog"]["risk"] == "read_only"
     assert catalog["export-rpf-native-workspace"]["risk"] == "authoring_write"
     assert catalog["plan-rpf-native-workspace"]["risk"] == "authoring_write"
     assert catalog["list-ytd-textures"]["risk"] == "authoring_write"

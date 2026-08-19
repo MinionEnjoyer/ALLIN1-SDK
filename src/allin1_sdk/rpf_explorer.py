@@ -22,6 +22,7 @@ from allin1_sdk.native_assets import (
 )
 from allin1_sdk.paths import user_data_root
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
+from allin1_sdk.rpf_catalog import RpfCatalogResult, RpfCatalogService
 from allin1_sdk.rpf_tools import RpfEntryRecord, RpfExplorerService, RpfIndex
 from allin1_sdk.help_center import HelpCenterDialog
 
@@ -318,6 +319,7 @@ class RpfExplorerDialog(ttk.Frame):
         self.index: RpfIndex | None = None
         self.service: RpfExplorerService | None = None
         self.entry_items: dict[str, RpfEntryRecord] = {}
+        self.catalog_items: dict[str, RpfCatalogResult] = {}
         self.entry_action_menus: list[tk.Menu] = []
         self.file_menus: list[tk.Menu] = []
         self._photo: ImageTk.PhotoImage | None = None
@@ -444,6 +446,7 @@ class RpfExplorerDialog(ttk.Frame):
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", self._select_entry)
+        self.tree.bind("<Double-1>", self._activate_tree_item)
 
         self.asset_title = tk.StringVar(value="Select an entry")
         self.asset_meta = tk.StringVar(value="No archive loaded")
@@ -485,6 +488,13 @@ class RpfExplorerDialog(ttk.Frame):
         menu.add_command(
             label="Compare with archive…",
             command=self._compare_archive, state="disabled",
+        )
+        menu.add_separator()
+        menu.add_command(
+            label="Build/update global RPF catalog…", command=self._build_catalog,
+        )
+        menu.add_command(
+            label="Search global RPF catalog…", command=self._search_catalog,
         )
         menu.add_separator()
         menu.add_command(
@@ -697,6 +707,7 @@ class RpfExplorerDialog(ttk.Frame):
     def _populate(self) -> None:
         self.tree.delete(*self.tree.get_children())
         self.entry_items.clear()
+        self.catalog_items.clear()
         if self.index is None:
             return
         filtered = self._filtered()
@@ -744,6 +755,134 @@ class RpfExplorerDialog(ttk.Frame):
     def _selected(self) -> RpfEntryRecord | None:
         selected = self.tree.selection()
         return self.entry_items.get(selected[0]) if selected else None
+
+    def _activate_tree_item(self, _event: object | None = None) -> None:
+        selected = self.tree.selection()
+        result = self.catalog_items.get(selected[0]) if selected else None
+        if result is None:
+            return
+        archive = Path(result.outer_archive)
+        self._load_archive(archive)
+        for item_id, entry in self.entry_items.items():
+            if (
+                entry.archive_path.casefold() == result.archive_path.casefold()
+                and entry.path.casefold() == result.entry_path.casefold()
+            ):
+                self.tree.selection_set(item_id)
+                self.tree.focus(item_id)
+                self.tree.see(item_id)
+                self._select_entry()
+                break
+
+    def _catalog_game(self) -> Path | None:
+        game = Path(self.game_path.get().strip())
+        if game.is_dir():
+            return game
+        messagebox.showerror(
+            "GTA V path required",
+            "Select the matching Legacy or Enhanced installation for catalog indexing.",
+            parent=self,
+        )
+        return None
+
+    def _build_catalog(self) -> None:
+        game = self._catalog_game()
+        if game is None:
+            return
+        source = filedialog.askdirectory(
+            parent=self, title="Select folder containing loose RPF archives",
+        )
+        if not source:
+            return
+        destination = filedialog.asksaveasfilename(
+            parent=self, title="Create or update global RPF catalog",
+            defaultextension=".sqlite",
+            filetypes=(("RPF search catalog", "*.sqlite *.db"),),
+        )
+        if not destination:
+            return
+        self.status.set("Building incremental global RPF catalog…")
+
+        def completed(result) -> None:
+            database, summary = result
+            self.status.set(
+                f"RPF catalog ready: {summary['archives']} archives · "
+                f"{summary['indexed']} indexed · {summary['cached']} cached · "
+                f"{summary['failed']} failed"
+            )
+            messagebox.showinfo(
+                "RPF catalog ready",
+                f"Database: {database}\n\nIndexed: {summary['indexed']}\n"
+                f"Reused cache: {summary['cached']}\nFailed: {summary['failed']}",
+                parent=self,
+            )
+
+        RpfProgressDialog(
+            self, "Cataloging loose RPF archives",
+            lambda progress: RpfCatalogService(
+                self.project_root, game,
+            ).build(source, destination, progress=progress),
+            completed,
+            lambda exc: messagebox.showerror(
+                "RPF catalog failed", str(exc), parent=self,
+            ),
+        )
+
+    def _search_catalog(self) -> None:
+        selected = filedialog.askopenfilename(
+            parent=self, title="Open global RPF catalog",
+            filetypes=(("RPF search catalog", "*.sqlite *.db"),),
+        )
+        if not selected:
+            return
+        query = simpledialog.askstring(
+            "Search all cataloged RPFs",
+            "File, archive, or virtual-path text (blank lists the first entries):",
+            parent=self,
+        )
+        if query is None:
+            return
+        try:
+            results = RpfCatalogService.search(selected, query, limit=1000)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("RPF catalog search failed", str(exc), parent=self)
+            return
+        self.tree.delete(*self.tree.get_children())
+        self.entry_items.clear()
+        self.catalog_items.clear()
+        self._set_entry_actions(False)
+        self._set_subtree_action(False)
+        grouped: dict[str, list[RpfCatalogResult]] = {}
+        for result in results:
+            grouped.setdefault(result.outer_archive, []).append(result)
+        counter = 0
+        for archive, items in grouped.items():
+            root = self.tree.insert(
+                "", "end", text=Path(archive).name,
+                values=("RPF", f"{len(items)} matches", ""), open=True,
+            )
+            for result in items:
+                item_id = f"catalog:{counter}"
+                counter += 1
+                self.catalog_items[item_id] = result
+                label = (
+                    f"{result.archive_path} :: {result.entry_path}"
+                    if result.archive_path else result.entry_path
+                )
+                self.tree.insert(
+                    root, "end", iid=item_id, text=label,
+                    values=(
+                        result.kind, _human_size(result.size),
+                        result.resource_version if result.resource_version is not None else "",
+                    ),
+                )
+        self.asset_title.set("Global RPF search")
+        self.asset_meta.set(f"{len(results):,} result(s) for {query!r}")
+        self._show_text(
+            "Double-click a result to open its outer archive and select the exact "
+            "root or nested entry. Catalog searching does not modify any archive."
+        )
+        self.status.set(f"Global RPF catalog search returned {len(results):,} result(s)")
 
     def _select_entry(self, _event: object | None = None) -> None:
         entry = self._selected()
