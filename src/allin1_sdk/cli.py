@@ -16,12 +16,14 @@ from allin1_sdk.addon_sdk import AddonLinker, AddonManifest, AddonSdkCatalog
 from allin1_sdk.detector import detect_gta_path
 from allin1_sdk.dlc_inventory import DlcInventory
 from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
+from allin1_sdk.native_assets import NativeAssetInspector
 from allin1_sdk.mods import ModIntegrationService, ModManifest
 from allin1_sdk.oiv_workbench import OivWorkbench
 from allin1_sdk.paths import project_root
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.rage_data_compiler import RageVehicleDataCompiler
 from allin1_sdk.rpf_tools import RpfExplorerService, _running_gta_processes
+from allin1_sdk.texture_workspace import TextureDictionaryWorkspace
 
 
 PROJECT_ROOT = project_root()
@@ -450,6 +452,29 @@ def extract_rpf_entry(
     click.echo(f"Extracted read-only copy: {written}")
 
 
+@main.command("export-rpf-native-workspace")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("entry_path")
+@click.option("--archive-path", default="")
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--output", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+def export_rpf_native_workspace(
+    archive: Path, entry_path: str, archive_path: str,
+    gta_path: Path | None, output: Path,
+) -> None:
+    """Extract an RPF native asset into an editable CodeWalker XML workspace."""
+    service = _rpf_service(gta_path)
+    try:
+        index, entry = _entry(service, archive, archive_path, entry_path)
+        workspace = service.export_native_workspace(index, entry, output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Exported RPF native editing workspace: {workspace}")
+
+
 @main.command("extract-rpf-subtree")
 @click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
@@ -540,6 +565,34 @@ def plan_rpf_replacement(
     click.echo(
         f"Wrote {plan['status']} plan; no archive was changed: {destination}"
     )
+
+
+@main.command("plan-rpf-native-workspace")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("entry_path")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option("--archive-path", default="")
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--workspace-root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def plan_rpf_native_workspace(
+    archive: Path, entry_path: str, workspace: Path, archive_path: str,
+    gta_path: Path | None, workspace_root: Path | None, output: Path,
+) -> None:
+    """Rebuild/reparse a native workspace and create its RPF replacement plan."""
+    service = _rpf_service(gta_path, workspace_root)
+    try:
+        index, entry = _entry(service, archive, archive_path, entry_path)
+        plan, asset, report = service.plan_native_workspace_replacement(
+            index, entry, workspace, output,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Built and reparsed native RPF payload: {asset}")
+    click.echo(f"Validation report: {report}")
+    click.echo(f"Reviewed replacement plan (archive unchanged): {plan}")
 
 
 @main.command("plan-rpf-add")
@@ -811,6 +864,140 @@ def canary_rpf_transaction(
     click.echo(f"Real-archive canary passed: {report}")
 
 
+@main.command("export-native-workspace")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--edition", type=click.Choice(("Legacy", "Enhanced"), case_sensitive=False),
+    default="Enhanced", show_default=True,
+)
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def export_native_workspace(source: Path, edition: str, output: Path) -> None:
+    """Export a native resource to an editable XML/dependency workspace."""
+    try:
+        workspace = NativeAssetInspector(PROJECT_ROOT).export_workspace(
+            source, output, edition=edition,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Exported verified native editing workspace: {workspace}")
+
+
+@main.command("build-native-workspace")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def build_native_workspace(workspace: Path, output: Path) -> None:
+    """Rebuild and reparse an edited native XML workspace."""
+    try:
+        asset, report = NativeAssetInspector(PROJECT_ROOT).build_workspace(
+            workspace, output,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Built and reparsed native asset: {asset}")
+    click.echo(f"Validation report: {report}")
+
+
+@main.command("list-ytd-textures")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", type=click.Path(path_type=Path))
+def list_ytd_textures(workspace: Path, output: Path | None) -> None:
+    """List validated texture records from a native YTD workspace."""
+    try:
+        catalog = TextureDictionaryWorkspace(workspace).catalog()
+        rendered = json.dumps(catalog.to_dict(), indent=2) + "\n"
+        if output is None:
+            click.echo(rendered, nl=False)
+        else:
+            destination = output.resolve()
+            if destination.exists() or destination.is_symlink():
+                raise ValueError(f"Texture catalog output already exists: {destination}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(rendered, encoding="utf-8")
+            click.echo(f"Wrote {len(catalog.textures)} YTD texture record(s): {destination}")
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _require_texture_edit_acknowledgement(acknowledged: bool) -> None:
+    if not acknowledged:
+        raise click.ClickException(
+            "Texture workspace edits require --acknowledge-edit; the immutable YTD "
+            "source snapshot remains unchanged"
+        )
+
+
+@main.command("replace-ytd-texture")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("texture_name")
+@click.argument("image", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--acknowledge-edit", is_flag=True)
+def replace_ytd_texture(
+    workspace: Path, texture_name: str, image: Path, acknowledge_edit: bool,
+) -> None:
+    """Replace one texture using DDS or a converted raster image."""
+    _require_texture_edit_acknowledgement(acknowledge_edit)
+    try:
+        result = TextureDictionaryWorkspace(workspace).replace(texture_name, image)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Replaced {result.texture.name} ({result.texture.width}x{result.texture.height}, "
+        f"{result.texture.format}); undo history: {result.history}"
+    )
+
+
+@main.command("add-ytd-texture")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("texture_name")
+@click.argument("image", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--acknowledge-edit", is_flag=True)
+def add_ytd_texture(
+    workspace: Path, texture_name: str, image: Path, acknowledge_edit: bool,
+) -> None:
+    """Add one named texture using DDS or a converted raster image."""
+    _require_texture_edit_acknowledgement(acknowledge_edit)
+    try:
+        result = TextureDictionaryWorkspace(workspace).add(texture_name, image)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Added {result.texture.name} ({result.texture.width}x{result.texture.height}, "
+        f"{result.texture.format}); undo history: {result.history}"
+    )
+
+
+@main.command("remove-ytd-texture")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("texture_name")
+@click.option("--acknowledge-edit", is_flag=True)
+def remove_ytd_texture(
+    workspace: Path, texture_name: str, acknowledge_edit: bool,
+) -> None:
+    """Remove one named texture while preserving local undo history."""
+    _require_texture_edit_acknowledgement(acknowledge_edit)
+    try:
+        result = TextureDictionaryWorkspace(workspace).remove(texture_name)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Removed {result.texture.name}; undo history: {result.history}")
+
+
+@main.command("undo-ytd-texture-edit")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--acknowledge-edit", is_flag=True)
+def undo_ytd_texture_edit(workspace: Path, acknowledge_edit: bool) -> None:
+    """Restore the latest YTD texture edit while retaining recovery history."""
+    _require_texture_edit_acknowledgement(acknowledge_edit)
+    try:
+        result = TextureDictionaryWorkspace(workspace).restore_latest()
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Restored {result.restored.name}; pre-restore recovery history: "
+        f"{result.recovery_history}"
+    )
+
+
 @main.command("diff-meta")
 @click.argument("before", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("after", type=click.Path(exists=True, dir_okay=False, path_type=Path))
@@ -891,11 +1078,15 @@ def sdk_compatibility_group() -> None:
 for _command in (
     list_examples, validate, link, import_package, audit_folder, oiv_plan,
     inspect_rpf, dlc_inventory, compile_vehicle_data, index_rpf, extract_rpf_entry,
-    extract_rpf_subtree, diff_rpf,
-    plan_rpf_replacement, plan_rpf_add, plan_rpf_delete, plan_rpf_batch,
+    extract_rpf_subtree, export_rpf_native_workspace, diff_rpf,
+    plan_rpf_replacement, plan_rpf_native_workspace,
+    plan_rpf_add, plan_rpf_delete, plan_rpf_batch,
     plan_rpf_sync, apply_rpf_plan,
     verify_rpf_transaction, rollback_rpf_transaction, recover_rpf_transaction,
     list_rpf_transactions, canary_rpf_transaction, diff_meta_command,
+    export_native_workspace, build_native_workspace,
+    list_ytd_textures, replace_ytd_texture, add_ytd_texture, remove_ytd_texture,
+    undo_ytd_texture_edit,
     validate_meta_roundtrip_command, inspect_package_rpfs,
 ):
     sdk_compatibility_group.add_command(_command)

@@ -36,7 +36,10 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   adds/replacements/deletes into payload-backed atomic batch manifests.
 - **Native Asset Viewer** — browse authored text and images, parse bounded RAGE
   resource headers, convert supported resources to structured CodeWalker XML,
-  and generate YTD texture contact sheets without executing package code.
+  generate YTD texture contact sheets, and export manifest-backed XML/dependency
+  workspaces that rebuild only after the compiled result parses back through CodeWalker.
+  The embedded YTD editor catalogs and previews every DDS, imports common raster formats,
+  synchronizes dimensions/mips/formats, supports add/replace/remove, and retains undo history.
 - **RPF Explorer** — search root and nested RPFs as one hierarchy, inspect entry
   metadata, export JSON/CSV indexes, extract an exact entry or complete directory
   subtree through one archive scan, compare two recursive archive trees by metadata
@@ -53,6 +56,9 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   removal, same-parent entry rename, and exact nested-RPF deletion. They rebuild each
   nested container once and commit the outer archive once under one lock, backup,
   receipt, and rollback.
+  Supported native entries can move directly from a selected root or nested RPF into
+  an editable workspace, then back into a validated payload plus checksummed replacement
+  plan without bypassing the normal review/apply boundary.
 - **Real-archive canary** — copy a genuine Legacy or Enhanced RPF outside the game,
   exercise real replace/add/delete writes, verify each exact entry, roll everything
   back, and prove the final archive SHA-256 matches the untouched source.
@@ -151,7 +157,8 @@ content with large button rows:
   `Tab` to accept a completion, arrows to navigate, and `Ctrl+L` to clear output.
 - **Archive / Entry** controls RPF search, metadata, preview, exact-entry and
   recursive subtree extraction,
-  subtree workspace synchronization, replace/add/delete planning, guarded application,
+  native XML workspace export/rebuild, subtree workspace synchronization,
+  replace/add/delete planning, guarded application,
   canaries, transaction history,
   receipt recovery, stale-lock review, verification, and rollback.
 - **Help** provides contextual guidance for each workspace and its safety limits.
@@ -173,6 +180,11 @@ allin1-sdk import-package C:\Mods\Example -o C:\Mods\Example\addon.json
 allin1-sdk audit-folder C:\Mods\TestMods -o package-audit.md
 allin1-sdk dlc-inventory "D:\Games\GTA V Enhanced" -o dlc-inventory.md
 allin1-sdk index-rpf C:\Mods\Example\dlc.rpf --gta-path "D:\Games\GTA V Enhanced" -o index.json
+allin1-sdk export-rpf-native-workspace C:\Mods\Example\dlc.rpf common/data/model.ydr --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\model-workspace
+allin1-sdk plan-rpf-native-workspace C:\Mods\Example\dlc.rpf common/data/model.ydr C:\Work\model-workspace --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\model-plan.json
+allin1-sdk list-ytd-textures C:\Work\vehicle-ytd-workspace
+allin1-sdk replace-ytd-texture C:\Work\vehicle-ytd-workspace diffuse C:\Art\diffuse.png --acknowledge-edit
+allin1-sdk undo-ytd-texture-edit C:\Work\vehicle-ytd-workspace --acknowledge-edit
 allin1-sdk extract-rpf-subtree C:\Mods\Example\dlc.rpf --archive-path x64\textures.rpf --directory vehicle --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Exports\vehicle
 allin1-sdk plan-rpf-sync C:\Mods\Example\dlc.rpf C:\Mods\Exports\vehicle --gta-path "D:\Games\GTA V Enhanced" --workspace-root C:\Mods -o subtree-sync-plan.json
 allin1-sdk diff-rpf C:\Mods\Before\dlc.rpf C:\Mods\After\dlc.rpf --exact-content --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Reports\archive-diff.json
@@ -228,6 +240,16 @@ service used by the launcher.
 - RPF exploration and extraction are read-only. Subtree extraction scans the outer
   archive once, refuses existing output folders, verifies that the source hash did
   not change, and emits `.allin1-rpf-export.json` with every exported file hash.
+- Native workspaces retain an immutable source snapshot, editable CodeWalker XML and
+  dependencies, edition metadata, and hashes. Build refuses path escapes, links,
+  collisions, source tampering, unsupported types, oversized inputs, and any result
+  that CodeWalker cannot parse again. RPF-native planning stores the rebuilt payload
+  and validation report beside the plan; it still performs no archive write.
+- YTD texture edits are limited to a validated native workspace. Dependency paths,
+  names, DDS headers, dimensions, mip counts, texture formats, counts, image sizes,
+  and collisions are checked before publication. Raster conversion emits an
+  uncompressed DDS; supplying a DDS retains supported compression. Each mutation
+  snapshots the prior XML and dependency, and undo keeps a second recovery snapshot.
 - Subtree workspace synchronization revalidates that manifest, its selected archive
   and directory, the untouched source hash, every original payload hash, path
   containment, and case uniqueness. It turns edited, added, and removed loose files

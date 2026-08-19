@@ -15,7 +15,11 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from PIL import Image, ImageOps, ImageTk, UnidentifiedImageError
 
 from allin1_sdk.detector import detect_gta_path
-from allin1_sdk.native_assets import MAX_NATIVE_PREVIEW_BYTES, NativeAssetInspector
+from allin1_sdk.native_assets import (
+    MAX_NATIVE_PREVIEW_BYTES,
+    NATIVE_XML_IMPORT_SUFFIXES,
+    NativeAssetInspector,
+)
 from allin1_sdk.paths import user_data_root
 from allin1_sdk.rpf_tools import RpfEntryRecord, RpfExplorerService, RpfIndex
 from allin1_sdk.help_center import HelpCenterDialog
@@ -518,12 +522,20 @@ class RpfExplorerDialog(ttk.Frame):
             label="Extract selected…", command=self._extract_selected, state="disabled",
         )
         menu.add_command(
+            label="Export editable native workspace…",
+            command=self._export_native_workspace, state="disabled",
+        )
+        menu.add_command(
             label="Extract selected subtree…",
             command=self._extract_selected_subtree, state="disabled",
         )
         menu.add_separator()
         menu.add_command(
             label="Plan replacement…", command=self._plan_replacement, state="disabled",
+        )
+        menu.add_command(
+            label="Plan replacement from native workspace…",
+            command=self._plan_native_workspace_replacement, state="disabled",
         )
         menu.add_command(
             label="Plan new entry…", command=self._plan_addition, state="disabled",
@@ -553,7 +565,9 @@ class RpfExplorerDialog(ttk.Frame):
         for menu in self.entry_action_menus:
             menu.entryconfigure("Native preview", state=state)
             menu.entryconfigure("Extract selected…", state=state)
+            menu.entryconfigure("Export editable native workspace…", state=state)
             menu.entryconfigure("Plan replacement…", state=state)
+            menu.entryconfigure("Plan replacement from native workspace…", state=state)
             menu.entryconfigure("Plan new entry…", state=state)
             menu.entryconfigure("Plan deletion…", state=state)
             menu.entryconfigure("Plan rename…", state=state)
@@ -562,6 +576,14 @@ class RpfExplorerDialog(ttk.Frame):
         state = "normal" if enabled else "disabled"
         for menu in self.entry_action_menus:
             menu.entryconfigure("Extract selected subtree…", state=state)
+
+    def _set_native_authoring_actions(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for menu in self.entry_action_menus:
+            menu.entryconfigure("Export editable native workspace…", state=state)
+            menu.entryconfigure(
+                "Plan replacement from native workspace…", state=state,
+            )
 
     def _choose_game(self) -> None:
         selected = filedialog.askdirectory(parent=self, title="Select GTA V installation")
@@ -675,6 +697,10 @@ class RpfExplorerDialog(ttk.Frame):
         entry = self._selected()
         self._set_entry_actions(bool(entry and entry.kind != "directory"))
         self._set_subtree_action(bool(entry and entry.kind == "directory"))
+        self._set_native_authoring_actions(bool(
+            entry and entry.kind != "directory"
+            and Path(entry.name).suffix.casefold() in NATIVE_XML_IMPORT_SUFFIXES
+        ))
         if entry is None:
             return
         self.asset_title.set(entry.name)
@@ -752,6 +778,40 @@ class RpfExplorerDialog(ttk.Frame):
             messagebox.showerror("Extraction failed", str(exc), parent=self)
             return
         self.status.set(f"Extracted read-only copy: {output}")
+
+    def _export_native_workspace(self) -> None:
+        entry = self._selected()
+        if entry is None or self.index is None or self.service is None:
+            return
+        parent = filedialog.askdirectory(
+            parent=self, title="Select parent folder for editable native workspace",
+        )
+        if not parent:
+            return
+        destination = Path(parent) / f"{entry.name}-workspace"
+
+        def work(progress):
+            progress(f"Extracting {entry.virtual_name}…", 20)
+            result = self.service.export_native_workspace(
+                self.index, entry, destination,
+            )
+            progress("CodeWalker XML workspace verified", 100)
+            return result
+
+        def completed(workspace):
+            self.status.set(f"Exported editable native workspace: {workspace}")
+            messagebox.showinfo(
+                "Native workspace exported",
+                "The source snapshot is immutable. Edit only the XML/dependencies under "
+                f"the edit folder.\n\n{workspace}", parent=self,
+            )
+
+        RpfProgressDialog(
+            self, "Exporting native RPF workspace", work, completed,
+            lambda error: messagebox.showerror(
+                "Native workspace export failed", str(error), parent=self,
+            ),
+        )
 
     def _extract_current_archive(self) -> None:
         if self.index is None:
@@ -872,6 +932,48 @@ class RpfExplorerDialog(ttk.Frame):
                 + "\n".join(f"• {item}" for item in plan["blocking_reasons"]),
                 parent=self,
             )
+
+    def _plan_native_workspace_replacement(self) -> None:
+        entry = self._selected()
+        if entry is None or self.index is None or self.service is None:
+            return
+        workspace = filedialog.askdirectory(
+            parent=self, title=f"Select edited native workspace for {entry.name}",
+        )
+        if not workspace:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save rebuilt-native RPF replacement plan",
+            initialfile=f"{Path(entry.name).stem}-native-replacement-plan.json",
+            defaultextension=".json", filetypes=(("JSON", "*.json"),),
+        )
+        if not output:
+            return
+
+        def work(progress):
+            progress("Rebuilding edited CodeWalker XML…", 20)
+            result = self.service.plan_native_workspace_replacement(
+                self.index, entry, workspace, output,
+            )
+            progress("Reparsed payload and bound reviewed RPF plan", 100)
+            return result
+
+        def completed(result):
+            plan, asset, report = result
+            self.status.set(f"Wrote rebuilt-native replacement plan: {plan}")
+            messagebox.showinfo(
+                "Native replacement plan ready",
+                "The rebuilt asset parsed successfully and is bound to the plan. The RPF "
+                "has not changed; review and apply the plan separately.\n\n"
+                f"Payload: {asset}\nValidation: {report}\nPlan: {plan}", parent=self,
+            )
+
+        RpfProgressDialog(
+            self, "Building native RPF replacement", work, completed,
+            lambda error: messagebox.showerror(
+                "Native replacement plan failed", str(error), parent=self,
+            ),
+        )
 
     def _plan_addition(self) -> None:
         if self.index is None or self.service is None:

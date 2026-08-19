@@ -1500,6 +1500,177 @@ def test_native_asset_conversion_failure_retries_other_edition(tmp_path, monkeyp
     assert "parsed as Legacy" in report.warnings[0]
 
 
+def _native_workspace_inspector(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    patcher = project / "tools" / "RpfPatcher" / "RpfPatcher.exe"
+    patcher.parent.mkdir(parents=True)
+    patcher.write_bytes(b"exe")
+
+    def convert(args, **_kwargs):
+        command = str(args[1])
+        source = Path(args[2])
+        output = Path(args[3])
+        assets = Path(args[4])
+        assets.mkdir(parents=True, exist_ok=True)
+        if command == "asset-xml":
+            output.write_text(
+                f"<Drawable><Source>{source.name}</Source></Drawable>",
+                encoding="utf-8",
+            )
+            (assets / "texture.png").write_bytes(b"png-dependency")
+        elif command == "asset-from-xml":
+            output.write_bytes(b"RSC8" + source.read_bytes())
+        else:  # pragma: no cover - catches a future command-contract regression
+            raise AssertionError(command)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(native_assets, "run_hidden", convert)
+    return NativeAssetInspector(project)
+
+
+def test_native_workspace_exports_builds_and_reparses(tmp_path, monkeypatch):
+    inspector = _native_workspace_inspector(tmp_path, monkeypatch)
+    source = tmp_path / "vehicle.ydd"
+    source.write_bytes(b"RSC8-original")
+    workspace = inspector.export_workspace(
+        source, tmp_path / "vehicle-workspace", edition="Enhanced",
+    )
+    manifest = json.loads(
+        (workspace / "native-workspace.json").read_text(encoding="utf-8")
+    )
+    assert manifest["operation"] == "native_asset_workspace"
+    assert manifest["edition"] == "Enhanced"
+    assert manifest["source"]["sha256"] == hashlib.sha256(
+        source.read_bytes()
+    ).hexdigest()
+    assert manifest["dependencies"][0]["path"] == "texture.png"
+    assert (workspace / "original" / "vehicle.ydd").read_bytes() == source.read_bytes()
+
+    xml = workspace / "edit" / "vehicle.ydd.xml"
+    xml.write_text("<Drawable><Edited>true</Edited></Drawable>", encoding="utf-8")
+    (workspace / "edit" / "assets" / "extra.bin").write_bytes(b"dependency")
+    output, report = inspector.build_workspace(workspace, tmp_path / "rebuilt.ydd")
+    assert output.read_bytes().startswith(b"RSC8<Drawable>")
+    result = json.loads(report.read_text(encoding="utf-8"))
+    assert result["operation"] == "native_asset_workspace_build"
+    assert result["validation"]["reparsed"] is True
+    assert result["validation"]["dependency_count"] == 1
+    assert result["edited_xml_sha256"] == hashlib.sha256(xml.read_bytes()).hexdigest()
+
+
+def test_native_workspace_rejects_tampering_escapes_and_collisions(
+    tmp_path, monkeypatch,
+):
+    inspector = _native_workspace_inspector(tmp_path, monkeypatch)
+    workspace = inspector.export_workspace_bytes(
+        "asset.ydr", b"RSC8-original", tmp_path / "workspace", edition="gen9",
+    )
+    snapshot = workspace / "original" / "asset.ydr"
+    snapshot.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="source snapshot was modified"):
+        inspector.build_workspace(workspace, tmp_path / "rebuilt.ydr")
+
+    snapshot.write_bytes(b"RSC8-original")
+    manifest_path = workspace / "native-workspace.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["xml"]["path"] = "../outside.xml"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="XML path is unsafe"):
+        inspector.build_workspace(workspace, tmp_path / "rebuilt.ydr")
+
+    manifest["xml"]["path"] = "edit/asset.ydr.xml"
+    manifest["source"]["name"] = "renamed.ydr"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="source identity was modified"):
+        inspector.build_workspace(workspace, tmp_path / "rebuilt.ydr")
+
+    manifest["source"]["name"] = "asset.ydr"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="retain the .ydr extension"):
+        inspector.build_workspace(workspace, tmp_path / "rebuilt.ydd")
+    existing = tmp_path / "rebuilt.ydr"
+    existing.write_bytes(b"owned")
+    with pytest.raises(ValueError, match="output already exists"):
+        inspector.build_workspace(workspace, existing)
+    assert existing.read_bytes() == b"owned"
+
+
+def test_native_workspace_rejects_symlinked_dependencies(tmp_path, monkeypatch):
+    inspector = _native_workspace_inspector(tmp_path, monkeypatch)
+    workspace = inspector.export_workspace_bytes(
+        "asset.ytd", b"RSC8-original", tmp_path / "workspace", edition="Legacy",
+    )
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+    link = workspace / "edit" / "assets" / "linked.bin"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("Symbolic links are not available to this Windows test account")
+    with pytest.raises(ValueError, match="symbolic link"):
+        inspector.build_workspace(workspace, tmp_path / "rebuilt.ytd")
+
+
+def test_rpf_native_workspace_export_and_planned_replacement(tmp_path, monkeypatch):
+    service, archive, _ = _service(tmp_path)
+    index = RpfIndex.load(_write_index(tmp_path, _index_payload(archive)))
+    entry = index.entry("x64/textures.rpf::vehicle.ytd")
+
+    def rpf_helper(args, **_kwargs):
+        assert args[1] == "extract-virtual-entry"
+        Path(args[6]).write_bytes(b"RSC8-original")
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    def native_helper(args, **_kwargs):
+        command = str(args[1])
+        output = Path(args[3])
+        assets = Path(args[4])
+        assets.mkdir(parents=True, exist_ok=True)
+        if command == "asset-xml":
+            output.write_text("<TextureDictionary />", encoding="utf-8")
+        elif command == "asset-from-xml":
+            output.write_bytes(b"RSC8-rebuilt")
+        else:  # pragma: no cover
+            raise AssertionError(command)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(rpf_tools, "run_hidden", rpf_helper)
+    monkeypatch.setattr(native_assets, "run_hidden", native_helper)
+    workspace = service.export_native_workspace(
+        index, entry, tmp_path / "vehicle-workspace",
+    )
+    plan_path, asset, report = service.plan_native_workspace_replacement(
+        index, entry, workspace, tmp_path / "vehicle-native-plan.json",
+    )
+    assert plan_path.is_file() and asset.read_bytes() == b"RSC8-rebuilt"
+    assert report.is_file() and asset.parent.name == "vehicle-native-plan.payload"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["payload"]["path"] == str(asset)
+    assert plan["payload"]["sha256"] == hashlib.sha256(b"RSC8-rebuilt").hexdigest()
+    assert plan["native_workspace"]["validation_report"] == str(report)
+    assert plan["status"] == "blocked"
+    assert archive.read_bytes() == b"RPF7"
+
+
+def test_rpf_native_workspace_plan_cleans_failed_build(tmp_path, monkeypatch):
+    service, archive, _ = _service(tmp_path)
+    index = RpfIndex.load(_write_index(tmp_path, _index_payload(archive)))
+    entry = index.entry("x64/textures.rpf::vehicle.ytd")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "native-workspace.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        NativeAssetInspector, "build_workspace",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bad XML")),
+    )
+    plan = tmp_path / "failed.json"
+    with pytest.raises(RuntimeError, match="bad XML"):
+        service.plan_native_workspace_replacement(index, entry, workspace, plan)
+    assert not plan.exists()
+    assert not (tmp_path / "failed.payload").exists()
+    assert not list(tmp_path.glob(".failed.native-stage-*"))
+
+
 def test_native_preview_limits():
     assert native_preview_limit("model.yft", 20) == 21
     assert native_preview_limit("huge.yft", MAX_NATIVE_PREVIEW_BYTES + 10) == MAX_NATIVE_PREVIEW_BYTES
@@ -1541,6 +1712,26 @@ def test_new_rpf_cli_index_extract_and_plan(tmp_path, monkeypatch):
             )
             return target
 
+        def export_native_workspace(self, loaded, entry, output):
+            assert loaded is index and entry.path == "common/data/test.ymap"
+            target = Path(output)
+            target.mkdir()
+            (target / "native-workspace.json").write_text("{}", encoding="utf-8")
+            return target
+
+        def plan_native_workspace_replacement(self, loaded, entry, workspace, output):
+            assert loaded is index and entry.path == "common/data/test.ymap"
+            assert Path(workspace).name == "native-workspace"
+            plan = Path(output)
+            payload_dir = plan.with_name(f"{plan.stem}.payload")
+            payload_dir.mkdir()
+            asset = payload_dir / entry.name
+            report = payload_dir / f"{entry.name}.allin1.json"
+            asset.write_bytes(b"rebuilt")
+            report.write_text("{}", encoding="utf-8")
+            plan.write_text("{}", encoding="utf-8")
+            return plan, asset, report
+
         def replacement_plan(self, loaded, entry, payload):
             assert loaded is index and entry.path == "common/data/test.ymap"
             return {"operation": "replace_rpf_entry", "status": "plan_only"}
@@ -1561,6 +1752,24 @@ def test_new_rpf_cli_index_extract_and_plan(tmp_path, monkeypatch):
     ])
     assert extracted.exit_code == 0, extracted.output
     assert (tmp_path / "test.ymap").read_bytes() == b"extracted"
+
+    native_export = runner.invoke(main, [
+        "sdk", "export-rpf-native-workspace", str(archive),
+        "common/data/test.ymap", "--gta-path", str(game),
+        "-o", str(tmp_path / "native-export"),
+    ])
+    assert native_export.exit_code == 0, native_export.output
+    assert (tmp_path / "native-export" / "native-workspace.json").is_file()
+
+    native_workspace = tmp_path / "native-workspace"
+    native_workspace.mkdir()
+    native_plan = runner.invoke(main, [
+        "sdk", "plan-rpf-native-workspace", str(archive),
+        "common/data/test.ymap", str(native_workspace),
+        "--gta-path", str(game), "-o", str(tmp_path / "native-plan.json"),
+    ])
+    assert native_plan.exit_code == 0, native_plan.output
+    assert (tmp_path / "native-plan.json").is_file()
 
     subtree = runner.invoke(main, [
         "sdk", "extract-rpf-subtree", str(archive),

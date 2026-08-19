@@ -29,7 +29,9 @@ GAME_WRITE_COMMANDS = frozenset({
     "uninstall-package",
 })
 AUTHORING_COMMANDS = frozenset({
+    "add-ytd-texture",
     "audit-folder",
+    "build-native-workspace",
     "canary-rpf-transaction",
     "compile-vehicle-data",
     "diff-meta",
@@ -37,16 +39,23 @@ AUTHORING_COMMANDS = frozenset({
     "dlc-inventory",
     "extract-rpf-entry",
     "extract-rpf-subtree",
+    "export-native-workspace",
+    "export-rpf-native-workspace",
     "import-package",
     "index-rpf",
     "inspect-package-rpfs",
     "link",
+    "list-ytd-textures",
     "oiv-plan",
     "plan-rpf-add",
     "plan-rpf-batch",
+    "plan-rpf-native-workspace",
     "plan-rpf-sync",
     "plan-rpf-delete",
     "plan-rpf-replacement",
+    "remove-ytd-texture",
+    "replace-ytd-texture",
+    "undo-ytd-texture-edit",
     "validate-meta-roundtrip",
 })
 

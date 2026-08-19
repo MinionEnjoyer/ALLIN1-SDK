@@ -1,4 +1,4 @@
-"""Read-only package asset browser for the ALLIN1 desktop tool."""
+"""Package asset browser and guarded native-resource authoring workspace."""
 
 from __future__ import annotations
 
@@ -21,10 +21,12 @@ from allin1_sdk.addon_importer import (
 )
 from allin1_sdk.native_assets import (
     NATIVE_ASSET_SUFFIXES,
+    NATIVE_XML_IMPORT_SUFFIXES,
     NativeAssetInspector,
     native_preview_limit,
 )
 from allin1_sdk.help_center import HelpCenterDialog
+from allin1_sdk.texture_editor import TextureDictionaryEditorFrame
 
 
 def _human_size(value: int) -> str:
@@ -38,7 +40,7 @@ def _human_size(value: int) -> str:
 
 _BINARY_HELP = {
     ".rpf": "Rockstar archive. Inventory is shown, but nested entries require the Enhanced-aware RPF toolchain.",
-    ".ytd": "Rockstar texture dictionary. Use RpfPatcher or CodeWalker to inspect contained textures.",
+    ".ytd": "Rockstar texture dictionary. Export a native workspace, then use the embedded YTD texture editor for catalog, preview, import, and rebuild validation.",
     ".ydr": "Rockstar drawable model. Use CodeWalker or Sollumz for geometry and materials.",
     ".ydd": "Rockstar drawable dictionary. Use CodeWalker or Sollumz for contained models.",
     ".yft": "Rockstar fragment model, commonly used by vehicles and breakable objects.",
@@ -85,7 +87,9 @@ class AssetViewerDialog(ttk.Frame):
         self.scan: PackageScan | None = None
         self.reader: PackageAssetReader | None = None
         self.entries: dict[str, PackageEntry] = {}
+        self.selected_entry: PackageEntry | None = None
         self.action_menus: list[tk.Menu] = []
+        self._texture_editor: TextureDictionaryEditorFrame | None = None
         self._photo: ImageTk.PhotoImage | None = None
         self._build()
         if source is not None:
@@ -110,6 +114,7 @@ class AssetViewerDialog(ttk.Frame):
             self._window.bind("<F1>", lambda _event: self._show_help())
 
         outer = ttk.Frame(self, padding=16)
+        self.viewer_surface = outer
         outer.pack(fill="both", expand=True)
 
         ttk.Label(
@@ -121,7 +126,8 @@ class AssetViewerDialog(ttk.Frame):
             text=(
                 "Inspect package files before installation. Images and authored text "
                 "are previewed directly; GTA resources receive header analysis, structured "
-                "CodeWalker XML, and texture contact sheets when supported. Nothing is executed."
+                "CodeWalker XML, texture contact sheets, and manifest-backed editable native "
+                "workspaces when supported. Package code is never executed."
             ),
             wraplength=1080, justify="left", foreground="#52635c",
         ).pack(anchor="w", pady=(3, 12))
@@ -202,6 +208,13 @@ class AssetViewerDialog(ttk.Frame):
         menu = tk.Menu(parent, tearoff=False)
         menu.add_command(label="Open folder…", command=self._choose_folder)
         menu.add_command(label="Open archive…", command=self._choose_archive)
+        menu.add_separator()
+        menu.add_command(
+            label="Build native workspace…", command=self._build_native_workspace,
+        )
+        menu.add_command(
+            label="Open YTD texture workspace…", command=self._open_texture_workspace,
+        )
         return menu
 
     def _action_menu(self, parent: tk.Misc) -> tk.Menu:
@@ -212,6 +225,10 @@ class AssetViewerDialog(ttk.Frame):
         menu.add_command(
             label="Open package location", command=self._open_location, state="disabled",
         )
+        menu.add_command(
+            label="Export editable native workspace…",
+            command=self._export_native_workspace, state="disabled",
+        )
         self.action_menus.append(menu)
         return menu
 
@@ -220,6 +237,11 @@ class AssetViewerDialog(ttk.Frame):
         for menu in self.action_menus:
             menu.entryconfigure("Export inventory…", state=state)
             menu.entryconfigure("Open package location", state=state)
+
+    def _set_native_action(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for menu in self.action_menus:
+            menu.entryconfigure("Export editable native workspace…", state=state)
 
     def _show_help(self) -> None:
         if self._on_help is not None:
@@ -270,6 +292,8 @@ class AssetViewerDialog(ttk.Frame):
         self.source = source.resolve()
         self.scan = loaded
         self.reader = reader
+        self.selected_entry = None
+        self._set_native_action(False)
         self._set_package_actions(True)
         self._populate_tree()
         self.status.set(
@@ -319,7 +343,13 @@ class AssetViewerDialog(ttk.Frame):
         selection = self.tree.selection()
         entry = self.entries.get(selection[0]) if selection else None
         if entry is None or self.reader is None:
+            self.selected_entry = None
+            self._set_native_action(False)
             return
+        self.selected_entry = entry
+        self._set_native_action(
+            Path(entry.path).suffix.casefold() in NATIVE_XML_IMPORT_SUFFIXES
+        )
         try:
             content = self.reader.read(
                 entry.path, limit=native_preview_limit(entry.path, entry.size),
@@ -404,6 +434,98 @@ class AssetViewerDialog(ttk.Frame):
         self.text_preview.insert("1.0", value or "(empty file)")
         self.text_preview.configure(state="disabled")
         self.text_preview.pack(fill="both", expand=True)
+
+    def _export_native_workspace(self) -> None:
+        entry = self.selected_entry
+        if entry is None or self.reader is None:
+            return
+        parent = filedialog.askdirectory(
+            parent=self, title="Select parent folder for editable native workspace",
+        )
+        if not parent:
+            return
+        destination = Path(parent) / f"{Path(entry.path).name}-workspace"
+        try:
+            content = self.reader.read(
+                entry.path, limit=native_preview_limit(entry.path, entry.size),
+            )
+            if content.truncated:
+                raise ValueError("Native asset exceeds the guarded editable-workspace limit")
+            workspace = NativeAssetInspector(
+                Path(__file__).resolve().parents[2]
+            ).export_workspace_bytes(
+                entry.path, content.data, destination, edition=self._native_edition(),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror(
+                "Native workspace export failed", str(exc), parent=self,
+            )
+            return
+        self.status.set(f"Exported editable native workspace: {workspace}")
+
+    def _build_native_workspace(self) -> None:
+        selected = filedialog.askdirectory(
+            parent=self, title="Select native editing workspace",
+        )
+        if not selected:
+            return
+        try:
+            manifest = json.loads(
+                (Path(selected) / "native-workspace.json").read_text(encoding="utf-8")
+            )
+            name = str(manifest["source"]["name"])
+        except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+            messagebox.showerror(
+                "Invalid native workspace", str(exc), parent=self,
+            )
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save rebuilt native asset", initialfile=name,
+            defaultextension=Path(name).suffix,
+            filetypes=((f"{Path(name).suffix.upper()} asset", f"*{Path(name).suffix}"),),
+        )
+        if not output:
+            return
+        try:
+            asset, report = NativeAssetInspector(
+                Path(__file__).resolve().parents[2]
+            ).build_workspace(selected, output)
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("Native workspace build failed", str(exc), parent=self)
+            return
+        self.status.set(f"Built and reparsed native asset: {asset} · {report.name}")
+
+    def _open_texture_workspace(self) -> None:
+        selected = filedialog.askdirectory(
+            parent=self, title="Select editable native YTD workspace",
+        )
+        if not selected:
+            return
+        try:
+            editor = TextureDictionaryEditorFrame(
+                self, selected, Path(__file__).resolve().parents[2],
+                on_close=self._close_texture_workspace,
+            )
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Could not open YTD workspace", str(exc), parent=self)
+            return
+        if self._texture_editor is not None:
+            self._texture_editor.destroy()
+        self.viewer_surface.pack_forget()
+        self._texture_editor = editor
+        editor.pack(fill="both", expand=True)
+
+    def _close_texture_workspace(self) -> None:
+        if self._texture_editor is not None:
+            self._texture_editor.destroy()
+            self._texture_editor = None
+        self.viewer_surface.pack(fill="both", expand=True)
+
+    def _native_edition(self) -> str:
+        return (
+            "Legacy" if self.scan and self.scan.edition_hints == ("legacy",)
+            else "Enhanced"
+        )
 
     def _open_location(self) -> None:
         if self.source is None:

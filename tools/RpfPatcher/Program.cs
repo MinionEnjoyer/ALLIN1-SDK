@@ -16,6 +16,7 @@
 //   RpfPatcher.exe extract-entries <gta_path> <rpf_path> <manifest_tsv> <output_root>
 //   RpfPatcher.exe extract-virtual-entries <gta_path> <rpf_path> <manifest_tsv> <output_root>
 //   RpfPatcher.exe apply-entry-changes <gta_path> <rpf_path> <manifest_tsv> <payload_root>
+//   RpfPatcher.exe asset-from-xml <input_xml> <output_asset> <asset_folder> [legacy|gen9] [source_asset]
 //   RpfPatcher.exe audit-seats  <gta_path> <output_json> [output_cs]
 //   RpfPatcher.exe install-euphoria <gta_path> <payload_folder> [--allow-enhanced]
 //   RpfPatcher.exe verify-euphoria  <gta_path> <payload_folder>
@@ -35,6 +36,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Xml;
 using System.Xml.Linq;
 using CodeWalker.Core.Utils;
 using CodeWalker.GameFiles;
@@ -74,6 +76,7 @@ namespace RpfPatcher
                     "  RpfPatcher.exe extract-virtual-entry <gta_path> <rpf_path> <archive_path> <entry_path> <output>\n" +
                     "  RpfPatcher.exe extract-virtual-entries <gta_path> <rpf_path> <manifest_tsv> <output_root>\n" +
                     "  RpfPatcher.exe asset-xml    <input_asset> <output_xml> <asset_folder> [legacy|gen9]\n" +
+                    "  RpfPatcher.exe asset-from-xml <input_xml> <output_asset> <asset_folder> [legacy|gen9] [source_asset]\n" +
                     "  RpfPatcher.exe audit-seats  <gta_path> <output_json> [output_cs]\n" +
                     "  RpfPatcher.exe build-ytd    <dds_folder> <output_ytd> [legacy|gen9]\n" +
                     "  RpfPatcher.exe unpack-ytd   <ytd_path> <output_folder> [legacy|gen9]\n" +
@@ -135,6 +138,8 @@ namespace RpfPatcher
                 return ExtractVirtualEntries(args);
             if (command == "asset-xml")
                 return ExportAssetXml(args);
+            if (command == "asset-from-xml")
+                return ImportAssetXml(args);
             if (command == "audit-seats")
                 return SeatCatalogAudit.Run(args);
             if (command == "build-ytd")
@@ -1728,6 +1733,157 @@ namespace RpfPatcher
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"ERROR: Native asset conversion failed: {ex.Message}");
+                return 99;
+            }
+            finally
+            {
+                RpfManager.IsGen9 = previous;
+            }
+        }
+
+        // Rebuild a native resource from the CodeWalker XML emitted by asset-xml.
+        // Ambiguous META/PSO/RBF containers use the original asset as a schema and
+        // container-type authority, preserving newer embedded META definitions.
+        static int ImportAssetXml(string[] args)
+        {
+            if (args.Length < 4)
+            {
+                Console.Error.WriteLine(
+                    "Usage: RpfPatcher.exe asset-from-xml <input_xml> <output_asset> <asset_folder> [legacy|gen9] [source_asset]");
+                return 1;
+            }
+            string input = Path.GetFullPath(args[1]);
+            string output = Path.GetFullPath(args[2]);
+            string assetFolder = Path.GetFullPath(args[3]);
+            bool gen9 = args.Length >= 5 && args[4].Equals(
+                "gen9", StringComparison.OrdinalIgnoreCase);
+            string sourceAsset = args.Length >= 6
+                ? Path.GetFullPath(args[5]) : null;
+            if (!File.Exists(input) || !Directory.Exists(assetFolder))
+            {
+                Console.Error.WriteLine("ERROR: XML input or asset folder not found.");
+                return 4;
+            }
+            if (sourceAsset != null && !File.Exists(sourceAsset))
+            {
+                Console.Error.WriteLine($"ERROR: Original source asset not found: {sourceAsset}");
+                return 4;
+            }
+
+            bool previous = RpfManager.IsGen9;
+            try
+            {
+                string suffix = Path.GetExtension(output).ToLowerInvariant();
+                MetaFormat format;
+                object schemaSource = null;
+                switch (suffix)
+                {
+                    case ".rel": format = MetaFormat.AudioRel; break;
+                    case ".ynd": format = MetaFormat.Ynd; break;
+                    case ".ynv": format = MetaFormat.Ynv; break;
+                    case ".ycd": format = MetaFormat.Ycd; break;
+                    case ".ybn": format = MetaFormat.Ybn; break;
+                    case ".ytd": format = MetaFormat.Ytd; break;
+                    case ".ydr": format = MetaFormat.Ydr; break;
+                    case ".ydd": format = MetaFormat.Ydd; break;
+                    case ".yft": format = MetaFormat.Yft; break;
+                    case ".ypt": format = MetaFormat.Ypt; break;
+                    case ".yed": format = MetaFormat.Yed; break;
+                    case ".ywr": format = MetaFormat.Ywr; break;
+                    case ".yvr": format = MetaFormat.Yvr; break;
+                    case ".awc": format = MetaFormat.Awc; break;
+                    case ".yfd": format = MetaFormat.Yfd; break;
+                    case ".ymap":
+                    case ".ytyp":
+                        format = MetaFormat.RSC;
+                        break;
+                    case ".ymt":
+                    case ".ymf":
+                        if (sourceAsset == null)
+                            throw new InvalidDataException(
+                                $"{suffix} XML import requires its original source asset to identify META, PSO, or RBF encoding.");
+                        format = MetaFormat.XML;
+                        break;
+                    default:
+                        Console.Error.WriteLine(
+                            $"ERROR: Native XML import is not available for {suffix}");
+                        return 6;
+                }
+
+                RpfManager.IsGen9 = gen9;
+                if (sourceAsset != null && (suffix == ".ymap" || suffix == ".ytyp"
+                    || suffix == ".ymt" || suffix == ".ymf"))
+                {
+                    byte[] sourceData = File.ReadAllBytes(sourceAsset);
+                    var sourceEntry = LooseBinaryEntry(sourceAsset);
+                    Meta meta = null;
+                    PsoFile pso = null;
+                    RbfFile rbf = null;
+                    if (suffix == ".ymap")
+                    {
+                        var parsed = RpfFile.GetFile<YmapFile>(sourceEntry, sourceData);
+                        meta = parsed?.Meta; pso = parsed?.Pso; rbf = parsed?.Rbf;
+                    }
+                    else if (suffix == ".ytyp")
+                    {
+                        var parsed = RpfFile.GetFile<YtypFile>(sourceEntry, sourceData);
+                        meta = parsed?.Meta; pso = parsed?.Pso; rbf = parsed?.Rbf;
+                    }
+                    else if (suffix == ".ymt")
+                    {
+                        var parsed = RpfFile.GetFile<YmtFile>(sourceEntry, sourceData);
+                        meta = parsed?.Meta; pso = parsed?.Pso; rbf = parsed?.Rbf;
+                    }
+                    else
+                    {
+                        var parsed = RpfFile.GetFile<YmfFile>(sourceEntry, sourceData);
+                        meta = parsed?.Meta; pso = parsed?.Pso; rbf = parsed?.Rbf;
+                    }
+                    if (meta != null)
+                    {
+                        format = MetaFormat.RSC;
+                        schemaSource = meta;
+                    }
+                    else if (pso != null)
+                    {
+                        format = MetaFormat.PSO;
+                        schemaSource = pso;
+                    }
+                    else if (rbf != null)
+                    {
+                        format = MetaFormat.RBF;
+                    }
+                    else
+                    {
+                        throw new InvalidDataException(
+                            "Original structured asset could not be classified as META, PSO, or RBF.");
+                    }
+                }
+
+                var settings = new XmlReaderSettings
+                {
+                    DtdProcessing = DtdProcessing.Prohibit,
+                    XmlResolver = null,
+                    MaxCharactersInDocument = 256L * 1024L * 1024L,
+                };
+                var document = new XmlDocument { XmlResolver = null };
+                using (var reader = XmlReader.Create(input, settings))
+                    document.Load(reader);
+                byte[] data = schemaSource == null
+                    ? XmlMeta.GetData(document, format, assetFolder)
+                    : XmlMeta.GetData(document, format, assetFolder, schemaSource);
+                if (data == null || data.Length == 0)
+                    throw new InvalidDataException("Native XML rebuild produced no data.");
+                string parent = Path.GetDirectoryName(output);
+                if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+                File.WriteAllBytes(output, data);
+                Console.WriteLine(
+                    $"Rebuilt {suffix} from CodeWalker XML ({data.Length:N0} bytes): {output}");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"ERROR: Native XML rebuild failed: {ex.Message}");
                 return 99;
             }
             finally

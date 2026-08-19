@@ -108,7 +108,9 @@ OIV preview keeps unsafe text, XPath, PSO, archive-creation, and unknown operati
         "Browse package files and preview supported native resources without executing code.",
         """Open a package folder or supported archive, search its inventory, and select an asset. Images and text preview directly. Supported Rockstar resources receive header analysis, structured CodeWalker XML, and texture contact sheets when possible.
 
-The viewer is read-only. Compiled DLL, ASI, and script payloads are never executed.""",
+For a supported native resource, Package actions > Export editable native workspace preserves an immutable source snapshot beside editable XML and dependencies. File > Build native workspace reconstructs the binary only after CodeWalker successfully parses the result again and writes a validation sidecar.
+
+File > Open YTD texture workspace switches this same window into a searchable texture editor. It previews DDS images, imports DDS or common raster formats, updates width/height/mip/format metadata, supports add/replace/remove, and retains local undo history. Build + validate YTD reparses the completed dictionary before it is accepted. Raster imports become uncompressed DDS; provide a prepared DDS when compression and mip control must be retained. Compiled DLL, ASI, and script payloads are never executed.""",
         ("ytd", "ydr", "yft", "texture", "model", "preview", "codewalker"),
     ),
     HelpTopic(
@@ -117,6 +119,8 @@ The viewer is read-only. Compiled DLL, ASI, and script payloads are never execut
         """Select the matching GTA V installation before opening an RPF so the correct encryption keys and resource decoder are used.
 
 Search and filter the archive tree, then use Entry actions to preview or extract the selected entry. A selected directory can be exported recursively, and File > Extract current archive tree exports the root of the outer archive. Each subtree export scans the outer RPF once, writes into a new staged folder, refuses output collisions, verifies that its source did not change, and records source and per-file SHA-256 values in .allin1-rpf-export.json. Nested RPF files remain files in their parent export; select that virtual archive explicitly to export its internal tree.
+
+Supported native files expose Entry > Export editable native workspace. After editing its XML or dependencies, Entry > Plan replacement from native workspace rebuilds the binary, reparses it through CodeWalker, keeps the payload and validation report beside the inert plan, and binds their hashes to the selected root or nested entry. The archive is still unchanged until the normal reviewed apply step.
 
 File > Compare with archive indexes both recursive trees. Metadata mode is fast and reports added, removed, modified, and unchanged archive/entry records. Exact-content mode batch-extracts each side into bounded temporary storage and compares SHA-256 values, detecting payload changes even when size and resource metadata are identical. JSON and Markdown reports are written together, and both source hashes are rechecked before the report is accepted.
 

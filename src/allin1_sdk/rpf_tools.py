@@ -14,6 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable
 
+from allin1_sdk.native_assets import (
+    MAX_NATIVE_PREVIEW_BYTES,
+    NATIVE_XML_IMPORT_SUFFIXES,
+    NativeAssetInspector,
+)
 from allin1_sdk.paths import user_data_root
 from allin1_sdk.processes import run_hidden
 
@@ -358,6 +363,73 @@ class RpfExplorerService:
             detail = (completed.stderr or completed.stdout or "unknown helper error").strip()
             raise ValueError(f"RPF extraction failed: {detail}")
         return target
+
+    def export_native_workspace(
+        self, index: RpfIndex, entry: RpfEntryRecord, destination: str | Path,
+    ) -> Path:
+        """Extract an exact RPF resource into a snapshot-backed XML workspace."""
+        suffix = Path(entry.name).suffix.casefold()
+        if suffix not in NATIVE_XML_IMPORT_SUFFIXES:
+            raise ValueError(f"Native XML round-trip is not supported for {entry.name}")
+        if entry.size <= 0 or entry.size > MAX_NATIVE_PREVIEW_BYTES:
+            raise ValueError("Selected RPF native asset is empty or exceeds the guarded limit")
+        with tempfile.TemporaryDirectory(prefix="allin1-rpf-native-export-") as temporary:
+            source = self.extract(index, entry, Path(temporary) / entry.name)
+            data = source.read_bytes()
+        return NativeAssetInspector(self.project_root).export_workspace_bytes(
+            entry.name, data, destination, edition=index.edition,
+        )
+
+    def plan_native_workspace_replacement(
+        self, index: RpfIndex, entry: RpfEntryRecord, workspace: str | Path,
+        plan_destination: str | Path,
+    ) -> tuple[Path, Path, Path]:
+        """Build, reparse, and bind a native workspace to a guarded RPF plan."""
+        if Path(entry.name).suffix.casefold() not in NATIVE_XML_IMPORT_SUFFIXES:
+            raise ValueError(f"Native XML round-trip is not supported for {entry.name}")
+        if index.entry(entry.id) != entry or entry.kind == "directory":
+            raise ValueError("Entry does not belong to this RPF index")
+        plan_path = Path(plan_destination).expanduser().resolve()
+        if plan_path.suffix.casefold() != ".json":
+            raise ValueError("Native RPF replacement plan must use a .json extension")
+        if plan_path.exists() or plan_path.is_symlink():
+            raise ValueError(f"Native RPF replacement plan already exists: {plan_path}")
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        payload_dir = plan_path.with_name(f"{plan_path.stem}.payload")
+        if payload_dir.exists() or payload_dir.is_symlink():
+            raise ValueError(f"Native RPF plan payload folder already exists: {payload_dir}")
+        stage_root = Path(tempfile.mkdtemp(
+            prefix=f".{plan_path.stem}.native-stage-", dir=plan_path.parent,
+        )).resolve()
+        published = False
+        try:
+            staged_asset, staged_report = NativeAssetInspector(
+                self.project_root
+            ).build_workspace(workspace, stage_root / entry.name)
+            stage_root.rename(payload_dir)
+            published = True
+            asset = payload_dir / staged_asset.name
+            report = payload_dir / staged_report.name
+            plan = self.replacement_plan(index, entry, asset)
+            workspace_manifest = Path(workspace).resolve() / "native-workspace.json"
+            plan["native_workspace"] = {
+                "path": str(Path(workspace).resolve()),
+                "manifest_sha256": _sha256_file(workspace_manifest),
+                "rebuilt_asset": str(asset),
+                "validation_report": str(report),
+                "validation_report_sha256": _sha256_file(report),
+            }
+            _write_json_atomic(plan_path, plan)
+            return plan_path, asset, report
+        except Exception:
+            cleanup = payload_dir if published else stage_root
+            if cleanup.is_dir() and cleanup.parent == plan_path.parent:
+                shutil.rmtree(cleanup)
+            try:
+                plan_path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
 
     def extract_subtree(
         self, index: RpfIndex, destination: str | Path, *,
