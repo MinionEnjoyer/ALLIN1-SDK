@@ -639,7 +639,7 @@ class AddonPackageInspector:
             "shvdn": "ScriptHookVDotNet",
             "scripthookv": "ScriptHookV",
             "openrpf": "OpenRPF",
-            "openiv": "OpenIV",
+            "openiv": "OIV package",
             "reshade": "ReShade",
         }
         for entry in entries:

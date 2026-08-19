@@ -55,7 +55,10 @@ _BINARY_HELP = {
     ".ycd": "Rockstar animation clip dictionary.",
     ".gfx": "Scaleform UI movie. Use a SWF/GFX-aware inspector before editing frames or labels.",
     ".gxt2": "Rockstar text-label table. Preserve hashes and merge against the current game build.",
-    ".awc": "Rockstar audio wave container.",
+    ".awc": (
+        "Rockstar audio wave container. Select the matching GTA installation to "
+        "decrypt its stream table and export editable WAV dependencies."
+    ),
     ".rel": "Rockstar audio relationship data.",
     ".dll": "Compiled .NET/native library. The viewer does not execute package code.",
     ".asi": "Compiled ScriptHook plug-in. The viewer does not execute package code.",
@@ -68,11 +71,15 @@ class AssetViewerDialog(ttk.Frame):
     def __init__(
         self, parent: tk.Misc, source: str | Path | None = None,
         scan: PackageScan | None = None,
-        *, embedded: bool = False, on_help=None, on_close=None,
+        *, installation_roots: tuple[Path, ...] = (), embedded: bool = False,
+        on_help=None, on_close=None,
     ) -> None:
         self._window: tk.Toplevel | None = None
         self._on_help = on_help
         self._on_close = on_close
+        self.installation_roots = tuple(
+            Path(root).expanduser().resolve() for root in installation_roots
+        )
         host = parent
         if not embedded:
             self._window = tk.Toplevel(parent)
@@ -378,7 +385,9 @@ class AssetViewerDialog(ttk.Frame):
                     "Legacy" if self.scan and self.scan.edition_hints == ("legacy",)
                     else "Enhanced"
                 )
-                report = NativeAssetInspector(project_root).inspect_bytes(
+                report = NativeAssetInspector(
+                    project_root, self._native_game_path(),
+                ).inspect_bytes(
                     entry.path, content.data, edition=edition,
                     truncated=content.truncated,
                 )
@@ -452,7 +461,7 @@ class AssetViewerDialog(ttk.Frame):
             if content.truncated:
                 raise ValueError("Native asset exceeds the guarded editable-workspace limit")
             workspace = NativeAssetInspector(
-                Path(__file__).resolve().parents[2]
+                Path(__file__).resolve().parents[2], self._native_game_path(),
             ).export_workspace_bytes(
                 entry.path, content.data, destination, edition=self._native_edition(),
             )
@@ -488,7 +497,7 @@ class AssetViewerDialog(ttk.Frame):
             return
         try:
             asset, report = NativeAssetInspector(
-                Path(__file__).resolve().parents[2]
+                Path(__file__).resolve().parents[2], self._native_game_path(),
             ).build_workspace(selected, output)
         except (OSError, RuntimeError, ValueError) as exc:
             messagebox.showerror("Native workspace build failed", str(exc), parent=self)
@@ -526,6 +535,19 @@ class AssetViewerDialog(ttk.Frame):
             "Legacy" if self.scan and self.scan.edition_hints == ("legacy",)
             else "Enhanced"
         )
+
+    def _native_game_path(self) -> Path | None:
+        edition = self._native_edition()
+        executable = "GTA5.exe" if edition == "Legacy" else "GTA5_Enhanced.exe"
+        matching = tuple(
+            root for root in self.installation_roots
+            if (root / executable).is_file()
+        )
+        if len(matching) == 1:
+            return matching[0]
+        if len(self.installation_roots) == 1:
+            return self.installation_roots[0]
+        return None
 
     def _open_location(self) -> None:
         if self.source is None:

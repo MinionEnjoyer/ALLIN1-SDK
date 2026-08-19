@@ -452,7 +452,9 @@ class RpfExplorerService:
         with tempfile.TemporaryDirectory(prefix="allin1-rpf-native-export-") as temporary:
             source = self.extract(index, entry, Path(temporary) / entry.name)
             data = source.read_bytes()
-        return NativeAssetInspector(self.project_root).export_workspace_bytes(
+        return NativeAssetInspector(
+            self.project_root, self.gta_path,
+        ).export_workspace_bytes(
             entry.name, data, destination, edition=index.edition,
         )
 
@@ -472,7 +474,9 @@ class RpfExplorerService:
             raise RuntimeError("Extracted RPF asset is empty or exceeds the guarded limit")
         if _sha256_file(index.source) != archive_hash:
             raise RuntimeError("RPF changed during native asset inspection")
-        report = NativeAssetInspector(self.project_root).inspect_bytes(
+        report = NativeAssetInspector(
+            self.project_root, self.gta_path,
+        ).inspect_bytes(
             entry.name, data, edition=index.edition,
         )
         return report, {
@@ -685,7 +689,7 @@ class RpfExplorerService:
         published = False
         try:
             staged_asset, staged_report = NativeAssetInspector(
-                self.project_root
+                self.project_root, self.gta_path,
             ).build_workspace(workspace, stage_root / entry.name)
             stage_root.rename(payload_dir)
             published = True

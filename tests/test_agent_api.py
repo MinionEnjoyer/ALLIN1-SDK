@@ -45,7 +45,7 @@ def test_catalog_is_structured_and_classifies_risk():
         "position-rpf-graph-node", "remove-rpf-graph-node",
         "layout-rpf-graph",
         "refresh-rpf-graph-sources", "materialize-rpf-graph", "build-rpf-graph",
-        "plan-rpf-graph-origin",
+        "plan-rpf-graph-origin", "render-rpf-graph-previews",
     ):
         assert catalog[command]["risk"] == "authoring_write"
     assert catalog["inspect-rpf-graph"]["risk"] == "read_only"
@@ -62,6 +62,11 @@ def test_catalog_is_structured_and_classifies_risk():
     assert catalog["list-installed-packages"]["risk"] == "read_only"
     assert catalog["uninstall-package"]["risk"] == "game_write"
     assert catalog["validate"]["parameters"][0]["kind"] == "argument"
+    native_parameters = {
+        item["name"]: item for item in catalog["inspect-native-asset"]["parameters"]
+    }
+    assert native_parameters["gta_path"]["kind"] == "option"
+    assert "audio" in native_parameters["gta_path"]["help"].casefold()
     assert command_risk("unknown-future-command") == "read_only"
 
 

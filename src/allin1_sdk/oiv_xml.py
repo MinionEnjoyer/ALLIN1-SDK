@@ -1,4 +1,4 @@
-"""Bounded, side-effect-free compiler for OpenIV 2.2 XML commands."""
+"""Bounded, side-effect-free compiler for OIV 2.2 XML commands."""
 
 from __future__ import annotations
 

@@ -1,21 +1,32 @@
-"""UE-style visual node editor for RPF package graphs."""
+"""Visual node editor for RPF package graphs."""
 
 from __future__ import annotations
 
 import queue
+import hashlib
+import io
 import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from PIL import Image, ImageTk, UnidentifiedImageError
+
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_graph import RpfPackageGraph
+from allin1_sdk.rpf_graph_previews import (
+    ASSET_PREVIEW_HEIGHT,
+    ASSET_PREVIEW_WIDTH,
+    AssetPreviewRequest,
+    render_asset_preview,
+)
 from allin1_sdk.rpf_program_ui import RpfProgramFrame
 
 
-NODE_WIDTH = 230
+NODE_WIDTH = 270
 NODE_HEIGHT = 82
 CANVAS_LIMIT = 2500
+MAX_QUEUED_ASSET_PREVIEWS = 96
 
 
 class _GraphWorkDialog(tk.Toplevel):
@@ -85,7 +96,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
         self.geometry("1460x900")
         self.minsize(1050, 680)
         self.transient(parent.winfo_toplevel())
-        self.state: dict = {}
+        self.graph_state: dict = {}
         self.visible: set[str] = set()
         self.edge_items: dict[tuple[str, str], int] = {}
         self.selected: str | None = None
@@ -100,8 +111,32 @@ class RpfPackageGraphDialog(tk.Toplevel):
         self.detail_id = tk.StringVar(value="")
         self.detail_parent = tk.StringVar(value="")
         self.detail_source = tk.StringVar(value="")
+        self._preview_requests: queue.Queue[AssetPreviewRequest | None] = queue.Queue()
+        self._preview_results: queue.Queue[
+            tuple[str, str, bytes | None, str | None]
+        ] = queue.Queue()
+        self._preview_pending: set[str] = set()
+        self._preview_keys: dict[str, str] = {}
+        self._preview_photos: dict[str, ImageTk.PhotoImage] = {}
+        self._preview_messages: dict[str, str] = {}
+        self._preview_worker_thread = threading.Thread(
+            target=self._asset_preview_worker, daemon=True,
+            name="allin1-rpf-asset-previews",
+        )
+        self._preview_worker_thread.start()
         self._build_ui()
         self._reload()
+        # Tk can preserve the canvas' far-edge view while a toplevel is first
+        # mapped. Always present the package root on initial open.
+        self.after_idle(self._focus_initial_view)
+        self.after(150, self._focus_initial_view)
+        self.after(90, self._poll_asset_previews)
+
+    def _focus_initial_view(self) -> None:
+        if not self.winfo_exists():
+            return
+        self.canvas.xview_moveto(0.0)
+        self.canvas.yview_moveto(0.0)
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=12)
@@ -221,26 +256,34 @@ class RpfPackageGraphDialog(tk.Toplevel):
 
     def _reload(self, select: str | None = None) -> None:
         try:
-            self.state = RpfPackageGraph.validate(self.graph, verify_sources=False)
+            self.graph_state = RpfPackageGraph.validate(self.graph, verify_sources=False)
         except (OSError, ValueError) as exc:
             messagebox.showerror("RPF graph validation failed", str(exc), parent=self)
             self.status.set("Graph validation failed; the document was not changed.")
             return
-        self.selected = select if select in self.state["nodes"] else self.selected
-        if self.selected not in self.state["nodes"]:
-            self.selected = self.state["root_id"]
+        valid_nodes = set(self.graph_state["nodes"])
+        self._preview_pending.intersection_update(valid_nodes)
+        for cache in (
+            self._preview_keys, self._preview_photos, self._preview_messages,
+        ):
+            for node_id in tuple(cache):
+                if node_id not in valid_nodes:
+                    cache.pop(node_id, None)
+        self.selected = select if select in self.graph_state["nodes"] else self.selected
+        if self.selected not in self.graph_state["nodes"]:
+            self.selected = self.graph_state["root_id"]
         self._render()
         self._show_selected()
 
     def _render(self) -> None:
         self.canvas.delete("all")
-        nodes = list(self.state["nodes"])
-        ordered = [self.state["root_id"], *(
-            node for node in nodes if node != self.state["root_id"]
+        nodes = list(self.graph_state["nodes"])
+        ordered = [self.graph_state["root_id"], *(
+            node for node in nodes if node != self.graph_state["root_id"]
         )]
         self.visible = set(ordered[:CANVAS_LIMIT])
-        max_x = max((self.state["nodes"][node]["x"] for node in self.visible), default=0)
-        max_y = max((self.state["nodes"][node]["y"] for node in self.visible), default=0)
+        max_x = max((self.graph_state["nodes"][node]["x"] for node in self.visible), default=0)
+        max_y = max((self.graph_state["nodes"][node]["y"] for node in self.visible), default=0)
         width, height = max(2600, int(max_x + 500)), max(1800, int(max_y + 300))
         for x in range(0, width + 1, 100):
             self.canvas.create_line(x, 0, x, height, fill="#18211D", tags=("grid",))
@@ -248,7 +291,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
             self.canvas.create_line(0, y, width, y, fill="#18211D", tags=("grid",))
         self.canvas.configure(scrollregion=(0, 0, width, height))
         self.edge_items.clear()
-        for child, parent in self.state["parents"].items():
+        for child, parent in self.graph_state["parents"].items():
             if child not in self.visible or parent not in self.visible:
                 continue
             item = self.canvas.create_line(
@@ -256,18 +299,20 @@ class RpfPackageGraphDialog(tk.Toplevel):
                 width=3, fill="#50655C", tags=("edge",),
             )
             self.edge_items[(parent, child)] = item
-        for node_id in self.visible:
+        for node_id in ordered:
+            if node_id not in self.visible:
+                continue
             self._draw_node(node_id)
         self._update_edges()
         hidden = len(nodes) - len(self.visible)
         note = f" · {hidden:,} nodes hidden by canvas limit" if hidden else ""
         self.status.set(
-            f"{len(nodes):,} nodes · {len(self.state['parents']):,} links · "
-            f"{self.state['file_count']:,} files · {self.state['byte_count']:,} bytes{note}"
+            f"{len(nodes):,} nodes · {len(self.graph_state['parents']):,} links · "
+            f"{self.graph_state['file_count']:,} files · {self.graph_state['byte_count']:,} bytes{note}"
         )
 
     def _draw_node(self, node_id: str) -> None:
-        node = self.state["nodes"][node_id]
+        node = self.graph_state["nodes"][node_id]
         x, y = node["x"], node["y"]
         header, body = self.COLORS[node["type"]]
         tags = ("node", f"node:{node_id}")
@@ -287,16 +332,20 @@ class RpfPackageGraphDialog(tk.Toplevel):
             x + 10, y + 13, text=node["type"].upper(), anchor="w",
             fill="#FFFFFF", font=("Segoe UI Semibold", 9), tags=tags,
         )
+        is_file = node["type"] == "file"
+        text_width = NODE_WIDTH - 116 if is_file else NODE_WIDTH - 20
         self.canvas.create_text(
-            x + 10, y + 49, text=node["name"], anchor="w", width=NODE_WIDTH - 20,
+            x + 10, y + 49, text=node["name"], anchor="w", width=text_width,
             fill="#F0F5F2", font=("Segoe UI Semibold", 10), tags=tags,
         )
-        subtitle = node_id if node["type"] != "file" else f"{node['size']:,} bytes"
+        subtitle = node_id if not is_file else f"{node['size']:,} bytes"
         self.canvas.create_text(
-            x + 10, y + 68, text=subtitle, anchor="w", width=NODE_WIDTH - 20,
+            x + 10, y + 68, text=subtitle, anchor="w", width=text_width,
             fill="#9FB0A8", font=("Consolas", 8), tags=tags,
         )
-        if node_id != self.state["root_id"]:
+        if is_file:
+            self._draw_asset_preview(node_id, node, x, y, tags)
+        if node_id != self.graph_state["root_id"]:
             self.canvas.create_oval(
                 x - 7, y + 34, x + 7, y + 48, fill="#D9E4DF", outline="#111714",
                 width=2, tags=(*tags, f"in:{node_id}"),
@@ -308,9 +357,127 @@ class RpfPackageGraphDialog(tk.Toplevel):
                 tags=(*tags, f"out:{node_id}"),
             )
 
+    def _draw_asset_preview(
+        self, node_id: str, node: dict, x: float, y: float,
+        tags: tuple[str, ...],
+    ) -> None:
+        left = x + NODE_WIDTH - ASSET_PREVIEW_WIDTH - 8
+        top = y + 31
+        self.canvas.create_rectangle(
+            left - 2, top - 2,
+            left + ASSET_PREVIEW_WIDTH + 2, top + ASSET_PREVIEW_HEIGHT + 2,
+            fill="#09100D", outline="#466258", width=1, tags=tags,
+        )
+        self._queue_asset_preview(node_id, node)
+        photo = self._preview_photos.get(node_id)
+        if photo is not None:
+            self.canvas.create_image(
+                left, top, image=photo, anchor="nw", tags=tags,
+            )
+        else:
+            suffix = Path(str(node.get("name", ""))).suffix.upper().lstrip(".")
+            label = "…" if node_id in self._preview_pending else (suffix or "FILE")
+            self.canvas.create_text(
+                left + ASSET_PREVIEW_WIDTH / 2,
+                top + ASSET_PREVIEW_HEIGHT / 2,
+                text=label[:9], fill="#B8CDC2",
+                font=("Segoe UI Semibold", 8), tags=tags,
+            )
+
+    def _graph_edition(self) -> str:
+        origin = self.graph_state.get("payload", {}).get("origin", {})
+        authored = origin.get("edition") if isinstance(origin, dict) else None
+        if isinstance(authored, str) and authored.casefold() in {"legacy", "enhanced"}:
+            return authored.title()
+        if self.game_path is not None and (self.game_path / "GTA5.exe").is_file():
+            return "Legacy"
+        return "Enhanced"
+
+    def _queue_asset_preview(self, node_id: str, node: dict) -> None:
+        source_value = node.get("source")
+        expected_hash = str(node.get("sha256", "")).casefold()
+        expected_size = node.get("size")
+        if (
+            not isinstance(source_value, str) or not source_value
+            or not isinstance(expected_size, int) or isinstance(expected_size, bool)
+            or len(expected_hash) != 64
+        ):
+            self._preview_messages[node_id] = "No hash-bound source preview is available"
+            return
+        edition = self._graph_edition()
+        source = Path(source_value).expanduser()
+        key = hashlib.sha256(
+            f"{source}|{expected_size}|{expected_hash}|{edition}".encode("utf-8")
+        ).hexdigest()
+        if self._preview_keys.get(node_id) == key and (
+            node_id in self._preview_photos or node_id in self._preview_messages
+        ):
+            return
+        if node_id in self._preview_pending and self._preview_keys.get(node_id) == key:
+            return
+        if len(self._preview_pending) >= MAX_QUEUED_ASSET_PREVIEWS:
+            self._preview_messages[node_id] = "Preview queue limit reached"
+            return
+        self._preview_keys[node_id] = key
+        self._preview_photos.pop(node_id, None)
+        self._preview_messages.pop(node_id, None)
+        self._preview_pending.add(node_id)
+        self._preview_requests.put(AssetPreviewRequest(
+            node_id, source, expected_size, expected_hash, edition, key,
+        ))
+
+    def _asset_preview_worker(self) -> None:
+        while True:
+            request = self._preview_requests.get()
+            if request is None:
+                return
+            try:
+                preview = render_asset_preview(
+                    request, self.project_root, self.game_path,
+                )
+                self._preview_results.put(
+                    (request.node_id, request.cache_key, preview, None)
+                )
+            except (
+                OSError, RuntimeError, ValueError, UnidentifiedImageError,
+                Image.DecompressionBombError,
+            ) as exc:
+                self._preview_results.put(
+                    (request.node_id, request.cache_key, None, str(exc))
+                )
+
+    def _poll_asset_previews(self) -> None:
+        changed = False
+        while True:
+            try:
+                node_id, key, preview, error = self._preview_results.get_nowait()
+            except queue.Empty:
+                break
+            if self._preview_keys.get(node_id) != key:
+                continue
+            self._preview_pending.discard(node_id)
+            if preview is None:
+                self._preview_messages[node_id] = error or "Preview unavailable"
+                changed = True
+                continue
+            try:
+                with Image.open(io.BytesIO(preview)) as image:
+                    rendered = image.convert("RGB").copy()
+                self._preview_photos[node_id] = ImageTk.PhotoImage(rendered, master=self)
+                self._preview_messages.pop(node_id, None)
+                changed = True
+            except (
+                OSError, UnidentifiedImageError, Image.DecompressionBombError,
+            ) as exc:
+                self._preview_messages[node_id] = str(exc)
+        if changed and self.winfo_exists():
+            self._render()
+        if self.winfo_exists():
+            self.after(90, self._poll_asset_previews)
+
     def _update_edges(self) -> None:
         for (parent, child), item in self.edge_items.items():
-            source, target = self.state["nodes"][parent], self.state["nodes"][child]
+            source, target = self.graph_state["nodes"][parent], self.graph_state["nodes"][child]
             x1, y1 = source["x"] + NODE_WIDTH, source["y"] + 41
             x2, y2 = target["x"], target["y"] + 41
             curve = max(60, abs(x2 - x1) * 0.45)
@@ -343,7 +510,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         if output:
             self.connecting_parent = output
-            source = self.state["nodes"][output]
+            source = self.graph_state["nodes"][output]
             x1, y1 = source["x"] + NODE_WIDTH, source["y"] + 41
             self.connection_line = self.canvas.create_line(
                 x1, y1, x, y, fill="#E7B94B", width=3, dash=(7, 4),
@@ -356,7 +523,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
     def _motion(self, event: tk.Event) -> None:
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         if self.connecting_parent and self.connection_line:
-            source = self.state["nodes"][self.connecting_parent]
+            source = self.graph_state["nodes"][self.connecting_parent]
             self.canvas.coords(
                 self.connection_line, source["x"] + NODE_WIDTH, source["y"] + 41, x, y,
             )
@@ -364,7 +531,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
         if not self.dragging:
             return
         dx, dy = x - self.drag_last[0], y - self.drag_last[1]
-        node = self.state["nodes"][self.dragging]
+        node = self.graph_state["nodes"][self.dragging]
         node["x"], node["y"] = node["x"] + dx, node["y"] + dy
         self.canvas.move(f"node:{self.dragging}", dx, dy)
         self.drag_last = (x, y)
@@ -387,7 +554,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
             return
         if self.dragging:
             node_id = self.dragging
-            node = self.state["nodes"][node_id]
+            node = self.graph_state["nodes"][node_id]
             self.dragging = None
             try:
                 RpfPackageGraph.set_position(self.graph, node_id, node["x"], node["y"])
@@ -407,7 +574,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
         self._show_selected()
 
     def _show_selected(self) -> None:
-        node = self.state.get("nodes", {}).get(self.selected)
+        node = self.graph_state.get("nodes", {}).get(self.selected)
         if node is None:
             self.detail_name.set("Nothing selected")
             for variable in (
@@ -418,7 +585,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
         self.detail_name.set(node["name"])
         self.detail_type.set(f"Type: {node['type']}")
         self.detail_id.set(f"ID: {node['id']}")
-        parent = self.state["parents"].get(node["id"])
+        parent = self.graph_state["parents"].get(node["id"])
         self.detail_parent.set(f"Parent: {parent or '(package root)'}")
         self.detail_source.set(
             f"Source: {node.get('source', '(generated container)')}"
@@ -429,7 +596,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
         if not wanted:
             return
         found = next((
-            node_id for node_id, node in self.state["nodes"].items()
+            node_id for node_id, node in self.graph_state["nodes"].items()
             if wanted in node_id.casefold() or wanted in node["name"].casefold()
             or wanted in str(node.get("source", "")).casefold()
         ), None)
@@ -440,22 +607,22 @@ class RpfPackageGraphDialog(tk.Toplevel):
             self.status.set("The matching node is beyond the canvas display limit.")
             return
         self._select(found)
-        node = self.state["nodes"][found]
+        node = self.graph_state["nodes"][found]
         region = self.canvas.cget("scrollregion").split()
         width, height = max(1.0, float(region[2])), max(1.0, float(region[3]))
         self.canvas.xview_moveto(max(0, (node["x"] - 100) / width))
         self.canvas.yview_moveto(max(0, (node["y"] - 100) / height))
 
     def _container_parent(self) -> str:
-        selected = self.selected or self.state["root_id"]
-        if self.state["nodes"][selected]["type"] == "file":
-            return self.state["parents"][selected]
+        selected = self.selected or self.graph_state["root_id"]
+        if self.graph_state["nodes"][selected]["type"] == "file":
+            return self.graph_state["parents"][selected]
         return selected
 
     def _new_position(self, parent: str) -> tuple[float, float]:
-        node = self.state["nodes"][parent]
+        node = self.graph_state["nodes"][parent]
         return node["x"] + 300, node["y"] + 112 * (
-            len(self.state["children"][parent]) + 1
+            len(self.graph_state["children"][parent]) + 1
         )
 
     def _add_directory(self) -> None:
@@ -516,7 +683,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
     def _rename(self) -> None:
         if not self.selected:
             return
-        node = self.state["nodes"][self.selected]
+        node = self.graph_state["nodes"][self.selected]
         name = simpledialog.askstring(
             "Rename graph node", "Authored name:", initialvalue=node["name"], parent=self,
         )
@@ -530,7 +697,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
         self._reload(self.selected)
 
     def _remove(self) -> None:
-        if not self.selected or self.selected == self.state["root_id"]:
+        if not self.selected or self.selected == self.graph_state["root_id"]:
             messagebox.showinfo("Root retained", "The package root cannot be removed.", parent=self)
             return
         if not messagebox.askyesno(
@@ -539,7 +706,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
             "files will not be deleted.", parent=self,
         ):
             return
-        parent = self.state["parents"].get(self.selected)
+        parent = self.graph_state["parents"].get(self.selected)
         try:
             removed = RpfPackageGraph.remove_node(self.graph, self.selected)
         except (OSError, ValueError) as exc:
@@ -623,7 +790,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
             self.game_path = Path(selected).resolve()
         output = filedialog.asksaveasfilename(
             parent=self, title="Build graph-authored RPF",
-            initialfile=self.state["nodes"][self.state["root_id"]]["name"],
+            initialfile=self.graph_state["nodes"][self.graph_state["root_id"]]["name"],
             defaultextension=".rpf", filetypes=(("Rockstar RPF", "*.rpf"),),
         )
         if not output:
@@ -646,7 +813,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
         )
 
     def _plan_origin_changes(self) -> None:
-        if not self.state.get("payload", {}).get("origin"):
+        if not self.graph_state.get("payload", {}).get("origin"):
             messagebox.showinfo(
                 "No imported origin",
                 "This graph was not imported from an existing RPF. Build a new archive "

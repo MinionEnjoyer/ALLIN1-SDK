@@ -53,6 +53,7 @@ MAP_PREVIEW_SUFFIXES = frozenset({".ymap"})
 NAVMESH_PREVIEW_SUFFIXES = frozenset({".ynv"})
 PATH_PREVIEW_SUFFIXES = frozenset({".ynd"})
 ARCHETYPE_PREVIEW_SUFFIXES = frozenset({".ytyp"})
+AUDIO_PREVIEW_SUFFIXES = frozenset({".awc"})
 MAX_MODEL_XML_BYTES = 192 * 1024 * 1024
 MAX_MODEL_VERTICES = 1_000_000
 MAX_MODEL_TRIANGLES = 1_000_000
@@ -607,6 +608,116 @@ def _safe_codewalker_xml(xml: Path) -> etree._ElementTree:
     if tree.docinfo.doctype:
         raise ValueError("CodeWalker XML contains a prohibited document type")
     return tree
+
+
+def _semantic_xml_sha256(xml: Path) -> str:
+    """Hash parsed XML while ignoring serialization-only indentation."""
+    tree = _safe_codewalker_xml(xml)
+    for node in tree.iter():
+        if node.text is not None and not node.text.strip():
+            node.text = None
+        if node.tail is not None and not node.tail.strip():
+            node.tail = None
+    canonical = etree.tostring(
+        tree, method="c14n", exclusive=False, with_comments=False,
+    )
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _awc_preview_from_xml(
+    xml: Path, assets: Path,
+) -> tuple[dict[str, Any], str | None]:
+    """Summarize streams and exported wave payloads in a bounded AWC XML export."""
+    try:
+        root = _safe_codewalker_xml(xml).getroot()
+        streams = root.xpath(
+            "./*[local-name()='Streams']/*[local-name()='Item']"
+        )
+        if len(streams) > MAX_NATIVE_WORKSPACE_FILES:
+            raise ValueError("AWC preview exceeds the guarded stream limit")
+        codecs: dict[str, int] = {}
+        sample_rates: set[int] = set()
+        total_samples = 0
+        total_seconds = 0.0
+        looped = 0
+        peak_streams = 0
+        file_names: list[str] = []
+        for stream in streams:
+            filename = _child_text(stream, "FileName")
+            if filename:
+                safe_name = Path(filename).name
+                if safe_name != filename or safe_name in {".", ".."}:
+                    raise ValueError("AWC XML contains an unsafe stream filename")
+                file_names.append(safe_name)
+            format_chunks = stream.xpath(
+                "./*[local-name()='Chunks']/*[local-name()='Item']"
+                "[*[local-name()='Type' and normalize-space(text())='format']]"
+            )
+            stream_samples = 0
+            stream_rate = 0
+            for chunk in format_chunks:
+                codec = _child_text(chunk, "Codec") or "Unknown"
+                codecs[codec] = codecs.get(codec, 0) + 1
+                samples = int(_numeric_child(
+                    chunk, "Samples", context="AWC stream", default=0,
+                ))
+                rate = int(_numeric_child(
+                    chunk, "SampleRate", context="AWC stream", default=0,
+                ))
+                stream_samples = max(stream_samples, samples)
+                stream_rate = max(stream_rate, rate)
+                loop_begin = int(_numeric_child(
+                    chunk, "LoopBegin", context="AWC stream", default=0,
+                ))
+                loop_end = int(_numeric_child(
+                    chunk, "LoopEnd", context="AWC stream", default=0,
+                ))
+                if loop_end > loop_begin:
+                    looped += 1
+            if stream_rate > 0:
+                sample_rates.add(stream_rate)
+                total_seconds += stream_samples / stream_rate
+            total_samples += stream_samples
+            if stream.xpath(
+                "./*[local-name()='Chunks']/*[local-name()='Item']"
+                "[*[local-name()='Type' and normalize-space(text())='peak']]"
+            ):
+                peak_streams += 1
+        asset_files = {
+            item.name: item for item in assets.iterdir()
+            if item.is_file() and not item.is_symlink()
+        } if assets.is_dir() and not assets.is_symlink() else {}
+        missing = sorted(set(file_names) - set(asset_files))
+        metadata: dict[str, Any] = {
+            "audio_stream_count": len(streams),
+            "audio_codec_counts": ", ".join(
+                f"{name}: {count}" for name, count in sorted(codecs.items())
+            ) or "None",
+            "audio_sample_rates_hz": ", ".join(
+                str(value) for value in sorted(sample_rates)
+            ) or "None",
+            "audio_total_samples": total_samples,
+            "audio_total_duration_seconds": round(total_seconds, 3),
+            "audio_looped_streams": looped,
+            "audio_peak_streams": peak_streams,
+            "audio_wave_files": len(asset_files),
+            "audio_wave_bytes": sum(item.stat().st_size for item in asset_files.values()),
+            "audio_single_channel_encrypted": _child_value_text(
+                root, "SingleChannelEncrypt"
+            ).casefold() == "true",
+            "audio_multi_channel_encrypted": _child_value_text(
+                root, "MultiChannelEncrypt"
+            ).casefold() == "true",
+        }
+        warning = (
+            "AWC export did not produce wave payloads for: " + ", ".join(missing)
+            if missing else None
+        )
+        return metadata, warning
+    except (
+        OSError, ValueError, etree.XMLSyntaxError, OverflowError,
+    ) as exc:
+        return {}, f"AWC stream preview unavailable: {exc}"
 
 
 def _model_preview_from_xml(
@@ -1500,6 +1611,13 @@ def _child_text(parent: etree._Element, name: str) -> str:
     return ((child.text or "").strip() if child is not None else "")
 
 
+def _child_value_text(parent: etree._Element, name: str) -> str:
+    child = _direct_child(parent, name)
+    if child is None:
+        return ""
+    return (child.get("value") or child.text or "").strip()
+
+
 def _archetype_records(root: etree._Element) -> list[_ArchetypeRecord]:
     records: list[_ArchetypeRecord] = []
     for item in _item_children(root, "archetypes"):
@@ -1697,9 +1815,37 @@ def _archetype_preview_from_xml(
 class NativeAssetInspector:
     """Describe native files and optionally invoke CodeWalker XML conversion."""
 
-    def __init__(self, project_root: str | Path) -> None:
+    def __init__(
+        self, project_root: str | Path, gta_path: str | Path | None = None,
+    ) -> None:
         self.project_root = Path(project_root).resolve()
+        self.gta_path = (
+            Path(gta_path).expanduser().resolve() if gta_path is not None else None
+        )
         self.patcher = self.project_root / "tools" / "RpfPatcher" / "RpfPatcher.exe"
+
+    def _asset_xml_args(
+        self, source: Path, xml: Path, assets: Path, edition: str,
+    ) -> list[str | Path]:
+        args: list[str | Path] = [
+            self.patcher, "asset-xml", source, xml, assets,
+            "gen9" if edition.casefold() == "enhanced" else "legacy",
+        ]
+        if self.gta_path is not None:
+            args.append(self.gta_path)
+        return args
+
+    def _asset_from_xml_args(
+        self, xml: Path, output: Path, assets: Path, edition: str,
+        source: Path,
+    ) -> list[str | Path]:
+        args: list[str | Path] = [
+            self.patcher, "asset-from-xml", xml, output, assets,
+            "gen9" if edition.casefold() == "enhanced" else "legacy", source,
+        ]
+        if self.gta_path is not None:
+            args.append(self.gta_path)
+        return args
 
     def inspect_bytes(
         self, name: str, data: bytes, *, edition: str = "Enhanced",
@@ -1719,7 +1865,10 @@ class NativeAssetInspector:
         if (not truncated and suffix in NATIVE_XML_SUFFIXES
                 and self.patcher.is_file()):
             converted = self._convert(name, data, edition)
-            if converted is not None and converted.conversion_error:
+            if (
+                converted is not None and converted.conversion_error
+                and suffix not in AUDIO_PREVIEW_SUFFIXES
+            ):
                 alternate = "Legacy" if edition.casefold() == "enhanced" else "Enhanced"
                 retried = self._convert(name, data, alternate)
                 if retried is not None and not retried.conversion_error:
@@ -1758,10 +1907,7 @@ class NativeAssetInspector:
             assets = root / "assets"
             source.write_bytes(data)
             completed = run_hidden(
-                [
-                    self.patcher, "asset-xml", source, xml, assets,
-                    "gen9" if edition.casefold() == "enhanced" else "legacy",
-                ],
+                self._asset_xml_args(source, xml, assets, edition),
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             if completed.returncode or not xml.is_file():
@@ -1810,6 +1956,10 @@ class NativeAssetInspector:
                 )
                 if preview_warning:
                     preview_metadata["archetype_preview"] = preview_warning
+            elif suffix in AUDIO_PREVIEW_SUFFIXES:
+                preview_metadata, preview_warning = _awc_preview_from_xml(xml, assets)
+                if preview_warning:
+                    preview_metadata["audio_preview_warning"] = preview_warning
             with xml.open("r", encoding="utf-8", errors="replace") as stream:
                 text = stream.read(2_000_000)
             if xml_size > 2_000_000:
@@ -1869,10 +2019,7 @@ class NativeAssetInspector:
             source_snapshot.write_bytes(data)
             xml = edit_dir / f"{safe_name}.xml"
             completed = run_hidden(
-                [
-                    self.patcher, "asset-xml", source_snapshot, xml, assets,
-                    "gen9" if normalized_edition == "Enhanced" else "legacy",
-                ],
+                self._asset_xml_args(source_snapshot, xml, assets, normalized_edition),
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             if completed.returncode or not xml.is_file():
@@ -1901,6 +2048,8 @@ class NativeAssetInspector:
                     "source_snapshot_immutable": True,
                     "game_write_performed": False,
                     "rebuilt_asset_requires_parse_validation": True,
+                    "gta_installation_keys_required": suffix == ".awc",
+                    "gta_installation_path_stored": False,
                 },
             }
             _write_json_atomic(staging / "native-workspace.json", manifest)
@@ -1994,10 +2143,9 @@ class NativeAssetInspector:
             stage_root = Path(temporary)
             staged = stage_root / destination.name
             completed = run_hidden(
-                [
-                    self.patcher, "asset-from-xml", xml, staged, assets,
-                    "gen9" if edition == "Enhanced" else "legacy", source_snapshot,
-                ],
+                self._asset_from_xml_args(
+                    xml, staged, assets, edition, source_snapshot,
+                ),
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             if completed.returncode or not staged.is_file():
@@ -2010,11 +2158,9 @@ class NativeAssetInspector:
             validation_xml = stage_root / f"{destination.name}.validated.xml"
             validation_assets = stage_root / "validated-assets"
             validation = run_hidden(
-                [
-                    self.patcher, "asset-xml", staged, validation_xml,
-                    validation_assets,
-                    "gen9" if edition == "Enhanced" else "legacy",
-                ],
+                self._asset_xml_args(
+                    staged, validation_xml, validation_assets, edition,
+                ),
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             if validation.returncode or not validation_xml.is_file():
@@ -2022,6 +2168,13 @@ class NativeAssetInspector:
                     validation.stderr or validation.stdout or "parse validation failed"
                 ).strip()
                 raise RuntimeError(f"Rebuilt native asset failed validation: {detail}")
+            edited_semantic_hash = _semantic_xml_sha256(xml)
+            validation_semantic_hash = _semantic_xml_sha256(validation_xml)
+            semantic_match = edited_semantic_hash == validation_semantic_hash
+            if expected_suffix == ".awc" and not semantic_match:
+                raise RuntimeError(
+                    "Rebuilt AWC reparsed but its structured stream definition changed"
+                )
             result = {
                 "schema_version": 1,
                 "operation": "native_asset_workspace_build",
@@ -2036,6 +2189,9 @@ class NativeAssetInspector:
                 "validation": {
                     "reparsed": True,
                     "xml_sha256": _sha256_file(validation_xml),
+                    "edited_semantic_xml_sha256": edited_semantic_hash,
+                    "reparsed_semantic_xml_sha256": validation_semantic_hash,
+                    "semantic_xml_match": semantic_match,
                     "dependency_count": len(self._workspace_files(validation_assets)),
                 },
             }

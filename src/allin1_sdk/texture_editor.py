@@ -1,4 +1,4 @@
-"""Embedded OpenIV-style YTD texture workspace editor."""
+"""Embedded native YTD texture workspace editor."""
 
 from __future__ import annotations
 

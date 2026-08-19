@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
+from PIL import Image
 
 from allin1_sdk.cli import main
 from allin1_sdk.rpf_graph import RpfPackageGraph
+from allin1_sdk.rpf_graph_previews import (
+    ASSET_PREVIEW_HEIGHT,
+    ASSET_PREVIEW_WIDTH,
+    AssetPreviewRequest,
+    render_asset_preview,
+    render_graph_preview_bundle,
+)
 
 
 def _node_id(state, name):
@@ -468,6 +477,88 @@ def test_rpf_graph_desktop_surface_uses_ports_and_shared_graph_model():
     assert "RpfPackageGraph.materialize" in source
     assert "RpfPackageGraph.build" in source
     assert "RpfPackageGraph.plan_origin_changes" in source
+    assert "_asset_preview_worker" in source
+    assert "render_asset_preview" in source
+    assert "_focus_initial_view" in source
+    assert "self.state" not in source
     assert "RpfPackageGraph.import_archive" in (
         Path(__file__).parents[1] / "src" / "allin1_sdk" / "rpf_explorer.py"
     ).read_text(encoding="utf-8")
+
+
+def test_rpf_graph_asset_previews_are_hash_bound_and_bounded(tmp_path):
+    image_source = tmp_path / "diffuse.png"
+    Image.new("RGB", (320, 120), "#35a667").save(image_source)
+    data = image_source.read_bytes()
+    request = AssetPreviewRequest(
+        "texture", image_source, len(data), hashlib.sha256(data).hexdigest(),
+        "Enhanced", "cache-key",
+    )
+    preview = render_asset_preview(request, tmp_path, None)
+    with Image.open(io.BytesIO(preview)) as rendered:
+        assert rendered.size == (ASSET_PREVIEW_WIDTH, ASSET_PREVIEW_HEIGHT)
+
+    text_source = tmp_path / "handling.meta"
+    text_source.write_text("<HandlingData>\n<Item />\n</HandlingData>\n", encoding="utf-8")
+    text_data = text_source.read_bytes()
+    fallback = render_asset_preview(
+        AssetPreviewRequest(
+            "meta", text_source, len(text_data), hashlib.sha256(text_data).hexdigest(),
+            "Enhanced", "text-key",
+        ),
+        tmp_path, None,
+    )
+    with Image.open(io.BytesIO(fallback)) as rendered:
+        assert rendered.size == (ASSET_PREVIEW_WIDTH, ASSET_PREVIEW_HEIGHT)
+
+    with pytest.raises(ValueError, match="source hash changed"):
+        render_asset_preview(
+            AssetPreviewRequest(
+                "bad", text_source, len(text_data), "0" * 64,
+                "Enhanced", "bad-key",
+            ),
+            tmp_path, None,
+        )
+
+
+def test_rpf_graph_preview_bundle_and_cli_are_verified(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    Image.new("RGB", (320, 120), "#35a667").save(source / "diffuse.png")
+    (source / "handling.meta").write_text(
+        "<HandlingData>\n<Item />\n</HandlingData>\n", encoding="utf-8",
+    )
+    graph = RpfPackageGraph.create_from_folder(
+        source, tmp_path / "graph.json", root_name="dlc.rpf",
+    )
+    bundle, report_path = render_graph_preview_bundle(
+        graph, tmp_path / "previews", tmp_path,
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["summary"] == {
+        "graph_files": 2, "processed": 2, "rendered": 2,
+        "failed": 0, "truncated": False,
+    }
+    assert all(
+        hashlib.sha256((bundle / item["preview"]).read_bytes()).hexdigest()
+        == item["preview_sha256"]
+        for item in report["assets"]
+    )
+
+    cli_bundle = tmp_path / "cli-previews"
+    result = CliRunner().invoke(main, [
+        "sdk", "render-rpf-graph-previews", str(graph),
+        "--output", str(cli_bundle),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "Rendered verified" in result.output
+    assert (cli_bundle / "preview-report.json").is_file()
+
+    game = tmp_path / "game"
+    game.mkdir()
+    result = CliRunner().invoke(main, [
+        "render-rpf-graph-previews", str(graph), "--gta-path", str(game),
+        "--output", str(game / "blocked"),
+    ])
+    assert result.exit_code != 0
+    assert "cannot be published inside GTA V" in result.output

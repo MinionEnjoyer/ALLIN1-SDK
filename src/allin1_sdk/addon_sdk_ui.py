@@ -381,7 +381,8 @@ class AddonSdkDialog(tk.Toplevel):
         ).pack(fill="x", pady=(8, 0))
 
         self.asset_workspace = AssetViewerDialog(
-            assets_page, embedded=True, on_help=self._open_help,
+            assets_page, installation_roots=self.installation_roots,
+            embedded=True, on_help=self._open_help,
             on_close=lambda: self._select_workspace("linker"),
         )
         self.rpf_workspace = RpfExplorerDialog(
@@ -627,7 +628,7 @@ class AddonSdkDialog(tk.Toplevel):
     def _preview_oiv(self) -> None:
         selected = filedialog.askopenfilename(
             parent=self, title="Select an OIV package",
-            filetypes=(("OpenIV package", "*.oiv *.zip"), ("All files", "*.*")),
+            filetypes=(("OIV package", "*.oiv *.zip"), ("All files", "*.*")),
         )
         if not selected:
             return
@@ -651,7 +652,7 @@ class AddonSdkDialog(tk.Toplevel):
         if plan.xml_compilable:
             if not messagebox.askyesno(
                 "Verified OIV XML compile available",
-                "This recipe uses the supported OpenIV XML add/replace/remove "
+                "This recipe uses the supported OIV 2.2 XML add/replace/remove "
                 "grammar. Select the matching outer RPF to compile every XPath "
                 "edit into reparsed payloads and a hash-bound inert plan?\n\n"
                 "The selected archive will not be changed.", parent=self,

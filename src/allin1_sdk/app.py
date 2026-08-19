@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import argparse
 import os
+import sys
 import tkinter as tk
-from tkinter import ttk
+from pathlib import Path
+from tkinter import messagebox, ttk
 
 from allin1_sdk import __version__
 from allin1_sdk.addon_sdk_ui import AddonSdkDialog
 from allin1_sdk.branding import apply_sdk_window_icon
 from allin1_sdk.detector import detect_gta_path
 from allin1_sdk.paths import project_root
+from allin1_sdk.rpf_graph import RpfPackageGraph
+from allin1_sdk.rpf_graph_ui import RpfPackageGraphDialog
 
 _INSTANCE_MUTEX: int | None = None
 
@@ -111,19 +116,59 @@ def _configure_style(root: tk.Tk) -> None:
     )
 
 
-def main() -> None:
+def _launch_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument(
+        "--rpf-graph", type=Path,
+        help="Open a validated RPF package graph directly in the visual node editor.",
+    )
+    parser.add_argument(
+        "--gta-path", type=Path,
+        help="Matching GTA installation for encrypted/native asset previews.",
+    )
+    return parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    arguments = _launch_arguments(argv)
     if os.name == "nt":
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
             "MinionEnjoyer.ALLIN1SDK"
         )
-    if not _claim_single_instance():
+    if arguments.rpf_graph is None and not _claim_single_instance():
         return
     root = tk.Tk()
     root.withdraw()
     apply_sdk_window_icon(root, project_root())
     _configure_style(root)
-    detected = detect_gta_path()
+    detected = (
+        arguments.gta_path.expanduser().resolve()
+        if arguments.gta_path is not None else detect_gta_path()
+    )
+    if arguments.rpf_graph is not None:
+        try:
+            graph = arguments.rpf_graph.expanduser().resolve(strict=True)
+            RpfPackageGraph.validate(graph, verify_sources=False)
+            if arguments.gta_path is not None and not detected.is_dir():
+                raise ValueError(f"GTA installation was not found: {detected}")
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Could not open RPF package graph", str(exc), parent=root)
+            root.destroy()
+            return
+        dialog = RpfPackageGraphDialog(
+            root, graph, project_root(), detected,
+        )
+        dialog.tk.call("wm", "transient", dialog._w, "")
+        dialog.protocol("WM_DELETE_WINDOW", root.destroy)
+        dialog.deiconify()
+        dialog.state("normal")
+        dialog.lift()
+        dialog.focus_force()
+        dialog.attributes("-topmost", True)
+        dialog.after(1000, lambda: dialog.attributes("-topmost", False))
+        root.mainloop()
+        return
     roots = (detected,) if detected else ()
     dialog = AddonSdkDialog(
         root, project_root(), installation_roots=roots, standalone=True,

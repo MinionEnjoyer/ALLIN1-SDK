@@ -85,6 +85,7 @@ AUTHORING_COMMANDS = frozenset({
     "position-rpf-graph-node",
     "position-rpf-program-node",
     "refresh-rpf-graph-sources",
+    "render-rpf-graph-previews",
     "remove-rpf-graph-node",
     "remove-rpf-program-node",
     "rename-rpf-graph-node",

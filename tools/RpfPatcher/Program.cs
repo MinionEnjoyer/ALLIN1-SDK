@@ -17,7 +17,7 @@
 //   RpfPatcher.exe extract-entries <gta_path> <rpf_path> <manifest_tsv> <output_root>
 //   RpfPatcher.exe extract-virtual-entries <gta_path> <rpf_path> <manifest_tsv> <output_root>
 //   RpfPatcher.exe apply-entry-changes <gta_path> <rpf_path> <manifest_tsv> <payload_root>
-//   RpfPatcher.exe asset-from-xml <input_xml> <output_asset> <asset_folder> [legacy|gen9] [source_asset]
+//   RpfPatcher.exe asset-from-xml <input_xml> <output_asset> <asset_folder> [legacy|gen9] [source_asset] [gta_path]
 //   RpfPatcher.exe audit-seats  <gta_path> <output_json> [output_cs]
 //   RpfPatcher.exe install-euphoria <gta_path> <payload_folder> [--allow-enhanced]
 //   RpfPatcher.exe verify-euphoria  <gta_path> <payload_folder>
@@ -77,8 +77,8 @@ namespace RpfPatcher
                     "  RpfPatcher.exe index-json   <gta_path> <rpf_path> <output_json>\n" +
                     "  RpfPatcher.exe extract-virtual-entry <gta_path> <rpf_path> <archive_path> <entry_path> <output>\n" +
                     "  RpfPatcher.exe extract-virtual-entries <gta_path> <rpf_path> <manifest_tsv> <output_root>\n" +
-                    "  RpfPatcher.exe asset-xml    <input_asset> <output_xml> <asset_folder> [legacy|gen9]\n" +
-                    "  RpfPatcher.exe asset-from-xml <input_xml> <output_asset> <asset_folder> [legacy|gen9] [source_asset]\n" +
+                    "  RpfPatcher.exe asset-xml    <input_asset> <output_xml> <asset_folder> [legacy|gen9] [gta_path]\n" +
+                    "  RpfPatcher.exe asset-from-xml <input_xml> <output_asset> <asset_folder> [legacy|gen9] [source_asset] [gta_path]\n" +
                     "  RpfPatcher.exe audit-seats  <gta_path> <output_json> [output_cs]\n" +
                     "  RpfPatcher.exe build-ytd    <dds_folder> <output_ytd> [legacy|gen9]\n" +
                     "  RpfPatcher.exe unpack-ytd   <ytd_path> <output_folder> [legacy|gen9]\n" +
@@ -1773,7 +1773,7 @@ namespace RpfPatcher
             if (args.Length < 4)
             {
                 Console.Error.WriteLine(
-                    "Usage: RpfPatcher.exe asset-xml <input_asset> <output_xml> <asset_folder> [legacy|gen9]");
+                    "Usage: RpfPatcher.exe asset-xml <input_asset> <output_xml> <asset_folder> [legacy|gen9] [gta_path]");
                 return 1;
             }
             string input = Path.GetFullPath(args[1]);
@@ -1781,6 +1781,8 @@ namespace RpfPatcher
             string assetFolder = Path.GetFullPath(args[3]);
             bool gen9 = args.Length >= 5 && args[4].Equals(
                 "gen9", StringComparison.OrdinalIgnoreCase);
+            string gtaPath = args.Length >= 6
+                ? Path.GetFullPath(args[5]) : null;
             if (!File.Exists(input))
             {
                 Console.Error.WriteLine($"ERROR: File not found: {input}");
@@ -1852,8 +1854,12 @@ namespace RpfPatcher
                         var rel = new RelFile(); rel.Load(data, relEntry);
                         xml = RelXml.GetXml(rel); break;
                     case ".awc":
+                        LoadAwcKey(gtaPath, gen9);
                         var awcEntry = LooseBinaryEntry(input);
                         var awc = new AwcFile(); awc.Load(data, awcEntry);
+                        if (!string.IsNullOrWhiteSpace(awc.ErrorMessage))
+                            throw new InvalidDataException(
+                                "AWC parse failed: " + awc.ErrorMessage);
                         xml = AwcXml.GetXml(awc, assetFolder); break;
                     case ".gxt2":
                         var entry = new RpfBinaryFileEntry
@@ -1907,7 +1913,7 @@ namespace RpfPatcher
             if (args.Length < 4)
             {
                 Console.Error.WriteLine(
-                    "Usage: RpfPatcher.exe asset-from-xml <input_xml> <output_asset> <asset_folder> [legacy|gen9] [source_asset]");
+                    "Usage: RpfPatcher.exe asset-from-xml <input_xml> <output_asset> <asset_folder> [legacy|gen9] [source_asset] [gta_path]");
                 return 1;
             }
             string input = Path.GetFullPath(args[1]);
@@ -1917,6 +1923,8 @@ namespace RpfPatcher
                 "gen9", StringComparison.OrdinalIgnoreCase);
             string sourceAsset = args.Length >= 6
                 ? Path.GetFullPath(args[5]) : null;
+            string gtaPath = args.Length >= 7
+                ? Path.GetFullPath(args[6]) : null;
             if (!File.Exists(input) || !Directory.Exists(assetFolder))
             {
                 Console.Error.WriteLine("ERROR: XML input or asset folder not found.");
@@ -1969,6 +1977,8 @@ namespace RpfPatcher
                 }
 
                 RpfManager.IsGen9 = gen9;
+                if (suffix == ".awc")
+                    LoadAwcKey(gtaPath, gen9);
                 if (sourceAsset != null && (suffix == ".ymap" || suffix == ".ytyp"
                     || suffix == ".ymt" || suffix == ".ymf"))
                 {
@@ -2061,6 +2071,20 @@ namespace RpfPatcher
                 FileUncompressedSize = (uint)Math.Min(
                     new FileInfo(path).Length, uint.MaxValue),
             };
+        }
+
+        static void LoadAwcKey(string gtaPath, bool gen9)
+        {
+            if (string.IsNullOrWhiteSpace(gtaPath))
+                throw new InvalidOperationException(
+                    "AWC conversion requires the matching GTA installation path for audio keys.");
+            if (!Directory.Exists(gtaPath))
+                throw new DirectoryNotFoundException(
+                    "GTA path for AWC keys was not found: " + gtaPath);
+            GTA5Keys.LoadFromPath(gtaPath, gen9, null);
+            if (GTA5Keys.PC_AWC_KEY == null || GTA5Keys.PC_AWC_KEY.Length == 0)
+                throw new InvalidDataException(
+                    "The GTA installation did not provide an AWC decryption key.");
         }
 
         // Build a texture dictionary from standards-compliant DDS files.
@@ -2947,7 +2971,7 @@ namespace RpfPatcher
                     return 5;
                 }
                 // ExtractFile returns decompressed resource payloads. Re-wrap
-                // them as standalone OpenIV-compatible resource files so the
+                // them as standalone header-bearing RAGE resource files so the
                 // result can be opened and compared outside its source RPF.
                 if (matches[0] is RpfResourceFileEntry resourceEntry)
                 {

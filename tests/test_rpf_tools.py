@@ -1954,6 +1954,58 @@ def test_native_asset_helper_xml_and_texture_contact_sheet(tmp_path, monkeypatch
     assert report.image_png.startswith(b"\x89PNG")
 
 
+def test_native_asset_helper_uses_game_keys_and_summarizes_awc(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    patcher = project / "tools" / "RpfPatcher" / "RpfPatcher.exe"
+    patcher.parent.mkdir(parents=True)
+    patcher.write_bytes(b"exe")
+    game = tmp_path / "game"
+    game.mkdir()
+    calls = []
+    awc_xml = """<?xml version="1.0"?>
+<AudioWaveContainer>
+ <Version value="1"/><SingleChannelEncrypt value="True"/>
+ <MultiChannelEncrypt value="True"/><Streams>
+  <Item><Name>first</Name><FileName>first.wav</FileName><Chunks>
+   <Item><Type>data</Type></Item><Item><Type>format</Type><Codec>ADPCM</Codec>
+    <Samples value="32000"/><SampleRate value="32000"/>
+    <LoopBegin value="10"/><LoopEnd value="100"/></Item>
+   <Item><Type>peak</Type></Item></Chunks></Item>
+  <Item><Name>second</Name><FileName>second.wav</FileName><Chunks>
+   <Item><Type>format</Type><Codec>PCM</Codec><Samples value="24000"/>
+    <SampleRate value="48000"/><LoopBegin value="0"/><LoopEnd value="0"/></Item>
+  </Chunks></Item>
+ </Streams>
+</AudioWaveContainer>"""
+
+    def convert(args, **_kwargs):
+        calls.append(args)
+        assert Path(args[-1]) == game.resolve()
+        Path(args[3]).write_text(awc_xml, encoding="utf-8")
+        assets = Path(args[4])
+        assets.mkdir(parents=True)
+        (assets / "first.wav").write_bytes(b"RIFF-first")
+        (assets / "second.wav").write_bytes(b"RIFF-second")
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(native_assets, "run_hidden", convert)
+    report = NativeAssetInspector(project, game).inspect_bytes(
+        "voice.awc", b"ADAT" + b"\x01\0\0\0" + struct.pack("<I", 2),
+    )
+    assert len(calls) == 1
+    assert report.metadata["audio_stream_count"] == 2
+    assert report.metadata["audio_codec_counts"] == "ADPCM: 1, PCM: 1"
+    assert report.metadata["audio_sample_rates_hz"] == "32000, 48000"
+    assert report.metadata["audio_total_samples"] == 56000
+    assert report.metadata["audio_total_duration_seconds"] == 1.5
+    assert report.metadata["audio_looped_streams"] == 1
+    assert report.metadata["audio_peak_streams"] == 1
+    assert report.metadata["audio_wave_files"] == 2
+    assert report.metadata["audio_single_channel_encrypted"] is True
+    assert report.metadata["audio_multi_channel_encrypted"] is True
+    assert report.warnings == ()
+
+
 def test_native_asset_helper_renders_bounded_model_geometry(tmp_path, monkeypatch):
     project = tmp_path / "project"
     patcher = project / "tools" / "RpfPatcher" / "RpfPatcher.exe"
@@ -2359,6 +2411,60 @@ def test_native_workspace_exports_builds_and_reparses(tmp_path, monkeypatch):
     assert result["validation"]["reparsed"] is True
     assert result["validation"]["dependency_count"] == 1
     assert result["edited_xml_sha256"] == hashlib.sha256(xml.read_bytes()).hexdigest()
+
+
+def test_native_awc_workspace_requires_semantic_reparse(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    patcher = project / "tools" / "RpfPatcher" / "RpfPatcher.exe"
+    patcher.parent.mkdir(parents=True)
+    patcher.write_bytes(b"exe")
+    game = tmp_path / "game"
+    game.mkdir()
+    drift = {"enabled": False}
+    awc_xml = """<AudioWaveContainer><Version value="1"/><Streams><Item>
+<Name>voice</Name><FileName>voice.wav</FileName><Chunks><Item><Type>format</Type>
+<Codec>ADPCM</Codec><Samples value="100"/><SampleRate value="32000"/>
+</Item></Chunks></Item></Streams></AudioWaveContainer>"""
+
+    def convert(args, **_kwargs):
+        assert Path(args[-1]) == game.resolve()
+        command = str(args[1])
+        output = Path(args[3])
+        assets = Path(args[4])
+        assets.mkdir(parents=True, exist_ok=True)
+        if command == "asset-xml":
+            rendered = awc_xml
+            if drift["enabled"] and Path(args[2]).name == "drift.awc":
+                rendered = rendered.replace('Samples value="100"', 'Samples value="101"')
+            output.write_text(rendered, encoding="utf-8")
+            (assets / "voice.wav").write_bytes(b"RIFF-wave")
+        else:
+            output.write_bytes(b"ADAT-rebuilt")
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(native_assets, "run_hidden", convert)
+    inspector = NativeAssetInspector(project, game)
+    workspace = inspector.export_workspace_bytes(
+        "voice.awc", b"ADAT-original", tmp_path / "awc-workspace",
+        edition="Enhanced",
+    )
+    manifest = json.loads(
+        (workspace / "native-workspace.json").read_text(encoding="utf-8")
+    )
+    assert manifest["safety"]["gta_installation_keys_required"] is True
+    assert manifest["safety"]["gta_installation_path_stored"] is False
+    output, report = inspector.build_workspace(workspace, tmp_path / "rebuilt.awc")
+    assert output.read_bytes() == b"ADAT-rebuilt"
+    result = json.loads(report.read_text(encoding="utf-8"))
+    assert result["validation"]["semantic_xml_match"] is True
+    assert result["validation"]["edited_semantic_xml_sha256"] == (
+        result["validation"]["reparsed_semantic_xml_sha256"]
+    )
+    drift["enabled"] = True
+    with pytest.raises(RuntimeError, match="structured stream definition changed"):
+        inspector.build_workspace(workspace, tmp_path / "drift.awc")
+    assert not (tmp_path / "drift.awc").exists()
+    assert not (tmp_path / "drift.awc.allin1.json").exists()
 
 
 def test_native_workspace_rejects_tampering_escapes_and_collisions(

@@ -31,6 +31,7 @@ from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_catalog import RpfCatalogService
 from allin1_sdk.rpf_change_set import CHANGE_ACTIONS, RpfChangeSet
 from allin1_sdk.rpf_graph import RpfPackageGraph
+from allin1_sdk.rpf_graph_previews import render_graph_preview_bundle
 from allin1_sdk.rpf_program import NODE_SPECS, PROGRAM_TEMPLATES, RpfPackageProgram
 from allin1_sdk.rpf_tools import RpfExplorerService, _running_gta_processes
 from allin1_sdk.texture_workspace import TextureDictionaryWorkspace
@@ -663,6 +664,36 @@ def import_rpf_graph(archive: Path, gta_path: Path | None, output: Path) -> None
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Imported existing RPF into external graph workspace: {graph}")
     click.echo("Source archive unchanged; import report: " + str(graph.parent / "rpf-graph-import.json"))
+
+
+@main.command("render-rpf-graph-previews")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA V installation for edition-aware native asset decoding.",
+)
+@click.option(
+    "--limit", type=click.IntRange(1, 2500), default=2500, show_default=True,
+    help="Maximum number of file-node previews to render.",
+)
+@click.option(
+    "--output", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+def render_rpf_graph_previews(
+    graph: Path, gta_path: Path | None, limit: int, output: Path,
+) -> None:
+    """Render a hash-bound portable preview bundle for graph asset nodes."""
+    try:
+        bundle, report = render_graph_preview_bundle(
+            graph, output, PROJECT_ROOT,
+            game_path=gta_path.resolve() if gta_path is not None else None,
+            limit=limit,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Rendered verified RPF graph asset previews: {bundle}")
+    click.echo(f"Preview report: {report}")
 
 
 def _write_rpf_graph_report(report: dict, output: Path | None) -> None:
@@ -1898,11 +1929,17 @@ def canary_rpf_transaction(
     "--edition", type=click.Choice(("Legacy", "Enhanced"), case_sensitive=False),
     default="Enhanced", show_default=True,
 )
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="GTA installation used to decrypt encrypted AWC audio streams.",
+)
 @click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
-def export_native_workspace(source: Path, edition: str, output: Path) -> None:
+def export_native_workspace(
+    source: Path, edition: str, gta_path: Path | None, output: Path,
+) -> None:
     """Export a native resource to an editable XML/dependency workspace."""
     try:
-        workspace = NativeAssetInspector(PROJECT_ROOT).export_workspace(
+        workspace = NativeAssetInspector(PROJECT_ROOT, gta_path).export_workspace(
             source, output, edition=edition,
         )
     except (OSError, RuntimeError, ValueError) as exc:
@@ -1917,10 +1954,17 @@ def export_native_workspace(source: Path, edition: str, output: Path) -> None:
     default="Enhanced", show_default=True,
 )
 @click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="GTA installation used to decrypt encrypted AWC audio streams.",
+)
+@click.option(
     "--output-dir", type=click.Path(file_okay=False, path_type=Path),
     help="Publish a new report folder containing any XML/text and PNG preview.",
 )
-def inspect_native_asset(source: Path, edition: str, output_dir: Path | None) -> None:
+def inspect_native_asset(
+    source: Path, edition: str, gta_path: Path | None,
+    output_dir: Path | None,
+) -> None:
     """Inspect one native asset and optionally publish its bounded preview bundle."""
     try:
         if source.is_symlink():
@@ -1929,7 +1973,7 @@ def inspect_native_asset(source: Path, edition: str, output_dir: Path | None) ->
         size = resolved.stat().st_size
         if not 0 < size <= MAX_NATIVE_PREVIEW_BYTES:
             raise ValueError("Native inspection source is empty or exceeds the 128 MiB limit")
-        report = NativeAssetInspector(PROJECT_ROOT).inspect_bytes(
+        report = NativeAssetInspector(PROJECT_ROOT, gta_path).inspect_bytes(
             resolved.name, resolved.read_bytes(), edition=edition,
         )
         payload = _native_report_payload(
@@ -1944,11 +1988,17 @@ def inspect_native_asset(source: Path, edition: str, output_dir: Path | None) ->
 
 @main.command("build-native-workspace")
 @click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="GTA installation used to encrypt and reparse AWC audio streams.",
+)
 @click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
-def build_native_workspace(workspace: Path, output: Path) -> None:
+def build_native_workspace(
+    workspace: Path, gta_path: Path | None, output: Path,
+) -> None:
     """Rebuild and reparse an edited native XML workspace."""
     try:
-        asset, report = NativeAssetInspector(PROJECT_ROOT).build_workspace(
+        asset, report = NativeAssetInspector(PROJECT_ROOT, gta_path).build_workspace(
             workspace, output,
         )
     except (OSError, RuntimeError, ValueError) as exc:
@@ -2316,7 +2366,8 @@ for _command in (
     compile_oiv_xml,
     inspect_rpf, dlc_inventory, compile_vehicle_data, index_rpf, catalog_rpfs,
     search_rpf_catalog, build_rpf_tree,
-    create_rpf_graph, import_rpf_graph, inspect_rpf_graph, validate_rpf_graph,
+    create_rpf_graph, import_rpf_graph, render_rpf_graph_previews,
+    inspect_rpf_graph, validate_rpf_graph,
     add_rpf_graph_container, add_rpf_graph_file, rename_rpf_graph_node,
     reparent_rpf_graph_node, position_rpf_graph_node, remove_rpf_graph_node,
     layout_rpf_graph, refresh_rpf_graph_sources, materialize_rpf_graph, build_rpf_graph,

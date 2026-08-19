@@ -1360,7 +1360,9 @@ class RpfExplorerDialog(ttk.Frame):
         try:
             extracted = self.service.extract(self.index, entry, destination)
             data = extracted.read_bytes()
-            report = NativeAssetInspector(self.project_root).inspect_bytes(
+            report = NativeAssetInspector(
+                self.project_root, self.service.gta_path,
+            ).inspect_bytes(
                 entry.name, data, edition=self.index.edition,
             )
         except (OSError, ValueError) as exc:

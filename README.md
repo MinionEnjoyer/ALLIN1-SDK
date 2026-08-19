@@ -74,26 +74,37 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   Supported native entries can move directly from a selected root or nested RPF into
   an editable workspace, then back into a validated payload plus checksummed replacement
   plan without bypassing the normal review/apply boundary.
+- **Encrypted AWC audio workspaces** — use keys from an explicitly selected matching
+  Legacy or Enhanced installation to report stream names, codecs, sample rates,
+  duration, loops, peaks, encryption flags, and exported WAV dependencies. A workspace
+  keeps its original container immutable and does not store the GTA path. Rebuilds create
+  a separate AWC, decrypt and parse it again, and are rejected unless edited and reparsed
+  stream definitions have the same canonical semantic hash. Loose-file, RPF-entry,
+  desktop, CLI, console, and Agent API routes share this implementation.
 - **GXT2 game-text workspaces** — extract a text dictionary from an exact root or
   nested RPF entry into a searchable desktop hash/text editor, retain an immutable
   source and hash-chained undo history, add/remove/edit UTF-8 labels, and rebuild only
   after a strict semantic reparse. The rebuilt payload, validation report, outer-archive
   hash, virtual entry, and edition remain bound to an inert reviewed replacement plan.
 - **Visual RPF package graphs** — import an existing loose tree or author one from an
-  empty root on a UE-style dark node canvas. Archive, directory, and source-file cards
+  empty root on a dark visual node canvas. Archive, directory, and source-file cards
   use input/output ports for validated containment links; cards can be positioned,
   searched, renamed, reparented, and removed without touching referenced files. The
   same graph document is fully scriptable through the console and agent API, tracks
   every source hash, emits nested `.rpf.source` trees, and builds through the exact
   recursive archive verifier. Validation reports identify every payload as either
   byte-exact or canonical RSC7 (identical resource header plus decompressed bytes).
+  File cards receive non-blocking cached thumbnails for images, native visual assets,
+  text/configuration files, and deterministic type fallbacks. The same hash-bound
+  renderer is available as `render-rpf-graph-previews`, producing an atomic portable
+  bundle and per-preview SHA-256 report through the console or structured Agent API.
   An already-built RPF can also be recursively expanded into a retained external
   graph workspace: nested archives become editable `.rpf.source` branches, the
   untouched origin hash remains in the graph, and one import report accounts for
   every extracted payload. Imported graphs can build/diff against that origin and
   emit a normal inert multi-entry plan; changes inside a nested archive collapse to
   one reviewed parent-container replacement instead of an order-dependent deep edit.
-  The graph window also includes an embedded **Build Flow** workspace: a UE-style
+  The graph window also includes an embedded **Build Flow** workspace: a typed visual
   operation canvas with typed artifact pins for package source, validation, loose-tree
   materialization, exact RPF build, verified defragmentation, imported-origin planning,
   and named outputs. Invalid type connections and cycles are rejected at edit time.
@@ -203,6 +214,9 @@ the checksum, extract the archive to a fresh directory, and run
 
 The desktop application is one persistent developer window. Its sidebar moves
 between **Integration**, **Native Assets**, **RPF Explorer**, and **Help Center**.
+Pass `--rpf-graph <graph.json>` to the desktop executable to open a validated
+package graph directly; add `--gta-path <installation>` when its asset nodes need
+encrypted or edition-specific native previews.
 The SDK Console remains docked along the bottom and can expand over any context;
 opening a tool no longer creates another independent workspace
 window. Only file pickers, confirmations, and blocking transaction progress use
@@ -256,6 +270,9 @@ allin1-sdk build-rpf-graph C:\Work\dlc-rpf-graph.json --gta-path "D:\Games\GTA V
 allin1-sdk plan-rpf-graph-origin C:\Work\dlc-imported-graph\rpf-graph.json --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\dlc-origin-plan.json
 allin1-sdk export-rpf-native-workspace C:\Mods\Example\dlc.rpf common/data/model.ydr --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\model-workspace
 allin1-sdk plan-rpf-native-workspace C:\Mods\Example\dlc.rpf common/data/model.ydr C:\Work\model-workspace --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\model-plan.json
+allin1-sdk inspect-native-asset C:\Audio\voice.awc --edition Enhanced --gta-path "D:\Games\GTA V Enhanced" --output-dir C:\Work\voice-report
+allin1-sdk export-native-workspace C:\Audio\voice.awc --edition Enhanced --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\voice-workspace
+allin1-sdk build-native-workspace C:\Work\voice-workspace --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\voice-rebuilt.awc
 allin1-sdk export-rpf-binary-workspace C:\Mods\Example\dlc.rpf common/data/table.bin --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\table-binary
 allin1-sdk inspect-binary-workspace C:\Work\table-binary --offset 0x100 --length 256
 allin1-sdk patch-binary-workspace C:\Work\table-binary --offset 0x108 --expected-hex "01 02" --hex "03 04" --acknowledge-edit

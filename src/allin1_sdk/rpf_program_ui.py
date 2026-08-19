@@ -1,4 +1,4 @@
-"""Embedded UE-style editor for typed RPF package programs."""
+"""Embedded visual editor for typed RPF package programs."""
 
 from __future__ import annotations
 
