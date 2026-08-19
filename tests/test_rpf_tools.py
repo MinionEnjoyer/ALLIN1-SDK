@@ -2028,6 +2028,45 @@ def test_native_asset_helper_renders_collision_geometry(tmp_path, monkeypatch):
     assert report.metadata["collision_preview"] == "isometric geometry diagnostic"
 
 
+def test_native_asset_helper_renders_ymap_placement_overview(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    patcher = project / "tools" / "RpfPatcher" / "RpfPatcher.exe"
+    patcher.parent.mkdir(parents=True)
+    patcher.write_bytes(b"exe")
+    map_xml = """<?xml version="1.0"?>
+<CMapData><name>test_map</name><entities>
+ <Item type="CEntityDef"><archetypeName>prop_crate</archetypeName>
+  <position x="100" y="200" z="10"/><rotation x="0" y="0" z="0" w="1"/>
+  <scaleXY value="1"/><parentIndex value="-1"/></Item>
+ <Item type="CEntityDef"><archetypeName>prop_crate</archetypeName>
+  <position x="110" y="200" z="15"/><rotation x="0" y="0" z="0.707" w="0.707"/>
+  <scaleXY value="2"/><parentIndex value="0"/></Item>
+ <Item type="CEntityDef"><archetypeName>prop_light</archetypeName>
+  <position x="105" y="210" z="12"/><parentIndex value="-1"/></Item>
+</entities><carGenerators><Item/></carGenerators><boxOccluders><Item/></boxOccluders>
+<occludeModels/><timeCycleModifiers><Item/><Item/></timeCycleModifiers></CMapData>"""
+
+    def convert(args, **_kwargs):
+        Path(args[3]).write_text(map_xml, encoding="utf-8")
+        Path(args[4]).mkdir(parents=True)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(native_assets, "run_hidden", convert)
+    report = NativeAssetInspector(project).inspect_bytes("placements.ymap", b"RSC8" + b"\0" * 32)
+    assert report.image_png.startswith(b"\x89PNG")
+    assert report.metadata["map_name"] == "test_map"
+    assert report.metadata["map_entity_count"] == 3
+    assert report.metadata["map_archetype_count"] == 2
+    assert report.metadata["map_root_entities"] == 2
+    assert report.metadata["map_parent_links"] == 1
+    assert report.metadata["map_invalid_parent_links"] == 0
+    assert report.metadata["map_bounds"] == "10 x 10 x 5"
+    assert report.metadata["map_car_generators"] == 1
+    assert report.metadata["map_box_occluders"] == 1
+    assert report.metadata["map_timecycle_modifiers"] == 2
+    assert report.metadata["map_preview"] == "top-down entity placement diagnostic"
+
+
 def test_native_model_preview_rejects_dtd_and_bad_indices(tmp_path):
     dtd = tmp_path / "unsafe.ydr.xml"
     dtd.write_text(

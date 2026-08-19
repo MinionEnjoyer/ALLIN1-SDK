@@ -41,7 +41,8 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   generate YTD texture contact sheets, render bounded indexed-geometry previews for
   YDR/YDD/YFT models with vertex, triangle, LOD, drawable, and bounds statistics, and
   visualize YBN collision meshes/primitives with geometry, material, and polygon counts.
-  It can also
+  YMAP placement previews plot entities, archetypes, orientation, hierarchy links, and
+  world extents in a bounded top-down scene. The viewer can also
   export manifest-backed XML/dependency
   workspaces that rebuild only after the compiled result parses back through CodeWalker.
   The same read-only native inspection can publish a portable text/PNG/JSON bundle

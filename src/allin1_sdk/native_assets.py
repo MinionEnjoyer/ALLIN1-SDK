@@ -49,10 +49,13 @@ MAX_NATIVE_WORKSPACE_BYTES = 2 * 1024 * 1024 * 1024
 NATIVE_WORKSPACE_SCHEMA = 1
 MODEL_PREVIEW_SUFFIXES = frozenset({".ydr", ".ydd", ".yft"})
 COLLISION_PREVIEW_SUFFIXES = frozenset({".ybn"})
+MAP_PREVIEW_SUFFIXES = frozenset({".ymap"})
 MAX_MODEL_XML_BYTES = 192 * 1024 * 1024
 MAX_MODEL_VERTICES = 1_000_000
 MAX_MODEL_TRIANGLES = 1_000_000
 MAX_RENDERED_TRIANGLES = 45_000
+MAX_MAP_ENTITIES = 250_000
+MAX_RENDERED_MAP_ENTITIES = 80_000
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,15 @@ class _ModelGeometry:
     vertices: tuple[tuple[float, float, float], ...]
     triangles: tuple[tuple[int, int, int], ...]
     lod: str
+
+
+@dataclass(frozen=True)
+class _MapEntity:
+    archetype: str
+    position: tuple[float, float, float]
+    parent: int
+    yaw: float
+    scale: float
 
 
 def _sha256_file(path: Path) -> str:
@@ -629,6 +641,223 @@ def _collision_preview_from_xml(
         return None, {}, f"Collision preview unavailable: {exc}"
 
 
+def _direct_child(
+    parent: etree._Element, name: str,
+) -> etree._Element | None:
+    for child in parent:
+        if isinstance(child.tag, str) and _local_name(child) == name:
+            return child
+    return None
+
+
+def _child_value(parent: etree._Element, name: str, default: float) -> float:
+    child = _direct_child(parent, name)
+    if child is None:
+        return default
+    try:
+        value = float(child.get("value", str(default)))
+    except ValueError as exc:
+        raise ValueError(f"YMAP {name} value is non-numeric") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"YMAP {name} value is non-finite")
+    return value
+
+
+def _map_entities(root: etree._Element) -> tuple[list[_MapEntity], int]:
+    container = _direct_child(root, "entities")
+    if container is None:
+        return [], 0
+    entities: list[_MapEntity] = []
+    skipped = 0
+    for item in container:
+        if not isinstance(item.tag, str) or _local_name(item) != "Item":
+            continue
+        position_element = _direct_child(item, "position")
+        if position_element is None:
+            skipped += 1
+            continue
+        position = _vector_attributes(position_element)
+        archetype_element = _direct_child(item, "archetypeName")
+        archetype = (
+            (archetype_element.text or "").strip()
+            if archetype_element is not None else ""
+        ) or "(unnamed archetype)"
+        parent_element = _direct_child(item, "parentIndex")
+        try:
+            parent = int(parent_element.get("value", "-1")) if parent_element is not None else -1
+        except ValueError as exc:
+            raise ValueError("YMAP parentIndex is non-integer") from exc
+        rotation = _direct_child(item, "rotation")
+        if rotation is None:
+            yaw = 0.0
+        else:
+            try:
+                qx, qy, qz, qw = (
+                    float(rotation.get(axis, default))
+                    for axis, default in (("x", "0"), ("y", "0"), ("z", "0"), ("w", "1"))
+                )
+            except ValueError as exc:
+                raise ValueError("YMAP entity rotation is non-numeric") from exc
+            if not all(math.isfinite(value) for value in (qx, qy, qz, qw)):
+                raise ValueError("YMAP entity rotation is non-finite")
+            yaw = math.atan2(
+                2.0 * ((qw * qz) + (qx * qy)),
+                1.0 - (2.0 * ((qy * qy) + (qz * qz))),
+            )
+        scale = max(0.01, min(1000.0, _child_value(item, "scaleXY", 1.0)))
+        entities.append(_MapEntity(archetype, position, parent, yaw, scale))
+        if len(entities) > MAX_MAP_ENTITIES:
+            raise ValueError("YMAP preview exceeds the guarded entity limit")
+    return entities, skipped
+
+
+def _map_item_count(root: etree._Element, name: str) -> int:
+    container = _direct_child(root, name)
+    if container is None:
+        return 0
+    return sum(
+        1 for item in container
+        if isinstance(item.tag, str) and _local_name(item) == "Item"
+    )
+
+
+def _map_colour(archetype: str) -> tuple[int, int, int]:
+    digest = hashlib.sha256(archetype.encode("utf-8", errors="replace")).digest()
+    return 70 + (digest[0] % 140), 75 + (digest[1] % 130), 85 + (digest[2] % 125)
+
+
+def _render_map_entities(
+    entities: list[_MapEntity], name: str,
+) -> tuple[bytes, dict[str, Any]]:
+    minima = tuple(min(entity.position[axis] for entity in entities) for axis in range(3))
+    maxima = tuple(max(entity.position[axis] for entity in entities) for axis in range(3))
+    width, height = 960, 680
+    left, top, right, bottom = 48, 78, 748, 616
+    span_x = max(maxima[0] - minima[0], 1.0)
+    span_y = max(maxima[1] - minima[1], 1.0)
+    padding_x = max(span_x * 0.04, 0.5)
+    padding_y = max(span_y * 0.04, 0.5)
+    world_left, world_right = minima[0] - padding_x, maxima[0] + padding_x
+    world_bottom, world_top = minima[1] - padding_y, maxima[1] + padding_y
+
+    def screen(position: tuple[float, float, float]) -> tuple[float, float]:
+        x = left + ((position[0] - world_left) / (world_right - world_left)) * (right - left)
+        y = bottom - ((position[1] - world_bottom) / (world_top - world_bottom)) * (bottom - top)
+        return x, y
+
+    image = Image.new("RGB", (width, height), "#101714")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((left, top, right, bottom), fill="#121c18", outline="#31453a")
+    for division in range(1, 5):
+        x = left + ((right - left) * division / 5)
+        y = top + ((bottom - top) * division / 5)
+        draw.line((x, top, x, bottom), fill="#1e2d26")
+        draw.line((left, y, right, y), fill="#1e2d26")
+    draw.text((48, 24), f"YMAP PLACEMENT  |  {name[:68]}", fill="#E8F2EC")
+    draw.text((left, bottom + 10), f"X {minima[0]:.2f} .. {maxima[0]:.2f}", fill="#91AA9D")
+    draw.text((right - 178, bottom + 10), f"Y {minima[1]:.2f} .. {maxima[1]:.2f}", fill="#91AA9D")
+
+    stride = max(1, math.ceil(len(entities) / MAX_RENDERED_MAP_ENTITIES))
+    sampled_indexes = range(0, len(entities), stride)
+    for index in sampled_indexes:
+        entity = entities[index]
+        if 0 <= entity.parent < len(entities):
+            draw.line(
+                (*screen(entity.position), *screen(entities[entity.parent].position)),
+                fill="#455b50", width=1,
+            )
+    for index in sampled_indexes:
+        entity = entities[index]
+        x, y = screen(entity.position)
+        colour = _map_colour(entity.archetype)
+        radius = max(2.0, min(7.0, 2.5 + math.log2(max(1.0, entity.scale))))
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=colour)
+        direction = 5.0 + radius
+        draw.line((
+            x, y,
+            x + (math.sin(entity.yaw) * direction),
+            y - (math.cos(entity.yaw) * direction),
+        ), fill="#E8F2EC", width=1)
+        if entity.parent < 0:
+            draw.ellipse(
+                (x - radius - 2, y - radius - 2, x + radius + 2, y + radius + 2),
+                outline="#91DDB4",
+            )
+
+    counts: dict[str, int] = {}
+    for entity in entities:
+        counts[entity.archetype] = counts.get(entity.archetype, 0) + 1
+    draw.text((776, 78), "TOP ARCHETYPES", fill="#E8F2EC")
+    for row, (archetype, count) in enumerate(sorted(
+        counts.items(), key=lambda item: (-item[1], item[0].casefold()),
+    )[:14]):
+        y = 106 + (row * 29)
+        colour = _map_colour(archetype)
+        draw.rectangle((776, y + 2, 786, y + 12), fill=colour)
+        draw.text((794, y), archetype[:22], fill="#C6D8CE")
+        draw.text((910, y), str(count), fill="#91AA9D")
+    roots = sum(1 for entity in entities if entity.parent < 0)
+    draw.text(
+        (48, height - 25),
+        f"{len(entities):,} entities  |  {len(counts):,} archetypes  |  "
+        f"{roots:,} roots  |  top-down diagnostic view",
+        fill="#AFC5B9",
+    )
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    valid_links = sum(
+        1 for entity in entities if 0 <= entity.parent < len(entities)
+    )
+    invalid_links = sum(
+        1 for entity in entities if entity.parent >= len(entities)
+    )
+    return output.getvalue(), {
+        "map_entity_count": len(entities),
+        "map_archetype_count": len(counts),
+        "map_root_entities": roots,
+        "map_parent_links": valid_links,
+        "map_invalid_parent_links": invalid_links,
+        "map_bounds": " x ".join(
+            f"{maxima[axis] - minima[axis]:.4g}" for axis in range(3)
+        ),
+        "map_center": ", ".join(
+            f"{(minima[axis] + maxima[axis]) / 2.0:.4f}" for axis in range(3)
+        ),
+        "map_preview": "top-down entity placement diagnostic",
+    }
+
+
+def _map_preview_from_xml(
+    xml: Path, name: str,
+) -> tuple[bytes | None, dict[str, Any], str | None]:
+    """Render a bounded YMAP entity placement overview."""
+    try:
+        root = _safe_codewalker_xml(xml).getroot()
+        entities, skipped = _map_entities(root)
+        name_element = _direct_child(root, "name")
+        metadata: dict[str, Any] = {
+            "map_name": ((name_element.text or "").strip() if name_element is not None else ""),
+            "map_car_generators": _map_item_count(root, "carGenerators"),
+            "map_box_occluders": _map_item_count(root, "boxOccluders"),
+            "map_occlude_models": _map_item_count(root, "occludeModels"),
+            "map_timecycle_modifiers": _map_item_count(root, "timeCycleModifiers"),
+        }
+        if skipped:
+            metadata["map_skipped_entities"] = skipped
+        if not entities:
+            metadata.update({
+                "map_entity_count": 0,
+                "map_archetype_count": 0,
+                "map_preview": "No positioned entities were found",
+            })
+            return None, metadata, None
+        image, rendered = _render_map_entities(entities, name)
+        metadata.update(rendered)
+        return image, metadata, None
+    except (OSError, ValueError, etree.XMLSyntaxError, OverflowError) as exc:
+        return None, {}, f"Map preview unavailable: {exc}"
+
+
 class NativeAssetInspector:
     """Describe native files and optionally invoke CodeWalker XML conversion."""
 
@@ -721,6 +950,12 @@ class NativeAssetInspector:
                 )
                 if preview_warning:
                     preview_metadata["collision_preview"] = preview_warning
+            elif suffix in MAP_PREVIEW_SUFFIXES:
+                geometry_image, preview_metadata, preview_warning = _map_preview_from_xml(
+                    xml, Path(name).name,
+                )
+                if preview_warning:
+                    preview_metadata["map_preview"] = preview_warning
             with xml.open("r", encoding="utf-8", errors="replace") as stream:
                 text = stream.read(2_000_000)
             if xml_size > 2_000_000:
