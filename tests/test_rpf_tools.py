@@ -263,6 +263,9 @@ def _dynamic_index(source: Path) -> dict:
 
     def index_archive(state: dict[str, bytes], archive_path: str) -> None:
         for path, data in state.items():
+            if path.endswith("/"):
+                add_directory(archive_path, path.rstrip("/"))
+                continue
             add_file(archive_path, path, data)
             if not path.casefold().endswith(".rpf"):
                 continue
@@ -276,6 +279,12 @@ def _dynamic_index(source: Path) -> dict:
             index_archive(nested_entries, nested_path)
 
     index_archive(root_entries, "")
+    for directory in (item for item in entries if item["kind"] == "directory"):
+        directory["child_count"] = sum(
+            1 for item in entries
+            if item["archive_path"] == directory["archive_path"]
+            and Path(item["path"]).parent.as_posix() == directory["path"]
+        )
     return {
         "schema_version": 1, "source": str(source.resolve()),
         "edition": "Enhanced", "archive_size": source.stat().st_size,
@@ -331,6 +340,25 @@ def _fake_archive_runner(args, **_kwargs):
             action, entry_path, relative = line.split("\t", 2)
             if action == "delete":
                 state.pop(entry_path)
+            elif action == "mkdir":
+                state[entry_path.rstrip("/") + "/"] = b""
+            elif action == "rmdir":
+                state.pop(entry_path.rstrip("/") + "/", None)
+            elif action == "rename":
+                destination = relative
+                marker = entry_path.rstrip("/") + "/"
+                if marker in state or any(key.startswith(marker) for key in state):
+                    rewritten = {}
+                    for key, value in state.items():
+                        if key == marker:
+                            rewritten[destination.rstrip("/") + "/"] = value
+                        elif key.startswith(marker):
+                            rewritten[destination.rstrip("/") + "/" + key[len(marker):]] = value
+                        else:
+                            rewritten[key] = value
+                    state = rewritten
+                else:
+                    state[destination] = state.pop(entry_path)
             else:
                 state[entry_path] = (payload_root / relative).read_bytes()
         source.write_bytes(_encode_archive(state))
@@ -717,6 +745,12 @@ def test_atomic_multi_entry_plan_batches_root_and_deep_changes_with_one_receipt(
     assert receipt["operation"] == "rpf_multi_entry_change"
     assert receipt["action"] == "batch"
     assert len(receipt["changes"]) == 5
+    legacy_receipt = json.loads(json.dumps(receipt))
+    legacy_receipt["schema_version"] = 1
+    for change in legacy_receipt["changes"]:
+        change["original"].pop("kind", None)
+        change["original"].pop("child_count", None)
+    assert service._validate_receipt(legacy_receipt)["schema_version"] == 1
     # One helper session for the outer archive and each of the three nested
     # containers, not one full outer reconstruction per authored change.
     assert len(calls) == 4
@@ -788,6 +822,100 @@ def test_multi_entry_plan_rejects_conflicts_tampering_and_stale_payloads(
     payload.write_bytes(b"changed")
     with pytest.raises(RuntimeError, match="payload.*changed after planning"):
         service.apply_change_plan(path, receipt_root=tmp_path / "stale")
+    assert archive.read_bytes() == original
+
+
+def test_atomic_tree_plan_creates_renames_removes_and_rolls_back_directories(
+    tmp_path, monkeypatch,
+):
+    service, archive, _entry, _fake = _transaction_service(tmp_path, monkeypatch)
+    original = archive.read_bytes()
+    payload = tmp_path / "tree.bin"
+    payload.write_bytes(b"tree payload")
+    create_plan = service.multi_change_plan(service.index(archive), [
+        {"action": "mkdir", "entry": "common/new"},
+        {"action": "mkdir", "entry": "common/new/deep"},
+        {
+            "action": "add", "entry": "common/new/deep/item.bin",
+            "payload": payload,
+        },
+        {
+            "action": "rename", "entry": "common/data/test.ymap",
+            "new_entry": "common/data/renamed.ymap",
+        },
+    ])
+    assert [item["action"] for item in create_plan["changes"]] == [
+        "mkdir", "mkdir", "add", "rename",
+    ]
+    create_path = tmp_path / "create-tree.json"
+    create_path.write_text(json.dumps(create_plan), encoding="utf-8")
+    receipt = service.apply_change_plan(
+        create_path, receipt_root=tmp_path / "create-transactions",
+    )
+    applied = _decode_archive(archive)
+    assert applied["common/new/"] == b""
+    assert applied["common/new/deep/"] == b""
+    assert applied["common/new/deep/item.bin"] == b"tree payload"
+    assert applied["common/data/renamed.ymap"] == b"original entry"
+    assert "common/data/test.ymap" not in applied
+    assert service.verify_transaction(receipt)["healthy"] is True
+
+    with pytest.raises(ValueError, match="not empty after reviewed changes"):
+        service.multi_change_plan(service.index(archive), [
+            {"action": "rmdir", "entry": "common/new"},
+        ])
+    remove_plan = service.multi_change_plan(service.index(archive), [
+        {"action": "delete", "entry": "common/new/deep/item.bin"},
+        {"action": "rmdir", "entry": "common/new/deep"},
+        {"action": "rmdir", "entry": "common/new"},
+    ])
+    remove_path = tmp_path / "remove-tree.json"
+    remove_path.write_text(json.dumps(remove_plan), encoding="utf-8")
+    remove_receipt = service.apply_change_plan(
+        remove_path, receipt_root=tmp_path / "remove-transactions",
+    )
+    removed = _decode_archive(archive)
+    assert not any(path.startswith("common/new") for path in removed)
+    assert service.verify_transaction(remove_receipt)["healthy"] is True
+    service.rollback_transaction(remove_receipt)
+    assert _decode_archive(archive) == applied
+    service.rollback_transaction(receipt)
+    assert archive.read_bytes() == original
+
+
+def test_atomic_tree_plan_renames_directory_and_can_delete_nested_archive(
+    tmp_path, monkeypatch,
+):
+    service, archive, _entry, _fake = _transaction_service(
+        tmp_path, monkeypatch, nested=True,
+    )
+    original = archive.read_bytes()
+    rename = service.multi_change_plan(service.index(archive), [{
+        "action": "rename", "entry": "common", "new_entry": "renamed",
+    }])
+    rename_path = tmp_path / "rename-dir.json"
+    rename_path.write_text(json.dumps(rename), encoding="utf-8")
+    receipt = service.apply_change_plan(
+        rename_path, receipt_root=tmp_path / "rename-transactions",
+    )
+    state = _decode_archive(archive)
+    assert state["renamed/data/test.ymap"] == b"original entry"
+    assert not any(path.startswith("common/") for path in state)
+    assert service.verify_transaction(receipt)["healthy"] is True
+    service.rollback_transaction(receipt)
+    assert archive.read_bytes() == original
+
+    delete_archive = service.multi_change_plan(service.index(archive), [{
+        "action": "delete", "entry": "x64/textures.rpf",
+    }])
+    delete_path = tmp_path / "delete-nested-container.json"
+    delete_path.write_text(json.dumps(delete_archive), encoding="utf-8")
+    delete_receipt = service.apply_change_plan(
+        delete_path, receipt_root=tmp_path / "archive-delete-transactions",
+    )
+    assert "x64/textures.rpf" not in _decode_archive(archive)
+    assert service.verify_transaction(delete_receipt)["healthy"] is True
+    service.rollback_transaction(delete_receipt)
     assert archive.read_bytes() == original
 
 
@@ -926,6 +1054,49 @@ def test_rpf_subtree_workspace_sync_rejects_wrong_base_and_manifest_escape(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="escapes its selection"):
         service.subtree_sync_plan(index, workspace)
+
+
+def test_rpf_subtree_workspace_sync_preserves_and_reconciles_directory_tree(
+    tmp_path, monkeypatch,
+):
+    service, archive, _entry, _fake = _transaction_service(tmp_path, monkeypatch)
+    state = _decode_archive(archive)
+    state["common/empty/"] = b""
+    archive.write_bytes(_encode_archive(state))
+    original = archive.read_bytes()
+    index = service.index(archive)
+    workspace = service.extract_subtree(
+        index, tmp_path / "tree-workspace", directory_path="common",
+    )
+    export_manifest = json.loads(
+        (workspace / ".allin1-rpf-export.json").read_text(encoding="utf-8")
+    )
+    assert export_manifest["directory_count"] == 2
+    assert (workspace / "empty").is_dir()
+    (workspace / "empty").rmdir()
+    nested = workspace / "new" / "deep"
+    nested.mkdir(parents=True)
+    (nested / "payload.bin").write_bytes(b"workspace tree")
+
+    plan = service.subtree_sync_plan(index, workspace)
+    assert {(item["action"], item["entry"]) for item in plan["changes"]} == {
+        ("mkdir", "common/new"),
+        ("mkdir", "common/new/deep"),
+        ("add", "common/new/deep/payload.bin"),
+        ("rmdir", "common/empty"),
+    }
+    assert plan["workspace_sync"]["changed_directories"] == 3
+    plan_path = tmp_path / "tree-sync.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    receipt = service.apply_change_plan(
+        plan_path, receipt_root=tmp_path / "tree-sync-transactions",
+    )
+    applied = _decode_archive(archive)
+    assert "common/empty/" not in applied
+    assert applied["common/new/deep/payload.bin"] == b"workspace tree"
+    assert service.verify_transaction(receipt)["healthy"] is True
+    service.rollback_transaction(receipt)
+    assert archive.read_bytes() == original
 
 
 def test_rpf_diff_detects_tree_and_exact_content_changes_and_exports_reports(

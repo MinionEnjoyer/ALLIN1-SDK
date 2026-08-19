@@ -2917,6 +2917,26 @@ namespace RpfPatcher
             return matches.SingleOrDefault();
         }
 
+        static RpfEntry FindExactEntry(RpfFile rpf, string entryPath)
+        {
+            string requested = entryPath.Replace('\\', '/').Trim('/');
+            if (string.IsNullOrEmpty(requested)) return null;
+            var matches = rpf.AllEntries?
+                .Where(entry =>
+                {
+                    string relative = RelativeRpfEntryPath(rpf, entry).TrimEnd('/');
+                    return string.Equals(relative, requested,
+                            StringComparison.OrdinalIgnoreCase)
+                        || relative.EndsWith("/" + requested,
+                            StringComparison.OrdinalIgnoreCase);
+                })
+                .ToArray() ?? Array.Empty<RpfEntry>();
+            if (matches.Length > 1)
+                throw new InvalidOperationException(
+                    "RPF entry path is ambiguous: " + entryPath);
+            return matches.SingleOrDefault();
+        }
+
         static RpfFile OpenWritableRpf(string gtaPath, string rpfPath)
         {
             bool isGen9 = File.Exists(Path.Combine(gtaPath, "GTA5_Enhanced.exe"))
@@ -3033,8 +3053,10 @@ namespace RpfPatcher
         }
 
         // Apply a reviewed set of exact root-archive entry operations after one
-        // writable scan. Each TSV line is action<TAB>entry/path<TAB>payload/path;
-        // delete lines have an empty payload field. Nested archive orchestration
+        // writable scan. Each TSV line is action<TAB>entry/path<TAB>argument.
+        // File add/replace arguments are payload paths, rename arguments are the
+        // destination entry path, and delete/mkdir/rmdir arguments are empty.
+        // Nested archive orchestration
         // is handled by the SDK transaction layer and reaches this command as a
         // verified replacement of the immediate child RPF.
         static int ApplyEntryChanges(string[] args)
@@ -3069,6 +3091,7 @@ namespace RpfPatcher
                     return 4;
                 }
                 var targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var results = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 string payloadPrefix = payloadRoot.TrimEnd(
                     Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                     + Path.DirectorySeparatorChar;
@@ -3076,28 +3099,67 @@ namespace RpfPatcher
                 {
                     string action = change[0].Trim().ToLowerInvariant();
                     string entryPath = change[1].Replace('\\', '/').Trim('/');
-                    if (action != "replace" && action != "add" && action != "delete")
+                    if (action != "replace" && action != "add" && action != "delete"
+                        && action != "mkdir" && action != "rmdir" && action != "rename")
                     {
                         Console.Error.WriteLine($"ERROR: Invalid RPF action: {change[0]}");
                         return 4;
                     }
                     if (string.IsNullOrWhiteSpace(entryPath)
-                        || entryPath.Contains("../") || entryPath.Contains("/..")
+                        || entryPath.Split('/').Any(part => string.IsNullOrEmpty(part)
+                            || part == "." || part == "..")
                         || Path.IsPathRooted(entryPath) || !targets.Add(entryPath))
                     {
                         Console.Error.WriteLine(
                             $"ERROR: Unsafe or duplicate RPF target: {change[1]}");
                         return 4;
                     }
-                    if (action == "delete")
+                    if (action == "rename")
+                    {
+                        string destination = change[2].Replace('\\', '/').Trim('/');
+                        int sourceSeparator = entryPath.LastIndexOf('/');
+                        int destinationSeparator = destination.LastIndexOf('/');
+                        string sourceParent = sourceSeparator >= 0
+                            ? entryPath.Substring(0, sourceSeparator) : string.Empty;
+                        string destinationParent = destinationSeparator >= 0
+                            ? destination.Substring(0, destinationSeparator) : string.Empty;
+                        if (string.IsNullOrWhiteSpace(destination)
+                            || destination.Split('/').Any(part => string.IsNullOrEmpty(part)
+                                || part == "." || part == "..")
+                            || Path.IsPathRooted(destination)
+                            || !sourceParent.Equals(destinationParent,
+                                StringComparison.OrdinalIgnoreCase)
+                            || destination.Equals(entryPath,
+                                StringComparison.OrdinalIgnoreCase)
+                            || !results.Add(destination))
+                        {
+                            Console.Error.WriteLine(
+                                $"ERROR: Unsafe or duplicate RPF rename destination: {change[2]}");
+                            return 4;
+                        }
+                        continue;
+                    }
+                    if (action == "delete" || action == "mkdir" || action == "rmdir")
                     {
                         if (!string.IsNullOrEmpty(change[2]))
                         {
                             Console.Error.WriteLine(
-                                $"ERROR: Delete action has a payload: {entryPath}");
+                                $"ERROR: {action} action has an argument: {entryPath}");
+                            return 4;
+                        }
+                        if (action == "mkdir" && !results.Add(entryPath))
+                        {
+                            Console.Error.WriteLine(
+                                $"ERROR: Duplicate RPF result target: {entryPath}");
                             return 4;
                         }
                         continue;
+                    }
+                    if (!results.Add(entryPath))
+                    {
+                        Console.Error.WriteLine(
+                            $"ERROR: Duplicate RPF result target: {entryPath}");
+                        return 4;
                     }
                     string relative = change[2]
                         .Replace('/', Path.DirectorySeparatorChar)
@@ -3116,38 +3178,109 @@ namespace RpfPatcher
                 // Validate the entire manifest before the first change. The SDK also
                 // operates only on a disposable staged archive, but this keeps the
                 // helper deterministic when called independently.
+                var plannedDirectories = new HashSet<string>(
+                    changes.Where(change => change[0].Trim().Equals(
+                        "mkdir", StringComparison.OrdinalIgnoreCase))
+                    .Select(change => change[1].Replace('\\', '/').Trim('/')),
+                    StringComparer.OrdinalIgnoreCase);
                 foreach (string[] change in changes)
                 {
                     string action = change[0].Trim().ToLowerInvariant();
                     string entryPath = change[1].Replace('\\', '/').Trim('/');
-                    var existing = FindExactFileEntry(rpf, entryPath);
-                    if (action == "add" && existing != null)
+                    var existing = FindExactEntry(rpf, entryPath);
+                    if ((action == "add" || action == "mkdir") && existing != null)
                         throw new InvalidDataException(
-                            $"Add target already exists: {entryPath}");
+                            $"{action} target already exists: {entryPath}");
                     if ((action == "replace" || action == "delete") && existing == null)
                         throw new InvalidDataException(
                             $"{action} target does not exist: {entryPath}");
-                    if (action == "add")
+                    if ((action == "replace" || action == "delete")
+                        && !(existing is RpfFileEntry))
+                        throw new InvalidDataException(
+                            $"{action} target is not a file: {entryPath}");
+                    if (action == "rmdir" && !(existing is RpfDirectoryEntry))
+                        throw new InvalidDataException(
+                            $"rmdir target is not a directory: {entryPath}");
+                    if (action == "rename")
+                    {
+                        if (existing == null)
+                            throw new InvalidDataException(
+                                $"rename target does not exist: {entryPath}");
+                        if (existing is RpfFileEntry
+                            && existing.Name.EndsWith(".rpf",
+                                StringComparison.OrdinalIgnoreCase))
+                            throw new InvalidDataException(
+                                $"rename does not support archive entries: {entryPath}");
+                        string destination = change[2].Replace('\\', '/').Trim('/');
+                        if (FindExactEntry(rpf, destination) != null)
+                            throw new InvalidDataException(
+                                $"rename destination already exists: {destination}");
+                    }
+                    if (action == "add" || action == "mkdir")
                     {
                         int separator = entryPath.LastIndexOf('/');
                         string parentPath = separator >= 0
                             ? entryPath.Substring(0, separator) : string.Empty;
-                        if (FindExactDirectory(rpf, parentPath) == null)
+                        if (FindExactDirectory(rpf, parentPath) == null
+                            && !plannedDirectories.Contains(parentPath))
                             throw new InvalidDataException(
                                 $"RPF target directory not found: {parentPath}");
                     }
                 }
 
                 int applied = 0;
-                foreach (string[] change in changes)
+                var ordered = changes
+                    .OrderBy(change =>
+                    {
+                        string action = change[0].Trim().ToLowerInvariant();
+                        if (action == "mkdir") return 0;
+                        if (action == "rename") return 1;
+                        if (action == "replace" || action == "add") return 2;
+                        if (action == "delete") return 3;
+                        return 4;
+                    })
+                    .ThenBy(change =>
+                    {
+                        string action = change[0].Trim().ToLowerInvariant();
+                        int depth = change[1].Count(character => character == '/');
+                        return action == "rmdir" ? -depth : depth;
+                    })
+                    .ToArray();
+                foreach (string[] change in ordered)
                 {
                     string action = change[0].Trim().ToLowerInvariant();
                     string entryPath = change[1].Replace('\\', '/').Trim('/');
-                    var existing = FindExactFileEntry(rpf, entryPath);
+                    var existing = FindExactEntry(rpf, entryPath);
                     if (action == "delete")
                     {
                         RpfFile.DeleteEntry(existing);
                         Console.WriteLine($"Deleted RPF entry: {entryPath}");
+                    }
+                    else if (action == "mkdir")
+                    {
+                        int separator = entryPath.LastIndexOf('/');
+                        string parentPath = separator >= 0
+                            ? entryPath.Substring(0, separator) : string.Empty;
+                        string name = entryPath.Split('/').Last();
+                        var parent = FindExactDirectory(rpf, parentPath);
+                        RpfFile.CreateDirectory(parent, name);
+                        Console.WriteLine($"Created RPF directory: {entryPath}");
+                    }
+                    else if (action == "rmdir")
+                    {
+                        var directory = existing as RpfDirectoryEntry;
+                        if (directory.Directories.Count != 0 || directory.Files.Count != 0)
+                            throw new InvalidDataException(
+                                $"rmdir target is not empty: {entryPath}");
+                        RpfFile.DeleteEntry(directory);
+                        Console.WriteLine($"Removed empty RPF directory: {entryPath}");
+                    }
+                    else if (action == "rename")
+                    {
+                        string destination = change[2].Replace('\\', '/').Trim('/');
+                        string name = destination.Split('/').Last();
+                        RpfFile.RenameEntry(existing, name);
+                        Console.WriteLine($"Renamed RPF entry: {entryPath} -> {destination}");
                     }
                     else
                     {
@@ -3157,7 +3290,8 @@ namespace RpfPatcher
                         byte[] data = File.ReadAllBytes(Path.Combine(payloadRoot, relative));
                         if (action == "replace")
                         {
-                            RpfFile.CreateFile(existing.Parent, existing.Name, data, true);
+                            var file = existing as RpfFileEntry;
+                            RpfFile.CreateFile(file.Parent, file.Name, data, true);
                             Console.WriteLine(
                                 $"Replaced RPF entry: {entryPath} ({data.Length:N0} bytes)");
                         }

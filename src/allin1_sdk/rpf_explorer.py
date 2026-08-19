@@ -484,6 +484,10 @@ class RpfExplorerDialog(ttk.Frame):
             state="disabled",
         )
         menu.add_command(
+            label="Plan new directory…", command=self._plan_directory,
+            state="disabled",
+        )
+        menu.add_command(
             label="Plan subtree workspace sync…", command=self._plan_subtree_sync,
             state="disabled",
         )
@@ -527,6 +531,9 @@ class RpfExplorerDialog(ttk.Frame):
         menu.add_command(
             label="Plan deletion…", command=self._plan_deletion, state="disabled",
         )
+        menu.add_command(
+            label="Plan rename…", command=self._plan_rename, state="disabled",
+        )
         self.entry_action_menus.append(menu)
         return menu
 
@@ -537,6 +544,7 @@ class RpfExplorerDialog(ttk.Frame):
             menu.entryconfigure("Extract current archive tree…", state=state)
             menu.entryconfigure("Compare with archive…", state=state)
             menu.entryconfigure("Create multi-entry plan…", state=state)
+            menu.entryconfigure("Plan new directory…", state=state)
             menu.entryconfigure("Plan subtree workspace sync…", state=state)
             menu.entryconfigure("Run disposable archive canary…", state=state)
 
@@ -548,6 +556,7 @@ class RpfExplorerDialog(ttk.Frame):
             menu.entryconfigure("Plan replacement…", state=state)
             menu.entryconfigure("Plan new entry…", state=state)
             menu.entryconfigure("Plan deletion…", state=state)
+            menu.entryconfigure("Plan rename…", state=state)
 
     def _set_subtree_action(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -908,13 +917,6 @@ class RpfExplorerDialog(ttk.Frame):
         entry = self._selected()
         if entry is None or self.index is None or self.service is None:
             return
-        if entry.kind in {"directory", "archive"}:
-            messagebox.showinfo(
-                "File entry required",
-                "Select a binary or resource file. Directory and nested-archive deletion "
-                "is intentionally not available.", parent=self,
-            )
-            return
         output = filedialog.asksaveasfilename(
             parent=self, title="Save RPF delete safety plan",
             initialfile=f"{Path(entry.name).stem}-delete-plan.json",
@@ -923,12 +925,103 @@ class RpfExplorerDialog(ttk.Frame):
         if not output:
             return
         try:
-            plan = self.service.deletion_plan(self.index, entry)
+            plan = (
+                self.service.multi_change_plan(self.index, [{
+                    "action": "rmdir" if entry.kind == "directory" else "delete",
+                    "archive_path": entry.archive_path, "entry": entry.path,
+                }])
+                if entry.kind in {"directory", "archive"}
+                else self.service.deletion_plan(self.index, entry)
+            )
             Path(output).write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
         except (OSError, RuntimeError, ValueError) as exc:
             messagebox.showerror("Could not create delete plan", str(exc), parent=self)
             return
-        self._report_plan(plan, Path(output))
+        if plan.get("operation") == "rpf_multi_entry_change":
+            self.status.set(
+                f"Wrote {plan['status']} atomic delete plan; no RPF changes were made: "
+                f"{output}"
+            )
+        else:
+            self._report_plan(plan, Path(output))
+
+    def _plan_directory(self) -> None:
+        if self.index is None or self.service is None:
+            return
+        selected = self._selected()
+        archive_path = simpledialog.askstring(
+            "Nested archive",
+            "Nested RPF virtual path (use ! between levels; blank means root):",
+            initialvalue=selected.archive_path if selected else "", parent=self,
+        )
+        if archive_path is None:
+            return
+        entry_path = simpledialog.askstring(
+            "New RPF directory", "Exact new virtual directory path:", parent=self,
+        )
+        if not entry_path:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save RPF directory safety plan",
+            initialfile=f"{Path(entry_path).name}-mkdir-plan.json",
+            defaultextension=".json", filetypes=(("JSON", "*.json"),),
+        )
+        if not output:
+            return
+        try:
+            plan = self.service.multi_change_plan(self.index, [{
+                "action": "mkdir", "archive_path": archive_path,
+                "entry": entry_path,
+            }])
+            Path(output).write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("Could not create directory plan", str(exc), parent=self)
+            return
+        self.status.set(
+            f"Wrote {plan['status']} directory plan; no RPF changes were made: {output}"
+        )
+
+    def _plan_rename(self) -> None:
+        entry = self._selected()
+        if entry is None or self.index is None or self.service is None:
+            return
+        if entry.kind == "archive":
+            messagebox.showinfo(
+                "Archive rename unavailable",
+                "Nested RPF containers cannot be renamed because their indexed archive "
+                "identity would also change. Extract and review that migration separately.",
+                parent=self,
+            )
+            return
+        parent = str(Path(entry.path).parent).replace("\\", "/")
+        if parent == ".":
+            parent = ""
+        authored = simpledialog.askstring(
+            "Rename RPF entry",
+            "New exact path in the same parent directory:",
+            initialvalue=f"{parent + '/' if parent else ''}{entry.name}", parent=self,
+        )
+        if not authored:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save RPF rename safety plan",
+            initialfile=f"{Path(entry.name).stem}-rename-plan.json",
+            defaultextension=".json", filetypes=(("JSON", "*.json"),),
+        )
+        if not output:
+            return
+        try:
+            plan = self.service.multi_change_plan(self.index, [{
+                "action": "rename", "archive_path": entry.archive_path,
+                "entry": entry.path, "new_entry": authored,
+            }])
+            Path(output).write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("Could not create rename plan", str(exc), parent=self)
+            return
+        self.status.set(
+            f"Wrote {plan['status']} rename plan; no RPF changes were made: {output}"
+        )
 
     def _report_plan(self, plan: dict, output: Path) -> None:
         self.status.set(

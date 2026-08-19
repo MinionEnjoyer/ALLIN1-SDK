@@ -20,8 +20,8 @@ from allin1_sdk.processes import run_hidden
 
 RPF_REPLACEMENT_PLAN_SCHEMA = 3
 RPF_TRANSACTION_RECEIPT_SCHEMA = 2
-RPF_MULTI_CHANGE_PLAN_SCHEMA = 1
-RPF_MULTI_TRANSACTION_RECEIPT_SCHEMA = 1
+RPF_MULTI_CHANGE_PLAN_SCHEMA = 2
+RPF_MULTI_TRANSACTION_RECEIPT_SCHEMA = 2
 _GTA_PROCESS_NAMES = {"gta5.exe", "gta5_enhanced.exe"}
 _COPY_MARGIN_BYTES = 64 * 1024 * 1024
 _MAX_CANARY_ARCHIVE_BYTES = 512 * 1024 * 1024
@@ -30,6 +30,8 @@ _MAX_SUBTREE_FILES = 25_000
 _MAX_SUBTREE_LOGICAL_BYTES = 16 * 1024 * 1024 * 1024
 _MAX_MULTI_ENTRY_CHANGES = 1_000
 _RPF_ACTIONS = {"replace", "add", "delete"}
+_RPF_TREE_ACTIONS = {"mkdir", "rmdir", "rename"}
+_RPF_MULTI_ACTIONS = _RPF_ACTIONS | _RPF_TREE_ACTIONS
 _RPF_DIFF_ENTRY_FIELDS = (
     "archive_path", "path", "kind", "size", "stored_size", "name_hash",
     "short_name_hash", "encrypted", "compressed", "resource_version",
@@ -391,9 +393,16 @@ class RpfExplorerService:
             and entry.kind != "directory"
             and (not prefix or entry.path.casefold().startswith(prefix.casefold()))
         )
-        if not selected:
+        selected_directories = tuple(
+            entry for entry in index.entries
+            if entry.archive_path.casefold() == selected_archive.casefold()
+            and entry.kind == "directory"
+            and entry.path.casefold() != selected_directory.casefold()
+            and (not prefix or entry.path.casefold().startswith(prefix.casefold()))
+        )
+        if not selected and not selected_directories:
             label = f"{selected_archive}::{selected_directory}".strip(":") or "root"
-            raise ValueError(f"RPF subtree contains no extractable files: {label}")
+            raise ValueError(f"RPF subtree contains no exportable entries: {label}")
         if len(selected) > _MAX_SUBTREE_FILES:
             raise ValueError(
                 f"RPF subtree contains {len(selected):,} files; the guarded export limit "
@@ -424,6 +433,18 @@ class RpfExplorerService:
             destinations.add(folded)
             exports.append((entry, relative))
 
+        directory_exports: list[tuple[RpfEntryRecord, str]] = []
+        for entry in sorted(selected_directories, key=lambda item: item.path.casefold()):
+            relative = entry.path[len(prefix):] if prefix else entry.path
+            relative = _safe_virtual_path(relative)
+            folded = relative.casefold()
+            if folded in destinations:
+                raise ValueError(
+                    f"RPF subtree contains a file/directory output collision: {relative}"
+                )
+            destinations.add(folded)
+            directory_exports.append((entry, relative))
+
         target = Path(destination).expanduser().resolve()
         if target.exists() or target.is_symlink():
             raise ValueError(f"RPF subtree destination already exists: {target}")
@@ -435,24 +456,30 @@ class RpfExplorerService:
             prefix=f".{target.name}.allin1-stage-", dir=target.parent,
         )).resolve()
         try:
-            with tempfile.TemporaryDirectory(prefix="allin1-rpf-export-") as temporary:
-                manifest = Path(temporary) / "entries.tsv"
-                manifest.write_text("".join(
-                    f"{entry.archive_path}\t{entry.path}\t{relative}\n"
-                    for entry, relative in exports
-                ), encoding="utf-8")
-                completed = run_hidden(
-                    [
-                        self.patcher, "extract-virtual-entries", self.gta_path,
-                        index.source, manifest, staging,
-                    ],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace",
-                )
-            if completed.returncode:
-                detail = (
-                    completed.stderr or completed.stdout or "unknown helper error"
-                ).strip()
-                raise ValueError(f"RPF subtree extraction failed: {detail}")
+            for _entry, relative in directory_exports:
+                directory_output = (staging / Path(relative)).resolve()
+                if not directory_output.is_relative_to(staging):
+                    raise ValueError(f"RPF subtree directory escapes staging: {relative}")
+                directory_output.mkdir(parents=True, exist_ok=True)
+            if exports:
+                with tempfile.TemporaryDirectory(prefix="allin1-rpf-export-") as temporary:
+                    manifest = Path(temporary) / "entries.tsv"
+                    manifest.write_text("".join(
+                        f"{entry.archive_path}\t{entry.path}\t{relative}\n"
+                        for entry, relative in exports
+                    ), encoding="utf-8")
+                    completed = run_hidden(
+                        [
+                            self.patcher, "extract-virtual-entries", self.gta_path,
+                            index.source, manifest, staging,
+                        ],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    )
+                if completed.returncode:
+                    detail = (
+                        completed.stderr or completed.stdout or "unknown helper error"
+                    ).strip()
+                    raise ValueError(f"RPF subtree extraction failed: {detail}")
 
             files: list[dict[str, Any]] = []
             for entry, relative in exports:
@@ -474,6 +501,12 @@ class RpfExplorerService:
                 raise RuntimeError(
                     "RPF source changed during read-only subtree extraction; output was discarded"
                 )
+            directories = [{
+                "archive_path": entry.archive_path,
+                "entry_path": entry.path,
+                "relative_path": relative,
+                "child_count": entry.child_count,
+            } for entry, relative in directory_exports]
             export_manifest = {
                 "schema_version": 1,
                 "operation": "rpf_subtree_export",
@@ -489,7 +522,9 @@ class RpfExplorerService:
                     "directory_path": selected_directory,
                 },
                 "file_count": len(files),
+                "directory_count": len(directories),
                 "logical_bytes": logical_bytes,
+                "directories": directories,
                 "files": files,
             }
             _write_json_atomic(staging / ".allin1-rpf-export.json", export_manifest)
@@ -773,7 +808,7 @@ class RpfExplorerService:
     def multi_change_plan(
         self, index: RpfIndex, authored_changes: Iterable[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Create one guarded plan for many root and nested entry changes."""
+        """Create one guarded plan for file and directory tree changes."""
         self._require_tool()
         if index.source.suffix.casefold() != ".rpf" or not index.source.is_file():
             raise ValueError("RPF multi-change plans require a loose .rpf archive")
@@ -790,11 +825,15 @@ class RpfExplorerService:
         seen: set[tuple[str, str]] = set()
         warnings: list[str] = []
         archive_records = {item.path.casefold(): item.path for item in index.archives}
+        indexed = {
+            (entry.archive_path.casefold(), entry.path.casefold()): entry
+            for entry in index.entries
+        }
         for number, authored in enumerate(requested, start=1):
             if not isinstance(authored, dict):
                 raise ValueError(f"RPF multi-change item {number} is not an object")
             authored_action = str(authored.get("action", "")).casefold()
-            if authored_action not in _RPF_ACTIONS | {"upsert"}:
+            if authored_action not in _RPF_MULTI_ACTIONS | {"upsert"}:
                 raise ValueError(f"RPF multi-change item {number} has an invalid action")
             archive_path = _safe_virtual_path(
                 str(authored.get("archive_path", "")), allow_empty=True,
@@ -817,22 +856,47 @@ class RpfExplorerService:
                 ("replace" if existing is not None else "add")
                 if authored_action == "upsert" else authored_action
             )
-            if action == "add":
+            if action in {"add", "mkdir"}:
                 if existing is not None:
                     raise ValueError(
-                        f"RPF add target already exists: {archive_path}::{entry_path}"
+                        f"RPF {action} target already exists: {archive_path}::{entry_path}"
                     )
-                self._require_existing_parent(index, archive_path, entry_path)
             elif existing is None:
                 raise ValueError(
                     f"RPF {action} target does not exist: {archive_path}::{entry_path}"
                 )
-            elif existing.kind == "directory" or (
-                action == "delete" and existing.kind == "archive"
-            ):
+            elif action in {"replace", "delete"} and existing.kind == "directory":
                 raise ValueError(
                     f"RPF {action} cannot target {existing.kind}: {existing.virtual_name}"
                 )
+            elif action == "rmdir" and existing.kind != "directory":
+                raise ValueError(f"RPF rmdir requires a directory: {existing.virtual_name}")
+
+            new_entry: str | None = None
+            if action == "rename":
+                if existing is None or existing.kind == "archive":
+                    raise ValueError("RPF rename does not support archive entries")
+                new_entry = _safe_virtual_path(str(authored.get("new_entry", "")))
+                if new_entry.casefold() == entry_path.casefold():
+                    raise ValueError("RPF rename destination must differ from its source")
+                old_parent = str(PurePosixPath(entry_path).parent)
+                new_parent = str(PurePosixPath(new_entry).parent)
+                if old_parent == ".":
+                    old_parent = ""
+                if new_parent == ".":
+                    new_parent = ""
+                if old_parent.casefold() != new_parent.casefold():
+                    raise ValueError("RPF rename is limited to the same parent directory")
+                destination_existing = indexed.get(
+                    (archive_path.casefold(), new_entry.casefold())
+                )
+                if destination_existing is not None:
+                    raise ValueError(
+                        f"RPF rename destination already exists: "
+                        f"{archive_path}::{new_entry}"
+                    )
+            elif authored.get("new_entry") not in (None, ""):
+                raise ValueError(f"RPF {action} item {number} cannot include new_entry")
 
             payload_meta: dict[str, Any] | None = None
             if action in {"replace", "add"}:
@@ -857,14 +921,104 @@ class RpfExplorerService:
                         "the native resource type before applying."
                     )
             elif authored.get("payload") not in (None, ""):
-                raise ValueError(f"RPF delete item {number} cannot include a payload")
-            if existing is not None:
+                raise ValueError(f"RPF {action} item {number} cannot include a payload")
+            if existing is not None and existing.kind != "directory":
                 existing_entries.append(existing)
             prepared.append({
                 "action": action, "archive_path": archive_path,
                 "entry": entry_path, "existing": existing,
                 "payload": payload_meta,
+                **({"new_entry": new_entry} if new_entry is not None else {}),
             })
+
+        source_actions = {
+            (item["archive_path"].casefold(), item["entry"].casefold()): item
+            for item in prepared
+        }
+        available_directories = {
+            (entry.archive_path.casefold(), entry.path.casefold())
+            for entry in index.entries if entry.kind == "directory"
+        }
+        for item in prepared:
+            existing = item["existing"]
+            identity = (item["archive_path"].casefold(), item["entry"].casefold())
+            if item["action"] == "rmdir" or (
+                item["action"] == "rename" and existing is not None
+                and existing.kind == "directory"
+            ):
+                available_directories.discard(identity)
+            if item["action"] == "mkdir":
+                available_directories.add(identity)
+            elif item["action"] == "rename" and existing is not None and (
+                existing.kind == "directory"
+            ):
+                available_directories.add(
+                    (item["archive_path"].casefold(), item["new_entry"].casefold())
+                )
+
+        for item in prepared:
+            if item["action"] not in {"add", "mkdir"}:
+                continue
+            parent = str(PurePosixPath(item["entry"]).parent)
+            if parent in {"", "."}:
+                continue
+            parent_id = (item["archive_path"].casefold(), parent.casefold())
+            if parent_id not in available_directories:
+                raise ValueError(f"RPF target directory does not exist: {parent}")
+
+        # Removing a directory is explicit and non-recursive: every indexed child
+        # must be independently reviewed for deletion before the parent can vanish.
+        for item in prepared:
+            if item["action"] != "rmdir":
+                continue
+            prefix = item["entry"].casefold() + "/"
+            for child in index.entries:
+                if child.archive_path.casefold() != item["archive_path"].casefold() or not (
+                    child.path.casefold().startswith(prefix)
+                ):
+                    continue
+                child_change = source_actions.get(
+                    (child.archive_path.casefold(), child.path.casefold())
+                )
+                required = "rmdir" if child.kind == "directory" else "delete"
+                if child_change is None or child_change["action"] != required:
+                    raise ValueError(
+                        f"RPF directory is not empty after reviewed changes: "
+                        f"{item['archive_path']}::{item['entry']}"
+                    )
+
+        # A directory rename updates every descendant path. Mixing that implicit
+        # path rewrite with other edits in the same subtree would be order-dependent.
+        for item in prepared:
+            existing = item["existing"]
+            if item["action"] != "rename" or existing is None or (
+                existing.kind != "directory"
+            ):
+                continue
+            old_prefix = item["entry"].casefold() + "/"
+            new_prefix = item["new_entry"].casefold() + "/"
+            if any(
+                other is not item
+                and other["archive_path"].casefold() == item["archive_path"].casefold()
+                and (
+                    other["entry"].casefold().startswith(old_prefix)
+                    or other["entry"].casefold().startswith(new_prefix)
+                )
+                for other in prepared
+            ):
+                raise ValueError(
+                    "RPF directory rename cannot be mixed with edits inside its subtree"
+                )
+
+        final_targets: set[tuple[str, str]] = set()
+        for item in prepared:
+            if item["action"] in {"delete", "rmdir"}:
+                continue
+            result_entry = item.get("new_entry", item["entry"])
+            target = (item["archive_path"].casefold(), result_entry.casefold())
+            if target in final_targets:
+                raise ValueError("RPF multi-change plan has a duplicate result target")
+            final_targets.add(target)
 
         # Replacing a child RPF while also editing its internals would produce
         # order-dependent results, so the reviewed plan must choose one operation.
@@ -894,10 +1048,20 @@ class RpfExplorerService:
         for item in prepared:
             existing = item.pop("existing")
             original = (
-                {"exists": False, "size": 0, "sha256": None}
+                {
+                    "exists": False, "kind": None, "size": 0,
+                    "sha256": None, "child_count": None,
+                }
                 if existing is None else {
-                    "exists": True, "size": existing.size,
-                    "sha256": original_hashes[existing.id],
+                    "exists": True, "kind": existing.kind, "size": existing.size,
+                    "sha256": (
+                        None if existing.kind == "directory"
+                        else original_hashes[existing.id]
+                    ),
+                    "child_count": (
+                        int(existing.child_count or 0)
+                        if existing.kind == "directory" else None
+                    ),
                 }
             )
             changes.append({**item, "original": original})
@@ -956,10 +1120,13 @@ class RpfExplorerService:
         source = manifest.get("source")
         selection = manifest.get("selection")
         records = manifest.get("files")
+        directory_records = manifest.get("directories", [])
         if not isinstance(source, dict) or not isinstance(selection, dict):
             raise ValueError("RPF subtree export is missing source or selection metadata")
-        if not isinstance(records, list) or not records:
-            raise ValueError("RPF subtree export contains no file records")
+        if not isinstance(records, list) or not isinstance(directory_records, list):
+            raise ValueError("RPF subtree export has invalid file or directory records")
+        if not records and not directory_records:
+            raise ValueError("RPF subtree export contains no entry records")
         if len(records) > _MAX_SUBTREE_FILES:
             raise ValueError("RPF subtree export exceeds the guarded file limit")
         source_hash = source.get("sha256")
@@ -981,6 +1148,10 @@ class RpfExplorerService:
         self._require_supported_nested_archive(index, archive_path)
         if manifest.get("file_count") != len(records):
             raise ValueError("RPF subtree export file count does not match its manifest")
+        if manifest.get("directory_count", len(directory_records)) != len(
+            directory_records
+        ):
+            raise ValueError("RPF subtree export directory count does not match its manifest")
 
         recorded: dict[str, dict[str, Any]] = {}
         for number, item in enumerate(records, start=1):
@@ -1018,13 +1189,65 @@ class RpfExplorerService:
                 **item, "relative_path": relative, "entry_path": entry_path,
             }
 
+        prefix = f"{directory_path}/" if directory_path else ""
+        base_directories: dict[str, tuple[str, str]] = {}
+        for entry in index.entries:
+            if entry.archive_path.casefold() != archive_path.casefold() or (
+                entry.kind != "directory"
+            ):
+                continue
+            if entry.path.casefold() == directory_path.casefold():
+                continue
+            if prefix and not entry.path.casefold().startswith(prefix.casefold()):
+                continue
+            relative = entry.path[len(prefix):] if prefix else entry.path
+            relative = _safe_virtual_path(relative)
+            base_directories[relative.casefold()] = (relative, entry.path)
+        if directory_records:
+            manifested_directories: dict[str, tuple[str, str]] = {}
+            for number, item in enumerate(directory_records, start=1):
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        f"RPF subtree export directory record {number} is invalid"
+                    )
+                relative = _safe_virtual_path(str(item.get("relative_path", "")))
+                entry_path = _safe_virtual_path(str(item.get("entry_path", "")))
+                item_archive = _safe_virtual_path(
+                    str(item.get("archive_path", "")), allow_empty=True,
+                )
+                expected_entry = f"{directory_path}/{relative}" if directory_path else relative
+                if item_archive.casefold() != archive_path.casefold() or (
+                    entry_path.casefold() != expected_entry.casefold()
+                ):
+                    raise ValueError(
+                        f"RPF subtree export directory escapes its selection: {relative}"
+                    )
+                if relative.casefold() in manifested_directories:
+                    raise ValueError(
+                        f"RPF subtree export contains a duplicate directory: {relative}"
+                    )
+                manifested_directories[relative.casefold()] = (relative, entry_path)
+            if set(manifested_directories) != set(base_directories):
+                raise ValueError(
+                    "RPF subtree export directory records do not match its source index"
+                )
+
         workspace_files: dict[str, tuple[str, Path]] = {}
+        workspace_directories: dict[str, str] = {}
         for path in root.rglob("*"):
             if path.is_symlink():
                 raise ValueError(f"RPF subtree workspace contains a symbolic link: {path}")
+            relative = path.relative_to(root).as_posix()
+            if path.is_dir():
+                relative = _safe_virtual_path(relative)
+                if relative.casefold() in workspace_directories:
+                    raise ValueError(
+                        f"RPF subtree workspace contains a directory collision: {relative}"
+                    )
+                workspace_directories[relative.casefold()] = relative
+                continue
             if not path.is_file():
                 continue
-            relative = path.relative_to(root).as_posix()
             if relative.casefold() == ".allin1-rpf-export.json":
                 continue
             relative = _safe_virtual_path(relative)
@@ -1035,8 +1258,24 @@ class RpfExplorerService:
             workspace_files[relative.casefold()] = (relative, path)
         if len(workspace_files) > _MAX_SUBTREE_FILES:
             raise ValueError("RPF subtree workspace exceeds the guarded file limit")
+        collision = set(workspace_files).intersection(workspace_directories)
+        if collision:
+            raise ValueError(
+                "RPF subtree workspace contains a file/directory path collision: "
+                f"{next(iter(collision))}"
+            )
 
         changes: list[dict[str, Any]] = []
+        for key, relative in sorted(
+            workspace_directories.items(), key=lambda item: item[1].count("/"),
+        ):
+            if key in base_directories:
+                continue
+            entry_path = f"{directory_path}/{relative}" if directory_path else relative
+            changes.append({
+                "action": "mkdir", "archive_path": archive_path,
+                "entry": entry_path,
+            })
         for key, item in recorded.items():
             workspace = workspace_files.get(key)
             if workspace is None:
@@ -1059,13 +1298,29 @@ class RpfExplorerService:
                 "action": "add", "archive_path": archive_path,
                 "entry": entry_path, "payload": payload,
             })
+        for key, (_relative, entry_path) in sorted(
+            base_directories.items(),
+            key=lambda item: item[1][1].count("/"), reverse=True,
+        ):
+            if key in workspace_directories:
+                continue
+            changes.append({
+                "action": "rmdir", "archive_path": archive_path,
+                "entry": entry_path,
+            })
         if not changes:
             raise ValueError("RPF subtree workspace has no changes to plan")
         plan = self.multi_change_plan(index, changes)
         plan["workspace_sync"] = {
             "manifest": str(manifest_path),
             "archive_path": archive_path, "directory_path": directory_path,
-            "changed_files": len(changes),
+            "changed_entries": len(changes),
+            "changed_files": sum(
+                item["action"] in {"add", "replace", "delete"} for item in changes
+            ),
+            "changed_directories": sum(
+                item["action"] in {"mkdir", "rmdir"} for item in changes
+            ),
         }
         return plan
 
@@ -1388,10 +1643,8 @@ class RpfExplorerService:
                 raise RuntimeError(f"RPF payload changed after planning: {payload}")
         self._verify_entry_states(
             archive,
-            [
-                (change["archive_path"], change["entry"], change["original"])
-                for change, _payload in changes
-            ],
+            [state for change, _payload in changes
+             for state in self._change_entry_states(change, applied=False)],
             plan["edition"],
         )
 
@@ -1435,6 +1688,9 @@ class RpfExplorerService:
                 "action": change["action"],
                 "archive_path": change["archive_path"],
                 "entry": change["entry"],
+                **({"new_entry": change["new_entry"]} if change.get(
+                    "new_entry"
+                ) else {}),
                 "original": dict(change["original"]),
                 "payload": payload_receipt,
             })
@@ -1482,11 +1738,8 @@ class RpfExplorerService:
             self._emit(progress, "Applying batch to staged archive", 45)
             self._apply_entry_changes(stage, staged_changes, plan["edition"])
             expected_applied = [
-                (
-                    change["archive_path"], change["entry"],
-                    self._applied_entry_state(change),
-                )
-                for change in receipt_changes
+                state for change in receipt_changes
+                for state in self._change_entry_states(change, applied=True)
             ]
             self._emit(progress, "Verifying every staged entry", 65)
             self._verify_entry_states(stage, expected_applied, plan["edition"])
@@ -1564,26 +1817,16 @@ class RpfExplorerService:
         if current_hash == receipt.get("applied_archive_sha256"):
             archive_state = "applied"
             expected_entry = (
-                [
-                    (
-                        change["archive_path"], change["entry"],
-                        self._applied_entry_state(change),
-                    )
-                    for change in receipt["changes"]
-                ]
+                [state for change in receipt["changes"]
+                 for state in self._change_entry_states(change, applied=True)]
                 if receipt["operation"] == "rpf_multi_entry_change"
                 else self._applied_entry_state(receipt)
             )
         elif current_hash == receipt["backup"]["sha256"]:
             archive_state = "original"
             expected_entry = (
-                [
-                    (
-                        change["archive_path"], change["entry"],
-                        change["original"],
-                    )
-                    for change in receipt["changes"]
-                ]
+                [state for change in receipt["changes"]
+                 for state in self._change_entry_states(change, applied=False)]
                 if receipt["operation"] == "rpf_multi_entry_change"
                 else receipt["original"]
             )
@@ -1655,13 +1898,8 @@ class RpfExplorerService:
         if receipt["operation"] == "rpf_multi_entry_change":
             self._verify_entry_states(
                 archive,
-                [
-                    (
-                        change["archive_path"], change["entry"],
-                        self._applied_entry_state(change),
-                    )
-                    for change in receipt["changes"]
-                ],
+                [state for change in receipt["changes"]
+                 for state in self._change_entry_states(change, applied=True)],
                 receipt["edition"],
             )
         else:
@@ -1697,13 +1935,8 @@ class RpfExplorerService:
             if receipt["operation"] == "rpf_multi_entry_change":
                 self._verify_entry_states(
                     archive,
-                    [
-                        (
-                            change["archive_path"], change["entry"],
-                            change["original"],
-                        )
-                        for change in receipt["changes"]
-                    ],
+                    [state for change in receipt["changes"]
+                     for state in self._change_entry_states(change, applied=False)],
                     receipt["edition"],
                 )
             else:
@@ -1800,7 +2033,10 @@ class RpfExplorerService:
             "action": item["action"],
             "archive_path": item["archive_path"],
             "entry": item["entry"],
+            "new_entry": item.get("new_entry"),
             "original_exists": item["original"]["exists"],
+            "original_kind": item["original"].get("kind"),
+            "original_child_count": item["original"].get("child_count"),
             "original_sha256": item["original"].get("sha256"),
             "payload_sha256": (
                 item["payload"].get("sha256") if item.get("payload") else None
@@ -1846,11 +2082,12 @@ class RpfExplorerService:
 
         normalized: list[tuple[dict[str, Any], Path | None]] = []
         seen: set[tuple[str, str]] = set()
+        result_targets: set[tuple[str, str]] = set()
         for number, authored in enumerate(authored_changes, start=1):
             if not isinstance(authored, dict):
                 raise ValueError(f"RPF multi-change item {number} is invalid")
             action = str(authored.get("action", ""))
-            if action not in _RPF_ACTIONS:
+            if action not in _RPF_MULTI_ACTIONS:
                 raise ValueError(f"RPF multi-change item {number} has an invalid action")
             archive_path = _safe_virtual_path(
                 str(authored.get("archive_path", "")), allow_empty=True,
@@ -1861,6 +2098,21 @@ class RpfExplorerService:
             if identity in seen:
                 raise ValueError("RPF multi-change plan contains a duplicate target")
             seen.add(identity)
+            new_entry: str | None = None
+            if action == "rename":
+                new_entry = _safe_virtual_path(str(authored.get("new_entry", "")))
+                if new_entry.casefold() == entry_path.casefold():
+                    raise ValueError("RPF rename destination must differ from its source")
+                old_parent = str(PurePosixPath(entry_path).parent)
+                new_parent = str(PurePosixPath(new_entry).parent)
+                if old_parent == ".":
+                    old_parent = ""
+                if new_parent == ".":
+                    new_parent = ""
+                if old_parent.casefold() != new_parent.casefold():
+                    raise ValueError("RPF rename is limited to the same parent directory")
+            elif authored.get("new_entry") not in (None, ""):
+                raise ValueError(f"RPF multi-change {action} item has new_entry")
             original = authored.get("original")
             if not isinstance(original, dict) or not isinstance(
                 original.get("exists"), bool,
@@ -1868,14 +2120,41 @@ class RpfExplorerService:
                 raise ValueError(f"RPF multi-change item {number} has invalid original state")
             if not isinstance(original.get("size"), int) or original["size"] < 0:
                 raise ValueError(f"RPF multi-change item {number} has invalid original size")
-            if original["exists"] and not _is_sha256(original.get("sha256")):
-                raise ValueError(f"RPF multi-change item {number} has invalid original hash")
-            if action == "add" and original["exists"]:
-                raise ValueError("RPF multi-change add item claims its target exists")
-            if action in {"replace", "delete"} and not original["exists"]:
+            original_kind = original.get("kind")
+            if original["exists"]:
+                if original_kind not in {"directory", "resource", "binary", "archive"}:
+                    raise ValueError(
+                        f"RPF multi-change item {number} has invalid original kind"
+                    )
+                if original_kind == "directory":
+                    if original.get("sha256") is not None or not isinstance(
+                        original.get("child_count"), int,
+                    ) or original["child_count"] < 0:
+                        raise ValueError(
+                            f"RPF multi-change item {number} has invalid directory state"
+                        )
+                elif not _is_sha256(original.get("sha256")):
+                    raise ValueError(
+                        f"RPF multi-change item {number} has invalid original hash"
+                    )
+            elif original_kind is not None or original.get("sha256") is not None:
+                raise ValueError(
+                    f"RPF multi-change item {number} has invalid absent state"
+                )
+            if action in {"add", "mkdir"} and original["exists"]:
+                raise ValueError(f"RPF multi-change {action} item claims its target exists")
+            if action in {"replace", "delete", "rmdir", "rename"} and not original[
+                "exists"
+            ]:
                 raise ValueError(
                     f"RPF multi-change {action} item claims its target is absent"
                 )
+            if action in {"replace", "delete"} and original_kind == "directory":
+                raise ValueError(f"RPF multi-change {action} cannot target a directory")
+            if action == "rmdir" and original_kind != "directory":
+                raise ValueError("RPF multi-change rmdir must target a directory")
+            if action == "rename" and original_kind == "archive":
+                raise ValueError("RPF multi-change rename cannot target an archive")
             payload_meta = authored.get("payload")
             payload: Path | None = None
             if action in {"replace", "add"}:
@@ -1892,12 +2171,21 @@ class RpfExplorerService:
                 if not _is_sha256(payload_meta.get("sha256")):
                     raise ValueError("RPF multi-change payload has an invalid hash")
             elif payload_meta is not None:
-                raise ValueError("RPF multi-change delete item unexpectedly has a payload")
+                raise ValueError(
+                    f"RPF multi-change {action} item unexpectedly has a payload"
+                )
             normalized_change = {
                 **authored, "action": action, "archive_path": archive_path,
                 "entry": entry_path,
+                **({"new_entry": new_entry} if new_entry is not None else {}),
             }
             normalized.append((normalized_change, payload))
+            if action not in {"delete", "rmdir"}:
+                result = new_entry if new_entry is not None else entry_path
+                result_id = (archive_path.casefold(), result.casefold())
+                if result_id in result_targets:
+                    raise ValueError("RPF multi-change plan has a duplicate result target")
+                result_targets.add(result_id)
 
         for change, _payload in normalized:
             container = (
@@ -2035,6 +2323,23 @@ class RpfExplorerService:
             raise RuntimeError(
                 f"RPF entry should be absent after write: {archive_path}::{entry_path}"
             )
+        expected_kind = expected.get("kind")
+        if expected_kind is not None and entry.kind != expected_kind:
+            raise RuntimeError(
+                f"RPF entry kind changed for {entry_path}: expected {expected_kind}, "
+                f"found {entry.kind}"
+            )
+        if expected_kind == "directory":
+            expected_children = expected.get("child_count")
+            if expected_children is not None and (
+                not isinstance(expected_children, int)
+                or int(entry.child_count or 0) != expected_children
+            ):
+                raise RuntimeError(
+                    f"RPF directory child count changed for {entry_path}: expected "
+                    f"{expected_children}, found {int(entry.child_count or 0)}"
+                )
+            return
         expected_hash = expected.get("sha256")
         if not _is_sha256(expected_hash):
             raise ValueError("Expected RPF entry state has no valid SHA-256 hash")
@@ -2072,6 +2377,23 @@ class RpfExplorerService:
                     f"RPF entry should be absent after batch write: "
                     f"{archive_path}::{entry_path}"
                 )
+            expected_kind = expected.get("kind")
+            if expected_kind is not None and entry.kind != expected_kind:
+                raise RuntimeError(
+                    f"RPF batch entry kind changed for {entry.virtual_name}: expected "
+                    f"{expected_kind}, found {entry.kind}"
+                )
+            if expected_kind == "directory":
+                expected_children = expected.get("child_count")
+                if expected_children is not None and (
+                    not isinstance(expected_children, int)
+                    or int(entry.child_count or 0) != expected_children
+                ):
+                    raise RuntimeError(
+                        f"RPF batch directory child count changed for {entry.virtual_name}: "
+                        f"expected {expected_children}, found {int(entry.child_count or 0)}"
+                    )
+                continue
             if not _is_sha256(expected.get("sha256")):
                 raise ValueError("Expected RPF batch entry state has no valid SHA-256 hash")
             present.append((entry, expected))
@@ -2176,7 +2498,9 @@ class RpfExplorerService:
                     snapshot = payload_root / f"{number:04d}{payload.suffix or '.bin'}"
                     shutil.copy2(payload, snapshot)
                     relative = snapshot.name
-                elif action != "delete":
+                elif action == "rename":
+                    relative = _safe_virtual_path(str(change.get("new_entry", "")))
+                elif action not in {"delete", "mkdir", "rmdir"}:
                     raise ValueError(f"Unsupported RPF batch action: {action}")
                 lines.append(f"{action}\t{entry_path}\t{relative}\n")
             manifest.write_text("".join(lines), encoding="utf-8")
@@ -2280,15 +2604,50 @@ class RpfExplorerService:
 
     @staticmethod
     def _applied_entry_state(container: dict[str, Any]) -> dict[str, Any]:
-        if container.get("action") == "delete":
-            return {"exists": False, "size": 0, "sha256": None}
+        action = container.get("action")
+        if action in {"delete", "rmdir"}:
+            return {
+                "exists": False, "kind": None, "size": 0,
+                "sha256": None, "child_count": None,
+            }
+        if action == "mkdir":
+            return {
+                "exists": True, "kind": "directory", "size": 0,
+                "sha256": None, "child_count": None,
+            }
+        if action == "rename":
+            raise ValueError("Rename produces two guarded RPF entry states")
         payload = container.get("payload")
         if not isinstance(payload, dict):
             raise ValueError("Applied RPF entry state is missing payload metadata")
         return {
-            "exists": True, "size": int(payload["size"]),
-            "sha256": payload["sha256"],
+            "exists": True, "kind": None, "size": int(payload["size"]),
+            "sha256": payload["sha256"], "child_count": None,
         }
+
+    @classmethod
+    def _change_entry_states(
+        cls, change: dict[str, Any], *, applied: bool,
+    ) -> list[tuple[str, str, dict[str, Any]]]:
+        archive_path = str(change["archive_path"])
+        entry_path = str(change["entry"])
+        absent = {
+            "exists": False, "kind": None, "size": 0,
+            "sha256": None, "child_count": None,
+        }
+        if change.get("action") != "rename":
+            state = cls._applied_entry_state(change) if applied else change["original"]
+            return [(archive_path, entry_path, state)]
+        new_entry = _safe_virtual_path(str(change.get("new_entry", "")))
+        if applied:
+            return [
+                (archive_path, entry_path, absent),
+                (archive_path, new_entry, change["original"]),
+            ]
+        return [
+            (archive_path, entry_path, change["original"]),
+            (archive_path, new_entry, absent),
+        ]
 
     @staticmethod
     def _require_existing_parent(
@@ -2440,7 +2799,8 @@ class RpfExplorerService:
     def _validate_multi_receipt(
         cls, receipt: dict[str, Any],
     ) -> dict[str, Any]:
-        if receipt.get("schema_version") != RPF_MULTI_TRANSACTION_RECEIPT_SCHEMA:
+        schema = receipt.get("schema_version")
+        if schema not in {1, RPF_MULTI_TRANSACTION_RECEIPT_SCHEMA}:
             raise ValueError("Unsupported RPF multi-change transaction receipt")
         if receipt.get("operation") != "rpf_multi_entry_change" or receipt.get(
             "action"
@@ -2457,8 +2817,10 @@ class RpfExplorerService:
         if len(changes) > _MAX_MULTI_ENTRY_CHANGES:
             raise ValueError("RPF multi-change receipt exceeds the guarded change limit")
         seen: set[tuple[str, str]] = set()
+        results: set[tuple[str, str]] = set()
         for number, change in enumerate(changes, start=1):
-            if not isinstance(change, dict) or change.get("action") not in _RPF_ACTIONS:
+            allowed_actions = _RPF_ACTIONS if schema == 1 else _RPF_MULTI_ACTIONS
+            if not isinstance(change, dict) or change.get("action") not in allowed_actions:
                 raise ValueError(f"RPF multi-change receipt item {number} is invalid")
             archive_path = _safe_virtual_path(
                 str(change.get("archive_path", "")), allow_empty=True,
@@ -2469,6 +2831,21 @@ class RpfExplorerService:
             if identity in seen:
                 raise ValueError("RPF multi-change receipt contains a duplicate target")
             seen.add(identity)
+            new_entry: str | None = None
+            if change["action"] == "rename":
+                new_entry = _safe_virtual_path(str(change.get("new_entry", "")))
+                old_parent = str(PurePosixPath(entry_path).parent)
+                new_parent = str(PurePosixPath(new_entry).parent)
+                if old_parent == ".":
+                    old_parent = ""
+                if new_parent == ".":
+                    new_parent = ""
+                if new_entry.casefold() == entry_path.casefold() or (
+                    old_parent.casefold() != new_parent.casefold()
+                ):
+                    raise ValueError("RPF multi-change receipt has an invalid rename")
+            elif change.get("new_entry") not in (None, ""):
+                raise ValueError("RPF multi-change receipt unexpectedly contains new_entry")
             original = change.get("original")
             if not isinstance(original, dict) or not isinstance(
                 original.get("exists"), bool,
@@ -2476,14 +2853,38 @@ class RpfExplorerService:
                 raise ValueError("RPF multi-change receipt has invalid original state")
             if not isinstance(original.get("size"), int) or original["size"] < 0:
                 raise ValueError("RPF multi-change receipt has invalid original size")
-            if original["exists"] and not _is_sha256(original.get("sha256")):
-                raise ValueError("RPF multi-change receipt has invalid original hash")
-            if change["action"] == "add" and original["exists"]:
-                raise ValueError("RPF multi-change add receipt claims its target exists")
-            if change["action"] in {"replace", "delete"} and not original["exists"]:
+            original_kind = original.get("kind")
+            if schema == 1:
+                if original["exists"] and not _is_sha256(original.get("sha256")):
+                    raise ValueError("RPF multi-change receipt has invalid original hash")
+            elif original["exists"]:
+                if original_kind not in {"directory", "resource", "binary", "archive"}:
+                    raise ValueError("RPF multi-change receipt has invalid original kind")
+                if original_kind == "directory":
+                    if original.get("sha256") is not None or not isinstance(
+                        original.get("child_count"), int,
+                    ) or original["child_count"] < 0:
+                        raise ValueError(
+                            "RPF multi-change receipt has invalid directory state"
+                        )
+                elif not _is_sha256(original.get("sha256")):
+                    raise ValueError("RPF multi-change receipt has invalid original hash")
+            elif original_kind is not None or original.get("sha256") is not None:
+                raise ValueError("RPF multi-change receipt has invalid absent state")
+            if change["action"] in {"add", "mkdir"} and original["exists"]:
+                raise ValueError(
+                    f"RPF multi-change {change['action']} receipt claims its target exists"
+                )
+            if change["action"] in {"replace", "delete", "rmdir", "rename"} and not (
+                original["exists"]
+            ):
                 raise ValueError(
                     "RPF multi-change receipt claims an existing target is absent"
                 )
+            if change["action"] == "rmdir" and original_kind != "directory":
+                raise ValueError("RPF multi-change rmdir receipt is not a directory")
+            if change["action"] == "rename" and original_kind == "archive":
+                raise ValueError("RPF multi-change receipt renames an archive")
             payload = change.get("payload")
             if change["action"] in {"replace", "add"}:
                 if not isinstance(payload, dict):
@@ -2498,7 +2899,15 @@ class RpfExplorerService:
                 if not _is_sha256(payload.get("sha256")):
                     raise ValueError("RPF multi-change receipt payload has invalid hash")
             elif payload is not None:
-                raise ValueError("RPF multi-change delete receipt has a payload")
+                raise ValueError("RPF multi-change non-file receipt has a payload")
+            if change["action"] not in {"delete", "rmdir"}:
+                result_entry = new_entry if new_entry is not None else entry_path
+                result = (archive_path.casefold(), result_entry.casefold())
+                if result in results:
+                    raise ValueError(
+                        "RPF multi-change receipt contains a duplicate result target"
+                    )
+                results.add(result)
         for change in changes:
             container = (
                 change["entry"] if not change["archive_path"]
@@ -2702,18 +3111,26 @@ class RpfExplorerService:
             canary_service.rollback_transaction(receipt, progress=progress)
             replace_restored = canary_service.verify_transaction(receipt)
 
-            # Exercise root add and delete as a chained transaction. Roll back
-            # delete first (restoring the added entry), then roll back add to
-            # recover the source-identical archive.
+            # Exercise directory creation, file add, rename, explicit file delete,
+            # and empty-directory removal as chained atomic transactions. Rolling
+            # back in reverse order must recover the source-identical archive.
             add_payload = canary_root / "allin1-sdk-canary.bin"
             add_payload.write_bytes(b"ALLIN1 SDK RPF canary\n")
             add_name = "allin1_sdk_canary.bin"
+            directory_name = "allin1_sdk_canary"
             restored_index = canary_service.index(canary)
-            if any(item.id.casefold() == f"::{add_name}" for item in restored_index.entries):
-                add_name = f"allin1_sdk_canary_{timestamp}.bin"
-            add_plan = canary_service.addition_plan(
-                restored_index, add_name, add_payload,
-            )
+            root_paths = {
+                item.path.casefold() for item in restored_index.entries
+                if not item.archive_path
+            }
+            if directory_name.casefold() in root_paths:
+                directory_name = f"allin1_sdk_canary_{timestamp}"
+            add_entry = f"{directory_name}/{add_name}"
+            renamed_entry = f"{directory_name}/verified_{add_name}"
+            add_plan = canary_service.multi_change_plan(restored_index, [
+                {"action": "mkdir", "entry": directory_name},
+                {"action": "add", "entry": add_entry, "payload": add_payload},
+            ])
             add_plan_path = canary_root / "canary-add-plan.json"
             _write_json_atomic(add_plan_path, add_plan)
             add_receipt = canary_service.apply_change_plan(
@@ -2725,9 +3142,27 @@ class RpfExplorerService:
                 raise RuntimeError(f"Canary add verification failed: {add_verification}")
 
             with_entry = canary_service.index(canary)
-            delete_plan = canary_service.deletion_plan(
-                with_entry, with_entry.entry(f"::{add_name}"),
+            rename_plan = canary_service.multi_change_plan(with_entry, [{
+                "action": "rename", "entry": add_entry,
+                "new_entry": renamed_entry,
+            }])
+            rename_plan_path = canary_root / "canary-rename-plan.json"
+            _write_json_atomic(rename_plan_path, rename_plan)
+            rename_receipt = canary_service.apply_change_plan(
+                rename_plan_path, receipt_root=canary_root / "transactions",
+                progress=progress,
             )
+            rename_verification = canary_service.verify_transaction(rename_receipt)
+            if not rename_verification["healthy"]:
+                raise RuntimeError(
+                    f"Canary rename verification failed: {rename_verification}"
+                )
+
+            renamed_index = canary_service.index(canary)
+            delete_plan = canary_service.multi_change_plan(renamed_index, [
+                {"action": "delete", "entry": renamed_entry},
+                {"action": "rmdir", "entry": directory_name},
+            ])
             delete_plan_path = canary_root / "canary-delete-plan.json"
             _write_json_atomic(delete_plan_path, delete_plan)
             delete_receipt = canary_service.apply_change_plan(
@@ -2740,6 +3175,7 @@ class RpfExplorerService:
                     f"Canary delete verification failed: {delete_verification}"
                 )
             canary_service.rollback_transaction(delete_receipt, progress=progress)
+            canary_service.rollback_transaction(rename_receipt, progress=progress)
             canary_service.rollback_transaction(add_receipt, progress=progress)
             restored = canary_service.verify_transaction(add_receipt)
             restored_hash = _sha256_file(canary)
@@ -2750,12 +3186,14 @@ class RpfExplorerService:
                 "status": "passed", "edition": index.edition,
                 "entry": entry.path, "entry_kind": entry.kind,
                 "receipts": {
-                    "replace": str(receipt), "add": str(add_receipt),
-                    "delete": str(delete_receipt),
+                    "replace": str(receipt), "tree_create": str(add_receipt),
+                    "tree_rename": str(rename_receipt),
+                    "tree_remove": str(delete_receipt),
                 },
                 "replace_apply_verification": applied,
                 "replace_rollback_verification": replace_restored,
                 "add_verification": add_verification,
+                "rename_verification": rename_verification,
                 "delete_verification": delete_verification,
                 "rollback_verification": restored,
                 "restored_sha256": restored_hash,

@@ -41,7 +41,7 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   metadata, export JSON/CSV indexes, extract an exact entry or complete directory
   subtree through one archive scan, compare two recursive archive trees by metadata
   or exact extracted-content hashes, and generate a
-  checksummed replace/add/delete plan without modifying the archive. Reviewed root
+  checksummed file or directory-tree plan without modifying the archive. Reviewed root
   and recursively nested-entry plans targeting an exact `mods` or explicitly isolated
   workspace copy support up to eight archive levels and use full outer-archive staging,
   deepest-first parent reassembly, pre/post-write verification,
@@ -49,8 +49,10 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   receipt recovery, and stale-lock inspection. Subtree exports are staged into a
   new folder and include a source and per-file SHA-256 manifest; an edited export
   can be reconciled back into one reviewed atomic workspace-sync plan. Multi-entry plans
-  batch up to 1,000 root or deep changes, rebuild each nested container once, and
-  commit the outer archive once under one lock, backup, receipt, and rollback.
+  batch up to 1,000 root or deep changes, including directory create, empty-directory
+  removal, same-parent entry rename, and exact nested-RPF deletion. They rebuild each
+  nested container once and commit the outer archive once under one lock, backup,
+  receipt, and rollback.
 - **Real-archive canary** — copy a genuine Legacy or Enhanced RPF outside the game,
   exercise real replace/add/delete writes, verify each exact entry, roll everything
   back, and prove the final archive SHA-256 matches the untouched source.
@@ -234,9 +236,12 @@ service used by the launcher.
 - RPF diffing leaves both sources untouched. Metadata mode compares recursive entry
   and archive records; exact mode batch-extracts each side once into bounded temporary
   storage and hashes every payload to expose same-size content changes.
-- Creating an RPF replace/add/delete or atomic multi-entry plan is read-only and
-  never authorizes a write. Batch manifests may use `upsert`; plan creation resolves
-  each exact indexed target to add or replace before hashing the reviewed plan.
+- Creating an RPF file or directory-tree plan is read-only and never authorizes a
+  write. Batch manifests may use `add`, `replace`, `delete`, `mkdir`, `rmdir`,
+  `rename` (with `new_entry`), or `upsert`; plan creation resolves each exact indexed
+  target, parent dependency, and directory-removal precondition before hashing the
+  reviewed plan. Directory removal is deliberately non-recursive: every child must
+  be listed for deletion, and renames stay within one parent directory.
 - Applying a plan is limited to the selected GTA V installation's `mods` directory
   or an external workspace explicitly authorized for that invocation. Workspace
   authorization cannot point at stock game folders. GTA V must be closed and the
@@ -255,9 +260,11 @@ service used by the launcher.
   staged copy, changes and verifies the deepest RPF, then verifies each child while
   reinserting it into its immediate parent. The complete outer archive is committed
   or rolled back as one transaction.
-- Atomic multi-entry plans preflight every original and payload, snapshot all inputs,
-  group changes by archive tree, update each nested container in one helper session,
-  verify every result, and retain a single full-outer-archive rollback receipt.
+- Atomic multi-entry plans preflight every original, directory state, and payload,
+  snapshot all inputs, order directory creation before file writes and explicit child
+  deletion before directory removal, group changes by archive tree, update each nested
+  container in one helper session, verify every result, and retain a single
+  full-outer-archive rollback receipt.
 - Canary mode never writes its selected source. It uses a generated external copy and
   is successful only after replace, add, delete, and exact final-hash rollback checks.
 - OIV conversion stops when an operation cannot be represented safely.

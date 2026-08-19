@@ -607,7 +607,7 @@ def plan_rpf_batch(
     archive: Path, change_manifest: Path, gta_path: Path | None,
     workspace_root: Path | None, output: Path,
 ) -> None:
-    """Create one guarded atomic plan from a JSON list of entry changes."""
+    """Plan add/replace/delete/mkdir/rmdir/rename/upsert JSON changes atomically."""
     service = _rpf_service(gta_path, workspace_root)
     try:
         authored = json.loads(change_manifest.read_text(encoding="utf-8"))
@@ -649,7 +649,7 @@ def plan_rpf_sync(
     archive: Path, export_directory: Path, gta_path: Path | None,
     workspace_root: Path | None, output: Path,
 ) -> None:
-    """Plan all file edits made inside a verified RPF subtree export."""
+    """Plan all file and directory edits in a verified RPF subtree export."""
     service = _rpf_service(gta_path, workspace_root)
     try:
         plan = service.subtree_sync_plan(service.index(archive), export_directory)
