@@ -45,7 +45,9 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   world extents in a bounded top-down scene. YNV navigation previews expose polygon
   surfaces, edge references, portals, points, flags, and bounds; YND path previews map
   vehicle/pedestrian nodes, internal and external links, junctions, street labels, and
-  declared-count inconsistencies. The viewer can also
+  declared-count inconsistencies. YTYP previews turn archetype-to-asset and shared
+  texture/drawable/physics/clip dictionary references into a typed dependency graph.
+  The viewer can also
   export manifest-backed XML/dependency
   workspaces that rebuild only after the compiled result parses back through CodeWalker.
   The same read-only native inspection can publish a portable text/PNG/JSON bundle

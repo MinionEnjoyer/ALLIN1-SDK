@@ -52,6 +52,7 @@ COLLISION_PREVIEW_SUFFIXES = frozenset({".ybn"})
 MAP_PREVIEW_SUFFIXES = frozenset({".ymap"})
 NAVMESH_PREVIEW_SUFFIXES = frozenset({".ynv"})
 PATH_PREVIEW_SUFFIXES = frozenset({".ynd"})
+ARCHETYPE_PREVIEW_SUFFIXES = frozenset({".ytyp"})
 MAX_MODEL_XML_BYTES = 192 * 1024 * 1024
 MAX_MODEL_VERTICES = 1_000_000
 MAX_MODEL_TRIANGLES = 1_000_000
@@ -68,6 +69,8 @@ MAX_PATH_LINKS = 2_000_000
 MAX_PATH_JUNCTIONS = 250_000
 MAX_RENDERED_PATH_NODES = 90_000
 MAX_RENDERED_PATH_LINKS = 140_000
+MAX_ARCHETYPES = 250_000
+MAX_RENDERED_ARCHETYPES = 18
 
 
 @dataclass(frozen=True)
@@ -140,6 +143,20 @@ class _PathJunction:
     max_z: float
     size_x: int
     size_y: int
+
+
+@dataclass(frozen=True)
+class _ArchetypeRecord:
+    name: str
+    kind: str
+    asset_type: str
+    asset_name: str
+    texture_dictionary: str
+    drawable_dictionary: str
+    physics_dictionary: str
+    clip_dictionary: str
+    lod_distance: float
+    extension_count: int
 
 
 def _sha256_file(path: Path) -> str:
@@ -1413,6 +1430,205 @@ def _path_preview_from_xml(
         return None, {}, f"Path network preview unavailable: {exc}"
 
 
+def _child_text(parent: etree._Element, name: str) -> str:
+    child = _direct_child(parent, name)
+    return ((child.text or "").strip() if child is not None else "")
+
+
+def _archetype_records(root: etree._Element) -> list[_ArchetypeRecord]:
+    records: list[_ArchetypeRecord] = []
+    for item in _item_children(root, "archetypes"):
+        extensions = _direct_child(item, "extensions")
+        extension_count = 0 if extensions is None else sum(
+            1 for child in extensions
+            if isinstance(child.tag, str) and _local_name(child) == "Item"
+        )
+        records.append(_ArchetypeRecord(
+            _child_text(item, "name") or "(unnamed archetype)",
+            item.get("type", "CBaseArchetypeDef"),
+            _child_text(item, "assetType") or "(unspecified asset type)",
+            _child_text(item, "assetName") or "(unspecified asset)",
+            _child_text(item, "textureDictionary"),
+            _child_text(item, "drawableDictionary"),
+            _child_text(item, "physicsDictionary"),
+            _child_text(item, "clipDictionary"),
+            float(_numeric_child(
+                item, "lodDist", context="YTYP archetype", default=0.0,
+            )),
+            extension_count,
+        ))
+        if len(records) > MAX_ARCHETYPES:
+            raise ValueError("YTYP preview exceeds the guarded archetype limit")
+    return records
+
+
+def _archetype_dependencies(
+    record: _ArchetypeRecord,
+) -> tuple[tuple[str, str], ...]:
+    values = (
+        ("Texture dictionary", record.texture_dictionary),
+        ("Drawable dictionary", record.drawable_dictionary),
+        ("Physics dictionary", record.physics_dictionary),
+        ("Clip dictionary", record.clip_dictionary),
+    )
+    return tuple((kind, value) for kind, value in values if value)
+
+
+def _archetype_samples(records: list[_ArchetypeRecord]) -> list[_ArchetypeRecord]:
+    if len(records) <= MAX_RENDERED_ARCHETYPES:
+        return records
+    last = len(records) - 1
+    indexes = {
+        round(index * last / (MAX_RENDERED_ARCHETYPES - 1))
+        for index in range(MAX_RENDERED_ARCHETYPES)
+    }
+    return [records[index] for index in sorted(indexes)]
+
+
+def _render_archetype_graph(
+    records: list[_ArchetypeRecord], name: str,
+) -> tuple[bytes, dict[str, Any]]:
+    sampled = _archetype_samples(records)
+    dependency_counts: dict[tuple[str, str], int] = {}
+    for record in records:
+        for dependency in _archetype_dependencies(record):
+            dependency_counts[dependency] = dependency_counts.get(dependency, 0) + 1
+    sampled_dependencies: dict[tuple[str, str], int] = {}
+    for record in sampled:
+        for dependency in _archetype_dependencies(record):
+            sampled_dependencies[dependency] = dependency_counts[dependency]
+    ordered_dependencies = sorted(
+        sampled_dependencies,
+        key=lambda item: (item[0].casefold(), -sampled_dependencies[item], item[1].casefold()),
+    )[:16]
+    dependency_y = {
+        dependency: 96 + (index * (490 / max(1, len(ordered_dependencies) - 1)))
+        for index, dependency in enumerate(ordered_dependencies)
+    }
+    width, height = 1120, 680
+    image = Image.new("RGB", (width, height), "#101714")
+    draw = ImageDraw.Draw(image)
+    draw.text((42, 22), f"YTYP ARCHETYPE DEPENDENCIES  |  {name[:62]}", fill="#E8F2EC")
+    draw.text((42, 53), "ARCHETYPE", fill="#91AA9D")
+    draw.text((358, 53), "ASSET BINDING", fill="#91AA9D")
+    draw.text((752, 53), "SHARED DICTIONARIES", fill="#91AA9D")
+    if len(sampled) == 1:
+        row_positions = [320.0]
+    else:
+        row_positions = [
+            88 + (index * (510 / (len(sampled) - 1)))
+            for index in range(len(sampled))
+        ]
+    dependency_colours = {
+        "Texture dictionary": "#7CCDA8",
+        "Drawable dictionary": "#9B87DB",
+        "Physics dictionary": "#E09B6B",
+        "Clip dictionary": "#70A9D7",
+    }
+    for record, y in zip(sampled, row_positions):
+        for dependency in _archetype_dependencies(record):
+            target_y = dependency_y.get(dependency)
+            if target_y is not None:
+                draw.line((630, y + 11, 744, target_y + 11), fill="#3D554A", width=1)
+        draw.line((292, y + 11, 350, y + 11), fill="#5C7C6C", width=2)
+    for dependency, y in dependency_y.items():
+        kind, value = dependency
+        colour = dependency_colours.get(kind, "#A8BDB2")
+        draw.rounded_rectangle((744, y, 1080, y + 22), radius=4,
+                               fill="#17231E", outline=colour)
+        draw.text((752, y + 4), kind[:19], fill=colour)
+        draw.text((880, y + 4), value[:24], fill="#D8E5DE")
+        draw.text((1044, y + 4), str(dependency_counts[dependency]), fill="#91AA9D")
+    for record, y in zip(sampled, row_positions):
+        kind_colour = "#B69CE6" if "Time" in record.kind else "#65C993"
+        draw.rounded_rectangle((42, y, 292, y + 22), radius=4,
+                               fill="#17231E", outline=kind_colour)
+        draw.text((50, y + 4), record.name[:27], fill="#E1ECE6")
+        draw.rounded_rectangle((350, y, 630, y + 22), radius=4,
+                               fill="#171D24", outline="#6A8CB2")
+        draw.text((358, y + 4), record.asset_type.removeprefix("ASSET_TYPE_")[:16],
+                  fill="#88AED4")
+        draw.text((468, y + 4), record.asset_name[:19], fill="#D8E5DE")
+    if len(records) > len(sampled):
+        draw.text(
+            (42, 620),
+            f"Showing {len(sampled):,} evenly sampled archetypes; all {len(records):,} "
+            "are counted in the report.", fill="#91AA9D",
+        )
+    type_counts: dict[str, int] = {}
+    asset_type_counts: dict[str, int] = {}
+    for record in records:
+        type_counts[record.kind] = type_counts.get(record.kind, 0) + 1
+        asset_type_counts[record.asset_type] = asset_type_counts.get(record.asset_type, 0) + 1
+    draw.text(
+        (42, height - 25),
+        f"{len(records):,} archetypes  |  {len(type_counts):,} definition types  |  "
+        f"{len(dependency_counts):,} unique dictionary dependencies  |  diagnostic graph",
+        fill="#AFC5B9",
+    )
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    dependency_kinds: dict[str, set[str]] = {}
+    for (kind, value) in dependency_counts:
+        dependency_kinds.setdefault(kind, set()).add(value)
+    return output.getvalue(), {
+        "archetype_count": len(records),
+        "archetype_definition_types": ", ".join(
+            f"{kind}: {count}" for kind, count in sorted(type_counts.items())
+        ),
+        "archetype_asset_types": ", ".join(
+            f"{kind}: {count}" for kind, count in sorted(asset_type_counts.items())
+        ),
+        "archetype_unique_assets": len({record.asset_name for record in records}),
+        "archetype_texture_dictionaries": len(
+            dependency_kinds.get("Texture dictionary", set())
+        ),
+        "archetype_drawable_dictionaries": len(
+            dependency_kinds.get("Drawable dictionary", set())
+        ),
+        "archetype_physics_dictionaries": len(
+            dependency_kinds.get("Physics dictionary", set())
+        ),
+        "archetype_clip_dictionaries": len(
+            dependency_kinds.get("Clip dictionary", set())
+        ),
+        "archetype_extension_count": sum(record.extension_count for record in records),
+        "archetype_lod_range": (
+            f"{min(record.lod_distance for record in records):.4g} .. "
+            f"{max(record.lod_distance for record in records):.4g}"
+        ),
+        "archetype_preview": "typed asset and dictionary dependency graph",
+    }
+
+
+def _archetype_preview_from_xml(
+    xml: Path, name: str,
+) -> tuple[bytes | None, dict[str, Any], str | None]:
+    """Render a bounded CodeWalker YTYP asset dependency overview."""
+    try:
+        root = _safe_codewalker_xml(xml).getroot()
+        records = _archetype_records(root)
+        root_name = _child_text(root, "name")
+        metadata: dict[str, Any] = {
+            "archetype_dictionary_name": root_name,
+            "archetype_declared_dependencies": len(_item_children(root, "dependencies")),
+            "archetype_composite_entity_types": len(
+                _item_children(root, "compositeEntityTypes")
+            ),
+        }
+        if not records:
+            metadata.update({
+                "archetype_count": 0,
+                "archetype_preview": "No archetype definitions were found",
+            })
+            return None, metadata, None
+        image, rendered = _render_archetype_graph(records, name)
+        metadata.update(rendered)
+        return image, metadata, None
+    except (OSError, ValueError, etree.XMLSyntaxError, OverflowError) as exc:
+        return None, {}, f"Archetype preview unavailable: {exc}"
+
+
 class NativeAssetInspector:
     """Describe native files and optionally invoke CodeWalker XML conversion."""
 
@@ -1523,6 +1739,12 @@ class NativeAssetInspector:
                 )
                 if preview_warning:
                     preview_metadata["path_preview"] = preview_warning
+            elif suffix in ARCHETYPE_PREVIEW_SUFFIXES:
+                geometry_image, preview_metadata, preview_warning = _archetype_preview_from_xml(
+                    xml, Path(name).name,
+                )
+                if preview_warning:
+                    preview_metadata["archetype_preview"] = preview_warning
             with xml.open("r", encoding="utf-8", errors="replace") as stream:
                 text = stream.read(2_000_000)
             if xml_size > 2_000_000:

@@ -2168,6 +2168,60 @@ def test_native_asset_helper_renders_ynd_path_network(tmp_path, monkeypatch):
     assert report.metadata["path_preview"] == "top-down node, link, and junction diagnostic"
 
 
+def test_native_asset_helper_renders_ytyp_dependency_graph(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    patcher = project / "tools" / "RpfPatcher" / "RpfPatcher.exe"
+    patcher.parent.mkdir(parents=True)
+    patcher.write_bytes(b"exe")
+    archetype_xml = """<?xml version="1.0"?>
+<CMapTypes><extensions/><archetypes>
+ <Item type="CBaseArchetypeDef"><lodDist value="100"/><name>prop_a</name>
+  <textureDictionary>shared_textures</textureDictionary><clipDictionary/>
+  <drawableDictionary>shared_drawables</drawableDictionary><physicsDictionary/>
+  <assetType>ASSET_TYPE_DRAWABLE</assetType><assetName>prop_a</assetName>
+  <extensions><Item type="CExtensionDefParticleEffect"/></extensions></Item>
+ <Item type="CTimeArchetypeDef"><lodDist value="200"/><name>prop_b</name>
+  <textureDictionary>shared_textures</textureDictionary><clipDictionary>clips</clipDictionary>
+  <drawableDictionary>shared_drawables</drawableDictionary><physicsDictionary/>
+  <assetType>ASSET_TYPE_DRAWABLE</assetType><assetName>prop_b</assetName>
+  <extensions/></Item>
+ <Item type="CBaseArchetypeDef"><lodDist value="300"/><name>prop_c</name>
+  <textureDictionary/><clipDictionary/><drawableDictionary/>
+  <physicsDictionary>physics</physicsDictionary>
+  <assetType>ASSET_TYPE_FRAGMENT</assetType><assetName>prop_c</assetName>
+  <extensions/></Item>
+</archetypes><name>test_types</name><dependencies><Item>base</Item></dependencies>
+<compositeEntityTypes/></CMapTypes>"""
+
+    def convert(args, **_kwargs):
+        Path(args[3]).write_text(archetype_xml, encoding="utf-8")
+        Path(args[4]).mkdir(parents=True)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(native_assets, "run_hidden", convert)
+    report = NativeAssetInspector(project).inspect_bytes("props.ytyp", b"RSC8" + b"\0" * 32)
+    assert report.image_png.startswith(b"\x89PNG")
+    assert report.metadata["archetype_dictionary_name"] == "test_types"
+    assert report.metadata["archetype_declared_dependencies"] == 1
+    assert report.metadata["archetype_count"] == 3
+    assert report.metadata["archetype_definition_types"] == (
+        "CBaseArchetypeDef: 2, CTimeArchetypeDef: 1"
+    )
+    assert report.metadata["archetype_asset_types"] == (
+        "ASSET_TYPE_DRAWABLE: 2, ASSET_TYPE_FRAGMENT: 1"
+    )
+    assert report.metadata["archetype_unique_assets"] == 3
+    assert report.metadata["archetype_texture_dictionaries"] == 1
+    assert report.metadata["archetype_drawable_dictionaries"] == 1
+    assert report.metadata["archetype_physics_dictionaries"] == 1
+    assert report.metadata["archetype_clip_dictionaries"] == 1
+    assert report.metadata["archetype_extension_count"] == 1
+    assert report.metadata["archetype_lod_range"] == "100 .. 300"
+    assert report.metadata["archetype_preview"] == (
+        "typed asset and dictionary dependency graph"
+    )
+
+
 def test_native_model_preview_rejects_dtd_and_bad_indices(tmp_path):
     dtd = tmp_path / "unsafe.ydr.xml"
     dtd.write_text(
