@@ -59,6 +59,11 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   Supported native entries can move directly from a selected root or nested RPF into
   an editable workspace, then back into a validated payload plus checksummed replacement
   plan without bypassing the normal review/apply boundary.
+- **GXT2 game-text workspaces** — extract a text dictionary from an exact root or
+  nested RPF entry into a searchable desktop hash/text editor, retain an immutable
+  source and hash-chained undo history, add/remove/edit UTF-8 labels, and rebuild only
+  after a strict semantic reparse. The rebuilt payload, validation report, outer-archive
+  hash, virtual entry, and edition remain bound to an inert reviewed replacement plan.
 - **Real-archive canary** — copy a genuine Legacy or Enhanced RPF outside the game,
   exercise real replace/add/delete writes, verify each exact entry, roll everything
   back, and prove the final archive SHA-256 matches the untouched source.
@@ -189,6 +194,12 @@ allin1-sdk export-rpf-binary-workspace C:\Mods\Example\dlc.rpf common/data/table
 allin1-sdk inspect-binary-workspace C:\Work\table-binary --offset 0x100 --length 256
 allin1-sdk patch-binary-workspace C:\Work\table-binary --offset 0x108 --expected-hex "01 02" --hex "03 04" --acknowledge-edit
 allin1-sdk plan-rpf-binary-workspace C:\Mods\Example\dlc.rpf common/data/table.bin C:\Work\table-binary --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\table-plan.json
+allin1-sdk export-rpf-gxt2-workspace C:\Mods\Example\dlc.rpf text/global.gxt2 --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\global-text
+allin1-sdk list-gxt2-entries C:\Work\global-text -o C:\Work\global-text.json
+allin1-sdk set-gxt2-text C:\Work\global-text 0x12345678 "Edited label" --acknowledge-edit
+allin1-sdk add-gxt2-entry C:\Work\global-text 0x87654321 "New label" --acknowledge-edit
+allin1-sdk undo-gxt2-edit C:\Work\global-text --acknowledge-edit
+allin1-sdk plan-rpf-gxt2-workspace C:\Mods\Example\dlc.rpf text/global.gxt2 C:\Work\global-text --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\global-text-plan.json
 allin1-sdk list-ytd-textures C:\Work\vehicle-ytd-workspace
 allin1-sdk replace-ytd-texture C:\Work\vehicle-ytd-workspace diffuse C:\Art\diffuse.png --acknowledge-edit
 allin1-sdk undo-ytd-texture-edit C:\Work\vehicle-ytd-workspace --acknowledge-edit
@@ -280,6 +291,11 @@ service used by the launcher.
   output overwrite, size drift, unchanged results, and more than 4 MiB of auditable
   differences. The changed-range report and rebuilt payload hashes are then bound to
   a normal inert RPF replacement plan.
+- GXT2 workspaces strictly validate both little-endian `2TXG` markers, the bounded
+  index, unique 32-bit hashes, text offsets, UTF-8 and terminators. Mutations append a
+  contiguous hash-chained snapshot history, while manual source, table, snapshot, or
+  history changes are rejected. Rebuild sorts hashes, reparses the complete table, and
+  binds its report to the exact source archive and virtual entry without writing it.
 - YTD texture edits are limited to a validated native workspace. Dependency paths,
   names, DDS headers, dimensions, mip counts, texture formats, counts, image sizes,
   and collisions are checked before publication. Raster conversion emits an

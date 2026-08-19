@@ -15,6 +15,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from PIL import Image, ImageOps, ImageTk, UnidentifiedImageError
 
 from allin1_sdk.detector import detect_gta_path
+from allin1_sdk.gxt2_workspace import Gxt2Workspace
 from allin1_sdk.native_assets import (
     MAX_NATIVE_PREVIEW_BYTES,
     NATIVE_XML_IMPORT_SUFFIXES,
@@ -97,6 +98,216 @@ class RpfProgressDialog(tk.Toplevel):
                     return
         except queue.Empty:
             self.after(80, self._poll)
+
+
+class Gxt2WorkspaceDialog(tk.Toplevel):
+    """Search and edit one validated GXT2 hash/text workspace."""
+
+    DISPLAY_LIMIT = 2500
+
+    def __init__(self, parent: tk.Misc, workspace: str | Path) -> None:
+        super().__init__(parent)
+        self.workspace = Path(workspace).resolve()
+        self.title("ALLIN1 — GXT2 Text Workspace")
+        self.geometry("1180x760")
+        self.minsize(860, 600)
+        self.transient(parent.winfo_toplevel())
+        self.entries: dict[int, dict[str, object]] = {}
+        self.query = tk.StringVar()
+        self.status = tk.StringVar(value="Loading validated GXT2 table…")
+
+        outer = ttk.Frame(self, padding=14)
+        outer.pack(fill="both", expand=True)
+        ttk.Label(
+            outer, text="GXT2 game-text editor", font=("Segoe UI Semibold", 17),
+            foreground="#1f7f42",
+        ).pack(anchor="w")
+        ttk.Label(
+            outer,
+            text=(
+                "Edit label hashes and UTF-8 text in a recovery-backed workspace. "
+                "The immutable source and exact RPF binding are never modified here."
+            ),
+            foreground="#52635c", wraplength=1080, justify="left",
+        ).pack(anchor="w", pady=(3, 10))
+
+        search = ttk.Frame(outer)
+        search.pack(fill="x", pady=(0, 8))
+        ttk.Label(search, text="Find hash or text").pack(side="left")
+        query = ttk.Entry(search, textvariable=self.query)
+        query.pack(side="left", fill="x", expand=True, padx=8)
+        query.bind("<Return>", lambda _event: self._reload())
+        ttk.Button(search, text="Search", command=self._reload).pack(side="left")
+        ttk.Button(search, text="Clear", command=self._clear_search).pack(
+            side="left", padx=(6, 0),
+        )
+
+        split = ttk.Panedwindow(outer, orient="vertical")
+        split.pack(fill="both", expand=True)
+        table_frame = ttk.Frame(split)
+        editor_frame = ttk.Frame(split, padding=(0, 10, 0, 0))
+        split.add(table_frame, weight=3)
+        split.add(editor_frame, weight=2)
+
+        self.tree = ttk.Treeview(
+            table_frame, columns=("hash", "text"), show="headings", selectmode="browse",
+        )
+        self.tree.heading("hash", text="Label hash")
+        self.tree.heading("text", text="Game text")
+        self.tree.column("hash", width=130, minwidth=110, stretch=False)
+        self.tree.column("text", width=850, minwidth=320)
+        scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", self._select)
+
+        ttk.Label(editor_frame, text="Selected text", font=("Segoe UI Semibold", 10)).pack(
+            anchor="w",
+        )
+        self.text = tk.Text(
+            editor_frame, height=7, wrap="word", font=("Consolas", 10),
+            undo=True, borderwidth=1, relief="solid",
+        )
+        self.text.pack(fill="both", expand=True, pady=(4, 8))
+        actions = ttk.Frame(editor_frame)
+        actions.pack(fill="x")
+        for label, command in (
+            ("Save selected text", self._save), ("Add entry…", self._add),
+            ("Remove selected", self._remove), ("Undo latest edit", self._undo),
+            ("Build verified GXT2…", self._build),
+        ):
+            ttk.Button(actions, text=label, command=command).pack(
+                side="left", padx=(0, 6),
+            )
+        ttk.Button(actions, text="Close", command=self.destroy).pack(side="right")
+        ttk.Label(outer, textvariable=self.status, foreground="#52635c").pack(
+            fill="x", pady=(8, 0),
+        )
+        self._reload()
+
+    def _clear_search(self) -> None:
+        self.query.set("")
+        self._reload()
+
+    def _reload(self, select_hash: int | None = None) -> None:
+        try:
+            state = Gxt2Workspace.validate(self.workspace)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("GXT2 workspace validation failed", str(exc), parent=self)
+            self.status.set("Workspace validation failed; no edits were made.")
+            return
+        self.entries = {int(item["hash"]): item for item in state["entries"]}
+        wanted = self.query.get().strip().casefold()
+        matches = [
+            item for item in state["entries"]
+            if not wanted or wanted in str(item["hash_hex"]).casefold()
+            or wanted in str(item["text"]).casefold()
+        ]
+        self.tree.delete(*self.tree.get_children())
+        for item in matches[:self.DISPLAY_LIMIT]:
+            label_hash = int(item["hash"])
+            self.tree.insert(
+                "", "end", iid=str(label_hash),
+                values=(item["hash_hex"], str(item["text"]).replace("\n", " ↵ ")),
+            )
+        shown = min(len(matches), self.DISPLAY_LIMIT)
+        suffix = " · refine the search to see more" if len(matches) > shown else ""
+        self.status.set(
+            f"{len(state['entries']):,} total entries · {shown:,} of {len(matches):,} "
+            f"matches shown{suffix}"
+        )
+        if select_hash is not None and self.tree.exists(str(select_hash)):
+            self.tree.selection_set(str(select_hash))
+            self.tree.see(str(select_hash))
+            self._select()
+
+    def _selected_hash(self) -> int | None:
+        selected = self.tree.selection()
+        return int(selected[0]) if selected else None
+
+    def _select(self, _event: object | None = None) -> None:
+        label_hash = self._selected_hash()
+        if label_hash is None or label_hash not in self.entries:
+            return
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", str(self.entries[label_hash]["text"]))
+
+    def _save(self) -> None:
+        label_hash = self._selected_hash()
+        if label_hash is None:
+            messagebox.showinfo("Select an entry", "Select a text record first.", parent=self)
+            return
+        try:
+            Gxt2Workspace.set_text(
+                self.workspace, label_hash, self.text.get("1.0", "end-1c"),
+            )
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("GXT2 edit failed", str(exc), parent=self)
+            return
+        self._reload(label_hash)
+
+    def _add(self) -> None:
+        label = simpledialog.askstring(
+            "Add GXT2 entry", "Unique decimal or 0x-prefixed label hash:", parent=self,
+        )
+        if label is None:
+            return
+        text = simpledialog.askstring("Add GXT2 entry", "UTF-8 game text:", parent=self)
+        if text is None:
+            return
+        try:
+            Gxt2Workspace.add(self.workspace, label, text)
+            self.query.set("")
+            self._reload()
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Could not add GXT2 entry", str(exc), parent=self)
+
+    def _remove(self) -> None:
+        label_hash = self._selected_hash()
+        if label_hash is None:
+            return
+        if not messagebox.askyesno(
+            "Remove GXT2 entry",
+            f"Remove 0x{label_hash:08X}? This remains undoable in the workspace.",
+            parent=self,
+        ):
+            return
+        try:
+            Gxt2Workspace.remove(self.workspace, label_hash)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Could not remove GXT2 entry", str(exc), parent=self)
+            return
+        self.text.delete("1.0", "end")
+        self._reload()
+
+    def _undo(self) -> None:
+        try:
+            Gxt2Workspace.undo(self.workspace)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Could not undo GXT2 edit", str(exc), parent=self)
+            return
+        self._reload()
+
+    def _build(self) -> None:
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Build verified GXT2 dictionary",
+            initialfile="rebuilt.gxt2", defaultextension=".gxt2",
+            filetypes=(("Rockstar GXT2", "*.gxt2"),),
+        )
+        if not output:
+            return
+        try:
+            asset, report = Gxt2Workspace.build(self.workspace, output)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("GXT2 build failed", str(exc), parent=self)
+            return
+        self.status.set(f"Built and reparsed {asset}; validation: {report}")
+        messagebox.showinfo(
+            "Verified GXT2 built",
+            f"The output was semantically reparsed.\n\nAsset: {asset}\nReport: {report}",
+            parent=self,
+        )
 
 
 class RpfTransactionHistoryDialog(ttk.Frame):
@@ -479,6 +690,9 @@ class RpfExplorerDialog(ttk.Frame):
             label="Build new RPF from folder…", command=self._build_new_archive,
         )
         menu.add_command(
+            label="Open GXT2 text workspace…", command=self._open_gxt2_workspace,
+        )
+        menu.add_command(
             label="Export index…", command=self._export_index, state="disabled",
         )
         menu.add_command(
@@ -551,6 +765,10 @@ class RpfExplorerDialog(ttk.Frame):
             command=self._export_binary_workspace, state="disabled",
         )
         menu.add_command(
+            label="Export GXT2 text workspace…",
+            command=self._export_gxt2_workspace, state="disabled",
+        )
+        menu.add_command(
             label="Extract selected subtree…",
             command=self._extract_selected_subtree, state="disabled",
         )
@@ -565,6 +783,10 @@ class RpfExplorerDialog(ttk.Frame):
         menu.add_command(
             label="Plan replacement from binary workspace…",
             command=self._plan_binary_workspace_replacement, state="disabled",
+        )
+        menu.add_command(
+            label="Plan replacement from GXT2 workspace…",
+            command=self._plan_gxt2_workspace_replacement, state="disabled",
         )
         menu.add_command(
             label="Plan new entry…", command=self._plan_addition, state="disabled",
@@ -597,10 +819,12 @@ class RpfExplorerDialog(ttk.Frame):
             menu.entryconfigure("Raw hex preview", state=state)
             menu.entryconfigure("Extract selected…", state=state)
             menu.entryconfigure("Export binary patch workspace…", state=state)
+            menu.entryconfigure("Export GXT2 text workspace…", state=state)
             menu.entryconfigure("Export editable native workspace…", state=state)
             menu.entryconfigure("Plan replacement…", state=state)
             menu.entryconfigure("Plan replacement from native workspace…", state=state)
             menu.entryconfigure("Plan replacement from binary workspace…", state=state)
+            menu.entryconfigure("Plan replacement from GXT2 workspace…", state=state)
             menu.entryconfigure("Plan new entry…", state=state)
             menu.entryconfigure("Plan deletion…", state=state)
             menu.entryconfigure("Plan rename…", state=state)
@@ -618,6 +842,14 @@ class RpfExplorerDialog(ttk.Frame):
                 "Plan replacement from native workspace…", state=state,
             )
 
+    def _set_gxt2_authoring_actions(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for menu in self.entry_action_menus:
+            menu.entryconfigure("Export GXT2 text workspace…", state=state)
+            menu.entryconfigure(
+                "Plan replacement from GXT2 workspace…", state=state,
+            )
+
     def _choose_game(self) -> None:
         selected = filedialog.askdirectory(parent=self, title="Select GTA V installation")
         if selected:
@@ -630,6 +862,19 @@ class RpfExplorerDialog(ttk.Frame):
         )
         if selected:
             self._load_archive(Path(selected))
+
+    def _open_gxt2_workspace(self) -> None:
+        selected = filedialog.askdirectory(
+            parent=self, title="Open a GXT2 text workspace",
+        )
+        if not selected:
+            return
+        try:
+            Gxt2Workspace.validate(selected)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Invalid GXT2 workspace", str(exc), parent=self)
+            return
+        Gxt2WorkspaceDialog(self, selected)
 
     def _build_new_archive(self) -> None:
         game = Path(self.game_path.get().strip())
@@ -911,6 +1156,9 @@ class RpfExplorerDialog(ttk.Frame):
             entry and entry.kind != "directory"
             and Path(entry.name).suffix.casefold() in NATIVE_XML_IMPORT_SUFFIXES
         ))
+        self._set_gxt2_authoring_actions(bool(
+            entry and entry.kind != "directory" and entry.suffix == ".gxt2"
+        ))
         if entry is None:
             return
         self.asset_title.set(entry.name)
@@ -1034,6 +1282,34 @@ class RpfExplorerDialog(ttk.Frame):
             f"replacement plan.\n\nWorkspace: {workspace}",
             parent=self,
         )
+
+    def _export_gxt2_workspace(self) -> None:
+        entry = self._selected()
+        if entry is None or self.index is None or self.service is None:
+            return
+        selected = filedialog.askdirectory(
+            parent=self, title="Select a new GXT2 text workspace folder",
+            mustexist=False,
+        )
+        if not selected:
+            return
+        try:
+            workspace = self.service.export_gxt2_workspace(
+                self.index, entry, selected,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("GXT2 workspace export failed", str(exc), parent=self)
+            return
+        self.status.set(f"Bound GXT2 text workspace exported: {workspace}")
+        messagebox.showinfo(
+            "GXT2 workspace exported",
+            "The validated hash/text table and immutable original are bound to this "
+            "exact archive entry. The editor will open now; console commands expose the "
+            "same guarded operations for automation. Return here afterward to create a "
+            f"reviewed replacement plan.\n\nWorkspace: {workspace}",
+            parent=self,
+        )
+        Gxt2WorkspaceDialog(self, workspace)
 
     def _extract_selected(self) -> None:
         entry = self._selected()
@@ -1328,6 +1604,50 @@ class RpfExplorerDialog(ttk.Frame):
             self, "Building binary RPF replacement", work, completed,
             lambda error: messagebox.showerror(
                 "Binary replacement plan failed", str(error), parent=self,
+            ),
+        )
+
+    def _plan_gxt2_workspace_replacement(self) -> None:
+        entry = self._selected()
+        if entry is None or self.index is None or self.service is None:
+            return
+        workspace = filedialog.askdirectory(
+            parent=self, title=f"Select edited GXT2 workspace for {entry.name}",
+        )
+        if not workspace:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save GXT2 RPF replacement plan",
+            initialfile=f"{Path(entry.name).stem}-gxt2-replacement-plan.json",
+            defaultextension=".json", filetypes=(("JSON", "*.json"),),
+        )
+        if not output:
+            return
+
+        def work(progress):
+            progress("Validating GXT2 table and exact source binding…", 20)
+            result = self.service.plan_gxt2_workspace_replacement(
+                self.index, entry, workspace, output,
+            )
+            progress("Rebuilt, reparsed, and bound reviewed RPF plan", 100)
+            return result
+
+        def completed(result):
+            plan, asset, report = result
+            self.status.set(f"Wrote GXT2 replacement plan: {plan}")
+            messagebox.showinfo(
+                "GXT2 replacement plan ready",
+                "The rebuilt dictionary parsed successfully and remains bound to the "
+                "original archive hash and exact virtual entry. The RPF has not changed; "
+                "review and apply the plan separately.\n\n"
+                f"Payload: {asset}\nValidation: {report}\nPlan: {plan}",
+                parent=self,
+            )
+
+        RpfProgressDialog(
+            self, "Building GXT2 RPF replacement", work, completed,
+            lambda error: messagebox.showerror(
+                "GXT2 replacement plan failed", str(error), parent=self,
             ),
         )
 

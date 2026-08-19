@@ -20,6 +20,7 @@ from allin1_sdk.native_assets import (
     NativeAssetInspector,
 )
 from allin1_sdk.binary_workspace import BinaryPatchWorkspace
+from allin1_sdk.gxt2_workspace import Gxt2Workspace, MAX_GXT2_BYTES
 from allin1_sdk.paths import user_data_root
 from allin1_sdk.processes import run_hidden
 
@@ -404,6 +405,96 @@ class RpfExplorerService:
                 "edition": index.edition,
             },
         )
+
+    def export_gxt2_workspace(
+        self, index: RpfIndex, entry: RpfEntryRecord, destination: str | Path,
+    ) -> Path:
+        """Extract one exact GXT2 dictionary into a bound text workspace."""
+        if entry.kind == "directory" or index.entry(entry.id) != entry:
+            raise ValueError("Entry does not belong to this RPF index")
+        if entry.suffix != ".gxt2":
+            raise ValueError(f"GXT2 text editing is not supported for {entry.name}")
+        if entry.size < 16 or entry.size > MAX_GXT2_BYTES:
+            raise ValueError("Selected GXT2 entry is invalid or exceeds the guarded limit")
+        archive_hash = _sha256_file(index.source)
+        with tempfile.TemporaryDirectory(prefix="allin1-rpf-gxt2-export-") as temporary:
+            source = self.extract(index, entry, Path(temporary) / entry.name)
+            data = source.read_bytes()
+        if _sha256_file(index.source) != archive_hash:
+            raise RuntimeError("RPF changed during GXT2 workspace export")
+        return Gxt2Workspace().export_bytes(
+            entry.name, data, destination,
+            source_binding={
+                "outer_archive": str(index.source),
+                "outer_archive_sha256": archive_hash,
+                "entry_id": entry.id,
+                "edition": index.edition,
+            },
+        )
+
+    def plan_gxt2_workspace_replacement(
+        self, index: RpfIndex, entry: RpfEntryRecord, workspace: str | Path,
+        plan_destination: str | Path,
+    ) -> tuple[Path, Path, Path]:
+        """Rebuild/reparse a bound GXT2 dictionary and create its RPF plan."""
+        if entry.kind == "directory" or index.entry(entry.id) != entry:
+            raise ValueError("Entry does not belong to this RPF index")
+        if entry.suffix != ".gxt2":
+            raise ValueError(f"GXT2 text editing is not supported for {entry.name}")
+        state = Gxt2Workspace.validate(workspace)
+        binding = state["manifest"].get("source_binding", {})
+        expected = {
+            "outer_archive": str(index.source),
+            "outer_archive_sha256": _sha256_file(index.source),
+            "entry_id": entry.id,
+            "edition": index.edition,
+        }
+        if not isinstance(binding, dict) or any(
+            str(binding.get(key, "")).casefold() != str(value).casefold()
+            for key, value in expected.items()
+        ):
+            raise ValueError(
+                "GXT2 workspace is not bound to this exact RPF archive and entry"
+            )
+        plan_path = Path(plan_destination).expanduser().resolve()
+        if plan_path.suffix.casefold() != ".json":
+            raise ValueError("GXT2 RPF replacement plan must use a .json extension")
+        if plan_path.exists() or plan_path.is_symlink():
+            raise ValueError(f"GXT2 RPF replacement plan already exists: {plan_path}")
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        payload_dir = plan_path.with_name(f"{plan_path.stem}.payload")
+        if payload_dir.exists() or payload_dir.is_symlink():
+            raise ValueError(f"GXT2 RPF plan payload folder already exists: {payload_dir}")
+        stage_root = Path(tempfile.mkdtemp(
+            prefix=f".{plan_path.stem}.gxt2-stage-", dir=plan_path.parent,
+        )).resolve()
+        published = False
+        try:
+            staged_asset, staged_report = Gxt2Workspace.build(
+                workspace, stage_root / entry.name,
+            )
+            stage_root.rename(payload_dir)
+            published = True
+            asset = payload_dir / staged_asset.name
+            report = payload_dir / staged_report.name
+            plan = self.replacement_plan(index, entry, asset)
+            plan["gxt2_workspace"] = {
+                "path": str(Path(workspace).resolve()),
+                "manifest_sha256": _sha256_file(
+                    Path(workspace).resolve() / "gxt2-workspace.json"
+                ),
+                "rebuilt_asset": str(asset),
+                "validation_report": str(report),
+                "validation_report_sha256": _sha256_file(report),
+            }
+            _write_json_atomic(plan_path, plan)
+            return plan_path, asset, report
+        except Exception:
+            cleanup = payload_dir if published else stage_root
+            if cleanup.is_dir() and cleanup.parent == plan_path.parent:
+                shutil.rmtree(cleanup)
+            plan_path.unlink(missing_ok=True)
+            raise
 
     def plan_binary_workspace_replacement(
         self, index: RpfIndex, entry: RpfEntryRecord, workspace: str | Path,

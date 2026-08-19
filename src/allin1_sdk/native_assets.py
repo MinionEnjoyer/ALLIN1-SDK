@@ -23,6 +23,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 
+from allin1_sdk.gxt2_workspace import Gxt2Workspace
 from allin1_sdk.processes import run_hidden
 
 
@@ -110,29 +111,15 @@ def _dds_metadata(data: bytes) -> dict[str, Any]:
 
 
 def _gxt2_text(data: bytes) -> tuple[str | None, dict[str, Any], tuple[str, ...]]:
-    if len(data) < 16 or data[:4] != b"GXT2":
+    if len(data) < 16 or data[:4] != b"2TXG":
         return None, {}, ()
     count = int.from_bytes(data[4:8], "little")
-    table_end = 8 + (count * 8)
-    if count > 1_000_000 or table_end + 8 > len(data):
-        return None, {"label_count": count}, ("GXT2 index is truncated or invalid.",)
-    lines: list[str] = []
-    invalid = 0
-    for index in range(count):
-        offset = 8 + (index * 8)
-        label_hash, text_offset = struct.unpack_from("<II", data, offset)
-        if text_offset >= len(data):
-            invalid += 1
-            continue
-        end = data.find(b"\0", text_offset)
-        if end < 0:
-            end = len(data)
-        value = data[text_offset:end].decode("utf-8", errors="replace")
-        lines.append(f"0x{label_hash:08X}  {value}")
-    warnings = (
-        (f"{invalid} label offsets were outside the file.",) if invalid else ()
-    )
-    return "\n".join(lines), {"label_count": count}, warnings
+    try:
+        entries = Gxt2Workspace.parse(data)
+    except ValueError as exc:
+        return None, {"label_count": count}, (str(exc),)
+    lines = [f"{item['hash_hex']}  {item['text']}" for item in entries]
+    return "\n".join(lines), {"label_count": len(entries)}, ()
 
 
 def _format_identity(name: str, data: bytes) -> tuple[str, dict[str, Any]]:
@@ -143,7 +130,7 @@ def _format_identity(name: str, data: bytes) -> tuple[str, dict[str, Any]]:
     if data.startswith(b"DDS "):
         metadata.update(_dds_metadata(data))
         return "DirectDraw Surface texture", metadata
-    if data.startswith(b"GXT2"):
+    if data.startswith(b"2TXG"):
         return "Rockstar GXT2 text table", metadata
     if data[:4] in {b"ADAT", b"TADA"}:
         metadata["endianness"] = "little" if data[:4] == b"ADAT" else "big"

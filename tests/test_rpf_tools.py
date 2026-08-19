@@ -12,6 +12,7 @@ from click.testing import CliRunner
 
 from allin1_sdk import native_assets, rpf_tools
 from allin1_sdk.cli import main
+from allin1_sdk.gxt2_workspace import Gxt2Workspace
 from allin1_sdk.native_assets import (
     MAX_NATIVE_PREVIEW_BYTES,
     NativeAssetInspector,
@@ -243,6 +244,50 @@ def test_rpf_binary_workspace_exports_patches_and_builds_bound_plan(
     with pytest.raises(ValueError, match="not bound"):
         service.plan_binary_workspace_replacement(
             index, entry, workspace, tmp_path / "wrong-plan.json",
+        )
+
+
+def test_rpf_gxt2_workspace_exports_edits_and_builds_bound_plan(
+    tmp_path, monkeypatch,
+):
+    service, archive, _ = _service(tmp_path)
+    source = Gxt2Workspace.encode((
+        {"hash": 0x100, "text": "Original text"},
+        {"hash": 0x200, "text": "Second text"},
+    ))
+    payload = _index_payload(archive, nested=False)
+    payload["entries"].append({
+        "id": "::text/global.gxt2", "archive_path": "",
+        "path": "text/global.gxt2", "name": "global.gxt2",
+        "kind": "binary", "size": len(source), "stored_size": len(source),
+    })
+    index = RpfIndex.load(_write_index(tmp_path, payload))
+    entry = index.entry("::text/global.gxt2")
+
+    def fake_run(args, **_kwargs):
+        assert args[1] == "extract-virtual-entry"
+        Path(args[6]).write_bytes(source)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(rpf_tools, "run_hidden", fake_run)
+    workspace = service.export_gxt2_workspace(
+        index, entry, tmp_path / "gxt2-workspace",
+    )
+    Gxt2Workspace.set_text(workspace, 0x100, "Edited text")
+    plan_path, asset, report = service.plan_gxt2_workspace_replacement(
+        index, entry, workspace, tmp_path / "gxt2-plan.json",
+    )
+    assert plan_path.is_file() and asset.is_file() and report.is_file()
+    assert Gxt2Workspace.parse(asset.read_bytes())[0]["text"] == "Edited text"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["gxt2_workspace"]["validation_report"] == str(report)
+    assert plan["payload"]["sha256"] == hashlib.sha256(asset.read_bytes()).hexdigest()
+    assert archive.read_bytes() == b"RPF7"
+
+    archive.write_bytes(b"RPF7-changed")
+    with pytest.raises(ValueError, match="not bound"):
+        service.plan_gxt2_workspace_replacement(
+            index, entry, workspace, tmp_path / "stale-plan.json",
         )
 
 
@@ -1543,8 +1588,8 @@ def _gxt2() -> bytes:
     text_offset = 24
     end = text_offset + len(text)
     return b"".join((
-        b"GXT2", struct.pack("<I", 1), struct.pack("<II", 0x12345678, text_offset),
-        b"GXT2", struct.pack("<I", end), text,
+        b"2TXG", struct.pack("<I", 1), struct.pack("<II", 0x12345678, text_offset),
+        b"2TXG", struct.pack("<I", end), text,
     ))
 
 
@@ -1797,6 +1842,59 @@ def test_native_preview_limits():
     assert native_preview_limit("model.yft", 20) == 21
     assert native_preview_limit("huge.yft", MAX_NATIVE_PREVIEW_BYTES + 10) == MAX_NATIVE_PREVIEW_BYTES
     assert native_preview_limit("huge.bin", 20 * 1024 * 1024) == 8 * 1024 * 1024
+
+
+def test_gxt2_rpf_cli_export_and_plan_commands(tmp_path, monkeypatch):
+    game = tmp_path / "game"
+    game.mkdir()
+    archive = tmp_path / "dlc.rpf"
+    archive.write_bytes(b"RPF7")
+    source = Gxt2Workspace.encode(({"hash": 0x100, "text": "Text"},))
+    payload = _index_payload(archive, nested=False)
+    payload["entries"].append({
+        "id": "::text/global.gxt2", "archive_path": "",
+        "path": "text/global.gxt2", "name": "global.gxt2", "kind": "binary",
+        "size": len(source), "stored_size": len(source),
+    })
+    index = RpfIndex.load(_write_index(tmp_path, payload))
+
+    class FakeService:
+        def __init__(self, _project_root, gta_path, **_kwargs):
+            assert Path(gta_path) == game
+
+        def index(self, source_archive):
+            assert Path(source_archive) == archive
+            return index
+
+        def export_gxt2_workspace(self, loaded, entry, output):
+            assert loaded is index and entry.path == "text/global.gxt2"
+            return Gxt2Workspace().export_bytes(entry.name, source, output)
+
+        def plan_gxt2_workspace_replacement(self, loaded, entry, workspace, output):
+            assert loaded is index and entry.path == "text/global.gxt2"
+            plan = Path(output)
+            payload_dir = plan.with_name(f"{plan.stem}.payload")
+            payload_dir.mkdir()
+            asset, report = Gxt2Workspace.build(workspace, payload_dir / entry.name)
+            plan.write_text("{}", encoding="utf-8")
+            return plan, asset, report
+
+    monkeypatch.setattr("allin1_sdk.cli.RpfExplorerService", FakeService)
+    runner = CliRunner()
+    workspace = tmp_path / "gxt2-workspace"
+    exported = runner.invoke(main, [
+        "export-rpf-gxt2-workspace", str(archive), "text/global.gxt2",
+        "--gta-path", str(game), "--output", str(workspace),
+    ])
+    assert exported.exit_code == 0, exported.output
+    Gxt2Workspace.set_text(workspace, 0x100, "Edited")
+    planned = runner.invoke(main, [
+        "sdk", "plan-rpf-gxt2-workspace", str(archive), "text/global.gxt2",
+        str(workspace), "--gta-path", str(game),
+        "--output", str(tmp_path / "gxt2-plan.json"),
+    ])
+    assert planned.exit_code == 0, planned.output
+    assert "archive unchanged" in planned.output
 
 
 def test_new_rpf_cli_index_extract_and_plan(tmp_path, monkeypatch):

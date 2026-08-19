@@ -14,6 +14,7 @@ from allin1_sdk.addon_importer import (
 )
 from allin1_sdk.addon_sdk import AddonLinker, AddonManifest, AddonSdkCatalog
 from allin1_sdk.binary_workspace import BinaryPatchWorkspace
+from allin1_sdk.gxt2_workspace import Gxt2Workspace
 from allin1_sdk.detector import detect_gta_path
 from allin1_sdk.dlc_inventory import DlcInventory
 from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
@@ -590,6 +591,29 @@ def export_rpf_binary_workspace(
     click.echo(f"Exported bound RPF binary workspace: {workspace}")
 
 
+@main.command("export-rpf-gxt2-workspace")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("entry_path")
+@click.option("--archive-path", default="")
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--output", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+def export_rpf_gxt2_workspace(
+    archive: Path, entry_path: str, archive_path: str,
+    gta_path: Path | None, output: Path,
+) -> None:
+    """Extract an exact GXT2 dictionary into a bound text workspace."""
+    service = _rpf_service(gta_path)
+    try:
+        index, entry = _entry(service, archive, archive_path, entry_path)
+        workspace = service.export_gxt2_workspace(index, entry, output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Exported bound RPF GXT2 text workspace: {workspace}")
+
+
 @main.command("extract-rpf-subtree")
 @click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
@@ -755,6 +779,32 @@ def plan_rpf_binary_workspace(
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Built verified binary RPF payload: {asset}")
     click.echo(f"Binary diff report: {report}")
+    click.echo(f"Reviewed replacement plan (archive unchanged): {plan}")
+
+
+@main.command("plan-rpf-gxt2-workspace")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("entry_path")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--archive-path", default="")
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--workspace-root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def plan_rpf_gxt2_workspace(
+    archive: Path, entry_path: str, workspace: Path, archive_path: str,
+    gta_path: Path | None, workspace_root: Path | None, output: Path,
+) -> None:
+    """Rebuild/reparse a bound GXT2 workspace and create its reviewed RPF plan."""
+    service = _rpf_service(gta_path, workspace_root)
+    try:
+        index, entry = _entry(service, archive, archive_path, entry_path)
+        plan, asset, report = service.plan_gxt2_workspace_replacement(
+            index, entry, workspace, output,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Built and reparsed GXT2 RPF payload: {asset}")
+    click.echo(f"GXT2 validation report: {report}")
     click.echo(f"Reviewed replacement plan (archive unchanged): {plan}")
 
 
@@ -1131,6 +1181,111 @@ def build_binary_workspace(workspace: Path, output: Path) -> None:
     click.echo(f"Binary diff report: {report}")
 
 
+@main.command("list-gxt2-entries")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", type=click.Path(path_type=Path))
+def list_gxt2_entries(workspace: Path, output: Path | None) -> None:
+    """List validated hash/text records from a GXT2 workspace."""
+    try:
+        entries = Gxt2Workspace.validate(workspace)["entries"]
+        rendered = json.dumps(list(entries), indent=2, ensure_ascii=False) + "\n"
+        if output is None:
+            click.echo(rendered, nl=False)
+        else:
+            destination = output.resolve()
+            if destination.exists() or destination.is_symlink():
+                raise ValueError(f"GXT2 catalog output already exists: {destination}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(rendered, encoding="utf-8")
+            click.echo(f"Wrote {len(entries)} GXT2 text record(s): {destination}")
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _require_gxt2_edit_acknowledgement(acknowledged: bool) -> None:
+    if not acknowledged:
+        raise click.ClickException(
+            "GXT2 workspace edits require --acknowledge-edit; the immutable source "
+            "snapshot remains unchanged"
+        )
+
+
+@main.command("set-gxt2-text")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("label_hash")
+@click.argument("text")
+@click.option("--acknowledge-edit", is_flag=True)
+def set_gxt2_text(
+    workspace: Path, label_hash: str, text: str, acknowledge_edit: bool,
+) -> None:
+    """Replace one GXT2 text value while retaining local undo history."""
+    _require_gxt2_edit_acknowledgement(acknowledge_edit)
+    try:
+        record = Gxt2Workspace.set_text(workspace, label_hash, text)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Updated GXT2 text; undo history: {record}")
+
+
+@main.command("add-gxt2-entry")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("label_hash")
+@click.argument("text")
+@click.option("--acknowledge-edit", is_flag=True)
+def add_gxt2_entry(
+    workspace: Path, label_hash: str, text: str, acknowledge_edit: bool,
+) -> None:
+    """Add one unique hash/text record to a GXT2 workspace."""
+    _require_gxt2_edit_acknowledgement(acknowledge_edit)
+    try:
+        record = Gxt2Workspace.add(workspace, label_hash, text)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Added GXT2 entry; undo history: {record}")
+
+
+@main.command("remove-gxt2-entry")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("label_hash")
+@click.option("--acknowledge-edit", is_flag=True)
+def remove_gxt2_entry(
+    workspace: Path, label_hash: str, acknowledge_edit: bool,
+) -> None:
+    """Remove one GXT2 record while retaining local undo history."""
+    _require_gxt2_edit_acknowledgement(acknowledge_edit)
+    try:
+        record = Gxt2Workspace.remove(workspace, label_hash)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Removed GXT2 entry; undo history: {record}")
+
+
+@main.command("undo-gxt2-edit")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--acknowledge-edit", is_flag=True)
+def undo_gxt2_edit(workspace: Path, acknowledge_edit: bool) -> None:
+    """Restore the GXT2 table before its latest recorded operation."""
+    _require_gxt2_edit_acknowledgement(acknowledge_edit)
+    try:
+        record = Gxt2Workspace.undo(workspace)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Appended GXT2 undo operation: {record}")
+
+
+@main.command("build-gxt2-workspace")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def build_gxt2_workspace(workspace: Path, output: Path) -> None:
+    """Rebuild and semantically reparse an edited GXT2 text table."""
+    try:
+        asset, report = Gxt2Workspace.build(workspace, output)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Built and reparsed GXT2 dictionary: {asset}")
+    click.echo(f"GXT2 validation report: {report}")
+
+
 @main.command("list-ytd-textures")
 @click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--output", "-o", type=click.Path(path_type=Path))
@@ -1315,9 +1470,9 @@ for _command in (
     search_rpf_catalog, build_rpf_tree, verify_rpf_archive,
     extract_rpf_entry,
     extract_rpf_subtree, export_rpf_native_workspace,
-    export_rpf_binary_workspace, diff_rpf,
+    export_rpf_binary_workspace, export_rpf_gxt2_workspace, diff_rpf,
     plan_rpf_replacement, plan_rpf_native_workspace,
-    plan_rpf_binary_workspace,
+    plan_rpf_binary_workspace, plan_rpf_gxt2_workspace,
     plan_rpf_add, plan_rpf_delete, plan_rpf_batch,
     plan_rpf_sync, apply_rpf_plan,
     verify_rpf_transaction, rollback_rpf_transaction, recover_rpf_transaction,
@@ -1325,6 +1480,8 @@ for _command in (
     export_native_workspace, build_native_workspace,
     inspect_binary_workspace, patch_binary_workspace,
     undo_binary_workspace, build_binary_workspace,
+    list_gxt2_entries, set_gxt2_text, add_gxt2_entry, remove_gxt2_entry,
+    undo_gxt2_edit, build_gxt2_workspace,
     list_ytd_textures, replace_ytd_texture, add_ytd_texture, remove_ytd_texture,
     undo_ytd_texture_edit,
     validate_meta_roundtrip_command, inspect_package_rpfs,
