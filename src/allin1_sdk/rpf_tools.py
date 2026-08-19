@@ -1023,9 +1023,12 @@ class RpfExplorerService:
 
     def compare_indexes(
         self, left: RpfIndex, right: RpfIndex, *, exact_content: bool = False,
+        logical_content: bool = False,
     ) -> dict[str, Any]:
         """Compare two recursively indexed archives without modifying either source."""
         self._require_tool()
+        if exact_content and logical_content:
+            raise ValueError("Choose exact-content or logical-content RPF diff, not both")
         for label, index in (("left", left), ("right", right)):
             if not index.source.is_file():
                 raise ValueError(f"RPF diff {label} source no longer exists: {index.source}")
@@ -1035,14 +1038,23 @@ class RpfExplorerService:
                 )
         left_source_hash = _sha256_file(left.source)
         right_source_hash = _sha256_file(right.source)
-        left_hashes: dict[str, str] = {}
-        right_hashes: dict[str, str] = {}
+        left_hashes: dict[str, Any] = {}
+        right_hashes: dict[str, Any] = {}
         if exact_content:
             left_hashes = self._batch_content_hashes(
                 left, (entry for entry in left.entries if entry.kind != "directory"),
                 expected_source_sha256=left_source_hash,
             )
             right_hashes = self._batch_content_hashes(
+                right, (entry for entry in right.entries if entry.kind != "directory"),
+                expected_source_sha256=right_source_hash,
+            )
+        elif logical_content:
+            left_hashes = self._batch_content_fingerprints(
+                left, (entry for entry in left.entries if entry.kind != "directory"),
+                expected_source_sha256=left_source_hash,
+            )
+            right_hashes = self._batch_content_fingerprints(
                 right, (entry for entry in right.entries if entry.kind != "directory"),
                 expected_source_sha256=right_source_hash,
             )
@@ -1057,7 +1069,7 @@ class RpfExplorerService:
         }
 
         def describe_entry(
-            entry: RpfEntryRecord, hashes: dict[str, str],
+            entry: RpfEntryRecord, hashes: dict[str, Any],
         ) -> dict[str, Any]:
             item = {
                 "archive_path": entry.archive_path,
@@ -1067,7 +1079,18 @@ class RpfExplorerService:
                 "stored_size": entry.stored_size,
             }
             if entry.id in hashes:
-                item["sha256"] = hashes[entry.id]
+                fingerprint = hashes[entry.id]
+                if isinstance(fingerprint, str):
+                    item["sha256"] = fingerprint
+                else:
+                    item["content"] = {
+                        key: fingerprint[key]
+                        for key in (
+                            "mode", "size", "logical_size", "raw_sha256",
+                            "canonical_sha256", "resource_header_sha256",
+                        )
+                        if key in fingerprint
+                    }
             return item
 
         added = [
@@ -1085,7 +1108,21 @@ class RpfExplorerService:
             before = left_entries[key]
             after = right_entries[key]
             changes: dict[str, dict[str, Any]] = {}
-            for field_name in _RPF_DIFF_ENTRY_FIELDS:
+            compared_fields = _RPF_DIFF_ENTRY_FIELDS
+            if logical_content:
+                resource_pair = (
+                    before.kind != "directory" and after.kind != "directory"
+                    and left_hashes[before.id]["mode"] == "rsc7_canonical"
+                    and right_hashes[after.id]["mode"] == "rsc7_canonical"
+                )
+                compared_fields = tuple(
+                    field for field in compared_fields
+                    if field not in (
+                        {"size", "stored_size", "compressed"} if resource_pair
+                        else {"stored_size", "compressed"}
+                    )
+                )
+            for field_name in compared_fields:
                 old = getattr(before, field_name)
                 new = getattr(after, field_name)
                 if old != new:
@@ -1096,6 +1133,29 @@ class RpfExplorerService:
                 new_hash = right_hashes[after.id]
                 if old_hash != new_hash:
                     changes["sha256"] = {"left": old_hash, "right": new_hash}
+            elif logical_content and before.kind != "directory" and after.kind != "directory":
+                content_compared += 1
+                old_fingerprint = left_hashes[before.id]
+                new_fingerprint = right_hashes[after.id]
+                old_identity = (
+                    old_fingerprint["canonical_sha256"],
+                    old_fingerprint["logical_size"],
+                )
+                new_identity = (
+                    new_fingerprint["canonical_sha256"],
+                    new_fingerprint["logical_size"],
+                )
+                if old_identity != new_identity:
+                    changes["logical_content"] = {
+                        "left": {
+                            "canonical_sha256": old_identity[0],
+                            "logical_size": old_identity[1],
+                        },
+                        "right": {
+                            "canonical_sha256": new_identity[0],
+                            "logical_size": new_identity[1],
+                        },
+                    }
             if changes:
                 modified.append({
                     "identity": {
@@ -1151,7 +1211,10 @@ class RpfExplorerService:
             "schema_version": 1,
             "operation": "rpf_archive_diff",
             "created_utc": datetime.now(timezone.utc).isoformat(),
-            "comparison_mode": "exact_content" if exact_content else "metadata",
+            "comparison_mode": (
+                "exact_content" if exact_content else
+                "logical_content" if logical_content else "metadata"
+            ),
             "left": {
                 "path": str(left.source), "edition": left.edition,
                 "size": left.archive_size, "sha256": left_source_hash,
@@ -1695,7 +1758,7 @@ class RpfExplorerService:
             f"- Left: `{report['left']['path']}`",
             f"- Right: `{report['right']['path']}`", "",
             "## Summary", "",
-            "| Added | Removed | Modified | Unchanged | Exact contents compared |",
+            "| Added | Removed | Modified | Unchanged | Payload contents compared |",
             "|---:|---:|---:|---:|---:|",
             f"| {summary['added']} | {summary['removed']} | {summary['modified']} | "
             f"{summary['unchanged']} | {summary['content_compared']} |", "",

@@ -27,7 +27,7 @@ from allin1_sdk.rage_data_compiler import RageVehicleDataCompiler
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_catalog import RpfCatalogService
 from allin1_sdk.rpf_graph import RpfPackageGraph
-from allin1_sdk.rpf_program import NODE_SPECS, RpfPackageProgram
+from allin1_sdk.rpf_program import NODE_SPECS, PROGRAM_TEMPLATES, RpfPackageProgram
 from allin1_sdk.rpf_tools import RpfExplorerService, _running_gta_processes
 from allin1_sdk.texture_workspace import TextureDictionaryWorkspace
 
@@ -861,14 +861,39 @@ def _program_config(value: str) -> dict:
 @main.command("create-rpf-program")
 @click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--output", "-o", required=True, type=click.Path(dir_okay=False, path_type=Path))
-def create_rpf_program(graph: Path, output: Path) -> None:
+@click.option(
+    "--template", type=click.Choice(sorted(PROGRAM_TEMPLATES)),
+    default="validate", show_default=True,
+)
+def create_rpf_program(graph: Path, output: Path, template: str) -> None:
     """Create a typed visual build program bound to one RPF package graph."""
     try:
-        program = RpfPackageProgram.create(graph, output)
+        program = RpfPackageProgram.create(graph, output, template=template)
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Created RPF package node program: {program}")
-    click.echo("Default flow: Package graph -> Validate package")
+    click.echo(
+        f"Template: {PROGRAM_TEMPLATES[template]['title']} ({template}); "
+        "configure any incomplete operation nodes before planning"
+    )
+
+
+@main.command("list-rpf-program-templates")
+def list_rpf_program_templates() -> None:
+    """List reusable visual RPF package program templates as JSON."""
+    click.echo(json.dumps({
+        "schema_version": 1,
+        "operation": "rpf_package_program_templates",
+        "templates": [
+            {
+                "id": template_id,
+                "title": spec["title"],
+                "description": spec["description"],
+                "operation_nodes": len(spec["nodes"]),
+            }
+            for template_id, spec in PROGRAM_TEMPLATES.items()
+        ],
+    }, indent=2, ensure_ascii=False))
 
 
 @main.command("inspect-rpf-program")
@@ -1191,19 +1216,28 @@ def extract_rpf_subtree(
     "--exact-content", is_flag=True,
     help="Extract and hash entries to detect changes hidden by identical metadata.",
 )
+@click.option(
+    "--logical-content", is_flag=True,
+    help="Compare canonical RSC7 header + decompressed payload identities.",
+)
 @click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
 def diff_rpf(
-    left: Path, right: Path, exact_content: bool,
+    left: Path, right: Path, exact_content: bool, logical_content: bool,
     gta_path: Path | None, output: Path,
 ) -> None:
     """Compare two recursive RPF trees and export JSON and Markdown reports."""
+    if exact_content and logical_content:
+        raise click.ClickException(
+            "Choose --exact-content or --logical-content, not both"
+        )
     service = RpfExplorerService(PROJECT_ROOT, _game_path(gta_path))
     try:
         left_index = service.index(left)
         right_index = service.index(right)
         report = service.compare_indexes(
             left_index, right_index, exact_content=exact_content,
+            logical_content=logical_content,
         )
         json_path, markdown_path = service.export_diff(report, output)
     except (OSError, RuntimeError, ValueError) as exc:
@@ -2042,7 +2076,8 @@ for _command in (
     reparent_rpf_graph_node, position_rpf_graph_node, remove_rpf_graph_node,
     layout_rpf_graph, refresh_rpf_graph_sources, materialize_rpf_graph, build_rpf_graph,
     plan_rpf_graph_origin,
-    create_rpf_program, inspect_rpf_program, add_rpf_program_node,
+    create_rpf_program, list_rpf_program_templates,
+    inspect_rpf_program, add_rpf_program_node,
     configure_rpf_program_node, connect_rpf_program_nodes,
     disconnect_rpf_program_node, position_rpf_program_node,
     layout_rpf_program, remove_rpf_program_node, plan_rpf_program,

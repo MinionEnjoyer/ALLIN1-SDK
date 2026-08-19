@@ -4,6 +4,7 @@ import hashlib
 import json
 import base64
 import struct
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1558,6 +1559,49 @@ def test_rpf_diff_detects_tree_and_exact_content_changes_and_exports_reports(
     assert "changed.bin" in markdown
 
 
+def test_rpf_logical_diff_ignores_rsc7_recompression_but_detects_payload_change(
+    tmp_path, monkeypatch,
+):
+    service, _archive, _entry, _fake = _transaction_service(tmp_path, monkeypatch)
+    header = b"RSC7" + bytes(range(12))
+    logical = (b"rockstar resource payload" * 4096) + b"end"
+
+    def resource(level, payload=logical):
+        compressor = zlib.compressobj(level, zlib.DEFLATED, -zlib.MAX_WBITS)
+        return header + compressor.compress(payload) + compressor.flush()
+
+    left = tmp_path / "left-resource.rpf"
+    recompressed = tmp_path / "recompressed-resource.rpf"
+    changed = tmp_path / "changed-resource.rpf"
+    left.write_bytes(_encode_archive({"asset.ytd": resource(1)}))
+    recompressed.write_bytes(_encode_archive({"asset.ytd": resource(9)}))
+    changed.write_bytes(_encode_archive({"asset.ytd": resource(9, logical + b"changed")}))
+
+    left_index = service.index(left)
+    recompressed_index = service.index(recompressed)
+    changed_index = service.index(changed)
+    raw = service.compare_indexes(
+        left_index, recompressed_index, exact_content=True,
+    )
+    assert raw["summary"]["modified"] == 1
+    logical_same = service.compare_indexes(
+        left_index, recompressed_index, logical_content=True,
+    )
+    assert logical_same["comparison_mode"] == "logical_content"
+    assert logical_same["summary"]["modified"] == 0
+    assert logical_same["summary"]["content_compared"] == 1
+    logical_changed = service.compare_indexes(
+        left_index, changed_index, logical_content=True,
+    )
+    assert logical_changed["summary"]["modified"] == 1
+    assert "logical_content" in logical_changed["entries"]["modified"][0]["changes"]
+    assert "content" in logical_changed["entries"]["modified"][0]["left"]
+    with pytest.raises(ValueError, match="not both"):
+        service.compare_indexes(
+            left_index, changed_index, exact_content=True, logical_content=True,
+        )
+
+
 def test_rpf_diff_refuses_stale_indexes_and_invalid_reports(tmp_path, monkeypatch):
     service, archive, _entry, _fake = _transaction_service(tmp_path, monkeypatch)
     index = service.index(archive)
@@ -2261,6 +2305,7 @@ def test_rpf_diff_cli_routes_exact_comparison_and_reports(tmp_path, monkeypatch)
         "operation": "rpf_archive_diff",
         "summary": {"added": 1, "removed": 2, "modified": 3},
     }
+    modes = []
 
     class FakeService:
         def __init__(self, _project_root, gta_path, **_kwargs):
@@ -2269,9 +2314,11 @@ def test_rpf_diff_cli_routes_exact_comparison_and_reports(tmp_path, monkeypatch)
         def index(self, source):
             return left_index if Path(source) == left else right_index
 
-        def compare_indexes(self, first, second, *, exact_content=False):
+        def compare_indexes(
+            self, first, second, *, exact_content=False, logical_content=False,
+        ):
             assert first is left_index and second is right_index
-            assert exact_content is True
+            modes.append((exact_content, logical_content))
             return report
 
         def export_diff(self, authored, output):
@@ -2291,6 +2338,25 @@ def test_rpf_diff_cli_routes_exact_comparison_and_reports(tmp_path, monkeypatch)
     assert "1 added, 2 removed, 3 modified" in result.output
     assert (tmp_path / "comparison.json").is_file()
     assert (tmp_path / "comparison.md").is_file()
+    logical = CliRunner().invoke(main, [
+        "diff-rpf", str(left), str(right), "--logical-content",
+        "--gta-path", str(game), "-o", str(tmp_path / "logical.json"),
+    ])
+    assert logical.exit_code == 0, logical.output
+    assert modes == [(True, False), (False, True)]
+
+
+def test_rpf_diff_cli_rejects_multiple_content_modes(tmp_path):
+    left = tmp_path / "left.rpf"
+    right = tmp_path / "right.rpf"
+    left.write_bytes(b"RPF7-left")
+    right.write_bytes(b"RPF7-right")
+    result = CliRunner().invoke(main, [
+        "diff-rpf", str(left), str(right), "--exact-content",
+        "--logical-content", "-o", str(tmp_path / "report.json"),
+    ])
+    assert result.exit_code != 0
+    assert "not both" in result.output
 
 
 def test_rpf_batch_cli_resolves_manifest_payloads_and_writes_plan(

@@ -11,7 +11,7 @@ from allin1_sdk import rpf_program
 from allin1_sdk.agent_api import command_catalog
 from allin1_sdk.cli import main
 from allin1_sdk.rpf_graph import RpfPackageGraph
-from allin1_sdk.rpf_program import NODE_SPECS, RpfPackageProgram
+from allin1_sdk.rpf_program import NODE_SPECS, PROGRAM_TEMPLATES, RpfPackageProgram
 
 
 def _graph(tmp_path: Path) -> tuple[Path, Path]:
@@ -22,6 +22,30 @@ def _graph(tmp_path: Path) -> tuple[Path, Path]:
         source, tmp_path / "package-graph.json", root_name="package.rpf",
     )
     return source, graph
+
+
+def test_rpf_program_reusable_templates_have_typed_connected_scaffolds(tmp_path):
+    _source, graph = _graph(tmp_path)
+    expected = {
+        "validate": (2, 1, True),
+        "loose-export": (4, 3, False),
+        "verified-build": (4, 3, False),
+        "compact-release": (5, 4, False),
+        "origin-change-plan": (4, 3, False),
+    }
+    assert set(PROGRAM_TEMPLATES) == set(expected)
+    for template, (nodes, links, ready) in expected.items():
+        program = RpfPackageProgram.create(
+            graph, tmp_path / f"{template}.json", template=template,
+        )
+        report = RpfPackageProgram.describe(program)
+        assert report["template"] == template
+        assert report["summary"]["nodes"] == nodes
+        assert report["summary"]["links"] == links
+        assert report["summary"]["ready"] is ready
+        assert not any("input is not connected" in issue for issue in report["issues"])
+    with pytest.raises(ValueError, match="Unknown RPF program template"):
+        RpfPackageProgram.create(graph, tmp_path / "invalid.json", template="other")
 
 
 def test_rpf_program_create_edit_validate_plan_and_typed_links(tmp_path):
@@ -499,6 +523,20 @@ def test_rpf_program_cli_console_alias_and_agent_catalog(tmp_path):
     assert planned.exit_code == 0, planned.output
     assert "No program operation was executed" in planned.output
 
+    templates = runner.invoke(main, ["sdk", "list-rpf-program-templates"])
+    assert templates.exit_code == 0, templates.output
+    template_report = json.loads(templates.output)
+    assert {item["id"] for item in template_report["templates"]} == set(
+        PROGRAM_TEMPLATES
+    )
+    compact = tmp_path / "compact-program.json"
+    created_compact = runner.invoke(main, [
+        "create-rpf-program", str(graph), "--output", str(compact),
+        "--template", "compact-release",
+    ])
+    assert created_compact.exit_code == 0, created_compact.output
+    assert RpfPackageProgram.describe(compact)["template"] == "compact-release"
+
     catalog = {item["name"]: item for item in command_catalog()}
     for command in (
         "create-rpf-program", "add-rpf-program-node",
@@ -509,6 +547,7 @@ def test_rpf_program_cli_console_alias_and_agent_catalog(tmp_path):
     ):
         assert catalog[command]["risk"] == "authoring_write"
     assert catalog["inspect-rpf-program"]["risk"] == "read_only"
+    assert catalog["list-rpf-program-templates"]["risk"] == "read_only"
 
 
 def test_rpf_program_desktop_is_embedded_typed_pin_canvas():
@@ -520,5 +559,6 @@ def test_rpf_program_desktop_is_embedded_typed_pin_canvas():
     assert "RpfPackageProgram.connect" in source
     assert "RpfPackageProgram.plan" in source
     assert "RpfPackageProgram.execute" in source
+    assert "PROGRAM_TEMPLATES.items()" in source
     assert 'notebook.add(program_tab, text="Build Flow")' in graph_ui
     assert "RpfProgramFrame(" in graph_ui

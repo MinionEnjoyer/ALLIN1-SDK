@@ -88,12 +88,20 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   order, and every expected output without running a node. Explicit execution can only
   create new artifacts outside GTA V, removes outputs created by a failed run, and emits
   one verification report. Every node/configure/connect/disconnect/layout/plan/run action
-  is available through the persistent console and structured Agent API.
+  is available through the persistent console and structured Agent API. The Create flow
+  menu provides reusable Validate, Loose tree, Verified build, Compact release, and
+  Imported-origin plan scaffolds; `list-rpf-program-templates` exposes the same catalog
+  to scripts and AI agents.
 - **Verified RPF defragmentation** — recursively compact a new external archive copy,
   rescan both archive trees, compare preserved metadata, extract every non-container
   leaf, and require both raw and canonical logical hashes to match before publishing.
   The source is hash-checked before and after, and neither the desktop nor
   `defragment-rpf` command can place the authored copy inside a GTA V installation.
+- **Resource-aware RPF comparison** — compare recursive archive trees as indexed
+  metadata, byte-exact extracted payloads, or logical content. Logical mode fingerprints
+  RSC7 headers plus decompressed resource bytes so compressor-level changes do not hide
+  real edits or create noisy false positives; desktop, `diff-rpf --logical-content`, and
+  the Agent API emit the same JSON and Markdown evidence.
 - **Real-archive canary** — copy a genuine Legacy or Enhanced RPF outside the game,
   exercise real replace/add/delete writes, verify each exact entry, roll everything
   back, and prove the final archive SHA-256 matches the untouched source.
@@ -338,9 +346,9 @@ service used by the launcher.
   remains visible but cannot plan or run. Programs support branching external-authoring
   pipelines, preflight all primary and sidecar outputs, block path collisions and any
   output under a configured GTA root, and recheck both program and package-graph hashes
-  after execution. The CLI/API surface includes `create-rpf-program`, inspect/add/
-  configure/connect/disconnect/position/layout/remove operations, `plan-rpf-program`,
-  and acknowledgement-gated `run-rpf-program`.
+  after execution. The CLI/API surface includes reusable template discovery,
+  `create-rpf-program`, inspect/add/configure/connect/disconnect/position/layout/remove
+  operations, `plan-rpf-program`, and acknowledgement-gated `run-rpf-program`.
 - Bounded OIV `createIfNotExist` containers are translated into retained loose
   `.rpf.source` workspaces and passed through that same builder. Safe top-level
   archives and new archives one level inside an existing RPF become validated,

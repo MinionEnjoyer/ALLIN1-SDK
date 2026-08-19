@@ -1517,13 +1517,23 @@ class RpfExplorerDialog(ttk.Frame):
         )
         if not selected:
             return
-        exact = messagebox.askyesno(
-            "Exact content comparison",
-            "Extract and hash every file on both sides?\n\n"
-            "This detects payload changes even when indexed metadata is identical, "
-            "but requires more time and temporary disk space.",
-            parent=self,
+        mode = simpledialog.askstring(
+            "RPF comparison mode",
+            "Choose metadata, logical, or exact.\n\n"
+            "Logical compares canonical RSC7 headers and decompressed content, so "
+            "harmless resource recompression is not reported as a change. Exact "
+            "compares every extracted byte.",
+            initialvalue="logical", parent=self,
         )
+        if mode is None:
+            return
+        mode = mode.strip().casefold()
+        if mode not in {"metadata", "logical", "exact"}:
+            messagebox.showerror(
+                "Invalid comparison mode",
+                "Enter metadata, logical, or exact.", parent=self,
+            )
+            return
         output = filedialog.asksaveasfilename(
             parent=self, title="Save RPF comparison reports",
             initialfile=(
@@ -1538,7 +1548,8 @@ class RpfExplorerDialog(ttk.Frame):
         try:
             other = self.service.index(selected)
             report = self.service.compare_indexes(
-                self.index, other, exact_content=exact,
+                self.index, other, exact_content=mode == "exact",
+                logical_content=mode == "logical",
             )
             json_path, markdown_path = self.service.export_diff(report, output)
         except (OSError, RuntimeError, ValueError) as exc:

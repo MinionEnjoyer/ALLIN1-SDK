@@ -9,7 +9,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from allin1_sdk.rpf_program import NODE_SPECS, RpfPackageProgram
+from allin1_sdk.rpf_program import NODE_SPECS, PROGRAM_TEMPLATES, RpfPackageProgram
 
 
 NODE_WIDTH = 248
@@ -68,8 +68,17 @@ class RpfProgramFrame(ttk.Frame):
             text="Typed pins prevent invalid package operations",
             foreground="#52635c",
         ).pack(side="left", padx=(12, 0))
+        create = ttk.Menubutton(tools, text="Create flow ▾")
+        create_menu = tk.Menu(create, tearoff=False)
+        for template_id, spec in PROGRAM_TEMPLATES.items():
+            create_menu.add_command(
+                label=spec["title"],
+                command=lambda value=template_id: self._create(value),
+            )
+        create.configure(menu=create_menu)
+        create.pack(side="right", padx=(5, 0))
         for text, command in (
-            ("Create flow", self._create), ("Open flow", self._choose),
+            ("Open flow", self._choose),
             ("Auto layout", self._auto_layout), ("Validate", self._validate),
             ("Dry-run plan", self._plan), ("Run flow", self._run),
         ):
@@ -176,20 +185,26 @@ class RpfProgramFrame(ttk.Frame):
         )
         self.state = {}
 
-    def _create(self) -> None:
+    def _create(self, template: str = "validate") -> None:
+        spec = PROGRAM_TEMPLATES[template]
         output = filedialog.asksaveasfilename(
             parent=self, title="Create RPF package build flow",
-            initialfile=f"{self.graph.stem}.program.json",
+            initialfile=f"{self.graph.stem}.{template}.program.json",
             defaultextension=".json", filetypes=(("RPF program", "*.json"),),
         )
         if not output:
             return
         try:
-            program = RpfPackageProgram.create(self.graph, output)
+            program = RpfPackageProgram.create(
+                self.graph, output, template=template,
+            )
         except (OSError, ValueError) as exc:
             messagebox.showerror("Could not create build flow", str(exc), parent=self)
             return
         self._open_program(program)
+        self.status.set(
+            f"Created {spec['title']} template · configure highlighted operation nodes"
+        )
 
     def _choose(self) -> None:
         selected = filedialog.askopenfilename(

@@ -60,6 +60,60 @@ NODE_SPECS: dict[str, ProgramNodeSpec] = {
 }
 
 
+PROGRAM_TEMPLATES: dict[str, dict[str, Any]] = {
+    "validate": {
+        "title": "Validate only",
+        "description": "Verify the package graph and every bound source file.",
+        "nodes": (),
+        "links": (),
+    },
+    "loose-export": {
+        "title": "Loose authoring tree",
+        "description": "Validate, materialize a loose tree, and expose it as an artifact.",
+        "nodes": (
+            ("materialize", "materialize_tree", 680.0, 120.0),
+            ("artifact", "artifact_output", 980.0, 120.0),
+        ),
+        "links": (("validate", "materialize"), ("materialize", "artifact")),
+    },
+    "verified-build": {
+        "title": "Verified RPF build",
+        "description": "Validate, build an external RPF, and expose the verified archive.",
+        "nodes": (
+            ("build", "build_rpf", 680.0, 120.0),
+            ("artifact", "artifact_output", 980.0, 120.0),
+        ),
+        "links": (("validate", "build"), ("build", "artifact")),
+    },
+    "compact-release": {
+        "title": "Compact verified release",
+        "description": (
+            "Validate, build, defragment a separate copy, and expose the compact RPF."
+        ),
+        "nodes": (
+            ("build", "build_rpf", 680.0, 120.0),
+            ("compact", "defragment_rpf", 980.0, 120.0),
+            ("artifact", "artifact_output", 1280.0, 120.0),
+        ),
+        "links": (
+            ("validate", "build"), ("build", "compact"),
+            ("compact", "artifact"),
+        ),
+    },
+    "origin-change-plan": {
+        "title": "Imported archive change plan",
+        "description": (
+            "Validate an imported graph and emit a reviewed plan for its origin archive."
+        ),
+        "nodes": (
+            ("origin-plan", "plan_origin", 680.0, 120.0),
+            ("artifact", "artifact_output", 980.0, 120.0),
+        ),
+        "links": (("validate", "origin-plan"), ("origin-plan", "artifact")),
+    },
+}
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -146,9 +200,14 @@ class RpfPackageProgram:
     """Create, edit, validate, plan, and execute a typed RPF node program."""
 
     @classmethod
-    def create(cls, package_graph: str | Path, destination: str | Path) -> Path:
+    def create(
+        cls, package_graph: str | Path, destination: str | Path, *,
+        template: str = "validate",
+    ) -> Path:
         graph = Path(package_graph).expanduser().resolve()
         RpfPackageGraph.validate(graph, verify_sources=False)
+        if template not in PROGRAM_TEMPLATES:
+            raise ValueError(f"Unknown RPF program template: {template}")
         output = Path(destination).expanduser().resolve()
         if output.suffix.casefold() != ".json":
             raise ValueError("RPF program output must use a .json extension")
@@ -158,27 +217,34 @@ class RpfPackageProgram:
                 f"RPF package programs must be created outside GTA V: {detected_game}"
             )
         now = datetime.now(timezone.utc).isoformat()
+        template_spec = PROGRAM_TEMPLATES[template]
+        nodes = [
+            {
+                "id": "package", "type": "package_source",
+                "x": 80.0, "y": 120.0, "config": {},
+            },
+            {
+                "id": "validate", "type": "validate_graph",
+                "x": 380.0, "y": 120.0, "config": {},
+            },
+        ]
+        nodes.extend({
+            "id": node_id, "type": node_type, "x": x, "y": y, "config": {},
+        } for node_id, node_type, x, y in template_spec["nodes"])
+        links = [("package", "validate"), *template_spec["links"]]
         payload = {
             "schema_version": RPF_PROGRAM_SCHEMA,
             "operation": RPF_PROGRAM_OPERATION,
             "created_utc": now,
             "updated_utc": now,
             "package_graph": str(graph),
+            "template": template,
             "source_id": "package",
-            "nodes": [
-                {
-                    "id": "package", "type": "package_source",
-                    "x": 80.0, "y": 120.0, "config": {},
-                },
-                {
-                    "id": "validate", "type": "validate_graph",
-                    "x": 380.0, "y": 120.0, "config": {},
-                },
-            ],
+            "nodes": nodes,
             "links": [{
-                "from": "package", "from_port": "artifact",
-                "to": "validate", "to_port": "input",
-            }],
+                "from": parent, "from_port": "artifact",
+                "to": child, "to_port": "input",
+            } for parent, child in links],
         }
         cls._normalize(payload, verify_graph=False)
         _write_json_new(output, payload)
@@ -206,6 +272,9 @@ class RpfPackageProgram:
             or payload.get("operation") != RPF_PROGRAM_OPERATION
         ):
             raise ValueError("Unsupported RPF package program schema")
+        template = payload.get("template", "validate")
+        if template not in PROGRAM_TEMPLATES:
+            raise ValueError(f"Unknown RPF program template: {template!r}")
         graph = _configured_path(payload.get("package_graph"), "package graph")
         if verify_graph:
             RpfPackageGraph.validate(graph, verify_sources=True)
@@ -344,6 +413,7 @@ class RpfPackageProgram:
 
         return {
             "payload": payload, "package_graph": graph,
+            "template": template,
             "source_id": source_id, "nodes": nodes, "links": tuple(links),
             "incoming": incoming,
             "outgoing": {key: tuple(value) for key, value in outgoing.items()},
@@ -374,6 +444,7 @@ class RpfPackageProgram:
             "program": str(state["program"]),
             "program_sha256": state["program_sha256"],
             "package_graph": str(state["package_graph"]),
+            "template": state["template"],
             "summary": {
                 "nodes": len(state["nodes"]), "links": len(state["links"]),
                 "ready": not state["issues"], "issues": len(state["issues"]),

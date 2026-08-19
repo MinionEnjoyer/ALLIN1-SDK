@@ -21,6 +21,7 @@ def test_command_catalog_combines_cli_and_console_builtins():
     assert "create-rpf-program" in catalog
     assert "connect-rpf-program-nodes" in catalog
     assert "run-rpf-program" in catalog
+    assert "list-rpf-program-templates" in catalog
     assert "defragment-rpf" in catalog
 
 
