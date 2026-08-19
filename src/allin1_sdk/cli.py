@@ -13,6 +13,7 @@ from allin1_sdk.addon_importer import (
     AddonDraftBuilder, AddonPackageInspector, PackageAssetReader,
 )
 from allin1_sdk.addon_sdk import AddonLinker, AddonManifest, AddonSdkCatalog
+from allin1_sdk.binary_workspace import BinaryPatchWorkspace
 from allin1_sdk.detector import detect_gta_path
 from allin1_sdk.dlc_inventory import DlcInventory
 from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
@@ -566,6 +567,29 @@ def export_rpf_native_workspace(
     click.echo(f"Exported RPF native editing workspace: {workspace}")
 
 
+@main.command("export-rpf-binary-workspace")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("entry_path")
+@click.option("--archive-path", default="")
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--output", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+def export_rpf_binary_workspace(
+    archive: Path, entry_path: str, archive_path: str,
+    gta_path: Path | None, output: Path,
+) -> None:
+    """Extract an exact RPF entry into an auditable same-size hex workspace."""
+    service = _rpf_service(gta_path)
+    try:
+        index, entry = _entry(service, archive, archive_path, entry_path)
+        workspace = service.export_binary_workspace(index, entry, output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Exported bound RPF binary workspace: {workspace}")
+
+
 @main.command("extract-rpf-subtree")
 @click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
@@ -683,6 +707,32 @@ def plan_rpf_native_workspace(
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Built and reparsed native RPF payload: {asset}")
     click.echo(f"Validation report: {report}")
+    click.echo(f"Reviewed replacement plan (archive unchanged): {plan}")
+
+
+@main.command("plan-rpf-binary-workspace")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("entry_path")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--archive-path", default="")
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--workspace-root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def plan_rpf_binary_workspace(
+    archive: Path, entry_path: str, workspace: Path, archive_path: str,
+    gta_path: Path | None, workspace_root: Path | None, output: Path,
+) -> None:
+    """Build a bound same-size binary diff and create its reviewed RPF plan."""
+    service = _rpf_service(gta_path, workspace_root)
+    try:
+        index, entry = _entry(service, archive, archive_path, entry_path)
+        plan, asset, report = service.plan_binary_workspace_replacement(
+            index, entry, workspace, output,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Built verified binary RPF payload: {asset}")
+    click.echo(f"Binary diff report: {report}")
     click.echo(f"Reviewed replacement plan (archive unchanged): {plan}")
 
 
@@ -988,6 +1038,77 @@ def build_native_workspace(workspace: Path, output: Path) -> None:
     click.echo(f"Validation report: {report}")
 
 
+@main.command("inspect-binary-workspace")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--offset", default="0", show_default=True)
+@click.option("--length", default=256, type=int, show_default=True)
+def inspect_binary_workspace(workspace: Path, offset: str, length: int) -> None:
+    """Render a bounded hexdump from an auditable binary workspace."""
+    try:
+        parsed_offset = int(offset, 0)
+        click.echo(BinaryPatchWorkspace.hexdump(
+            workspace, offset=parsed_offset, length=length,
+        ))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _require_binary_edit_acknowledgement(acknowledged: bool) -> None:
+    if not acknowledged:
+        raise click.ClickException(
+            "Binary workspace edits require --acknowledge-edit; the immutable source "
+            "snapshot remains unchanged"
+        )
+
+
+@main.command("patch-binary-workspace")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--offset", required=True, help="Decimal or 0x-prefixed byte offset.")
+@click.option("--hex", "replacement_hex", required=True, help="Replacement bytes in hex.")
+@click.option("--expected-hex", default="", help="Optional expected bytes at the offset.")
+@click.option("--acknowledge-edit", is_flag=True)
+def patch_binary_workspace(
+    workspace: Path, offset: str, replacement_hex: str,
+    expected_hex: str, acknowledge_edit: bool,
+) -> None:
+    """Apply one same-size offset patch and append its hash-chained history."""
+    _require_binary_edit_acknowledgement(acknowledge_edit)
+    try:
+        parsed_offset = int(offset, 0)
+        record = BinaryPatchWorkspace.patch(
+            workspace, parsed_offset, replacement_hex, expected_hex=expected_hex,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Applied auditable binary patch: {record}")
+
+
+@main.command("undo-binary-workspace")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--acknowledge-edit", is_flag=True)
+def undo_binary_workspace(workspace: Path, acknowledge_edit: bool) -> None:
+    """Reverse the latest binary workspace operation and retain recovery history."""
+    _require_binary_edit_acknowledgement(acknowledge_edit)
+    try:
+        record = BinaryPatchWorkspace.undo(workspace)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Appended binary undo operation: {record}")
+
+
+@main.command("build-binary-workspace")
+@click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def build_binary_workspace(workspace: Path, output: Path) -> None:
+    """Build a same-size binary asset and bounded changed-range report."""
+    try:
+        asset, report = BinaryPatchWorkspace.build(workspace, output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Built verified binary asset: {asset}")
+    click.echo(f"Binary diff report: {report}")
+
+
 @main.command("list-ytd-textures")
 @click.argument("workspace", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--output", "-o", type=click.Path(path_type=Path))
@@ -1171,13 +1292,17 @@ for _command in (
     inspect_rpf, dlc_inventory, compile_vehicle_data, index_rpf, catalog_rpfs,
     search_rpf_catalog, build_rpf_tree,
     extract_rpf_entry,
-    extract_rpf_subtree, export_rpf_native_workspace, diff_rpf,
+    extract_rpf_subtree, export_rpf_native_workspace,
+    export_rpf_binary_workspace, diff_rpf,
     plan_rpf_replacement, plan_rpf_native_workspace,
+    plan_rpf_binary_workspace,
     plan_rpf_add, plan_rpf_delete, plan_rpf_batch,
     plan_rpf_sync, apply_rpf_plan,
     verify_rpf_transaction, rollback_rpf_transaction, recover_rpf_transaction,
     list_rpf_transactions, canary_rpf_transaction, diff_meta_command,
     export_native_workspace, build_native_workspace,
+    inspect_binary_workspace, patch_binary_workspace,
+    undo_binary_workspace, build_binary_workspace,
     list_ytd_textures, replace_ytd_texture, add_ytd_texture, remove_ytd_texture,
     undo_ytd_texture_edit,
     validate_meta_roundtrip_command, inspect_package_rpfs,

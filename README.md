@@ -185,6 +185,10 @@ allin1-sdk search-rpf-catalog C:\Mods\Indexes\enhanced.sqlite police --suffix yt
 allin1-sdk build-rpf-tree C:\Mods\Example\dlc.rpf.source --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Build\dlc.rpf
 allin1-sdk export-rpf-native-workspace C:\Mods\Example\dlc.rpf common/data/model.ydr --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\model-workspace
 allin1-sdk plan-rpf-native-workspace C:\Mods\Example\dlc.rpf common/data/model.ydr C:\Work\model-workspace --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\model-plan.json
+allin1-sdk export-rpf-binary-workspace C:\Mods\Example\dlc.rpf common/data/table.bin --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\table-binary
+allin1-sdk inspect-binary-workspace C:\Work\table-binary --offset 0x100 --length 256
+allin1-sdk patch-binary-workspace C:\Work\table-binary --offset 0x108 --expected-hex "01 02" --hex "03 04" --acknowledge-edit
+allin1-sdk plan-rpf-binary-workspace C:\Mods\Example\dlc.rpf common/data/table.bin C:\Work\table-binary --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\table-plan.json
 allin1-sdk list-ytd-textures C:\Work\vehicle-ytd-workspace
 allin1-sdk replace-ytd-texture C:\Work\vehicle-ytd-workspace diffuse C:\Art\diffuse.png --acknowledge-edit
 allin1-sdk undo-ytd-texture-edit C:\Work\vehicle-ytd-workspace --acknowledge-edit
@@ -268,6 +272,13 @@ service used by the launcher.
   collisions, source tampering, unsupported types, oversized inputs, and any result
   that CodeWalker cannot parse again. RPF-native planning stores the rebuilt payload
   and validation report beside the plan; it still performs no archive write.
+- Binary patch workspaces bind an immutable source hash to one exact outer archive,
+  nested archive path, entry, and edition. Offset edits are same-size, capped at
+  64 KiB each, optionally require expected bytes, and append a hash-chained history;
+  undo appends a recovery operation. Builds refuse source/editable/history tampering,
+  output overwrite, size drift, unchanged results, and more than 4 MiB of auditable
+  differences. The changed-range report and rebuilt payload hashes are then bound to
+  a normal inert RPF replacement plan.
 - YTD texture edits are limited to a validated native workspace. Dependency paths,
   names, DDS headers, dimensions, mip counts, texture formats, counts, image sizes,
   and collisions are checked before publication. Raster conversion emits an

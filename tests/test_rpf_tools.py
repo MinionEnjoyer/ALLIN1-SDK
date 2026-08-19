@@ -208,6 +208,44 @@ def test_rpf_service_indexes_extracts_and_builds_plan(tmp_path, monkeypatch):
     assert plan["safety"]["writes_performed"] is False
 
 
+def test_rpf_binary_workspace_exports_patches_and_builds_bound_plan(
+    tmp_path, monkeypatch,
+):
+    service, archive, _ = _service(tmp_path)
+    payload = b"native payload"
+
+    def fake_run(args, **_kwargs):
+        if args[1] == "index-json":
+            Path(args[4]).write_text(json.dumps(_index_payload(archive)), encoding="utf-8")
+        elif args[1] == "extract-virtual-entry":
+            Path(args[6]).write_bytes(payload)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(rpf_tools, "run_hidden", fake_run)
+    index = service.index(archive)
+    entry = index.entry("::common/data/test.ymap")
+    workspace = service.export_binary_workspace(index, entry, tmp_path / "binary-workspace")
+    from allin1_sdk.binary_workspace import BinaryPatchWorkspace
+    BinaryPatchWorkspace.patch(workspace, 0, "FF", expected_hex=payload[:1].hex())
+    plan_path, asset, report = service.plan_binary_workspace_replacement(
+        index, entry, workspace, tmp_path / "binary-plan.json",
+    )
+    assert plan_path.is_file() and asset.is_file() and report.is_file()
+    assert asset.read_bytes()[0] == 0xFF
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["binary_workspace"]["diff_report"] == str(report)
+    assert plan["payload"]["sha256"] == hashlib.sha256(asset.read_bytes()).hexdigest()
+
+    manifest = workspace / "binary-workspace.json"
+    authored = json.loads(manifest.read_text(encoding="utf-8"))
+    authored["source_binding"]["entry_id"] = "::wrong.bin"
+    manifest.write_text(json.dumps(authored), encoding="utf-8")
+    with pytest.raises(ValueError, match="not bound"):
+        service.plan_binary_workspace_replacement(
+            index, entry, workspace, tmp_path / "wrong-plan.json",
+        )
+
+
 def _encode_archive(entries: dict[str, bytes]) -> bytes:
     return b"RPF7" + json.dumps({
         path: base64.b64encode(data).decode("ascii") for path, data in entries.items()

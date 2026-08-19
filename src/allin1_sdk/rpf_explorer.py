@@ -533,11 +533,18 @@ class RpfExplorerDialog(ttk.Frame):
             label="Native preview", command=self._preview_selected, state="disabled",
         )
         menu.add_command(
+            label="Raw hex preview", command=self._preview_selected_hex, state="disabled",
+        )
+        menu.add_command(
             label="Extract selected…", command=self._extract_selected, state="disabled",
         )
         menu.add_command(
             label="Export editable native workspace…",
             command=self._export_native_workspace, state="disabled",
+        )
+        menu.add_command(
+            label="Export binary patch workspace…",
+            command=self._export_binary_workspace, state="disabled",
         )
         menu.add_command(
             label="Extract selected subtree…",
@@ -550,6 +557,10 @@ class RpfExplorerDialog(ttk.Frame):
         menu.add_command(
             label="Plan replacement from native workspace…",
             command=self._plan_native_workspace_replacement, state="disabled",
+        )
+        menu.add_command(
+            label="Plan replacement from binary workspace…",
+            command=self._plan_binary_workspace_replacement, state="disabled",
         )
         menu.add_command(
             label="Plan new entry…", command=self._plan_addition, state="disabled",
@@ -578,10 +589,13 @@ class RpfExplorerDialog(ttk.Frame):
         state = "normal" if enabled else "disabled"
         for menu in self.entry_action_menus:
             menu.entryconfigure("Native preview", state=state)
+            menu.entryconfigure("Raw hex preview", state=state)
             menu.entryconfigure("Extract selected…", state=state)
+            menu.entryconfigure("Export binary patch workspace…", state=state)
             menu.entryconfigure("Export editable native workspace…", state=state)
             menu.entryconfigure("Plan replacement…", state=state)
             menu.entryconfigure("Plan replacement from native workspace…", state=state)
+            menu.entryconfigure("Plan replacement from binary workspace…", state=state)
             menu.entryconfigure("Plan new entry…", state=state)
             menu.entryconfigure("Plan deletion…", state=state)
             menu.entryconfigure("Plan rename…", state=state)
@@ -954,6 +968,68 @@ class RpfExplorerDialog(ttk.Frame):
             self._show_text(body)
         self.status.set(f"Previewed {entry.virtual_name} without modifying the archive")
 
+    def _preview_selected_hex(self) -> None:
+        entry = self._selected()
+        if entry is None or self.index is None or self.service is None:
+            return
+        length = min(entry.size, 16 * 1024)
+        if length <= 0:
+            messagebox.showwarning("Empty entry", "This entry has no bytes to preview.", parent=self)
+            return
+        destination = Path(self._preview_temp.name) / (
+            f"hex-{len(list(Path(self._preview_temp.name).iterdir()))}-{entry.name}"
+        )
+        try:
+            data = self.service.extract(self.index, entry, destination).read_bytes()[:length]
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Raw hex preview failed", str(exc), parent=self)
+            return
+        lines = []
+        for offset in range(0, len(data), 16):
+            block = data[offset:offset + 16]
+            hexadecimal = " ".join(f"{value:02X}" for value in block)
+            printable = "".join(
+                chr(value) if 32 <= value < 127 else "." for value in block
+            )
+            lines.append(f"{offset:08X}  {hexadecimal:<47}  |{printable:<16}|")
+        if entry.size > length:
+            lines.extend([
+                "", f"Preview capped at {_human_size(length)} of {_human_size(entry.size)}.",
+                "Export a bound binary patch workspace for offset inspection and editing.",
+            ])
+        self.asset_meta.set(
+            f"Raw bytes · {entry.virtual_name} · {_human_size(entry.size)} · read-only"
+        )
+        self._show_text("\n".join(lines))
+        self.status.set(f"Previewed raw bytes from {entry.virtual_name}")
+
+    def _export_binary_workspace(self) -> None:
+        entry = self._selected()
+        if entry is None or self.index is None or self.service is None:
+            return
+        selected = filedialog.askdirectory(
+            parent=self, title="Select a new binary patch workspace folder",
+            mustexist=False,
+        )
+        if not selected:
+            return
+        try:
+            workspace = self.service.export_binary_workspace(
+                self.index, entry, selected,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("Binary workspace export failed", str(exc), parent=self)
+            return
+        self.status.set(f"Bound binary patch workspace exported: {workspace}")
+        messagebox.showinfo(
+            "Binary workspace exported",
+            "The immutable source snapshot and editable same-size copy are bound to "
+            f"this exact archive entry. Use the SDK Console's inspect-, patch-, and "
+            f"undo-binary-workspace commands, then return here to create the reviewed "
+            f"replacement plan.\n\nWorkspace: {workspace}",
+            parent=self,
+        )
+
     def _extract_selected(self) -> None:
         entry = self._selected()
         if entry is None or self.index is None or self.service is None:
@@ -1163,6 +1239,49 @@ class RpfExplorerDialog(ttk.Frame):
             self, "Building native RPF replacement", work, completed,
             lambda error: messagebox.showerror(
                 "Native replacement plan failed", str(error), parent=self,
+            ),
+        )
+
+    def _plan_binary_workspace_replacement(self) -> None:
+        entry = self._selected()
+        if entry is None or self.index is None or self.service is None:
+            return
+        workspace = filedialog.askdirectory(
+            parent=self, title=f"Select patched binary workspace for {entry.name}",
+        )
+        if not workspace:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save binary RPF replacement plan",
+            initialfile=f"{Path(entry.name).stem}-binary-replacement-plan.json",
+            defaultextension=".json", filetypes=(("JSON", "*.json"),),
+        )
+        if not output:
+            return
+
+        def work(progress):
+            progress("Validating binary workspace history and source binding…", 20)
+            result = self.service.plan_binary_workspace_replacement(
+                self.index, entry, workspace, output,
+            )
+            progress("Built same-size diff and bound reviewed RPF plan", 100)
+            return result
+
+        def completed(result):
+            plan, asset, report = result
+            self.status.set(f"Wrote binary replacement plan: {plan}")
+            messagebox.showinfo(
+                "Binary replacement plan ready",
+                "The same-size output, changed byte ranges, history chain, archive hash, "
+                "and exact entry identity are bound to this plan. The RPF has not "
+                f"changed.\n\nPayload: {asset}\nDiff: {report}\nPlan: {plan}",
+                parent=self,
+            )
+
+        RpfProgressDialog(
+            self, "Building binary RPF replacement", work, completed,
+            lambda error: messagebox.showerror(
+                "Binary replacement plan failed", str(error), parent=self,
             ),
         )
 
