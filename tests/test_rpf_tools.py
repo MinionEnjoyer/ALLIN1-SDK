@@ -867,6 +867,67 @@ def test_rpf_subtree_export_enforces_limits_and_cleans_failed_staging(
     assert not list(tmp_path.glob(".failed-export.allin1-stage-*"))
 
 
+def test_rpf_subtree_workspace_sync_plans_applies_and_rolls_back_file_edits(
+    tmp_path, monkeypatch,
+):
+    service, archive, _entry, _fake = _transaction_service(tmp_path, monkeypatch)
+    original = archive.read_bytes()
+    index = service.index(archive)
+    workspace = service.extract_subtree(
+        index, tmp_path / "common-workspace", directory_path="common",
+    )
+    edited = workspace / "data" / "test.ymap"
+    edited.write_bytes(b"workspace replacement")
+    added = workspace / "data" / "new.bin"
+    added.write_bytes(b"workspace addition")
+    plan = service.subtree_sync_plan(index, workspace)
+    assert plan["operation"] == "rpf_multi_entry_change"
+    assert plan["workspace_sync"]["changed_files"] == 2
+    assert {(item["action"], item["entry"]) for item in plan["changes"]} == {
+        ("replace", "common/data/test.ymap"),
+        ("add", "common/data/new.bin"),
+    }
+    plan_path = tmp_path / "sync-plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    receipt = service.apply_change_plan(
+        plan_path, receipt_root=tmp_path / "transactions",
+    )
+    applied = _decode_archive(archive)
+    assert applied["common/data/test.ymap"] == b"workspace replacement"
+    assert applied["common/data/new.bin"] == b"workspace addition"
+    assert service.verify_transaction(receipt)["healthy"] is True
+    service.rollback_transaction(receipt)
+    assert archive.read_bytes() == original
+
+    clean = service.extract_subtree(
+        service.index(archive), tmp_path / "clean-workspace", directory_path="common",
+    )
+    with pytest.raises(ValueError, match="no changes"):
+        service.subtree_sync_plan(service.index(archive), clean)
+
+
+def test_rpf_subtree_workspace_sync_rejects_wrong_base_and_manifest_escape(
+    tmp_path, monkeypatch,
+):
+    service, archive, _entry, _fake = _transaction_service(tmp_path, monkeypatch)
+    index = service.index(archive)
+    workspace = service.extract_subtree(
+        index, tmp_path / "workspace", directory_path="common",
+    )
+    manifest_path = workspace / ".allin1-rpf-export.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match.*base"):
+        service.subtree_sync_plan(index, workspace)
+
+    manifest["source"]["sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+    manifest["files"][0]["entry_path"] = "outside/escape.bin"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="escapes its selection"):
+        service.subtree_sync_plan(index, workspace)
+
+
 def test_rpf_diff_detects_tree_and_exact_content_changes_and_exports_reports(
     tmp_path, monkeypatch,
 ):
@@ -1425,6 +1486,14 @@ def test_rpf_batch_cli_resolves_manifest_payloads_and_writes_plan(
                 "changes": changes,
             }
 
+        def subtree_sync_plan(self, index, export_directory):
+            assert index is sentinel
+            assert Path(export_directory) == tmp_path / "workspace"
+            return {
+                "operation": "rpf_multi_entry_change", "status": "ready",
+                "changes": [{"action": "replace"}],
+            }
+
     monkeypatch.setattr("allin1_sdk.cli.RpfExplorerService", FakeService)
     output = tmp_path / "batch-plan.json"
     result = CliRunner().invoke(main, [
@@ -1434,6 +1503,16 @@ def test_rpf_batch_cli_resolves_manifest_payloads_and_writes_plan(
     assert result.exit_code == 0, result.output
     assert "atomic plan for 1 changes" in result.output
     assert json.loads(output.read_text(encoding="utf-8"))["status"] == "ready"
+
+    (tmp_path / "workspace").mkdir()
+    sync_output = tmp_path / "sync-plan.json"
+    sync = CliRunner().invoke(main, [
+        "sdk", "plan-rpf-sync", str(archive), str(tmp_path / "workspace"),
+        "--gta-path", str(game), "-o", str(sync_output),
+    ])
+    assert sync.exit_code == 0, sync.output
+    assert "atomic sync plan for 1 changes" in sync.output
+    assert sync_output.is_file()
 
 
 def test_new_rpf_cli_reports_missing_detection_and_unknown_entries(tmp_path, monkeypatch):

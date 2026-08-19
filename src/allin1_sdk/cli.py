@@ -637,6 +637,33 @@ def plan_rpf_batch(
     )
 
 
+@main.command("plan-rpf-sync")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument(
+    "export_directory", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--workspace-root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def plan_rpf_sync(
+    archive: Path, export_directory: Path, gta_path: Path | None,
+    workspace_root: Path | None, output: Path,
+) -> None:
+    """Plan all file edits made inside a verified RPF subtree export."""
+    service = _rpf_service(gta_path, workspace_root)
+    try:
+        plan = service.subtree_sync_plan(service.index(archive), export_directory)
+        destination = output.resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Wrote {plan['status']} atomic sync plan for {len(plan['changes'])} changes; "
+        f"no archive was changed: {destination}"
+    )
+
+
 @main.command("apply-rpf-plan")
 @click.argument("plan", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
@@ -866,7 +893,7 @@ for _command in (
     inspect_rpf, dlc_inventory, compile_vehicle_data, index_rpf, extract_rpf_entry,
     extract_rpf_subtree, diff_rpf,
     plan_rpf_replacement, plan_rpf_add, plan_rpf_delete, plan_rpf_batch,
-    apply_rpf_plan,
+    plan_rpf_sync, apply_rpf_plan,
     verify_rpf_transaction, rollback_rpf_transaction, recover_rpf_transaction,
     list_rpf_transactions, canary_rpf_transaction, diff_meta_command,
     validate_meta_roundtrip_command, inspect_package_rpfs,

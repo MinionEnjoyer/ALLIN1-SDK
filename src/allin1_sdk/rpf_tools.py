@@ -937,6 +937,138 @@ class RpfExplorerService:
             },
         }
 
+    def subtree_sync_plan(
+        self, index: RpfIndex, export_directory: str | Path,
+    ) -> dict[str, Any]:
+        """Convert edits in a verified subtree export into one atomic plan."""
+        authored_root = Path(export_directory).expanduser()
+        if authored_root.is_symlink():
+            raise ValueError("RPF subtree workspace cannot be a symbolic link")
+        root = authored_root.resolve()
+        if not root.is_dir():
+            raise FileNotFoundError(f"RPF subtree export not found: {root}")
+        manifest_path = root / ".allin1-rpf-export.json"
+        manifest = _read_json_object(manifest_path, "RPF subtree export manifest")
+        if manifest.get("schema_version") != 1 or manifest.get(
+            "operation"
+        ) != "rpf_subtree_export":
+            raise ValueError("Unsupported RPF subtree export manifest")
+        source = manifest.get("source")
+        selection = manifest.get("selection")
+        records = manifest.get("files")
+        if not isinstance(source, dict) or not isinstance(selection, dict):
+            raise ValueError("RPF subtree export is missing source or selection metadata")
+        if not isinstance(records, list) or not records:
+            raise ValueError("RPF subtree export contains no file records")
+        if len(records) > _MAX_SUBTREE_FILES:
+            raise ValueError("RPF subtree export exceeds the guarded file limit")
+        source_hash = source.get("sha256")
+        if not _is_sha256(source_hash):
+            raise ValueError("RPF subtree export has an invalid source hash")
+        if str(source.get("edition", "")).casefold() != index.edition.casefold():
+            raise ValueError("RPF subtree export edition does not match the target archive")
+        if _sha256_file(index.source) != source_hash:
+            raise ValueError(
+                "RPF target does not match the subtree export base; export it again "
+                "or use an unchanged byte-identical mods copy"
+            )
+        archive_path = _safe_virtual_path(
+            str(selection.get("archive_path", "")), allow_empty=True,
+        )
+        directory_path = _safe_virtual_path(
+            str(selection.get("directory_path", "")), allow_empty=True,
+        )
+        self._require_supported_nested_archive(index, archive_path)
+        if manifest.get("file_count") != len(records):
+            raise ValueError("RPF subtree export file count does not match its manifest")
+
+        recorded: dict[str, dict[str, Any]] = {}
+        for number, item in enumerate(records, start=1):
+            if not isinstance(item, dict):
+                raise ValueError(f"RPF subtree export file record {number} is invalid")
+            relative = _safe_virtual_path(str(item.get("relative_path", "")))
+            entry_path = _safe_virtual_path(str(item.get("entry_path", "")))
+            item_archive = _safe_virtual_path(
+                str(item.get("archive_path", "")), allow_empty=True,
+            )
+            expected_entry = (
+                f"{directory_path}/{relative}" if directory_path else relative
+            )
+            if item_archive.casefold() != archive_path.casefold() or (
+                entry_path.casefold() != expected_entry.casefold()
+            ):
+                raise ValueError(
+                    f"RPF subtree export record escapes its selection: {relative}"
+                )
+            if not _is_sha256(item.get("sha256")):
+                raise ValueError(f"RPF subtree export record has an invalid hash: {relative}")
+            if relative.casefold() in recorded:
+                raise ValueError(
+                    f"RPF subtree export contains a duplicate path: {relative}"
+                )
+            try:
+                current_entry = index.entry(f"{archive_path}::{entry_path}")
+            except KeyError as exc:
+                raise ValueError(
+                    f"RPF subtree export base entry is absent: {entry_path}"
+                ) from exc
+            if current_entry.kind == "directory":
+                raise ValueError(f"RPF subtree export file record is a directory: {entry_path}")
+            recorded[relative.casefold()] = {
+                **item, "relative_path": relative, "entry_path": entry_path,
+            }
+
+        workspace_files: dict[str, tuple[str, Path]] = {}
+        for path in root.rglob("*"):
+            if path.is_symlink():
+                raise ValueError(f"RPF subtree workspace contains a symbolic link: {path}")
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root).as_posix()
+            if relative.casefold() == ".allin1-rpf-export.json":
+                continue
+            relative = _safe_virtual_path(relative)
+            if relative.casefold() in workspace_files:
+                raise ValueError(
+                    f"RPF subtree workspace contains a case-insensitive collision: {relative}"
+                )
+            workspace_files[relative.casefold()] = (relative, path)
+        if len(workspace_files) > _MAX_SUBTREE_FILES:
+            raise ValueError("RPF subtree workspace exceeds the guarded file limit")
+
+        changes: list[dict[str, Any]] = []
+        for key, item in recorded.items():
+            workspace = workspace_files.get(key)
+            if workspace is None:
+                changes.append({
+                    "action": "delete", "archive_path": archive_path,
+                    "entry": item["entry_path"],
+                })
+                continue
+            _relative, payload = workspace
+            if _sha256_file(payload) != item["sha256"]:
+                changes.append({
+                    "action": "replace", "archive_path": archive_path,
+                    "entry": item["entry_path"], "payload": payload,
+                })
+        for key, (relative, payload) in workspace_files.items():
+            if key in recorded:
+                continue
+            entry_path = f"{directory_path}/{relative}" if directory_path else relative
+            changes.append({
+                "action": "add", "archive_path": archive_path,
+                "entry": entry_path, "payload": payload,
+            })
+        if not changes:
+            raise ValueError("RPF subtree workspace has no changes to plan")
+        plan = self.multi_change_plan(index, changes)
+        plan["workspace_sync"] = {
+            "manifest": str(manifest_path),
+            "archive_path": archive_path, "directory_path": directory_path,
+            "changed_files": len(changes),
+        }
+        return plan
+
     def replacement_plan(
         self, index: RpfIndex, entry: RpfEntryRecord, payload: str | Path,
     ) -> dict[str, Any]:

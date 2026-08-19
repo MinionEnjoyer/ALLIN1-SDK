@@ -44,6 +44,7 @@ AUTHORING_COMMANDS = frozenset({
     "oiv-plan",
     "plan-rpf-add",
     "plan-rpf-batch",
+    "plan-rpf-sync",
     "plan-rpf-delete",
     "plan-rpf-replacement",
     "validate-meta-roundtrip",

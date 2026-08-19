@@ -47,7 +47,8 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   deepest-first parent reassembly, pre/post-write verification,
   durable receipts, guarded rollback, progress UI, transaction history, interrupted
   receipt recovery, and stale-lock inspection. Subtree exports are staged into a
-  new folder and include a source and per-file SHA-256 manifest. Multi-entry plans
+  new folder and include a source and per-file SHA-256 manifest; an edited export
+  can be reconciled back into one reviewed atomic workspace-sync plan. Multi-entry plans
   batch up to 1,000 root or deep changes, rebuild each nested container once, and
   commit the outer archive once under one lock, backup, receipt, and rollback.
 - **Real-archive canary** — copy a genuine Legacy or Enhanced RPF outside the game,
@@ -148,7 +149,8 @@ content with large button rows:
   `Tab` to accept a completion, arrows to navigate, and `Ctrl+L` to clear output.
 - **Archive / Entry** controls RPF search, metadata, preview, exact-entry and
   recursive subtree extraction,
-  replace/add/delete planning, guarded application, canaries, transaction history,
+  subtree workspace synchronization, replace/add/delete planning, guarded application,
+  canaries, transaction history,
   receipt recovery, stale-lock review, verification, and rollback.
 - **Help** provides contextual guidance for each workspace and its safety limits.
 
@@ -170,6 +172,7 @@ allin1-sdk audit-folder C:\Mods\TestMods -o package-audit.md
 allin1-sdk dlc-inventory "D:\Games\GTA V Enhanced" -o dlc-inventory.md
 allin1-sdk index-rpf C:\Mods\Example\dlc.rpf --gta-path "D:\Games\GTA V Enhanced" -o index.json
 allin1-sdk extract-rpf-subtree C:\Mods\Example\dlc.rpf --archive-path x64\textures.rpf --directory vehicle --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Exports\vehicle
+allin1-sdk plan-rpf-sync C:\Mods\Example\dlc.rpf C:\Mods\Exports\vehicle --gta-path "D:\Games\GTA V Enhanced" --workspace-root C:\Mods -o subtree-sync-plan.json
 allin1-sdk diff-rpf C:\Mods\Before\dlc.rpf C:\Mods\After\dlc.rpf --exact-content --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Reports\archive-diff.json
 allin1-sdk oiv-plan C:\Mods\Example.oiv -o oiv-plan.md --rpf-batches C:\Mods\Example-rpf-batches
 allin1-sdk plan-rpf-batch "D:\Games\GTA V Enhanced\mods\update\update.rpf" C:\Mods\Example-rpf-batches\01-update-xxxxxxxx\changes.json --gta-path "D:\Games\GTA V Enhanced" -o atomic-plan.json
@@ -223,6 +226,11 @@ service used by the launcher.
 - RPF exploration and extraction are read-only. Subtree extraction scans the outer
   archive once, refuses existing output folders, verifies that the source hash did
   not change, and emits `.allin1-rpf-export.json` with every exported file hash.
+- Subtree workspace synchronization revalidates that manifest, its selected archive
+  and directory, the untouched source hash, every original payload hash, path
+  containment, and case uniqueness. It turns edited, added, and removed loose files
+  into a normal atomic multi-entry plan; plan creation is still read-only and a
+  separate acknowledged apply is required.
 - RPF diffing leaves both sources untouched. Metadata mode compares recursive entry
   and archive records; exact mode batch-extracts each side once into bounded temporary
   storage and hashes every payload to expose same-size content changes.

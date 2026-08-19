@@ -484,6 +484,10 @@ class RpfExplorerDialog(ttk.Frame):
             state="disabled",
         )
         menu.add_command(
+            label="Plan subtree workspace sync…", command=self._plan_subtree_sync,
+            state="disabled",
+        )
+        menu.add_command(
             label="Apply entry-change plan…", command=self._apply_replacement_plan,
         )
         menu.add_command(
@@ -533,6 +537,7 @@ class RpfExplorerDialog(ttk.Frame):
             menu.entryconfigure("Extract current archive tree…", state=state)
             menu.entryconfigure("Compare with archive…", state=state)
             menu.entryconfigure("Create multi-entry plan…", state=state)
+            menu.entryconfigure("Plan subtree workspace sync…", state=state)
             menu.entryconfigure("Run disposable archive canary…", state=state)
 
     def _set_entry_actions(self, enabled: bool) -> None:
@@ -985,6 +990,45 @@ class RpfExplorerDialog(ttk.Frame):
         if plan["status"] == "blocked":
             messagebox.showwarning(
                 "Multi-entry plan is blocked",
+                "No archive was changed. Resolve these items and create a new plan:\n\n"
+                + "\n".join(f"• {item}" for item in plan["blocking_reasons"]),
+                parent=self,
+            )
+
+    def _plan_subtree_sync(self) -> None:
+        if self.index is None or self.service is None:
+            return
+        export_directory = filedialog.askdirectory(
+            parent=self, title="Select verified RPF subtree workspace",
+        )
+        if not export_directory:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save atomic subtree sync plan",
+            initialfile=f"{Path(export_directory).name}-sync-plan.json",
+            defaultextension=".json", filetypes=(("JSON", "*.json"),),
+        )
+        if not output:
+            return
+        try:
+            plan = self.service.subtree_sync_plan(
+                self.index, export_directory,
+            )
+            Path(output).write_text(
+                json.dumps(plan, indent=2) + "\n", encoding="utf-8",
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror(
+                "Could not create sync plan", str(exc), parent=self,
+            )
+            return
+        self.status.set(
+            f"Wrote {plan['status']} atomic subtree sync plan for "
+            f"{len(plan['changes'])} changes: {output}"
+        )
+        if plan["status"] == "blocked":
+            messagebox.showwarning(
+                "Subtree sync plan is blocked",
                 "No archive was changed. Resolve these items and create a new plan:\n\n"
                 + "\n".join(f"• {item}" for item in plan["blocking_reasons"]),
                 parent=self,
