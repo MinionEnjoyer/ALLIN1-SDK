@@ -648,6 +648,60 @@ class AddonSdkDialog(tk.Toplevel):
             messagebox.showerror("OIV inspection failed", str(exc), parent=self)
             return
         self.status.set(f"OIV plan written: {report.name}")
+        if plan.xml_compilable:
+            if not messagebox.askyesno(
+                "Verified OIV XML compile available",
+                "This recipe uses the supported OpenIV XML add/replace/remove "
+                "grammar. Select the matching outer RPF to compile every XPath "
+                "edit into reparsed payloads and a hash-bound inert plan?\n\n"
+                "The selected archive will not be changed.", parent=self,
+            ):
+                self.status.set(f"OIV XML plan written: {report.name}")
+                return
+            game = self.installation_roots[0] if len(self.installation_roots) == 1 else None
+            if game is None:
+                selected_game = filedialog.askdirectory(
+                    parent=self,
+                    title="Select matching GTA V Legacy or Enhanced installation",
+                )
+                game = Path(selected_game) if selected_game else None
+            selected_archive = filedialog.askopenfilename(
+                parent=self, title="Select the matching existing outer RPF",
+                filetypes=(("RPF archive", "*.rpf"), ("All files", "*.*")),
+            ) if game is not None else ""
+            bundle_dir = filedialog.askdirectory(
+                parent=self, title="Select a new OIV XML compile folder",
+                mustexist=False,
+            ) if selected_archive else ""
+            if game is None or not selected_archive or not bundle_dir:
+                return
+
+            def xml_completed(outputs) -> None:
+                plan_path, audit_path = outputs
+                self.status.set(f"Verified OIV XML plan: {plan_path}")
+                messagebox.showinfo(
+                    "OIV XML compile complete",
+                    "Every XML payload was reparsed and canonically verified. The "
+                    "selected archive was not changed.\n\n"
+                    f"RPF plan: {plan_path}\nAudit: {audit_path}", parent=self,
+                )
+
+            from allin1_sdk.rpf_tools import RpfExplorerService
+            archive_path = Path(selected_archive).resolve()
+            service = RpfExplorerService(
+                self.project_root, game, workspace_roots=(archive_path.parent,),
+            )
+            RpfProgressDialog(
+                self, "Compiling verified OIV XML payloads",
+                lambda _progress: workbench.compile_xml_rpf_bundle(
+                    plan, archive_path, bundle_dir, service=service,
+                ),
+                xml_completed,
+                lambda exc: messagebox.showerror(
+                    "OIV XML compile failed", str(exc), parent=self,
+                ),
+            )
+            return
         if not plan.translatable:
             messagebox.showinfo(
                 "OIV review required",

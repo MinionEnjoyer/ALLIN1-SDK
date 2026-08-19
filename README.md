@@ -33,7 +33,9 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   content for review.
 - **OIV workbench** — preview ordered OIV operations, export a managed package
   when every operation fits receipt ownership, and translate existing nested-RPF
-  adds/replacements/deletes into payload-backed atomic batch manifests.
+  adds/replacements/deletes into payload-backed atomic batch manifests. Official
+  OIV 2.2 XML add/replace/remove commands compile against an explicitly selected
+  RPF into canonical-reparse-verified payloads and an inert hash-bound plan.
 - **Native Asset Viewer** — browse authored text and images, parse bounded RAGE
   resource headers, convert supported resources to structured CodeWalker XML,
   generate YTD texture contact sheets, and export manifest-backed XML/dependency
@@ -232,6 +234,7 @@ allin1-sdk diff-rpf C:\Mods\Before\dlc.rpf C:\Mods\After\dlc.rpf --exact-content
 allin1-sdk verify-rpf-archive C:\Mods\Example\dlc.rpf --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Reports\dlc-integrity.json
 allin1-sdk oiv-plan C:\Mods\Example.oiv -o oiv-plan.md --rpf-batches C:\Mods\Example-rpf-batches
 allin1-sdk oiv-plan C:\Mods\NewDlc.oiv -o new-dlc-plan.md --created-rpf-package C:\Mods\NewDlc-managed --gta-path "D:\Games\GTA V Enhanced"
+allin1-sdk compile-oiv-xml C:\Mods\XmlRecipe.oiv C:\Mods\Workspace\update.rpf --gta-path "D:\Games\GTA V Enhanced" --workspace-root C:\Mods\Workspace -o C:\Mods\XmlRecipe-compiled
 allin1-sdk plan-rpf-batch "D:\Games\GTA V Enhanced\mods\update\update.rpf" C:\Mods\Example-rpf-batches\01-update-xxxxxxxx\changes.json --gta-path "D:\Games\GTA V Enhanced" -o atomic-plan.json
 allin1-sdk plan-rpf-replacement "D:\Games\GTA V Enhanced\mods\update\update.rpf" common/data/example.meta C:\Mods\example.meta --gta-path "D:\Games\GTA V Enhanced" -o replacement-plan.json
 allin1-sdk plan-rpf-add "D:\Games\GTA V Enhanced\mods\update\update.rpf" common/data/new.meta C:\Mods\new.meta --gta-path "D:\Games\GTA V Enhanced" -o add-plan.json
@@ -319,8 +322,14 @@ service used by the launcher.
   `.rpf.source` workspaces and passed through that same builder. Safe top-level
   archives and new archives one level inside an existing RPF become validated,
   checksum-owned package payloads. Recipe code is never executed; ambiguous ancestry,
-  deletes inside new archives, deep existing-archive creation roots, and merge/edit
-  commands remain blocked.
+  deletes inside new archives and deep existing-archive creation roots remain
+  blocked. Official OIV 2.2 XML commands support First/Last/Before/After adds,
+  replacements, and removals only when every XPath selects exactly one textual
+  `.xml`/`.meta` entry inside one existing archive tree. Compilation replays the
+  recipe in order, preserves source encoding, blocks entities and unbounded XPath
+  constructs, reparses and canonically verifies every result, coalesces repeated
+  edits per entry, and emits the normal guarded multi-entry plan without writing
+  the archive. Text and PSO/META commands remain blocked.
 - Native workspaces retain an immutable source snapshot, editable CodeWalker XML and
   dependencies, edition metadata, and hashes. Build refuses path escapes, links,
   collisions, source tampering, unsupported types, oversized inputs, and any result
@@ -386,7 +395,9 @@ service used by the launcher.
   full-outer-archive rollback receipt.
 - Canary mode never writes its selected source. It uses a generated external copy and
   is successful only after replace, add, delete, and exact final-hash rollback checks.
-- OIV conversion stops when an operation cannot be represented safely.
+- OIV conversion stops when an operation cannot be represented safely; XML
+  compilation additionally binds `assembly.xml`, the selected archive, every
+  original target, and every resulting payload by SHA-256.
 - Temporary archive extraction is bounded and removed after inspection.
 - Edition uncertainty remains visible instead of silently selecting Legacy or
   Enhanced behavior.

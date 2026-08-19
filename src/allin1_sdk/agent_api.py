@@ -39,6 +39,7 @@ AUTHORING_COMMANDS = frozenset({
     "catalog-rpfs",
     "canary-rpf-transaction",
     "compile-vehicle-data",
+    "compile-oiv-xml",
     "create-rpf-graph",
     "diff-meta",
     "diff-rpf",
