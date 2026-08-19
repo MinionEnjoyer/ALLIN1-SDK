@@ -197,6 +197,10 @@ class RpfPackageGraphDialog(tk.Toplevel):
         ttk.Button(
             inspector, text="Build + exactly verify RPF…", command=self._build_archive,
         ).pack(fill="x", pady=(0, 5))
+        ttk.Button(
+            inspector, text="Plan changes to imported origin…",
+            command=self._plan_origin_changes,
+        ).pack(fill="x", pady=(0, 5))
         ttk.Button(inspector, text="Close", command=self.destroy).pack(
             fill="x", pady=(20, 0),
         )
@@ -628,4 +632,48 @@ class RpfPackageGraphDialog(tk.Toplevel):
             self, "Building RPF package graph",
             "Materializing source, building nested archives, and exactly extracting every payload…",
             lambda: RpfPackageGraph.build(self.graph, builder, output), completed,
+        )
+
+    def _plan_origin_changes(self) -> None:
+        if not self.state.get("payload", {}).get("origin"):
+            messagebox.showinfo(
+                "No imported origin",
+                "This graph was not imported from an existing RPF. Build a new archive "
+                "instead, or import an opened RPF from RPF Explorer.",
+                parent=self,
+            )
+            return
+        if self.game_path is None or not self.game_path.is_dir():
+            selected = filedialog.askdirectory(
+                parent=self, title="Select matching GTA V installation for RPF keys",
+            )
+            if not selected:
+                return
+            self.game_path = Path(selected).resolve()
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save reviewed graph-to-origin plan",
+            initialfile=f"{self.graph.stem}-origin-plan.json",
+            defaultextension=".json", filetypes=(("RPF change plan", "*.json"),),
+        )
+        if not output:
+            return
+        builder = RpfArchiveBuilder(self.project_root, self.game_path)
+
+        def completed(result) -> None:
+            plan, payloads = result
+            self.status.set(f"Created inert graph-to-origin plan: {plan}")
+            messagebox.showinfo(
+                "Origin change plan ready",
+                f"Plan: {plan}\nEvidence and payloads: {payloads}\n\n"
+                "The origin archive was not changed. Review/apply remains separate.",
+                parent=self,
+            )
+
+        _GraphWorkDialog(
+            self, "Planning graph changes to origin",
+            "Building the graph, comparing canonical content, and retaining reviewed payloads…",
+            lambda: RpfPackageGraph.plan_origin_changes(
+                self.graph, builder, builder.service, output,
+            ),
+            completed,
         )

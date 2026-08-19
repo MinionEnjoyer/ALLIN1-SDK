@@ -190,6 +190,146 @@ def test_import_archive_creates_retained_provenance_bound_graph_workspace(tmp_pa
     assert report["graph"]["sha256"] == hashlib.sha256(graph.read_bytes()).hexdigest()
 
 
+def test_imported_graph_emits_inert_canonical_origin_change_plan(tmp_path):
+    archive = tmp_path / "origin.rpf"
+    archive.write_bytes(b"RPF7-origin")
+    original_entry = SimpleNamespace(
+        id="::content.bin", archive_path="", path="content.bin",
+        kind="binary", name="content.bin",
+    )
+    original_index = SimpleNamespace(
+        source=archive, edition="Enhanced", entries=[original_entry], archives=[],
+    )
+
+    class ImportService:
+        def extract_authoring_tree(self, _index, destination):
+            source = Path(destination)
+            source.mkdir(parents=True)
+            (source / "content.bin").write_bytes(b"old")
+            return source, {
+                "schema_version": 1, "operation": "rpf_authoring_tree_export",
+                "created_utc": "2026-08-19T00:00:00+00:00",
+                "source": {
+                    "path": str(archive.resolve()), "edition": "Enhanced",
+                    "size": archive.stat().st_size,
+                    "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                },
+                "summary": {
+                    "archives": 1, "directories": 0,
+                    "files": 1, "logical_bytes": 3,
+                },
+                "directories": [], "files": [],
+            }
+
+    workspace = tmp_path / "workspace"
+    graph = RpfPackageGraph.import_archive(
+        SimpleNamespace(source=archive), ImportService(), workspace,
+    )
+    authored = workspace / "source" / "content.bin"
+    authored.write_bytes(b"new payload")
+    assert RpfPackageGraph.refresh_sources(graph) == 1
+
+    class FakeBuilder:
+        def build(self, loose, output):
+            assert (Path(loose) / "content.bin").read_bytes() == b"new payload"
+            desired = Path(output)
+            desired.parent.mkdir(parents=True, exist_ok=True)
+            desired.write_bytes(b"RPF7-desired")
+            report = desired.with_name(f"{desired.name}.validation.json")
+            report.write_text('{"status":"verified"}', encoding="utf-8")
+            return desired, report
+
+    class PlanningService:
+        def index(self, selected):
+            selected = Path(selected)
+            if selected == archive:
+                return original_index
+            entry = SimpleNamespace(
+                id="::content.bin", archive_path="", path="content.bin",
+                kind="binary", name="content.bin",
+            )
+            return SimpleNamespace(
+                source=selected, edition="Enhanced", entries=[entry], archives=[],
+                entry=lambda identity: entry if identity == "::content.bin" else None,
+            )
+
+        def entry_content_fingerprints(self, index, entries):
+            logical = b"old" if index is original_index else b"new payload"
+            return {
+                entry.id: {
+                    "mode": "byte_exact", "logical_size": len(logical),
+                    "canonical_sha256": hashlib.sha256(logical).hexdigest(),
+                }
+                for entry in entries
+            }
+
+        def extract(self, _index, _entry, destination):
+            target = Path(destination)
+            target.write_bytes(b"new payload")
+            return target
+
+        def multi_change_plan(self, loaded, changes):
+            assert loaded is original_index
+            assert len(changes) == 1
+            assert changes[0]["action"] == "replace"
+            assert changes[0]["entry"] == "content.bin"
+            assert Path(changes[0]["payload"]).read_bytes() == b"new payload"
+            return {
+                "schema_version": 2, "operation": "rpf_multi_entry_change",
+                "status": "ready",
+                "changes": [{**changes[0], "payload": str(changes[0]["payload"])}],
+            }
+
+    plan_path, payloads = RpfPackageGraph.plan_origin_changes(
+        graph, FakeBuilder(), PlanningService(), tmp_path / "origin-plan.json",
+    )
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert archive.read_bytes() == b"RPF7-origin"
+    assert plan["status"] == "ready"
+    assert plan["rpf_graph"]["comparison"] == "canonical_logical_content"
+    assert Path(plan["changes"][0]["payload"]).is_relative_to(payloads)
+    assert Path(plan["rpf_graph"]["desired_archive"]).is_file()
+    assert Path(plan["rpf_graph"]["desired_validation"]).is_file()
+
+
+def test_nested_archive_semantics_ignore_container_recompression_but_detect_leaf_edits():
+    root = SimpleNamespace(
+        id="::nested.rpf", archive_path="", path="nested.rpf",
+        kind="archive", name="nested.rpf",
+    )
+    leaf = SimpleNamespace(
+        id="nested.rpf::asset.ytd", archive_path="nested.rpf",
+        path="asset.ytd", kind="resource", name="asset.ytd",
+    )
+
+    def index(encryption):
+        return SimpleNamespace(
+            entries=[root, leaf],
+            archives=[SimpleNamespace(
+                path="nested.rpf", version=7, encryption=encryption,
+            )],
+        )
+
+    class Fingerprints:
+        def __init__(self, digest):
+            self.digest = digest
+
+        def entry_content_fingerprints(self, _index, entries):
+            return {
+                entry.id: {
+                    "mode": "rsc7_canonical", "logical_size": 1024,
+                    "canonical_sha256": self.digest,
+                }
+                for entry in entries
+            }
+
+    original = RpfPackageGraph._root_semantic_states(index("AES"), Fingerprints("a" * 64))
+    recompressed = RpfPackageGraph._root_semantic_states(index("OPEN"), Fingerprints("a" * 64))
+    edited = RpfPackageGraph._root_semantic_states(index("OPEN"), Fingerprints("b" * 64))
+    assert original["nested.rpf"]["signature"] == recompressed["nested.rpf"]["signature"]
+    assert original["nested.rpf"]["signature"] != edited["nested.rpf"]["signature"]
+
+
 def test_rpf_graph_cli_covers_create_mutate_inspect_materialize_and_build(
     tmp_path, monkeypatch,
 ):
@@ -327,6 +467,7 @@ def test_rpf_graph_desktop_surface_uses_ports_and_shared_graph_model():
     assert "RpfPackageGraph.reparent_node" in source
     assert "RpfPackageGraph.materialize" in source
     assert "RpfPackageGraph.build" in source
+    assert "RpfPackageGraph.plan_origin_changes" in source
     assert "RpfPackageGraph.import_archive" in (
         Path(__file__).parents[1] / "src" / "allin1_sdk" / "rpf_explorer.py"
     ).read_text(encoding="utf-8")

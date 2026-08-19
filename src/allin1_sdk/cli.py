@@ -790,6 +790,25 @@ def build_rpf_graph(graph: Path, gta_path: Path | None, output: Path) -> None:
     click.echo(f"Graph-bound validation report: {report}")
 
 
+@main.command("plan-rpf-graph-origin")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", required=True, type=click.Path(dir_okay=False, path_type=Path))
+def plan_rpf_graph_origin(graph: Path, gta_path: Path | None, output: Path) -> None:
+    """Build/diff an imported graph and emit an inert plan against its origin."""
+    try:
+        selected_game = _game_path(gta_path)
+        builder = RpfArchiveBuilder(PROJECT_ROOT, selected_game)
+        plan, payloads = RpfPackageGraph.plan_origin_changes(
+            graph, builder, builder.service, output,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Created reviewed RPF graph origin plan: {plan}")
+    click.echo(f"Retained desired archive, validation, and payloads: {payloads}")
+    click.echo("Origin archive unchanged; applying remains a separate guarded action")
+
+
 @main.command("extract-rpf-entry")
 @click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("entry_path")
@@ -1737,6 +1756,7 @@ for _command in (
     add_rpf_graph_container, add_rpf_graph_file, rename_rpf_graph_node,
     reparent_rpf_graph_node, position_rpf_graph_node, remove_rpf_graph_node,
     layout_rpf_graph, refresh_rpf_graph_sources, materialize_rpf_graph, build_rpf_graph,
+    plan_rpf_graph_origin,
     verify_rpf_archive,
     extract_rpf_entry,
     extract_rpf_subtree, export_rpf_native_workspace,

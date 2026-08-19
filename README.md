@@ -75,7 +75,9 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   An already-built RPF can also be recursively expanded into a retained external
   graph workspace: nested archives become editable `.rpf.source` branches, the
   untouched origin hash remains in the graph, and one import report accounts for
-  every extracted payload.
+  every extracted payload. Imported graphs can build/diff against that origin and
+  emit a normal inert multi-entry plan; changes inside a nested archive collapse to
+  one reviewed parent-container replacement instead of an order-dependent deep edit.
 - **Real-archive canary** — copy a genuine Legacy or Enhanced RPF outside the game,
   exercise real replace/add/delete writes, verify each exact entry, roll everything
   back, and prove the final archive SHA-256 matches the untouched source.
@@ -208,6 +210,7 @@ allin1-sdk reparent-rpf-graph-node C:\Work\dlc-rpf-graph.json f_NODE_ID d_PARENT
 allin1-sdk layout-rpf-graph C:\Work\dlc-rpf-graph.json --acknowledge-edit
 allin1-sdk validate-rpf-graph C:\Work\dlc-rpf-graph.json -o C:\Work\dlc-rpf-graph-validation.json
 allin1-sdk build-rpf-graph C:\Work\dlc-rpf-graph.json --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Build\dlc.rpf
+allin1-sdk plan-rpf-graph-origin C:\Work\dlc-imported-graph\rpf-graph.json --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\dlc-origin-plan.json
 allin1-sdk export-rpf-native-workspace C:\Mods\Example\dlc.rpf common/data/model.ydr --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\model-workspace
 allin1-sdk plan-rpf-native-workspace C:\Mods\Example\dlc.rpf common/data/model.ydr C:\Work\model-workspace --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\model-plan.json
 allin1-sdk export-rpf-binary-workspace C:\Mods\Example\dlc.rpf common/data/table.bin --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\table-binary
@@ -307,6 +310,11 @@ service used by the launcher.
   cannot be safely materialized on Windows, and writes only to a new external
   workspace. The graph retains the origin archive path, edition, size, and SHA-256;
   rebuilding still creates a separate new archive outside the game installation.
+  Origin-plan export first builds and exactly verifies that archive, compares ordinary
+  files byte-exactly and RSC7 resources canonically, retains the desired archive plus
+  payload evidence, and emits only the existing guarded multi-entry plan format.
+  It refuses source drift, outer-archive renames, case-only paths, type changes, and
+  no-op graphs; applying remains a separate receipt-owned operation.
 - Bounded OIV `createIfNotExist` containers are translated into retained loose
   `.rpf.source` workspaces and passed through that same builder. Safe top-level
   archives and new archives one level inside an existing RPF become validated,

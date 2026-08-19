@@ -43,6 +43,7 @@ def test_catalog_is_structured_and_classifies_risk():
         "position-rpf-graph-node", "remove-rpf-graph-node",
         "layout-rpf-graph",
         "refresh-rpf-graph-sources", "materialize-rpf-graph", "build-rpf-graph",
+        "plan-rpf-graph-origin",
     ):
         assert catalog[command]["risk"] == "authoring_write"
     assert catalog["inspect-rpf-graph"]["risk"] == "read_only"

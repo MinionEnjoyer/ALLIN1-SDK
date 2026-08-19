@@ -11,7 +11,7 @@ import tempfile
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from allin1_sdk.rpf_builder import (
@@ -755,4 +755,192 @@ class RpfPackageGraph:
         except Exception:
             archive.unlink(missing_ok=True)
             report_path.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _root_semantic_states(
+        index: RpfIndex, service: RpfExplorerService,
+    ) -> dict[str, dict[str, Any]]:
+        leaves = tuple(
+            entry for entry in index.entries
+            if entry.kind not in {"directory", "archive"}
+        )
+        fingerprints = service.entry_content_fingerprints(index, leaves)
+        states: dict[str, dict[str, Any]] = {}
+        for entry in (item for item in index.entries if not item.archive_path):
+            state: dict[str, Any] = {"path": entry.path, "kind": entry.kind}
+            if entry.kind == "directory":
+                state["signature"] = "directory"
+            elif entry.kind != "archive":
+                fingerprint = fingerprints[entry.id]
+                state["signature"] = hashlib.sha256(json.dumps({
+                    "mode": fingerprint["mode"],
+                    "logical_size": fingerprint["logical_size"],
+                    "canonical_sha256": fingerprint["canonical_sha256"],
+                }, sort_keys=True).encode("utf-8")).hexdigest()
+            else:
+                prefix = entry.path.casefold()
+
+                def inside(value: str) -> bool:
+                    folded = value.casefold()
+                    return folded == prefix or folded.startswith(f"{prefix}!")
+
+                archive_records = [
+                    {"path": archive.path}
+                    for archive in index.archives if inside(archive.path)
+                ]
+                entry_records: list[dict[str, Any]] = []
+                for nested in (item for item in index.entries if inside(item.archive_path)):
+                    record: dict[str, Any] = {
+                        "archive_path": nested.archive_path,
+                        "path": nested.path, "kind": nested.kind,
+                    }
+                    if nested.kind not in {"directory", "archive"}:
+                        fingerprint = fingerprints[nested.id]
+                        record["content"] = {
+                            "mode": fingerprint["mode"],
+                            "logical_size": fingerprint["logical_size"],
+                            "canonical_sha256": fingerprint["canonical_sha256"],
+                        }
+                    entry_records.append(record)
+                semantic = {
+                    "archives": sorted(
+                        archive_records, key=lambda item: item["path"].casefold(),
+                    ),
+                    "entries": sorted(
+                        entry_records,
+                        key=lambda item: (
+                            item["archive_path"].casefold(), item["path"].casefold(),
+                        ),
+                    ),
+                }
+                state["signature"] = hashlib.sha256(
+                    json.dumps(semantic, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+            folded_path = entry.path.casefold()
+            if folded_path in states:
+                raise ValueError(f"RPF root has a case-insensitive collision: {entry.path}")
+            states[folded_path] = state
+        return states
+
+    @classmethod
+    def plan_origin_changes(
+        cls, path: str | Path, builder: RpfArchiveBuilder,
+        service: RpfExplorerService, destination: str | Path,
+    ) -> tuple[Path, Path]:
+        """Build an imported graph and emit an inert atomic plan against its origin."""
+        state = cls.validate(path, verify_sources=True)
+        origin = state["payload"].get("origin")
+        if not isinstance(origin, dict) or origin.get("type") != "rpf_archive_import":
+            raise ValueError("RPF origin planning requires an imported archive graph")
+        source = Path(origin["path"]).resolve()
+        if (
+            not source.is_file() or source.stat().st_size != origin["size"]
+            or _sha256_file(source) != origin["sha256"]
+        ):
+            raise ValueError("Imported RPF origin changed; import it again before planning")
+        root_name = state["nodes"][state["root_id"]]["name"]
+        if root_name != source.name:
+            raise ValueError("An origin change plan cannot rename the outer RPF archive")
+        plan_path = Path(destination).expanduser().resolve()
+        if plan_path.suffix.casefold() != ".json":
+            raise ValueError("RPF graph origin plan must use a .json extension")
+        if plan_path.exists() or plan_path.is_symlink():
+            raise FileExistsError(f"RPF graph origin plan already exists: {plan_path}")
+        payload_root = plan_path.with_name(f"{plan_path.stem}.payload")
+        if payload_root.exists() or payload_root.is_symlink():
+            raise FileExistsError(f"RPF graph origin payload folder exists: {payload_root}")
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(
+            prefix=f".{plan_path.stem}.rpf-origin-plan-", dir=plan_path.parent,
+        )).resolve()
+        published = False
+        try:
+            original_index = service.index(source)
+            if original_index.edition.casefold() != origin["edition"].casefold():
+                raise ValueError("Imported RPF origin edition changed")
+            desired_archive, desired_validation = cls.build(
+                path, builder, staging / "desired" / source.name,
+            )
+            desired_index = service.index(desired_archive)
+            if desired_index.edition.casefold() != original_index.edition.casefold():
+                raise ValueError("Graph build edition differs from its imported origin")
+            original_states = cls._root_semantic_states(original_index, service)
+            desired_states = cls._root_semantic_states(desired_index, service)
+            changes: list[dict[str, Any]] = []
+            payload_records: list[tuple[dict[str, Any], Path]] = []
+            for folded in sorted(set(original_states) | set(desired_states)):
+                before = original_states.get(folded)
+                after = desired_states.get(folded)
+                if before is not None and after is not None:
+                    if before["path"] != after["path"]:
+                        raise ValueError(
+                            "Case-only RPF path changes require an explicit rename plan: "
+                            f"{before['path']} -> {after['path']}"
+                        )
+                    if before["kind"] != after["kind"]:
+                        raise ValueError(
+                            f"RPF graph origin planning does not combine a type change at "
+                            f"{before['path']}"
+                        )
+                    if before["kind"] == "directory" or (
+                        before["signature"] == after["signature"]
+                    ):
+                        continue
+                    change = {
+                        "action": "replace", "archive_path": "",
+                        "entry": after["path"],
+                    }
+                    changes.append(change)
+                    payload_records.append((change, Path(after["path"])))
+                    continue
+                if before is not None:
+                    changes.append({
+                        "action": "rmdir" if before["kind"] == "directory" else "delete",
+                        "archive_path": "", "entry": before["path"],
+                    })
+                    continue
+                assert after is not None
+                change = {
+                    "action": "mkdir" if after["kind"] == "directory" else "add",
+                    "archive_path": "", "entry": after["path"],
+                }
+                changes.append(change)
+                if after["kind"] != "directory":
+                    payload_records.append((change, Path(after["path"])))
+            if not changes:
+                raise ValueError("RPF graph has no logical changes from its imported origin")
+            payload_stage = staging / "changes"
+            payload_stage.mkdir()
+            for number, (change, virtual_path) in enumerate(payload_records):
+                entry = desired_index.entry(f"::{virtual_path.as_posix()}")
+                suffix = virtual_path.suffix or ".bin"
+                relative = Path("changes") / f"{number:04d}{suffix}"
+                service.extract(desired_index, entry, staging / relative)
+                change["payload_relative"] = relative.as_posix()
+            if cls.validate(path, verify_sources=True)["graph_sha256"] != state["graph_sha256"]:
+                raise RuntimeError("RPF graph changed during origin-plan creation")
+            staging.replace(payload_root)
+            published = True
+            for change in changes:
+                relative = change.pop("payload_relative", None)
+                if relative is not None:
+                    change["payload"] = payload_root / Path(relative)
+            plan = service.multi_change_plan(original_index, changes)
+            plan["rpf_graph"] = {
+                "path": str(state["graph"]), "sha256": state["graph_sha256"],
+                "origin_sha256": origin["sha256"],
+                "desired_archive": str(payload_root / desired_archive.relative_to(staging)),
+                "desired_validation": str(
+                    payload_root / desired_validation.relative_to(staging)
+                ),
+                "comparison": "canonical_logical_content",
+            }
+            _write_json_atomic(plan_path, plan)
+            return plan_path, payload_root
+        except Exception:
+            cleanup = payload_root if published else staging
+            if cleanup.is_dir() and cleanup.parent == plan_path.parent:
+                shutil.rmtree(cleanup)
+            plan_path.unlink(missing_ok=True)
             raise

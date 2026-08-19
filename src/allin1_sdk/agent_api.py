@@ -64,6 +64,7 @@ AUTHORING_COMMANDS = frozenset({
     "plan-rpf-native-workspace",
     "plan-rpf-binary-workspace",
     "plan-rpf-gxt2-workspace",
+    "plan-rpf-graph-origin",
     "plan-rpf-sync",
     "plan-rpf-delete",
     "plan-rpf-replacement",
