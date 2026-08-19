@@ -816,6 +816,22 @@ class RpfExplorerService:
             raise RuntimeError("RPF changed during exact content extraction")
         return hashes
 
+    def entry_content_hashes(
+        self, index: RpfIndex, entries: Iterable[RpfEntryRecord] | None = None,
+    ) -> dict[str, str]:
+        """Extract and hash exact indexed payloads through one bounded helper call."""
+        selected = tuple(
+            entry for entry in (entries if entries is not None else index.entries)
+            if entry.kind != "directory"
+        )
+        indexed = {entry.id for entry in index.entries}
+        if any(entry.id not in indexed for entry in selected):
+            raise ValueError("Content-hash entry does not belong to this RPF index")
+        source_sha256 = _sha256_file(index.source)
+        return self._batch_content_hashes(
+            index, selected, expected_source_sha256=source_sha256,
+        )
+
     @staticmethod
     def export_diff(
         report: dict[str, Any], destination: str | Path,

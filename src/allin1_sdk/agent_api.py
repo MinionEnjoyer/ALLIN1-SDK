@@ -32,6 +32,7 @@ AUTHORING_COMMANDS = frozenset({
     "add-ytd-texture",
     "audit-folder",
     "build-native-workspace",
+    "build-rpf-tree",
     "canary-rpf-transaction",
     "compile-vehicle-data",
     "diff-meta",

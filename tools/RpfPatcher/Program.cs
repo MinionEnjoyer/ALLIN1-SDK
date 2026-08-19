@@ -788,7 +788,8 @@ namespace RpfPatcher
         {
             int count = 0;
 
-            foreach (string filePath in Directory.GetFiles(sourceDir))
+            foreach (string filePath in Directory.GetFiles(sourceDir)
+                .OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase))
             {
                 string fileName = Path.GetFileName(filePath);
                 byte[] data = File.ReadAllBytes(filePath);
@@ -797,7 +798,8 @@ namespace RpfPatcher
                 count++;
             }
 
-            foreach (string subDir in Directory.GetDirectories(sourceDir))
+            foreach (string subDir in Directory.GetDirectories(sourceDir)
+                .OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase))
             {
                 string dirName = Path.GetFileName(subDir);
                 var subEntry = RpfFile.CreateDirectory(parentEntry, dirName);

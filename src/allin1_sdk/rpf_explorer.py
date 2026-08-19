@@ -21,6 +21,7 @@ from allin1_sdk.native_assets import (
     NativeAssetInspector,
 )
 from allin1_sdk.paths import user_data_root
+from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_tools import RpfEntryRecord, RpfExplorerService, RpfIndex
 from allin1_sdk.help_center import HelpCenterDialog
 
@@ -472,6 +473,9 @@ class RpfExplorerDialog(ttk.Frame):
         menu = tk.Menu(parent, tearoff=False)
         menu.add_command(label="Open RPF…", command=self._choose_archive)
         menu.add_command(
+            label="Build new RPF from folder…", command=self._build_new_archive,
+        )
+        menu.add_command(
             label="Export index…", command=self._export_index, state="disabled",
         )
         menu.add_command(
@@ -597,6 +601,54 @@ class RpfExplorerDialog(ttk.Frame):
         )
         if selected:
             self._load_archive(Path(selected))
+
+    def _build_new_archive(self) -> None:
+        game = Path(self.game_path.get().strip())
+        if not game.is_dir():
+            messagebox.showerror(
+                "GTA V path required",
+                "Select the matching Legacy or Enhanced installation before building.",
+                parent=self,
+            )
+            return
+        selected = filedialog.askdirectory(
+            parent=self, title="Select loose RPF source folder",
+        )
+        if not selected:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Create new verified RPF",
+            defaultextension=".rpf",
+            filetypes=(("Rockstar archive", "*.rpf"),),
+        )
+        if not output:
+            return
+        source = Path(selected)
+        destination = Path(output)
+        self.status.set("Building staged RPF and verifying every recursive payload…")
+
+        def completed(result) -> None:
+            archive, report = result
+            self.status.set(f"New RPF built and exactly verified: {archive}")
+            messagebox.showinfo(
+                "RPF creation complete",
+                "The recursive archive tree and every extracted payload passed exact "
+                f"verification.\n\nArchive: {archive}\nReport: {report}",
+                parent=self,
+            )
+            self._load_archive(archive)
+
+        RpfProgressDialog(
+            self, "Building new RPF archive",
+            lambda _progress: RpfArchiveBuilder(
+                self.project_root, game,
+            ).build(source, destination),
+            completed,
+            lambda exc: (
+                self.status.set("New RPF creation was refused or failed safely."),
+                messagebox.showerror("RPF creation failed", str(exc), parent=self),
+            ),
+        )
 
     def _load_archive(self, archive: Path) -> None:
         game = Path(self.game_path.get().strip())

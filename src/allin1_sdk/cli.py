@@ -22,6 +22,7 @@ from allin1_sdk.oiv_workbench import OivWorkbench
 from allin1_sdk.paths import project_root
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.rage_data_compiler import RageVehicleDataCompiler
+from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_tools import RpfExplorerService, _running_gta_processes
 from allin1_sdk.texture_workspace import TextureDictionaryWorkspace
 
@@ -430,6 +431,25 @@ def index_rpf(archive: Path, gta_path: Path | None, output: Path) -> None:
         f"Indexed {len(index.entries)} entries across {len(index.archives)} archive(s): "
         f"{json_path} and {csv_path}"
     )
+
+
+@main.command("build-rpf-tree")
+@click.argument("source", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--output", "-o", required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+def build_rpf_tree(source: Path, gta_path: Path | None, output: Path) -> None:
+    """Create and exactly verify a new RPF, including *.rpf.source subtrees."""
+    try:
+        archive, report = RpfArchiveBuilder(
+            PROJECT_ROOT, _game_path(gta_path),
+        ).build(source, output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Built and exactly verified new RPF: {archive}")
+    click.echo(f"Validation report: {report}")
 
 
 @main.command("extract-rpf-entry")
@@ -1077,7 +1097,8 @@ def sdk_compatibility_group() -> None:
 
 for _command in (
     list_examples, validate, link, import_package, audit_folder, oiv_plan,
-    inspect_rpf, dlc_inventory, compile_vehicle_data, index_rpf, extract_rpf_entry,
+    inspect_rpf, dlc_inventory, compile_vehicle_data, index_rpf, build_rpf_tree,
+    extract_rpf_entry,
     extract_rpf_subtree, export_rpf_native_workspace, diff_rpf,
     plan_rpf_replacement, plan_rpf_native_workspace,
     plan_rpf_add, plan_rpf_delete, plan_rpf_batch,
