@@ -28,7 +28,7 @@ HELP_TOPICS: tuple[HelpTopic, ...] = (
 3. Resolve missing fields, source files, references, edition tags, and rollback steps.
 4. Export the link report and keep it with the package's release artifacts.
 
-The SDK audits and authors content. Its RPF workspace applies reviewed replace, add, or delete plans to an exact mods copy or an explicitly isolated external workspace, including one-level nested entries. Full package installation, repair, and game launch remain the responsibility of the separate ALLIN1 Launcher.""",
+The SDK audits and authors content. Its RPF workspace applies reviewed replace, add, or delete plans to an exact mods copy or an explicitly isolated external workspace, including recursively nested entries up to eight archive levels. Full package installation, repair, and game launch remain the responsibility of the separate ALLIN1 Launcher.""",
         ("first run", "import", "addon", "linker", "report"),
     ),
     HelpTopic(
@@ -116,7 +116,7 @@ The viewer is read-only. Compiled DLL, ASI, and script payloads are never execut
 
 Search and filter the archive tree, then use Entry actions to preview or extract the selected entry. Replace, add, and delete planning creates an inert schema-v3 JSON plan and hashes the archive, original state, payload where applicable, edition, and authorized scope.
 
-A ready plan may be applied only inside the selected installation's mods directory or an external workspace explicitly authorized by the CLI. A nested change is performed inside the staged parent RPF and verified through that parent before commit. Transaction History provides verification, interrupted-receipt reconciliation, guarded rollback, and stale-lock inspection. Run disposable archive canary proves the real writer without changing the selected source.""",
+A ready plan may be applied only inside the selected installation's mods directory or an external workspace explicitly authorized by the CLI. A nested change walks a bounded chain of up to eight RPF levels inside the staged outer copy, verifies the deepest change, and verifies every child while reassembling its parent before commit. Transaction History provides verification, interrupted-receipt reconciliation, guarded rollback, and stale-lock inspection. Run disposable archive canary proves the real writer without changing the selected source.""",
         ("archive", "nested", "extract", "replacement", "rpf", "metadata"),
     ),
     HelpTopic(

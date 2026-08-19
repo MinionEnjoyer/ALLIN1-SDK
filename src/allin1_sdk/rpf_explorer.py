@@ -1,4 +1,4 @@
-"""Interactive read-only RPF explorer for the desktop launcher."""
+"""Interactive RPF inspection and guarded transaction workspace."""
 
 from __future__ import annotations
 
@@ -350,7 +350,7 @@ class RpfExplorerDialog(ttk.Frame):
         ttk.Label(
             outer,
             text=(
-                "Browse real RPF and nested-RPF entries with edition-aware keys. "
+                "Browse and safely author deep nested-RPF entries with edition-aware keys. "
                 "Writes require a reviewed plan, a mods or isolated workspace copy, "
                 "full-archive staging, exact-entry verification, and a rollback receipt."
             ),
@@ -754,7 +754,7 @@ class RpfExplorerDialog(ttk.Frame):
         default_archive = selected_entry.archive_path if selected_entry else ""
         archive_path = simpledialog.askstring(
             "Nested archive",
-            "Nested RPF virtual path (leave blank for the root archive):",
+            "Nested RPF virtual path (use ! between levels; blank means root):",
             initialvalue=default_archive, parent=self,
         )
         if archive_path is None:

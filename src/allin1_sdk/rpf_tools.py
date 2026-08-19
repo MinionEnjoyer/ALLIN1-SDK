@@ -23,6 +23,7 @@ RPF_TRANSACTION_RECEIPT_SCHEMA = 2
 _GTA_PROCESS_NAMES = {"gta5.exe", "gta5_enhanced.exe"}
 _COPY_MARGIN_BYTES = 64 * 1024 * 1024
 _MAX_CANARY_ARCHIVE_BYTES = 512 * 1024 * 1024
+_MAX_NESTED_WRITE_DEPTH = 8
 _RPF_ACTIONS = {"replace", "add", "delete"}
 ProgressCallback = Callable[[str, int], None]
 
@@ -848,6 +849,7 @@ class RpfExplorerService:
         archive_path = _safe_virtual_path(
             str(plan.get("archive_path", "")), allow_empty=True,
         )
+        self._nested_archive_chain(archive_path)
         archive = Path(str(plan.get("archive", ""))).expanduser().resolve()
         payload: Path | None = None
         if action in {"replace", "add"}:
@@ -948,17 +950,33 @@ class RpfExplorerService:
         if not archive_path:
             self._run_entry_helper(archive, entry_path, action, payload)
             return
+        archive_chain = self._nested_archive_chain(archive_path)
         with tempfile.TemporaryDirectory(prefix="allin1-rpf-nested-") as temporary:
-            outer_index = self.index(archive)
-            try:
-                nested_entry = outer_index.entry(f"::{archive_path}")
-            except KeyError as exc:
-                raise RuntimeError(
-                    f"Nested RPF disappeared from staged archive: {archive_path}"
-                ) from exc
-            nested = Path(temporary) / Path(archive_path).name
-            self.extract(outer_index, nested_entry, nested)
-            self._run_entry_helper(nested, entry_path, action, payload)
+            extracted_chain: list[tuple[Path, str, Path]] = []
+            current_archive = archive
+            for depth, nested_entry_path in enumerate(archive_chain):
+                current_index = self.index(current_archive)
+                try:
+                    nested_entry = current_index.entry(f"::{nested_entry_path}")
+                except KeyError as exc:
+                    raise RuntimeError(
+                        "Nested RPF disappeared from the staged archive chain: "
+                        f"{nested_entry_path} ({archive_path})"
+                    ) from exc
+                if nested_entry.kind != "archive":
+                    raise RuntimeError(
+                        f"Nested target is no longer an RPF archive: {nested_entry_path}"
+                    )
+                nested = (
+                    Path(temporary) / f"level-{depth:02d}" / nested_entry.name
+                )
+                self.extract(current_index, nested_entry, nested)
+                extracted_chain.append(
+                    (current_archive, nested_entry_path, nested)
+                )
+                current_archive = nested
+
+            self._run_entry_helper(current_archive, entry_path, action, payload)
             expected = (
                 {"exists": False, "size": 0, "sha256": None}
                 if action == "delete" else {
@@ -966,8 +984,27 @@ class RpfExplorerService:
                     "sha256": _sha256_file(payload),
                 }
             )
-            self._verify_entry_state(nested, "", entry_path, expected, edition)
-            self._run_entry_helper(archive, archive_path, "replace", nested)
+            self._verify_entry_state(
+                current_archive, "", entry_path, expected, edition,
+            )
+
+            # Reinsert each verified child into its immediate parent. The live
+            # archive is still untouched: this entire chain belongs to the
+            # transaction's staged outer copy.
+            for parent_archive, nested_entry_path, nested in reversed(
+                extracted_chain
+            ):
+                nested_state = {
+                    "exists": True,
+                    "size": nested.stat().st_size,
+                    "sha256": _sha256_file(nested),
+                }
+                self._run_entry_helper(
+                    parent_archive, nested_entry_path, "replace", nested,
+                )
+                self._verify_entry_state(
+                    parent_archive, "", nested_entry_path, nested_state, edition,
+                )
 
     def _run_entry_helper(
         self, archive: Path, entry_path: str, action: str, payload: Path | None,
@@ -1018,18 +1055,50 @@ class RpfExplorerService:
             raise ValueError(f"RPF target parent is not a directory: {parent}")
 
     @staticmethod
-    def _require_supported_nested_archive(index: RpfIndex, archive_path: str) -> None:
+    def _nested_archive_chain(archive_path: str) -> tuple[str, ...]:
+        normalized = _safe_virtual_path(archive_path, allow_empty=True)
+        if not normalized:
+            return ()
+        chain = tuple(normalized.split("!"))
+        if len(chain) > _MAX_NESTED_WRITE_DEPTH:
+            raise ValueError(
+                "Nested RPF writes are limited to "
+                f"{_MAX_NESTED_WRITE_DEPTH} archive levels; found {len(chain)}"
+            )
+        return chain
+
+    @classmethod
+    def _require_supported_nested_archive(
+        cls, index: RpfIndex, archive_path: str,
+    ) -> None:
         if not archive_path:
             return
-        try:
-            entry = index.entry(f"::{archive_path}")
-        except KeyError as exc:
-            raise ValueError(
-                "Only one-level nested RPF writes are supported; the nested archive must "
-                f"be a direct entry in the outer archive: {archive_path}"
-            ) from exc
-        if entry.kind != "archive":
-            raise ValueError(f"Nested target is not an RPF archive: {archive_path}")
+        chain = cls._nested_archive_chain(archive_path)
+        indexed_archives = {
+            archive.path.casefold() for archive in index.archives
+        }
+        container = ""
+        for nested_entry_path in chain:
+            try:
+                entry = index.entry(f"{container}::{nested_entry_path}")
+            except KeyError as exc:
+                raise ValueError(
+                    "Nested RPF chain is not present in the index: "
+                    f"{container or 'root'}::{nested_entry_path}"
+                ) from exc
+            if entry.kind != "archive":
+                raise ValueError(
+                    f"Nested target is not an RPF archive: {entry.virtual_name}"
+                )
+            container = (
+                nested_entry_path
+                if not container else f"{container}!{nested_entry_path}"
+            )
+            if container.casefold() not in indexed_archives:
+                raise ValueError(
+                    "Nested RPF contents were not indexed and cannot be written: "
+                    f"{container}"
+                )
 
     def _plan_scope_is_authorized(
         self, plan: dict[str, Any], archive: Path,
@@ -1064,8 +1133,10 @@ class RpfExplorerService:
         if _sha256_file(archive) != expected_hash:
             raise RuntimeError("Rollback archive verification failed")
 
-    @staticmethod
-    def _validate_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    @classmethod
+    def _validate_receipt(
+        cls, receipt: dict[str, Any],
+    ) -> dict[str, Any]:
         if receipt.get("schema_version") != RPF_TRANSACTION_RECEIPT_SCHEMA:
             raise ValueError("Unsupported RPF transaction receipt")
         if receipt.get("operation") != "rpf_entry_change":
@@ -1084,7 +1155,7 @@ class RpfExplorerService:
             if not isinstance(receipt.get(key), str) or not receipt[key].strip():
                 raise ValueError(f"RPF transaction receipt is missing {key}")
         _safe_virtual_path(str(receipt.get("entry", "")))
-        _safe_virtual_path(str(receipt.get("archive_path", "")), allow_empty=True)
+        cls._nested_archive_chain(str(receipt.get("archive_path", "")))
         hashes: list[object] = [receipt.get("plan_id"), receipt["backup"].get("sha256")]
         if receipt["original"].get("exists"):
             hashes.append(receipt["original"].get("sha256"))

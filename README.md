@@ -39,8 +39,9 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
 - **RPF Explorer** — search root and nested RPFs as one hierarchy, inspect entry
   metadata, export JSON/CSV indexes, extract an exact entry, and generate a
   checksummed replace/add/delete plan without modifying the archive. Reviewed root
-  and one-level nested-entry plans targeting an exact `mods` or explicitly isolated
-  workspace copy use full outer-archive staging, pre/post-write verification,
+  and recursively nested-entry plans targeting an exact `mods` or explicitly isolated
+  workspace copy support up to eight archive levels and use full outer-archive staging,
+  deepest-first parent reassembly, pre/post-write verification,
   durable receipts, guarded rollback, progress UI, transaction history, interrupted
   receipt recovery, and stale-lock inspection.
 - **Real-archive canary** — copy a genuine Legacy or Enhanced RPF outside the game,
@@ -224,9 +225,10 @@ service used by the launcher.
   RPF concurrently. An interrupted lock is never guessed away; verify the associated
   receipt and archive state before removing it.
 - Rollback is refused if the applied archive was subsequently changed by another
-  tool. A one-level nested write extracts and changes the nested RPF inside the staged
-  copy, replaces it in the staged parent, verifies the nested entry through the outer
-  archive, and commits or rolls back the complete outer archive as one transaction.
+  tool. A recursively nested write extracts the bounded archive chain inside the
+  staged copy, changes and verifies the deepest RPF, then verifies each child while
+  reinserting it into its immediate parent. The complete outer archive is committed
+  or rolled back as one transaction.
 - Canary mode never writes its selected source. It uses a generated external copy and
   is successful only after replace, add, delete, and exact final-hash rollback checks.
 - OIV conversion stops when an operation cannot be represented safely.

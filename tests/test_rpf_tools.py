@@ -261,17 +261,21 @@ def _dynamic_index(source: Path) -> dict:
             "size": len(data), "stored_size": len(data),
         })
 
-    for path, data in root_entries.items():
-        add_file("", path, data)
-        if path.casefold().endswith(".rpf"):
+    def index_archive(state: dict[str, bytes], archive_path: str) -> None:
+        for path, data in state.items():
+            add_file(archive_path, path, data)
+            if not path.casefold().endswith(".rpf"):
+                continue
             nested_entries = _decode_archive_bytes(data)
+            nested_path = path if not archive_path else f"{archive_path}!{path}"
             archives.append({
-                "path": path, "name": Path(path).name, "version": 7,
+                "path": nested_path, "name": Path(path).name, "version": 7,
                 "encryption": "OPEN", "size": len(data),
                 "entry_count": len(nested_entries),
             })
-            for child_path, child_data in nested_entries.items():
-                add_file(path, child_path, child_data)
+            index_archive(nested_entries, nested_path)
+
+    index_archive(root_entries, "")
     return {
         "schema_version": 1, "source": str(source.resolve()),
         "edition": "Enhanced", "archive_size": source.stat().st_size,
@@ -290,7 +294,8 @@ def _fake_archive_runner(args, **_kwargs):
         entry_path = str(args[5])
         state = _decode_archive(source)
         if archive_path:
-            state = _decode_archive_bytes(state[archive_path])
+            for nested_entry_path in archive_path.split("!"):
+                state = _decode_archive_bytes(state[nested_entry_path])
         Path(args[6]).write_bytes(state[entry_path])
     elif command == "replace-entry":
         source = Path(args[3])
@@ -305,7 +310,9 @@ def _fake_archive_runner(args, **_kwargs):
     return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
 
-def _transaction_service(tmp_path, monkeypatch, *, nested: bool = False):
+def _transaction_service(
+    tmp_path, monkeypatch, *, nested: bool = False, deep_nested: bool = False,
+):
     project = tmp_path / "project"
     patcher = project / "tools" / "RpfPatcher" / "RpfPatcher.exe"
     patcher.parent.mkdir(parents=True)
@@ -314,7 +321,15 @@ def _transaction_service(tmp_path, monkeypatch, *, nested: bool = False):
     archive = game / "mods" / "update" / "test.rpf"
     archive.parent.mkdir(parents=True)
     entries = {"common/data/test.ymap": b"original entry"}
-    if nested:
+    if deep_nested:
+        entries["x64/textures.rpf"] = _encode_archive({
+            "archives/level2.rpf": _encode_archive({
+                "deep/level3.rpf": _encode_archive({
+                    "assets/target.ytd": b"original deeply nested texture",
+                }),
+            }),
+        })
+    elif nested:
         entries["x64/textures.rpf"] = _encode_archive({
             "vehicle.ytd": b"original nested texture",
         })
@@ -554,6 +569,67 @@ def test_nested_rpf_replace_add_delete_use_outer_transaction(tmp_path, monkeypat
     assert archive.read_bytes() == original_outer
 
 
+def test_deep_nested_rpf_replace_add_delete_reassemble_every_parent(
+    tmp_path, monkeypatch,
+):
+    service, archive, _entry, _fake = _transaction_service(
+        tmp_path, monkeypatch, deep_nested=True,
+    )
+    original_outer = archive.read_bytes()
+    archive_path = (
+        "x64/textures.rpf!archives/level2.rpf!deep/level3.rpf"
+    )
+    target_id = f"{archive_path}::assets/target.ytd"
+    payload = tmp_path / "target.ytd"
+    payload.write_bytes(b"replacement deeply nested texture")
+    plan_path = tmp_path / "deep-change.json"
+
+    replacement = service.replacement_plan(
+        service.index(archive), service.index(archive).entry(target_id), payload,
+    )
+    assert replacement["status"] == "ready"
+    assert replacement["archive_path"] == archive_path
+    plan_path.write_text(json.dumps(replacement), encoding="utf-8")
+    receipt = service.apply_change_plan(
+        plan_path, receipt_root=tmp_path / "transactions",
+    )
+    level1 = _decode_archive_bytes(_decode_archive(archive)["x64/textures.rpf"])
+    level2 = _decode_archive_bytes(level1["archives/level2.rpf"])
+    level3 = _decode_archive_bytes(level2["deep/level3.rpf"])
+    assert level3["assets/target.ytd"] == payload.read_bytes()
+    assert service.verify_transaction(receipt)["healthy"] is True
+    service.rollback_transaction(receipt)
+    assert archive.read_bytes() == original_outer
+
+    addition = service.addition_plan(
+        service.index(archive), "assets/extra.ytd", payload,
+        archive_path=archive_path,
+    )
+    plan_path.write_text(json.dumps(addition), encoding="utf-8")
+    receipt = service.apply_change_plan(
+        plan_path, receipt_root=tmp_path / "transactions",
+    )
+    level1 = _decode_archive_bytes(_decode_archive(archive)["x64/textures.rpf"])
+    level2 = _decode_archive_bytes(level1["archives/level2.rpf"])
+    level3 = _decode_archive_bytes(level2["deep/level3.rpf"])
+    assert level3["assets/extra.ytd"] == payload.read_bytes()
+    service.rollback_transaction(receipt)
+
+    deletion = service.deletion_plan(
+        service.index(archive), service.index(archive).entry(target_id),
+    )
+    plan_path.write_text(json.dumps(deletion), encoding="utf-8")
+    receipt = service.apply_change_plan(
+        plan_path, receipt_root=tmp_path / "transactions",
+    )
+    level1 = _decode_archive_bytes(_decode_archive(archive)["x64/textures.rpf"])
+    level2 = _decode_archive_bytes(level1["archives/level2.rpf"])
+    level3 = _decode_archive_bytes(level2["deep/level3.rpf"])
+    assert "assets/target.ytd" not in level3
+    service.rollback_transaction(receipt)
+    assert archive.read_bytes() == original_outer
+
+
 def test_workspace_authorization_history_recovery_and_stale_lock(tmp_path, monkeypatch):
     service, archive, entry, _fake = _transaction_service(tmp_path, monkeypatch)
     workspace = tmp_path / "workspace"
@@ -626,8 +702,13 @@ def test_entry_plan_constraints_and_internal_action_guards(tmp_path, monkeypatch
         service.addition_plan(index, "common/data/test.ymap", payload)
     with pytest.raises(ValueError, match="target directory"):
         service.addition_plan(index, "missing/path/new.bin", payload)
-    with pytest.raises(ValueError, match="one-level nested"):
+    with pytest.raises(ValueError, match="Nested RPF chain"):
         service.addition_plan(index, "new.bin", payload, archive_path="missing.rpf")
+    with pytest.raises(ValueError, match="limited to 8"):
+        service.addition_plan(
+            index, "new.bin", payload,
+            archive_path="!".join(f"level-{number}.rpf" for number in range(9)),
+        )
     with pytest.raises(ValueError, match="Directories"):
         service.deletion_plan(index, index.entry("::common"))
     with pytest.raises(ValueError, match="Directories"):
