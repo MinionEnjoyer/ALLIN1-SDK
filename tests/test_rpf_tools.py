@@ -1961,7 +1961,13 @@ def test_native_asset_helper_renders_bounded_model_geometry(tmp_path, monkeypatc
     patcher.write_bytes(b"exe")
     model_xml = """<?xml version="1.0"?>
 <Drawable>
- <DrawableModelsHigh><Item><Geometries><Item>
+ <ShaderGroup><Shaders><Item><Name>vehicle_paint</Name><Parameters>
+  <Item name="DiffuseSampler" type="Texture"><Name>vehicle_diff</Name></Item>
+  <Item name="BumpSampler" type="Texture"/>
+ </Parameters></Item></Shaders></ShaderGroup>
+ <Skeleton><Bones><Item/><Item/></Bones></Skeleton>
+ <DrawableModelsHigh><Item><HasSkin value="1"/><Geometries><Item>
+  <ShaderIndex value="0"/><BoneIDs>1, 2, 3</BoneIDs>
   <VertexBuffer><Layout type="GTAV1"><Position/><Normal/></Layout><Data>
 0 0 0  0 0 1
 1 0 0  0 0 1
@@ -1971,6 +1977,7 @@ def test_native_asset_helper_renders_bounded_model_geometry(tmp_path, monkeypatc
   </Data></VertexBuffer>
   <IndexBuffer><Data>0 1 4  1 2 4  2 3 4  3 0 4  0 3 2  2 1 0</Data></IndexBuffer>
  </Item></Geometries></Item></DrawableModelsHigh>
+ <Lights><Item/></Lights>
 </Drawable>"""
 
     def convert(args, **_kwargs):
@@ -1986,6 +1993,15 @@ def test_native_asset_helper_renders_bounded_model_geometry(tmp_path, monkeypatc
     assert report.metadata["model_vertex_count"] == 5
     assert report.metadata["model_triangle_count"] == 6
     assert report.metadata["model_lods"] == "High: 1"
+    assert report.metadata["model_shader_count"] == 1
+    assert report.metadata["model_shader_names"] == "vehicle_paint"
+    assert report.metadata["model_texture_parameter_count"] == 2
+    assert report.metadata["model_texture_reference_count"] == 1
+    assert report.metadata["model_texture_names"] == "vehicle_diff"
+    assert report.metadata["model_skinned_models"] == 1
+    assert report.metadata["model_bone_binding_count"] == 3
+    assert report.metadata["model_skeleton_bones"] == 2
+    assert report.metadata["model_light_count"] == 1
     assert report.metadata["model_preview"] == "isometric geometry diagnostic"
 
 

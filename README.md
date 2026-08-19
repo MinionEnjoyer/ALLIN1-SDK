@@ -39,7 +39,8 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
 - **Native Asset Viewer** — browse authored text and images, parse bounded RAGE
   resource headers, convert supported resources to structured CodeWalker XML,
   generate YTD texture contact sheets, render bounded indexed-geometry previews for
-  YDR/YDD/YFT models with vertex, triangle, LOD, drawable, and bounds statistics, and
+  YDR/YDD/YFT models with vertex, triangle, LOD, drawable, bounds, shader, texture,
+  skin/bone-binding, skeleton, and light statistics, and
   visualize YBN collision meshes/primitives with geometry, material, and polygon counts.
   YMAP placement previews plot entities, archetypes, orientation, hierarchy links, and
   world extents in a bounded top-down scene. YNV navigation previews expose polygon

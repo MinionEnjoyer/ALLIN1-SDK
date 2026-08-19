@@ -412,6 +412,70 @@ def _model_drawable_count(root: etree._Element) -> int:
     return count or 1
 
 
+def _model_resource_metadata(root: etree._Element) -> dict[str, Any]:
+    shader_items = root.xpath(
+        ".//*[local-name()='ShaderGroup']/*[local-name()='Shaders']/*[local-name()='Item']"
+    )
+    shader_names: list[str] = []
+    texture_slots = 0
+    texture_names: set[str] = set()
+    for shader in shader_items:
+        name_element = next((
+            child for child in shader
+            if isinstance(child.tag, str) and _local_name(child) == "Name"
+        ), None)
+        name = ((name_element.text or "").strip() if name_element is not None else "")
+        if name:
+            shader_names.append(name)
+        for parameter in shader.xpath(
+            "./*[local-name()='Parameters']/*[local-name()='Item']"
+        ):
+            if parameter.get("type", "").casefold() != "texture":
+                continue
+            texture_slots += 1
+            texture = next((
+                child for child in parameter
+                if isinstance(child.tag, str) and _local_name(child) == "Name"
+            ), None)
+            texture_name = ((texture.text or "").strip() if texture is not None else "")
+            if texture_name:
+                texture_names.add(texture_name)
+    skinned_models = 0
+    for has_skin in root.xpath(".//*[local-name()='HasSkin']"):
+        try:
+            skinned_models += int(has_skin.get("value", "0"), 10) != 0
+        except ValueError as exc:
+            raise ValueError("Model HasSkin value is non-integer") from exc
+    bound_bones: set[int] = set()
+    for bone_ids in root.xpath(".//*[local-name()='BoneIDs']"):
+        bound_bones.update(_raw_integer_values(bone_ids, context="Model BoneIDs"))
+    skeleton_bones = len(root.xpath(
+        ".//*[local-name()='Skeleton']/*[local-name()='Bones']/*[local-name()='Item']"
+    ))
+    light_count = len(root.xpath(
+        ".//*[local-name()='Lights']/*[local-name()='Item']"
+    ))
+    metadata: dict[str, Any] = {
+        "model_shader_count": len(shader_items),
+        "model_texture_parameter_count": texture_slots,
+        "model_texture_reference_count": len(texture_names),
+        "model_skinned_models": skinned_models,
+        "model_bone_binding_count": len(bound_bones),
+        "model_skeleton_bones": skeleton_bones,
+        "model_light_count": light_count,
+    }
+    if shader_names:
+        metadata["model_shader_names"] = ", ".join(shader_names[:16])
+        if len(shader_names) > 16:
+            metadata["model_shader_names"] += f", … (+{len(shader_names) - 16})"
+    if texture_names:
+        ordered = sorted(texture_names, key=str.casefold)
+        metadata["model_texture_names"] = ", ".join(ordered[:16])
+        if len(ordered) > 16:
+            metadata["model_texture_names"] += f", … (+{len(ordered) - 16})"
+    return metadata
+
+
 def _project_model_point(
     point: tuple[float, float, float],
     center: tuple[float, float, float],
@@ -575,6 +639,7 @@ def _model_preview_from_xml(
             }, None
         image, metadata = _render_model_wireframe(geometries, name)
         metadata["model_drawable_count"] = _model_drawable_count(root)
+        metadata.update(_model_resource_metadata(root))
         if skipped_layouts:
             metadata["model_skipped_buffers"] = skipped_layouts
         return image, metadata, None
