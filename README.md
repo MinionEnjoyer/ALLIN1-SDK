@@ -42,8 +42,10 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   packages, classify scripts, plug-ins, shaders, replacements, and add-on DLC,
   detect Legacy/Enhanced compatibility, and surface incomplete or ambiguous
   content for review.
-- **OIV workbench** — preview ordered OIV operations, export a managed package
-  when every operation fits receipt ownership, and translate existing nested-RPF
+- **Package Recipes workspace** — inspect ordered OIV operations in a persistent
+  desktop work area, separate blockers from supported instructions, and enable only
+  outputs the SDK can prove safe. Export a managed package when every operation fits
+  receipt ownership, and translate existing nested-RPF
   adds/replacements/deletes into payload-backed atomic batch manifests. Official
   OIV 2.1/2.2 XML add/replace/remove commands compile against an explicitly selected
   RPF into canonical-reparse-verified payloads and an inert hash-bound plan.
@@ -260,7 +262,9 @@ commands are grouped by task:
 
 - **Packages** opens manifests, packages, folders, and installed DLC sources.
 - **Inspect & Export** validates links, explains fields, and exports reports.
-- **Package Tools** opens OIV, DLC inventory, vehicle compiler, and structured
+- **Package Recipes** keeps ordered OIV inspection and every valid report, compile,
+  batch, new-archive, or managed-package output in the main SDK window.
+- **Package Tools** opens Package Recipes, DLC inventory, vehicle compiler, and structured
   META/XML tools.
 - **The bottom SDK Console dock** keeps the complete CLI available from every
   workspace. Its completion list narrows as you type, suggests commands,

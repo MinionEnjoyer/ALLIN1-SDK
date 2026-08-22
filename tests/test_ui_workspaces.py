@@ -13,7 +13,7 @@ def test_primary_sdk_routes_are_plain_language_and_package_selection_works():
     source = _source("addon_sdk_ui.py")
     for label in (
         '"Package Linker"', '"Asset Viewer"', '"RPF Archives"',
-        '"Help Center"', 'text="Import or audit package"',
+        '"Package Recipes"', '"Help Center"', 'text="Import or audit package"',
         'text="Inspect or export"', 'text="Package tools"',
     ):
         assert label in source
@@ -79,6 +79,31 @@ def test_binary_workspace_exposes_guarded_patch_and_archive_plan_controls():
     assert "self._open_binary_editor(workspace)" in explorer
     assert "self._plan_binary_workspace_from_editor" in explorer
     assert "Use the SDK Console's inspect-" not in explorer
+
+
+def test_package_recipes_replace_the_oiv_prompt_cascade_with_one_workspace():
+    shell = _source("addon_sdk_ui.py")
+    recipes = _source("oiv_workbench_ui.py")
+    assert "class OivWorkbenchFrame(ttk.Frame)" in recipes
+    assert "tk.Toplevel" not in recipes
+    assert '"recipes": recipes_page' in shell
+    assert "self.recipe_workspace = OivWorkbenchFrame(" in shell
+    assert 'label="Open Package Recipes"' in shell
+    assert "def _preview_oiv" not in shell
+    assert "RpfProgressDialog" not in shell
+    for action in (
+        'text="Open recipe…"',
+        '("report", "Export inspection report…", self._export_report)',
+        '("compile", "Compile against existing RPF…", self._compile_existing)',
+        '("batches", "Export atomic RPF batches…", self._export_batches)',
+        '("created", "Build declared new archives…", self._build_created)',
+        '("managed", "Export managed package…", self._export_managed)',
+    ):
+        assert action in recipes
+    assert "plan.rpf_recipe_compilable" in recipes
+    assert "plan.translatable and plan.created_archive_operations" in recipes
+    assert "plan.managed_exportable" in recipes
+    assert "recipes.has_active_work()" in shell
 
 
 def test_asset_viewer_separates_package_browsing_from_native_authoring():

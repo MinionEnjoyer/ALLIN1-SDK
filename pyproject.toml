@@ -46,6 +46,7 @@ omit = [
     "src/allin1_sdk/addon_sdk_ui.py",
     "src/allin1_sdk/asset_viewer.py",
     "src/allin1_sdk/binary_workspace_ui.py",
+    "src/allin1_sdk/oiv_workbench_ui.py",
     "src/allin1_sdk/rpf_explorer.py",
     "src/allin1_sdk/rpf_graph_ui.py",
     "src/allin1_sdk/rpf_change_set_ui.py",

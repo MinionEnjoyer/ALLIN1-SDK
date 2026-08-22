@@ -17,10 +17,11 @@ from allin1_sdk import __version__
 from allin1_sdk.addon_importer import AddonDraftBuilder, AddonPackageInspector, PackageScan
 from allin1_sdk.branding import apply_sdk_window_icon
 from allin1_sdk.asset_viewer import AssetViewerDialog
-from allin1_sdk.rpf_explorer import RpfExplorerDialog, RpfProgressDialog
+from allin1_sdk.rpf_explorer import RpfExplorerDialog
 from allin1_sdk.sdk_console import SdkConsoleDialog
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.help_center import HelpCenterDialog
+from allin1_sdk.oiv_workbench_ui import OivWorkbenchFrame
 from allin1_sdk.paths import user_data_root
 from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
 from allin1_sdk.addon_sdk import (
@@ -85,7 +86,8 @@ class AddonSdkDialog(tk.Toplevel):
         view = tk.Menu(menu, tearoff=False)
         for index, (key, label) in enumerate((
             ("linker", "Package Linker"), ("assets", "Asset Viewer"),
-            ("rpf", "RPF Archives"), ("help", "Help Center"),
+            ("rpf", "RPF Archives"), ("recipes", "Package Recipes"),
+            ("help", "Help Center"),
         ), start=1):
             view.add_command(
                 label=label, accelerator=f"Ctrl+{index}",
@@ -140,7 +142,7 @@ class AddonSdkDialog(tk.Toplevel):
 
     def _make_intelligence_menu(self, parent: tk.Misc) -> tk.Menu:
         menu = tk.Menu(parent, tearoff=False)
-        menu.add_command(label="Preview OIV recipe…", command=self._preview_oiv)
+        menu.add_command(label="Open Package Recipes", command=self._open_oiv_workbench)
         menu.add_command(label="Inventory installed DLC…", command=self._inventory_dlc)
         menu.add_command(label="Compile vehicle data…", command=self._compile_vehicle_data)
         menu.add_separator()
@@ -169,12 +171,21 @@ class AddonSdkDialog(tk.Toplevel):
     def _open_context_help(self) -> None:
         topic = {
             "linker": "sdk", "assets": "asset-viewer",
-            "rpf": "rpf-explorer", "help": "input",
+            "rpf": "rpf-explorer", "recipes": "package-recipes", "help": "input",
         }.get(getattr(self, "current_workspace", "linker"), "sdk")
         self._open_help(topic)
 
     def request_close(self) -> bool:
         """Close the SDK only when guarded authoring work is no longer active."""
+        recipes = getattr(self, "recipe_workspace", None)
+        if recipes is not None and recipes.has_active_work():
+            self._select_workspace("recipes")
+            messagebox.showinfo(
+                "Package-recipe operation still running",
+                "Wait for the current inspection or export to finish before closing the SDK.",
+                parent=self,
+            )
+            return False
         rpf = getattr(self, "rpf_workspace", None)
         if rpf is not None and rpf.has_active_work():
             self._select_workspace("rpf")
@@ -277,11 +288,13 @@ class AddonSdkDialog(tk.Toplevel):
         linker_page = ttk.Frame(workspace)
         assets_page = ttk.Frame(workspace)
         rpf_page = ttk.Frame(workspace)
+        recipes_page = ttk.Frame(workspace)
         help_page = ttk.Frame(workspace)
         self.workspace_pages = {
             "linker": linker_page,
             "assets": assets_page,
             "rpf": rpf_page,
+            "recipes": recipes_page,
             "help": help_page,
         }
         self.workspace_buttons: dict[str, ttk.Button] = {}
@@ -289,6 +302,7 @@ class AddonSdkDialog(tk.Toplevel):
             ("linker", "Package Linker"),
             ("assets", "Asset Viewer"),
             ("rpf", "RPF Archives"),
+            ("recipes", "Package Recipes"),
             ("help", "Help Center"),
         ), start=1):
             self.workspace_pages[key].grid(row=0, column=0, sticky="nsew")
@@ -407,6 +421,11 @@ class AddonSdkDialog(tk.Toplevel):
         self.rpf_workspace = RpfExplorerDialog(
             rpf_page, self.project_root, installation_roots=self.installation_roots,
             embedded=True, on_help=self._open_help,
+            on_close=lambda: self._select_workspace("linker"),
+        )
+        self.recipe_workspace = OivWorkbenchFrame(
+            recipes_page, self.project_root, installation_roots=self.installation_roots,
+            on_help=self._open_help,
             on_close=lambda: self._select_workspace("linker"),
         )
         self.console_workspace = SdkConsoleDialog(
@@ -613,6 +632,9 @@ class AddonSdkDialog(tk.Toplevel):
     def _open_rpf_explorer(self) -> None:
         self._select_workspace("rpf")
 
+    def _open_oiv_workbench(self) -> None:
+        self._select_workspace("recipes")
+
     def _inspect_package_rpfs(self) -> None:
         if self.package_source is None:
             return
@@ -642,198 +664,6 @@ class AddonSdkDialog(tk.Toplevel):
             "RPF inspection complete",
             f"Read-only reports were written to:\n{Path(destination).resolve()}",
             parent=self,
-        )
-
-    def _preview_oiv(self) -> None:
-        selected = filedialog.askopenfilename(
-            parent=self, title="Select an OIV package",
-            filetypes=(("OIV package", "*.oiv *.zip"), ("All files", "*.*")),
-        )
-        if not selected:
-            return
-        destination = filedialog.asksaveasfilename(
-            parent=self, title="Save the read-only OIV operation plan",
-            initialdir=str(Path(selected).parent),
-            initialfile=f"{Path(selected).stem}-oiv-plan.md",
-            defaultextension=".md", filetypes=(("Markdown", "*.md"),),
-        )
-        if not destination:
-            return
-        try:
-            from allin1_sdk.oiv_workbench import OivWorkbench
-            workbench = OivWorkbench()
-            plan = workbench.inspect(selected)
-            report = plan.write_report(destination)
-        except (OSError, ValueError) as exc:
-            messagebox.showerror("OIV inspection failed", str(exc), parent=self)
-            return
-        self.status.set(f"OIV plan written: {report.name}")
-        if plan.rpf_recipe_compilable:
-            recipe_summary = (
-                f"{len(plan.xml_operations)} XML and "
-                f"{len(plan.text_operations)} bounded text operation(s) and "
-                f"{len(plan.pso_operations)} native PSO operation(s)"
-            )
-            if not messagebox.askyesno(
-                "Verified OIV RPF recipe compile available",
-                f"This recipe contains {recipe_summary}. Select the matching outer "
-                "RPF to replay the ordered edits into verified payloads and a "
-                "hash-bound inert plan? Native PSO resources are decoded and rebuilt "
-                "with the matching game keys. Exact and prefix text selectors must "
-                "match one line; wildcard masks remain blocked.\n\n"
-                "The selected archive will not be changed.", parent=self,
-            ):
-                self.status.set(f"OIV recipe plan written: {report.name}")
-                return
-            game = self.installation_roots[0] if len(self.installation_roots) == 1 else None
-            if game is None:
-                selected_game = filedialog.askdirectory(
-                    parent=self,
-                    title="Select matching GTA V Legacy or Enhanced installation",
-                )
-                game = Path(selected_game) if selected_game else None
-            selected_archive = filedialog.askopenfilename(
-                parent=self, title="Select the matching existing outer RPF",
-                filetypes=(("RPF archive", "*.rpf"), ("All files", "*.*")),
-            ) if game is not None else ""
-            bundle_dir = filedialog.askdirectory(
-                parent=self, title="Select a new OIV recipe compile folder",
-                mustexist=False,
-            ) if selected_archive else ""
-            if game is None or not selected_archive or not bundle_dir:
-                return
-
-            def recipe_completed(outputs) -> None:
-                plan_path, audit_path = outputs
-                self.status.set(f"Verified OIV RPF recipe plan: {plan_path}")
-                messagebox.showinfo(
-                    "OIV RPF recipe compile complete",
-                    "Every XML payload was canonically verified, every text payload "
-                    "passed encoding round-trip verification, and every PSO payload "
-                    "was rebuilt, reparsed, and semantically checked. XML-shaped text "
-                    "remained well-formed. The selected archive was not changed.\n\n"
-                    f"RPF plan: {plan_path}\nAudit: {audit_path}", parent=self,
-                )
-
-            from allin1_sdk.rpf_tools import RpfExplorerService
-            archive_path = Path(selected_archive).resolve()
-            service = RpfExplorerService(
-                self.project_root, game, workspace_roots=(archive_path.parent,),
-            )
-            RpfProgressDialog(
-                self, "Compiling verified OIV RPF recipe",
-                lambda _progress: workbench.compile_rpf_recipe_bundle(
-                    plan, archive_path, bundle_dir, service=service,
-                ),
-                recipe_completed,
-                lambda exc: messagebox.showerror(
-                    "OIV recipe compile failed", str(exc), parent=self,
-                ),
-            )
-            return
-        if not plan.translatable:
-            messagebox.showinfo(
-                "OIV review required",
-                f"The operation plan was written to:\n{report}\n\n"
-                "At least one unsafe delete, merge, unbounded archive creation, missing source, or "
-                "unknown operation must be resolved manually.", parent=self,
-            )
-            return
-        needs_batch = any(
-            item.kind == "delete" or len(item.archives) > 1
-            for item in plan.rpf_batch_operations
-        )
-        if needs_batch and messagebox.askyesno(
-            "Atomic RPF export available",
-            "This recipe contains exact deletes or nested RPF changes. Export "
-            "payload-backed batch manifests for review and atomic planning?",
-            parent=self,
-        ):
-            batch_dir = filedialog.askdirectory(
-                parent=self, title="Select a new or empty RPF batch folder",
-                mustexist=False,
-            )
-            if batch_dir:
-                try:
-                    manifests = workbench.export_rpf_batch_manifests(plan, batch_dir)
-                except (OSError, ValueError) as exc:
-                    messagebox.showerror(
-                        "RPF batch export failed", str(exc), parent=self,
-                    )
-                    return
-                messagebox.showinfo(
-                    "Atomic RPF batches exported",
-                    f"Exported {len(manifests)} outer-archive manifest(s). Open the "
-                    "matching archive in RPF Archives and choose Create multi-entry "
-                    "plan.", parent=self,
-                )
-        if plan.created_archive_operations and messagebox.askyesno(
-            "Verified created-RPF export available",
-            "This recipe declares bounded createIfNotExist archives. Extract only its "
-            "declared payloads, replay supported XML, bounded text edits, and cleanup "
-            "deletes in recipe order, build every archive, verify the recursive tree "
-            "and exact payload hashes, and create a managed package?",
-            parent=self,
-        ):
-            game = self.installation_roots[0] if len(self.installation_roots) == 1 else None
-            if game is None:
-                selected_game = filedialog.askdirectory(
-                    parent=self,
-                    title="Select matching GTA V Legacy or Enhanced installation",
-                )
-                game = Path(selected_game) if selected_game else None
-            package_dir = filedialog.askdirectory(
-                parent=self, title="Select a new created-RPF package folder",
-                mustexist=False,
-            ) if game is not None else ""
-            if game is not None and package_dir:
-                def completed(manifest) -> None:
-                    self.status.set(f"Verified created-RPF package: {manifest}")
-                    messagebox.showinfo(
-                        "Created RPF package exported",
-                        "Every new archive passed recursive and exact-payload "
-                        "verification. XML edits were canonically verified, text edits "
-                        "passed encoding round-trip checks, and the ordered recipe "
-                        "audit was retained."
-                        f"\n\nManifest: {manifest}\n\nReview it before using "
-                        "Import & install.", parent=self,
-                    )
-
-                RpfProgressDialog(
-                    self, "Building verified OIV archives",
-                    lambda _progress: workbench.export_created_rpf_package(
-                        plan, package_dir, project_root=self.project_root,
-                        gta_path=game,
-                    ),
-                    completed,
-                    lambda exc: messagebox.showerror(
-                        "Created RPF export failed", str(exc), parent=self,
-                    ),
-                )
-        if not plan.managed_exportable:
-            self.status.set(f"OIV atomic RPF plan written: {report.name}")
-            return
-        if not messagebox.askyesno(
-            "Managed export available",
-            "Every operation can be represented by ALLIN1 ownership and rollback. "
-            "Export a validated mod.toml package now?", parent=self,
-        ):
-            return
-        package_dir = filedialog.askdirectory(
-            parent=self, title="Select a new or empty managed-package folder",
-            mustexist=False,
-        )
-        if not package_dir:
-            return
-        try:
-            manifest = workbench.export_managed_package(plan, package_dir)
-        except (OSError, ValueError) as exc:
-            messagebox.showerror("Managed export failed", str(exc), parent=self)
-            return
-        messagebox.showinfo(
-            "Managed package exported",
-            f"Validated package manifest:\n{manifest}\n\n"
-            "Review it before using Import & install.", parent=self,
         )
 
     def _inventory_dlc(self) -> None:

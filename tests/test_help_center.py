@@ -4,7 +4,10 @@ from allin1_sdk.help_center import HELP_TOPICS, search_help_topics
 def test_help_center_has_unique_keys_and_core_workflows():
     keys = [topic.key for topic in HELP_TOPICS]
     assert len(keys) == len(set(keys))
-    assert {"getting-started", "packages", "asset-viewer", "rpf-explorer", "recovery"} <= set(keys)
+    assert {
+        "getting-started", "packages", "package-recipes", "asset-viewer",
+        "rpf-explorer", "recovery",
+    } <= set(keys)
 
 
 def test_help_search_matches_keywords_and_ranks_title_matches():
