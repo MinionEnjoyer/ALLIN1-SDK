@@ -14,6 +14,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageOps, ImageTk, UnidentifiedImageError
 
+from allin1_sdk.binary_workspace_ui import BinaryWorkspaceFrame
 from allin1_sdk.detector import detect_gta_path
 from allin1_sdk.gxt2_workspace import Gxt2Workspace
 from allin1_sdk.native_assets import (
@@ -694,10 +695,12 @@ class RpfExplorerDialog(ttk.Frame):
         browser_tab = ttk.Frame(self.workspace_tabs)
         changes_tab = ttk.Frame(self.workspace_tabs)
         self.graph_tab = ttk.Frame(self.workspace_tabs)
+        self.binary_tab = ttk.Frame(self.workspace_tabs)
         self.gxt2_tab = ttk.Frame(self.workspace_tabs)
         self.workspace_tabs.add(browser_tab, text="Archive Browser")
         self.workspace_tabs.add(changes_tab, text="Visual Change Set")
         self.workspace_tabs.add(self.graph_tab, text="Package Graph")
+        self.workspace_tabs.add(self.binary_tab, text="Binary Workspace")
         self.workspace_tabs.add(self.gxt2_tab, text="GXT2 Text")
         self.browser_tab = browser_tab
 
@@ -746,7 +749,7 @@ class RpfExplorerDialog(ttk.Frame):
         ttk.Separator(preview).pack(fill="x", pady=(0, 8))
         context_actions = ttk.Frame(preview)
         context_actions.pack(fill="x", pady=(0, 8))
-        for column in range(4):
+        for column in range(5):
             context_actions.columnconfigure(column, weight=1)
         self.preview_entry_button = ttk.Button(
             context_actions, text="Preview", command=self._preview_selected,
@@ -767,7 +770,12 @@ class RpfExplorerDialog(ttk.Frame):
             context_actions, text="GXT2", command=self._export_gxt2_workspace,
             state="disabled", padding=(5, 4),
         )
-        self.edit_gxt2_button.grid(row=0, column=3, sticky="ew", padx=(2, 0))
+        self.binary_workspace_button = ttk.Button(
+            context_actions, text="Edit bytes", command=self._export_binary_workspace,
+            state="disabled", padding=(5, 4),
+        )
+        self.binary_workspace_button.grid(row=0, column=3, sticky="ew", padx=2)
+        self.edit_gxt2_button.grid(row=0, column=4, sticky="ew", padx=(2, 0))
         self.preview_surface = tk.Frame(preview, background="#ffffff")
         self.preview_surface.pack(fill="both", expand=True)
         self.image_preview = tk.Label(
@@ -790,12 +798,17 @@ class RpfExplorerDialog(ttk.Frame):
         self.graph_host = ttk.Frame(self.graph_tab)
         self.graph_host.pack(fill="both", expand=True)
         self.graph_host.pack_propagate(False)
+        self.binary_host = ttk.Frame(self.binary_tab)
+        self.binary_host.pack(fill="both", expand=True)
+        self.binary_host.pack_propagate(False)
         self.gxt2_host = ttk.Frame(self.gxt2_tab)
         self.gxt2_host.pack(fill="both", expand=True)
         self.gxt2_host.pack_propagate(False)
         self._graph_editor: RpfPackageGraphFrame | None = None
+        self._binary_editor: BinaryWorkspaceFrame | None = None
         self._gxt2_editor: Gxt2WorkspaceFrame | None = None
         self._show_graph_home()
+        self._show_binary_home()
         self._show_gxt2_home()
         self.workspace_tabs.bind("<<NotebookTabChanged>>", self._workspace_tab_changed)
 
@@ -859,6 +872,79 @@ class RpfExplorerDialog(ttk.Frame):
             row=0, column=3, sticky="ew", padx=(4, 0),
         )
 
+    def _show_binary_home(self) -> None:
+        current = getattr(self, "_binary_editor", None)
+        if current is not None and current.winfo_exists() and current.has_active_work():
+            messagebox.showinfo(
+                "Binary operation still running",
+                "Wait for the current validation or build to finish before closing the editor.",
+                parent=self,
+            )
+            return
+        self._clear_workspace_host(self.binary_host)
+        self._binary_editor = None
+        surface = ttk.Frame(self.binary_host, padding=20)
+        surface.pack(fill="both", expand=True)
+        ttk.Label(
+            surface, text="Binary workspace", font=("Segoe UI Semibold", 17),
+            foreground="#1f7f42",
+        ).pack(anchor="w")
+        ttk.Label(
+            surface,
+            text=(
+                "Inspect raw bytes, apply expected-byte patches, review the retained "
+                "history, undo operations, build a changed-range report, and create an "
+                "archive-bound replacement plan without leaving RPF Archives."
+            ),
+            foreground="#52635c", wraplength=920, justify="left",
+        ).pack(anchor="w", pady=(4, 16))
+        actions = ttk.Frame(surface)
+        actions.pack(fill="x")
+        ttk.Button(
+            actions, text="Open binary workspace…",
+            command=self._open_binary_workspace, style="Accent.TButton",
+        ).pack(side="left")
+        ttk.Label(
+            actions,
+            text=(
+                "To start from an archive entry, return to Archive Browser and choose "
+                "Edit bytes."
+            ),
+            foreground="#52635c", wraplength=650, justify="left",
+        ).pack(side="left", padx=(12, 0))
+
+    def _open_binary_workspace(self) -> None:
+        current = getattr(self, "_binary_editor", None)
+        if current is not None and current.winfo_exists() and current.has_active_work():
+            messagebox.showinfo(
+                "Binary operation still running",
+                "Wait for the current validation or build to finish before opening "
+                "another workspace.", parent=self,
+            )
+            return
+        selected = filedialog.askdirectory(
+            parent=self, title="Open a binary patch workspace",
+        )
+        if selected:
+            self._open_binary_editor(selected)
+
+    def _open_binary_editor(self, workspace: str | Path) -> None:
+        current = getattr(self, "_binary_editor", None)
+        if current is not None and current.winfo_exists() and current.has_active_work():
+            messagebox.showinfo(
+                "Binary operation still running",
+                "Wait for the current validation or build to finish before replacing "
+                "this editor.", parent=self,
+            )
+            return
+        self._clear_workspace_host(self.binary_host)
+        self._binary_editor = BinaryWorkspaceFrame(
+            self.binary_host, workspace,
+            on_close=self._show_binary_home,
+            on_plan=self._plan_binary_workspace_from_editor,
+        )
+        self.workspace_tabs.select(self.binary_tab)
+
     def _show_gxt2_home(self) -> None:
         self._clear_workspace_host(self.gxt2_host)
         self._gxt2_editor = None
@@ -910,6 +996,9 @@ class RpfExplorerDialog(ttk.Frame):
         self._graph_import_actions.append((graph_menu, "Import opened RPF…"))
         graph_menu.add_command(label="Open graph…", command=self._open_rpf_graph)
         author_menu.add_cascade(label="Package graph", menu=graph_menu)
+        author_menu.add_command(
+            label="Open binary patch workspace…", command=self._open_binary_workspace,
+        )
         author_menu.add_command(
             label="Open GXT2 text workspace…", command=self._open_gxt2_workspace,
         )
@@ -1055,6 +1144,7 @@ class RpfExplorerDialog(ttk.Frame):
             menu.entryconfigure(label, state=state)
         for button_name in (
             "preview_entry_button", "extract_entry_button", "plan_entry_button",
+            "binary_workspace_button",
         ):
             button = getattr(self, button_name, None)
             if button is not None:
@@ -1631,14 +1721,7 @@ class RpfExplorerDialog(ttk.Frame):
             messagebox.showerror("Binary workspace export failed", str(exc), parent=self)
             return
         self.status.set(f"Bound binary patch workspace exported: {workspace}")
-        messagebox.showinfo(
-            "Binary workspace exported",
-            "The immutable source snapshot and editable same-size copy are bound to "
-            f"this exact archive entry. Use the SDK Console's inspect-, patch-, and "
-            f"undo-binary-workspace commands, then return here to create the reviewed "
-            f"replacement plan.\n\nWorkspace: {workspace}",
-            parent=self,
-        )
+        self._open_binary_editor(workspace)
 
     def _export_gxt2_workspace(self) -> None:
         entry = self._selected()
@@ -2038,6 +2121,53 @@ class RpfExplorerDialog(ttk.Frame):
         )
         if not workspace:
             return
+        self._create_binary_workspace_plan(entry, workspace)
+
+    def _plan_binary_workspace_from_editor(self, workspace: str | Path) -> None:
+        root = Path(workspace).expanduser().resolve()
+        try:
+            manifest = json.loads(
+                (root / "binary-workspace.json").read_text(encoding="utf-8")
+            )
+            binding = manifest.get("source_binding", {})
+            if not isinstance(binding, dict):
+                raise ValueError("Binary workspace has no valid RPF source binding")
+            archive_text = str(binding.get("outer_archive", "")).strip()
+            entry_id = str(binding.get("entry_id", "")).strip()
+            if not archive_text or not entry_id:
+                raise ValueError(
+                    "This binary workspace is not bound to an RPF archive entry"
+                )
+            archive = Path(archive_text).expanduser().resolve()
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            messagebox.showerror("Binary workspace binding failed", str(exc), parent=self)
+            return
+        if self.index is None or self.index.source != archive:
+            if not archive.is_file():
+                messagebox.showerror(
+                    "Bound RPF unavailable",
+                    f"The archive used to create this workspace was not found:\n{archive}",
+                    parent=self,
+                )
+                return
+            self._load_archive(archive)
+        if self.index is None or self.service is None or self.index.source != archive:
+            return
+        entry = self.index.entry(entry_id)
+        if entry is None or entry.kind == "directory":
+            messagebox.showerror(
+                "Bound entry unavailable",
+                "The exact archive entry recorded by this workspace is no longer present.",
+                parent=self,
+            )
+            return
+        self._create_binary_workspace_plan(entry, root)
+
+    def _create_binary_workspace_plan(
+        self, entry: RpfEntryRecord, workspace: str | Path,
+    ) -> None:
+        if self.index is None or self.service is None:
+            return
         output = filedialog.asksaveasfilename(
             parent=self, title="Save binary RPF replacement plan",
             initialfile=f"{Path(entry.name).stem}-binary-replacement-plan.json",
@@ -2049,7 +2179,7 @@ class RpfExplorerDialog(ttk.Frame):
         def work(progress):
             progress("Validating binary workspace history and source binding…", 20)
             result = self.service.plan_binary_workspace_replacement(
-                self.index, entry, workspace, output,
+                self.index, entry, str(workspace), output,
             )
             progress("Built same-size diff and bound reviewed RPF plan", 100)
             return result
@@ -2616,18 +2746,30 @@ class RpfExplorerDialog(ttk.Frame):
         self.text_preview.pack(fill="both", expand=True)
 
     def has_active_work(self) -> bool:
-        editor = getattr(self, "_graph_editor", None)
-        return bool(
-            editor is not None and editor.winfo_exists() and editor.has_active_work()
-        )
+        for name in ("_graph_editor", "_binary_editor"):
+            editor = getattr(self, name, None)
+            if editor is not None and editor.winfo_exists() and editor.has_active_work():
+                return True
+        return False
+
+    def focus_active_work(self) -> bool:
+        binary = getattr(self, "_binary_editor", None)
+        if binary is not None and binary.winfo_exists() and binary.has_active_work():
+            self.workspace_tabs.select(self.binary_tab)
+            return True
+        graph = getattr(self, "_graph_editor", None)
+        if graph is not None and graph.winfo_exists() and graph.has_active_work():
+            self.workspace_tabs.select(self.graph_tab)
+            return True
+        return False
 
     def _close(self) -> None:
         if self.has_active_work():
-            self.workspace_tabs.select(self.graph_tab)
+            self.focus_active_work()
             messagebox.showinfo(
-                "Build flow still running",
-                "Wait for the current dry run or build to finish before closing RPF "
-                "Archives.", parent=self,
+                "Authoring operation still running",
+                "Wait for the current validation, build, or dry run to finish before "
+                "closing RPF Archives.", parent=self,
             )
             return
         if self._on_close is not None:

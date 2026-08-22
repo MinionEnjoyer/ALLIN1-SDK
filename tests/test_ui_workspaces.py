@@ -21,17 +21,22 @@ def test_primary_sdk_routes_are_plain_language_and_package_selection_works():
     assert "<<ListboxSelect>>\", self._select_example" not in source
 
 
-def test_graph_and_gxt2_authoring_are_embedded_with_compatibility_hosts():
+def test_graph_binary_and_gxt2_authoring_are_embedded_with_compatibility_hosts():
     graph = _source("rpf_graph_ui.py")
+    binary = _source("binary_workspace_ui.py")
     explorer = _source("rpf_explorer.py")
     assert "class RpfPackageGraphFrame(ttk.Frame)" in graph
     assert "class RpfPackageGraphDialog(tk.Toplevel)" in graph
     assert "self.editor = RpfPackageGraphFrame(" in graph
+    assert "class BinaryWorkspaceFrame(ttk.Frame)" in binary
+    assert "tk.Toplevel" not in binary
     assert "class Gxt2WorkspaceFrame(ttk.Frame)" in explorer
     assert "class Gxt2WorkspaceDialog(tk.Toplevel)" in explorer
     assert 'self.workspace_tabs.add(self.graph_tab, text="Package Graph")' in explorer
+    assert 'self.workspace_tabs.add(self.binary_tab, text="Binary Workspace")' in explorer
     assert 'self.workspace_tabs.add(self.gxt2_tab, text="GXT2 Text")' in explorer
     assert "self._graph_editor = RpfPackageGraphFrame(" in explorer
+    assert "self._binary_editor = BinaryWorkspaceFrame(" in explorer
     assert "self._gxt2_editor = Gxt2WorkspaceFrame(" in explorer
     assert "RpfPackageGraphDialog(\n            self" not in explorer
     assert "Gxt2WorkspaceDialog(self, workspace)" not in explorer
@@ -50,9 +55,30 @@ def test_rpf_actions_are_grouped_and_common_entry_actions_are_visible():
         'text="Preview", command=self._preview_selected',
         'text="Extract", command=self._extract_selected',
         'text="Plan", command=self._plan_replacement',
+        'text="Edit bytes", command=self._export_binary_workspace',
         'text="GXT2", command=self._export_gxt2_workspace',
     ):
         assert button in source
+
+
+def test_binary_workspace_exposes_guarded_patch_and_archive_plan_controls():
+    binary = _source("binary_workspace_ui.py")
+    explorer = _source("rpf_explorer.py")
+    for control in (
+        'text="Expected current bytes"',
+        'text="Replacement bytes"',
+        'text="Read current bytes"',
+        'text="Apply patch…"',
+        '("Undo latest", self._undo)',
+        '("Build verified…", self._build)',
+        '("Create RPF plan…", self._plan)',
+    ):
+        assert control in binary
+    assert "BinaryPatchWorkspace.validate(self.workspace)" in binary
+    assert "expected_hex=expected.hex()" in binary
+    assert "self._open_binary_editor(workspace)" in explorer
+    assert "self._plan_binary_workspace_from_editor" in explorer
+    assert "Use the SDK Console's inspect-" not in explorer
 
 
 def test_asset_viewer_separates_package_browsing_from_native_authoring():

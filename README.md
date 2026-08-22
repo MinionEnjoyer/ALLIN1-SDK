@@ -104,6 +104,13 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   source and hash-chained undo history, add/remove/edit UTF-8 labels, and rebuild only
   after a strict semantic reparse. The rebuilt payload, validation report, outer-archive
   hash, virtual entry, and edition remain bound to an inert reviewed replacement plan.
+- **Guarded binary workspaces** — open any non-directory RPF entry in an embedded
+  hex workspace, highlight bytes changed from the immutable source, and page through
+  bounded offsets without leaving RPF Archives. Every same-size patch requires the
+  expected current bytes, is retained in hash-chained history, and can be recovered
+  with an appended undo operation. Verified builds publish a changed-range report;
+  archive-bound workspaces can create the normal inert replacement plan directly from
+  the editor. Desktop, console, and Agent API routes share the same validation rules.
 - **Visual RPF package graphs** — import an existing loose tree or author one from an
   empty root on a dark visual node canvas. Archive, directory, and source-file cards
   use input/output ports for validated containment links; cards can be positioned,

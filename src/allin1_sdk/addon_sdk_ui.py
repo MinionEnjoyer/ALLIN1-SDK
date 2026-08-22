@@ -178,10 +178,11 @@ class AddonSdkDialog(tk.Toplevel):
         rpf = getattr(self, "rpf_workspace", None)
         if rpf is not None and rpf.has_active_work():
             self._select_workspace("rpf")
-            rpf.workspace_tabs.select(rpf.graph_tab)
+            rpf.focus_active_work()
             messagebox.showinfo(
-                "Build flow still running",
-                "Wait for the current dry run or build to finish before closing the SDK.",
+                "Authoring operation still running",
+                "Wait for the current validation, build, or dry run to finish before "
+                "closing the SDK.",
                 parent=self,
             )
             return False
