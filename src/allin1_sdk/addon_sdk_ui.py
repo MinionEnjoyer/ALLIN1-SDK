@@ -742,8 +742,9 @@ class AddonSdkDialog(tk.Toplevel):
         if plan.created_archive_operations and messagebox.askyesno(
             "Verified created-RPF export available",
             "This recipe declares bounded createIfNotExist archives. Extract only its "
-            "declared payloads, build every archive, verify the recursive tree and "
-            "exact payload hashes, and create a managed package?",
+            "declared payloads, replay supported XML edits and cleanup deletes in "
+            "recipe order, build every archive, verify the recursive tree and exact "
+            "payload hashes, and create a managed package?",
             parent=self,
         ):
             game = self.installation_roots[0] if len(self.installation_roots) == 1 else None
@@ -763,8 +764,10 @@ class AddonSdkDialog(tk.Toplevel):
                     messagebox.showinfo(
                         "Created RPF package exported",
                         "Every new archive passed recursive and exact-payload "
-                        f"verification.\n\nManifest: {manifest}\n\nReview it before "
-                        "using Import & install.", parent=self,
+                        "verification. XML edits were canonically verified and the "
+                        "ordered recipe audit was retained."
+                        f"\n\nManifest: {manifest}\n\nReview it before using "
+                        "Import & install.", parent=self,
                     )
 
                 RpfProgressDialog(

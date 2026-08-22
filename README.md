@@ -47,6 +47,8 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   adds/replacements/deletes into payload-backed atomic batch manifests. Official
   OIV 2.2 XML add/replace/remove commands compile against an explicitly selected
   RPF into canonical-reparse-verified payloads and an inert hash-bound plan.
+  Bounded newly created archives can replay declared adds, XML edits, and cleanup
+  deletes in order before exact recursive verification and managed export.
 - **Native Asset Viewer** — browse authored text and images, parse bounded RAGE
   resource headers, convert supported resources to structured CodeWalker XML,
   generate YTD texture contact sheets, render bounded indexed-geometry previews for
@@ -416,15 +418,18 @@ service used by the launcher.
 - Bounded OIV `createIfNotExist` containers are translated into retained loose
   `.rpf.source` workspaces and passed through that same builder. Safe top-level
   archives and new archives one level inside an existing RPF become validated,
-  checksum-owned package payloads. Recipe code is never executed; ambiguous ancestry,
-  deletes inside new archives and deep existing-archive creation roots remain
-  blocked. Official OIV 2.2 XML commands support First/Last/Before/After adds,
-  replacements, and removals only when every XPath selects exactly one textual
-  `.xml`/`.meta` entry inside one existing archive tree. Compilation replays the
-  recipe in order, preserves source encoding, blocks entities and unbounded XPath
-  constructs, reparses and canonically verifies every result, coalesces repeated
-  edits per entry, and emits the normal guarded multi-entry plan without writing
-  the archive. Text and PSO/META commands remain blocked.
+  checksum-owned package payloads. Declared adds, XML edits, and cleanup deletes
+  inside those new archives replay in recipe order; XML and delete targets must
+  already exist at that point. XML output is reparsed and canonically verified,
+  and the managed package retains source bindings and the ordered operation audit.
+  Recipe code is never executed; ambiguous ancestry and deep existing-archive
+  creation roots remain blocked. Official OIV 2.2 XML commands also support
+  First/Last/Before/After adds, replacements, and removals when every XPath selects
+  exactly one textual `.xml`/`.meta` entry inside one existing archive tree.
+  Compilation preserves source encoding, blocks entities and unbounded XPath
+  constructs, coalesces repeated edits per entry, and emits the normal guarded
+  multi-entry plan without writing the archive. Text and PSO/META commands remain
+  blocked.
 - Native workspaces retain an immutable source snapshot, editable CodeWalker XML and
   dependencies, edition metadata, and hashes. Build refuses path escapes, links,
   collisions, source tampering, unsupported types, oversized inputs, and any result

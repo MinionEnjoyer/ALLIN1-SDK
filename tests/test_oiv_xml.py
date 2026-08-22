@@ -262,3 +262,116 @@ def test_oiv_xml_compiler_is_available_to_cli_sdk_console_and_agent_api(
     assert {item["name"] for item in command["parameters"]} >= {
         "source", "archive", "output", "workspace_root",
     }
+
+
+def _created_xml_package(root: Path) -> Path:
+    package = root / "created-xml-oiv"
+    (package / "content").mkdir(parents=True)
+    (package / "content" / "config.xml").write_text(
+        "<Root><Items><Item>BASE</Item></Items><Mode>OLD</Mode></Root>",
+        encoding="utf-8",
+    )
+    (package / "content" / "temporary.bin").write_bytes(b"temporary")
+    (package / "assembly.xml").write_text(
+        """<package version="2.2" target="Five"><metadata>
+        <name>Created XML recipe</name></metadata><content>
+        <archive path="update/x64/dlcpacks/createdxml/dlc.rpf" createIfNotExist="true">
+          <add source="config.xml">common/data/config.xml</add>
+          <xml path="common/data/config.xml"><replace xpath="/Root/Mode">
+            <Mode>NEW</Mode></replace></xml>
+          <add source="temporary.bin">common/data/temporary.bin</add>
+          <delete>common/data/temporary.bin</delete>
+          <archive path="x64/config.rpf" createIfNotExist="true">
+            <add source="config.xml">settings/nested.xml</add>
+            <xml path="settings/nested.xml"><add append="Last" xpath="/Root/Items">
+              <Item>NESTED</Item></add></xml>
+          </archive>
+        </archive></content></package>""",
+        encoding="utf-8",
+    )
+    return package
+
+
+def test_created_rpf_inspection_accepts_ordered_xml_and_cleanup_deletes(tmp_path):
+    plan = OivWorkbench().inspect(_created_xml_package(tmp_path))
+
+    assert plan.recipe_supported
+    assert plan.translatable
+    assert not plan.xml_compilable
+    assert len(plan.created_archive_operations) == 2
+    assert len(plan.xml_operations) == 2
+    assert not [item for item in plan.findings if item.severity == "error"]
+    assert "CREATED RPF EXPORT READY" in plan.to_markdown()
+
+
+def test_created_rpf_export_replays_order_and_retains_canonical_audit(
+    tmp_path, monkeypatch,
+):
+    package = _created_xml_package(tmp_path)
+    plan = OivWorkbench().inspect(package)
+    game = tmp_path / "game"
+    game.mkdir()
+
+    class FakeBuilder:
+        def __init__(self, project_root, gta_path):
+            assert Path(project_root) == tmp_path / "project"
+            assert Path(gta_path) == game
+
+        def build(self, loose, output):
+            loose = Path(loose)
+            root_xml = etree.parse(str(loose / "common" / "data" / "config.xml"))
+            assert root_xml.xpath("string(/Root/Mode)") == "NEW"
+            assert not (loose / "common" / "data" / "temporary.bin").exists()
+            nested = loose / "x64" / "config.rpf.source" / "settings" / "nested.xml"
+            nested_xml = etree.parse(str(nested))
+            assert nested_xml.xpath("/Root/Items/Item/text()") == ["BASE", "NESTED"]
+            output = Path(output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"RPF7-verified-created-xml")
+            report = output.with_name(f"{output.name}.validation.json")
+            report.write_text("{}", encoding="utf-8")
+            return output, report
+
+    monkeypatch.setattr("allin1_sdk.rpf_builder.RpfArchiveBuilder", FakeBuilder)
+    destination = tmp_path / "managed-created-xml"
+    manifest = OivWorkbench().export_created_rpf_package(
+        plan, destination, project_root=tmp_path / "project", gta_path=game,
+    )
+
+    assert manifest.is_file()
+    assert (destination / "rpf-sources" / "001_dlc").is_dir()
+    audit = json.loads(
+        (destination / "created-rpf-compile-audit.json").read_text(encoding="utf-8")
+    )
+    assert [item["kind"] for item in audit["recipe_events"]] == [
+        "add", "xml", "add", "delete", "add", "xml",
+    ]
+    assert len(audit["xml_merges"]) == 2
+    assert len(audit["built_archives"]) == 1
+    assert audit["verification"]["all_xml_outputs_canonical_verified"] is True
+    assert audit["verification"]["all_archives_recursively_verified"] is True
+
+
+@pytest.mark.parametrize("operation", [
+    '<xml path="common/data/config.xml"><remove xpath="/Root/Mode" /></xml>',
+    "<delete>common/data/config.xml</delete>",
+])
+def test_created_rpf_inspection_rejects_edit_before_target_is_added(
+    tmp_path, operation,
+):
+    package = tmp_path / "bad-created-order"
+    (package / "content").mkdir(parents=True)
+    (package / "content" / "config.xml").write_text("<Root/>", encoding="utf-8")
+    (package / "assembly.xml").write_text(
+        f"""<package version="2.2"><content>
+        <archive path="new.rpf" createIfNotExist="true">{operation}
+          <add source="config.xml">common/data/config.xml</add>
+        </archive></content></package>""",
+        encoding="utf-8",
+    )
+
+    plan = OivWorkbench().inspect(package)
+
+    assert not plan.translatable
+    assert "created_entry_not_available" in {item.code for item in plan.findings}
+    assert any(not item.supported for item in plan.operations)

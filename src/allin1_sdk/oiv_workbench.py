@@ -8,7 +8,7 @@ import re
 import shutil
 import tempfile
 import zipfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 from xml.etree import ElementTree as ET
@@ -95,11 +95,16 @@ class OivPlan:
     @property
     def translatable(self) -> bool:
         actionable = tuple(
-            item for item in self.operations if item.kind in {"add", "delete"}
+            item for item in self.operations if item.kind in {"add", "delete", "xml"}
+        )
+        created = self._created_archive_chains()
+        xml_inside_created = all(
+            any(item.archives[:len(chain)] == chain for chain in created)
+            for item in self.xml_operations
         )
         return bool(actionable) and not any(
             not item.supported for item in self.operations
-        ) and not self.xml_operations and not any(
+        ) and xml_inside_created and not any(
             item.severity == "error" for item in self.findings
         )
 
@@ -267,6 +272,9 @@ class OivWorkbench:
         else:
             for child in content:
                 self._walk(child, (), (), entries, operations, findings)
+        operations = list(self._validate_created_recipe_operations(
+            tuple(operations), findings,
+        ))
         if any(item.kind == "xml" for item in operations) and format_version not in {
             "2.1", "2.2",
         }:
@@ -285,6 +293,63 @@ class OivWorkbench:
             hashlib.sha256(assembly.data).hexdigest(),
             format_version,
         )
+
+    @staticmethod
+    def _validate_created_recipe_operations(
+        operations: tuple[OivOperation, ...], findings: list[OivFinding],
+    ) -> tuple[OivOperation, ...]:
+        """Prove ordered file state for edits inside newly created archives."""
+        created = tuple(
+            item.archives + (item.target,) for item in operations
+            if item.kind == "archive" and item.creates_archive and item.supported
+        )
+        available: set[tuple[tuple[str, ...], str]] = set()
+        invalid: dict[int, tuple[str, str]] = {}
+
+        def is_inside_created(item: OivOperation) -> bool:
+            return any(
+                item.archives[:len(chain)] == chain for chain in created
+            )
+
+        for item in operations:
+            if item.kind not in {"add", "delete", "xml"} or not is_inside_created(item):
+                continue
+            identity = (
+                tuple(part.casefold() for part in item.archives),
+                item.target.casefold(),
+            )
+            if item.kind == "add":
+                if identity in available:
+                    invalid[item.number] = (
+                        "duplicate_created_entry",
+                        "The created-RPF recipe adds the same entry more than once; "
+                        "use one source followed by explicit supported edits.",
+                    )
+                else:
+                    available.add(identity)
+                continue
+            if identity not in available:
+                invalid[item.number] = (
+                    "created_entry_not_available",
+                    f"The created-RPF {item.kind} target does not exist at that point "
+                    "in the ordered recipe.",
+                )
+                continue
+            if item.kind == "delete":
+                available.remove(identity)
+
+        if not invalid:
+            return operations
+        validated: list[OivOperation] = []
+        for item in operations:
+            error = invalid.get(item.number)
+            if error is None:
+                validated.append(item)
+                continue
+            code, message = error
+            findings.append(OivFinding("error", code, message, item.number))
+            validated.append(replace(item, supported=False))
+        return tuple(validated)
 
     def _walk(
         self, node: ET.Element, archives: tuple[str, ...],
@@ -382,15 +447,18 @@ class OivWorkbench:
             target_path = self._target_path(target, mods=False)
             supported = (
                 bool(archives) and bool(target_path) and len(archives) <= 9
-                and not any(created_archives)
+                and not target_path.casefold().endswith(".rpf")
             )
             target = target_path
-            detail = "Exact RPF entry deletion"
+            detail = (
+                "Ordered new-archive entry deletion"
+                if any(created_archives) else "Exact RPF entry deletion"
+            )
             if not supported:
                 findings.append(OivFinding(
                     "error", "unsupported_delete",
-                    "Delete is supported only for an exact entry inside an existing "
-                    "RPF archive tree.", number,
+                    "Delete requires one exact non-container entry inside a bounded "
+                    "existing or newly created RPF archive tree.", number,
                 ))
         elif kind == "xml":
             target_path = self._target_path(target, mods=False)
@@ -443,7 +511,7 @@ class OivWorkbench:
             edits = tuple(parsed_edits)
             suffix = PurePosixPath(target_path).suffix.casefold() if target_path else ""
             safe_context = bool(
-                archives and not any(created_archives) and len(archives) <= 9
+                archives and len(archives) <= 9
                 and target_path and suffix in {".xml", ".meta"}
             )
             supported = bool(safe_context and edits and recipe_error is None)
@@ -458,8 +526,8 @@ class OivWorkbench:
             elif not safe_context:
                 findings.append(OivFinding(
                     "error", "unsupported_xml",
-                    "XML commands are supported only for existing textual .xml/.meta "
-                    "entries inside one bounded RPF archive tree.", number,
+                    "XML commands require a textual .xml/.meta entry inside one "
+                    "bounded existing or newly created RPF archive tree.", number,
                 ))
             elif not edits:
                 findings.append(OivFinding(
@@ -791,8 +859,10 @@ class OivWorkbench:
         """Build createIfNotExist trees into a verified managed package.
 
         Every new archive is produced by :class:`RpfArchiveBuilder`; OIV recipe
-        text is never executed. Creation roots may be installed as a new managed
-        file or as one exact entry in an existing outer RPF.
+        text is never executed. Declared adds, supported XML edits, and cleanup
+        deletes are replayed in order and retained in a compile audit. Creation
+        roots may be installed as a new managed file or as one exact entry in an
+        existing outer RPF.
         """
         if not plan.translatable or not plan.created_archive_operations:
             raise ValueError("OIV plan has no fully translatable created-RPF workflow")
@@ -809,14 +879,19 @@ class OivWorkbench:
                 "Created RPF roots deeper than one existing archive require a batch bundle"
             )
         for operation in plan.operations:
-            if operation.kind == "delete":
-                raise ValueError("A created-RPF managed package cannot include deletions")
-            if operation.kind == "add" and operation.archives and not any(
+            if operation.kind in {"add", "delete", "xml"} and operation.archives and not any(
                 operation.archives[:len(chain)] == chain for chain in created
             ):
                 raise ValueError(
                     "Existing-RPF changes must be exported as a separate atomic batch"
                 )
+
+        current_assembly = PackageAssetReader(plan.source).read(
+            "assembly.xml", limit=MAX_XML_BYTES,
+        )
+        if hashlib.sha256(current_assembly.data).hexdigest() != plan.assembly_sha256:
+            raise RuntimeError("OIV assembly.xml changed after the operation plan was created")
+        package_source_sha256 = self._sha256(plan.source) if plan.source.is_file() else None
 
         root = Path(destination).expanduser().resolve()
         if root.exists() or root.is_symlink():
@@ -832,6 +907,9 @@ class OivWorkbench:
             authoring_root.mkdir()
             files: list[tuple[str, str, str]] = []
             entries: list[tuple[str, str, str, str]] = []
+            recipe_events: list[dict[str, object]] = []
+            xml_merges: list[dict[str, object]] = []
+            built_archives: list[dict[str, object]] = []
 
             for number, operation in enumerate(roots, start=1):
                 root_chain = operation.archives + (operation.target,)
@@ -852,17 +930,73 @@ class OivWorkbench:
                         continue
                     archive_source(chain).mkdir(parents=True, exist_ok=True)
 
-                for add in plan.add_operations:
-                    if add.archives[:len(root_chain)] != root_chain:
+                for authored in plan.operations:
+                    if authored.kind not in {"add", "delete", "xml"} or (
+                        authored.archives[:len(root_chain)] != root_chain
+                    ):
                         continue
-                    target = _safe_member_path(add.target)
-                    output = archive_source(add.archives).joinpath(*target.parts)
-                    if output.exists() or output.is_symlink():
-                        raise ValueError(
-                            f"Created RPF recipe has a duplicate output: {add.target}"
+                    target = _safe_member_path(authored.target)
+                    output = archive_source(authored.archives).joinpath(*target.parts)
+                    event: dict[str, object] = {
+                        "oiv_operation": authored.number,
+                        "kind": authored.kind,
+                        "archive_path": "!".join(authored.archives),
+                        "entry": authored.target,
+                    }
+                    if authored.kind == "add":
+                        if output.exists() or output.is_symlink():
+                            raise ValueError(
+                                "Created RPF recipe has a duplicate ordered output: "
+                                f"{authored.target}"
+                            )
+                        output.parent.mkdir(parents=True, exist_ok=True)
+                        self._copy_member(plan.source, authored.source, output)
+                        event.update({
+                            "source": authored.source,
+                            "output_size": output.stat().st_size,
+                            "output_sha256": self._sha256(output),
+                        })
+                    elif authored.kind == "delete":
+                        if not output.is_file() or output.is_symlink():
+                            raise ValueError(
+                                "Created RPF delete target is not an available file: "
+                                f"{authored.target}"
+                            )
+                        event.update({
+                            "deleted_size": output.stat().st_size,
+                            "deleted_sha256": self._sha256(output),
+                        })
+                        output.unlink()
+                    else:
+                        if not output.is_file() or output.is_symlink():
+                            raise ValueError(
+                                "Created RPF XML target is not an available file: "
+                                f"{authored.target}"
+                            )
+                        if output.stat().st_size > MAX_OIV_XML_BYTES:
+                            raise ValueError(
+                                f"Created RPF XML target exceeds {MAX_OIV_XML_BYTES:,} "
+                                f"bytes: {authored.target}"
+                            )
+                        merged = OivXmlMergeEngine.apply(
+                            output.read_bytes(), authored.edits,
+                            source_name=(
+                                f"{'!'.join(authored.archives)}::{authored.target}"
+                            ),
                         )
-                    output.parent.mkdir(parents=True, exist_ok=True)
-                    self._copy_member(plan.source, add.source, output)
+                        output.write_bytes(merged.data)
+                        event.update({
+                            "edits": len(authored.edits),
+                            "output_size": len(merged.data),
+                            "output_sha256": merged.audit["output_sha256"],
+                        })
+                        xml_merges.append({
+                            "oiv_operation": authored.number,
+                            "archive_path": "!".join(authored.archives),
+                            "entry": authored.target,
+                            **merged.audit,
+                        })
+                    recipe_events.append(event)
 
                 archive_name = PurePosixPath(operation.target).name
                 built_relative = f"payload/{number:03d}_{archive_name}"
@@ -870,6 +1004,12 @@ class OivWorkbench:
                 from allin1_sdk.rpf_builder import RpfArchiveBuilder
                 RpfArchiveBuilder(project_root, gta_path).build(loose, built)
                 digest = self._sha256(built)
+                built_archives.append({
+                    "root_archive": "!".join(root_chain),
+                    "output": built_relative,
+                    "size": built.stat().st_size,
+                    "sha256": digest,
+                })
                 if operation.archives:
                     entries.append((
                         built_relative, operation.archives[0], operation.target, digest,
@@ -902,6 +1042,36 @@ class OivWorkbench:
                 r"[^a-z0-9._-]+", "-", plan.name.casefold(),
             ).strip("-._")
             mod_id = (mod_id or "imported-oiv")[:64]
+            current_assembly = PackageAssetReader(plan.source).read(
+                "assembly.xml", limit=MAX_XML_BYTES,
+            )
+            if hashlib.sha256(current_assembly.data).hexdigest() != plan.assembly_sha256:
+                raise RuntimeError("OIV assembly.xml changed during created-RPF compilation")
+            if package_source_sha256 is not None and self._sha256(
+                plan.source
+            ) != package_source_sha256:
+                raise RuntimeError("OIV package changed during created-RPF compilation")
+            audit = {
+                "schema_version": 1,
+                "operation": "oiv_created_rpf_compile",
+                "source_oiv": str(plan.source),
+                "assembly_sha256": plan.assembly_sha256,
+                "package_sha256": package_source_sha256,
+                "recipe_events": recipe_events,
+                "xml_merges": xml_merges,
+                "built_archives": built_archives,
+                "verification": {
+                    "ordered_recipe_evaluated": True,
+                    "all_xml_outputs_reparsed": True,
+                    "all_xml_outputs_canonical_verified": True,
+                    "all_archives_recursively_verified": True,
+                    "source_assembly_hash_bound": True,
+                    "archive_package_hash_rechecked": package_source_sha256 is not None,
+                },
+            }
+            (stage / "created-rpf-compile-audit.json").write_text(
+                json.dumps(audit, indent=2) + "\n", encoding="utf-8",
+            )
             lines = [
                 "schema_version = 1", f"id = {json.dumps(mod_id)}",
                 f"name = {json.dumps(plan.name)}",
