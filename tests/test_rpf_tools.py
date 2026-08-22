@@ -19,6 +19,7 @@ from allin1_sdk.native_assets import (
     NativeAssetInspector,
     native_preview_limit,
 )
+from allin1_sdk.rpf_delta import RpfDeltaPlanResult, derive_rpf_change_plan
 from allin1_sdk.rpf_tools import RpfExplorerService, RpfIndex
 
 
@@ -2842,6 +2843,187 @@ def test_rpf_diff_cli_rejects_multiple_content_modes(tmp_path):
     ])
     assert result.exit_code != 0
     assert "not both" in result.output
+
+
+def test_rpf_delta_derives_portable_deep_plan_and_reproduces_desired_archive(
+    tmp_path, monkeypatch,
+):
+    service, base, _entry, _runner = _transaction_service(
+        tmp_path, monkeypatch, nested=True,
+    )
+    base_state = _decode_archive(base)
+    base_state["common/data/delete.bin"] = b"remove root"
+    base_state["oldempty/"] = b""
+    base_nested = _decode_archive_bytes(base_state["x64/textures.rpf"])
+    base_nested["remove.ytd"] = b"remove nested"
+    base_state["x64/textures.rpf"] = _encode_archive(base_nested)
+    base.write_bytes(_encode_archive(base_state))
+    original = base.read_bytes()
+
+    desired = tmp_path / "desired.rpf"
+    desired_state = {
+        "common/data/test.ymap": b"new root",
+        "common/data/new.bin": b"new file",
+        "common/newempty/": b"",
+        "x64/textures.rpf": _encode_archive({
+            "vehicle.ytd": b"new nested texture",
+            "added.ytd": b"added nested texture",
+        }),
+        "newpack.rpf": _encode_archive({"inside.bin": b"new archive leaf"}),
+    }
+    desired.write_bytes(_encode_archive(desired_state))
+    desired_original = desired.read_bytes()
+    output = tmp_path / "derived-plan.json"
+
+    result = derive_rpf_change_plan(
+        service, service.index(base), service.index(desired), output,
+    )
+    assert isinstance(result, RpfDeltaPlanResult)
+    assert result.plan_path == output
+    assert result.plan["status"] == "ready"
+    assert result.plan["derived_delta"]["comparison_mode"] == "logical_content"
+    assert result.plan["derived_delta"]["payload_count"] == 5
+    assert result.plan["derived_delta"]["source_archives_unchanged"] is True
+    assert len(result.plan["changes"]) == 9
+    assert result.payload_directory is not None
+    assert len(tuple(result.payload_directory.iterdir())) == 5
+    assert result.plan["derived_delta"]["payload_directory"] == "derived-plan.payloads"
+    assert all(
+        not Path(change["payload"]["path"]).is_absolute()
+        for change in result.plan["changes"] if change["payload"] is not None
+    )
+    targets = {
+        (change["action"], change["archive_path"], change["entry"])
+        for change in result.plan["changes"]
+    }
+    assert ("replace", "", "common/data/test.ymap") in targets
+    assert ("replace", "x64/textures.rpf", "vehicle.ytd") in targets
+    assert ("add", "", "newpack.rpf") in targets
+    assert ("add", "newpack.rpf", "inside.bin") not in targets
+    assert ("mkdir", "", "common/newempty") in targets
+    assert ("rmdir", "", "oldempty") in targets
+    assert base.read_bytes() == original
+    assert desired.read_bytes() == desired_original
+
+    relocated = tmp_path / "relocated"
+    relocated.mkdir()
+    relocated_plan = output.replace(relocated / output.name)
+    result.payload_directory.replace(relocated / result.payload_directory.name)
+    tampered = json.loads(relocated_plan.read_text(encoding="utf-8"))
+    tampered["derived_delta"]["payload_directory"] = "../relocated"
+    tampered_plan = relocated / "tampered.json"
+    tampered_plan.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(ValueError, match="one sibling folder"):
+        service.apply_change_plan(tampered_plan)
+    receipt = service.apply_change_plan(
+        relocated_plan, receipt_root=tmp_path / "transactions",
+    )
+    report = service.compare_indexes(
+        service.index(base), service.index(desired), exact_content=True,
+    )
+    assert report["summary"]["added"] == 0
+    assert report["summary"]["removed"] == 0
+    assert report["summary"]["modified"] == 0
+    service.rollback_transaction(receipt)
+    assert base.read_bytes() == original
+
+
+def test_rpf_delta_refuses_case_only_and_noop_deltas_without_partial_output(
+    tmp_path, monkeypatch,
+):
+    service, base, _entry, _runner = _transaction_service(tmp_path, monkeypatch)
+    desired = tmp_path / "desired.rpf"
+    desired.write_bytes(_encode_archive({"COMMON/data/test.ymap": b"original entry"}))
+    output = tmp_path / "case-plan.json"
+    with pytest.raises(ValueError, match="case-only"):
+        derive_rpf_change_plan(
+            service, service.index(base), service.index(desired), output,
+        )
+    assert not output.exists()
+    assert not (tmp_path / "case-plan.payloads").exists()
+
+    desired.write_bytes(base.read_bytes())
+    with pytest.raises(ValueError, match="no actionable"):
+        derive_rpf_change_plan(
+            service, service.index(base), service.index(desired), output,
+        )
+    assert not output.exists()
+    assert not (tmp_path / "case-plan.payloads").exists()
+
+
+def test_rpf_delta_discards_plan_and_payloads_when_desired_archive_drifts(
+    tmp_path, monkeypatch,
+):
+    service, base, _entry, _runner = _transaction_service(tmp_path, monkeypatch)
+    desired = tmp_path / "desired.rpf"
+    desired.write_bytes(_encode_archive({
+        "common/data/test.ymap": b"changed",
+        "added.bin": b"added",
+    }))
+    original_multi_change_plan = service.multi_change_plan
+
+    def drift_after_plan(index, changes):
+        plan = original_multi_change_plan(index, changes)
+        desired.write_bytes(desired.read_bytes() + b"drift")
+        return plan
+
+    monkeypatch.setattr(service, "multi_change_plan", drift_after_plan)
+    output = tmp_path / "drift-plan.json"
+    with pytest.raises(RuntimeError, match="Desired RPF changed"):
+        derive_rpf_change_plan(
+            service, service.index(base), service.index(desired), output,
+        )
+    assert not output.exists()
+    assert not (tmp_path / "drift-plan.payloads").exists()
+
+
+def test_rpf_delta_cli_routes_workspace_and_reports_portable_payloads(
+    tmp_path, monkeypatch,
+):
+    game = tmp_path / "game"
+    game.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    base = workspace / "base.rpf"
+    desired = tmp_path / "desired.rpf"
+    base.write_bytes(b"base")
+    desired.write_bytes(b"desired")
+    output = tmp_path / "plan.json"
+    base_index, desired_index = object(), object()
+
+    class FakeService:
+        def __init__(self, _project, selected_game, *, workspace_roots=()):
+            assert Path(selected_game) == game
+            assert workspace_roots == (workspace.resolve(),)
+
+        def index(self, selected):
+            return base_index if Path(selected) == base else desired_index
+
+    def fake_derive(service, before, after, destination, **kwargs):
+        assert isinstance(service, FakeService)
+        assert before is base_index and after is desired_index
+        assert Path(destination) == output
+        assert kwargs["exact_content"] is True
+        output.write_text("{}", encoding="utf-8")
+        payloads = tmp_path / "plan.payloads"
+        payloads.mkdir()
+        plan = {
+            "status": "ready", "changes": [{"action": "replace"}],
+            "blocking_reasons": [],
+            "derived_delta": {"action_counts": {"replace": 1}},
+        }
+        return RpfDeltaPlanResult(output, payloads, plan, {})
+
+    monkeypatch.setattr("allin1_sdk.cli.RpfExplorerService", FakeService)
+    monkeypatch.setattr("allin1_sdk.cli.derive_rpf_change_plan", fake_derive)
+    result = CliRunner().invoke(main, [
+        "sdk", "derive-rpf-plan", str(base), str(desired),
+        "--exact-content", "--gta-path", str(game),
+        "--workspace-root", str(workspace), "-o", str(output),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "Derived ready RPF plan with 1 action" in result.output
+    assert "Portable changed payloads" in result.output
 
 
 def test_rpf_batch_cli_resolves_manifest_payloads_and_writes_plan(

@@ -32,6 +32,7 @@ from allin1_sdk.rage_data_compiler import RageVehicleDataCompiler
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_catalog import RpfCatalogService
 from allin1_sdk.rpf_change_set import CHANGE_ACTIONS, RpfChangeSet
+from allin1_sdk.rpf_delta import derive_rpf_change_plan
 from allin1_sdk.rpf_graph import RpfPackageGraph
 from allin1_sdk.rpf_graph_previews import render_graph_preview_bundle
 from allin1_sdk.rpf_program import NODE_SPECS, PROGRAM_TEMPLATES, RpfPackageProgram
@@ -1546,6 +1547,48 @@ def diff_rpf(
     )
 
 
+@main.command("derive-rpf-plan")
+@click.argument("base", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("desired", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--exact-content", is_flag=True,
+    help="Preserve byte-level resource differences instead of ignoring recompression.",
+)
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--workspace-root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Authorize an isolated external base archive workspace for later apply.",
+)
+@click.option(
+    "--output", "-o", required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+def derive_rpf_plan(
+    base: Path, desired: Path, exact_content: bool,
+    gta_path: Path | None, workspace_root: Path | None, output: Path,
+) -> None:
+    """Derive a guarded plan and changed payloads from before/after RPFs."""
+    service = _rpf_service(gta_path, workspace_root)
+    try:
+        result = derive_rpf_change_plan(
+            service, service.index(base), service.index(desired), output,
+            exact_content=exact_content, progress=_progress,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    counts = result.plan["derived_delta"]["action_counts"]
+    summary = ", ".join(f"{count} {action}" for action, count in counts.items())
+    click.echo(
+        f"Derived {result.plan['status']} RPF plan with "
+        f"{len(result.plan['changes'])} action(s) ({summary}): {result.plan_path}"
+    )
+    if result.payload_directory is not None:
+        click.echo(f"Portable changed payloads: {result.payload_directory}")
+    if result.plan["blocking_reasons"]:
+        click.echo("Apply remains blocked: " + "; ".join(result.plan["blocking_reasons"]))
+
+
 @main.command("verify-rpf-archive")
 @click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
@@ -2437,6 +2480,7 @@ for _command in (
     extract_rpf_entry, inspect_rpf_native_entry,
     extract_rpf_subtree, export_rpf_native_workspace,
     export_rpf_binary_workspace, export_rpf_gxt2_workspace, diff_rpf,
+    derive_rpf_plan,
     plan_rpf_replacement, plan_rpf_native_workspace,
     plan_rpf_binary_workspace, plan_rpf_gxt2_workspace,
     plan_rpf_add, plan_rpf_delete, plan_rpf_batch,

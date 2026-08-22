@@ -25,6 +25,7 @@ from allin1_sdk.paths import user_data_root
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_catalog import RpfCatalogResult, RpfCatalogService
 from allin1_sdk.rpf_change_set_ui import RpfChangeSetFrame
+from allin1_sdk.rpf_delta import RpfDeltaPlanResult, derive_rpf_change_plan
 from allin1_sdk.rpf_graph import RpfPackageGraph
 from allin1_sdk.rpf_graph_ui import RpfPackageGraphDialog
 from allin1_sdk.rpf_tools import RpfEntryRecord, RpfExplorerService, RpfIndex
@@ -734,6 +735,10 @@ class RpfExplorerDialog(ttk.Frame):
             command=self._compare_archive, state="disabled",
         )
         menu.add_command(
+            label="Derive change plan from desired archive…",
+            command=self._derive_change_plan, state="disabled",
+        )
+        menu.add_command(
             label="Verify full archive integrity…",
             command=self._verify_archive_integrity, state="disabled",
         )
@@ -840,6 +845,9 @@ class RpfExplorerDialog(ttk.Frame):
             menu.entryconfigure("Export index…", state=state)
             menu.entryconfigure("Extract current archive tree…", state=state)
             menu.entryconfigure("Compare with archive…", state=state)
+            menu.entryconfigure(
+                "Derive change plan from desired archive…", state=state,
+            )
             menu.entryconfigure("Verify full archive integrity…", state=state)
             menu.entryconfigure("Build verified defragmented copy…", state=state)
             menu.entryconfigure("Create multi-entry plan…", state=state)
@@ -1579,6 +1587,65 @@ class RpfExplorerDialog(ttk.Frame):
         self.status.set(
             f"RPF diff: {summary['added']} added · {summary['removed']} removed · "
             f"{summary['modified']} modified · {json_path}"
+        )
+
+    def _derive_change_plan(self) -> None:
+        if self.index is None or self.service is None:
+            return
+        selected = filedialog.askopenfilename(
+            parent=self, title="Select desired finished RPF archive",
+            filetypes=(("Rockstar archive", "*.rpf"), ("All files", "*.*")),
+        )
+        if not selected:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save portable RPF change plan",
+            initialfile=(
+                f"{self.index.source.stem}-to-{Path(selected).stem}-change-plan.json"
+            ),
+            defaultextension=".json", filetypes=(("RPF change plan", "*.json"),),
+        )
+        if not output:
+            return
+        base, service = self.index, self.service
+        self.status.set("Deriving reviewed deep-entry changes from desired RPF…")
+
+        def work(progress) -> RpfDeltaPlanResult:
+            progress("Indexing desired recursive RPF tree", 3)
+            desired = service.index(selected)
+            return derive_rpf_change_plan(
+                service, base, desired, output, progress=progress,
+            )
+
+        def completed(result: RpfDeltaPlanResult) -> None:
+            plan = result.plan
+            self.status.set(
+                f"Derived {plan['status']} plan · {len(plan['changes']):,} action(s) · "
+                f"{result.plan_path}"
+            )
+            detail = (
+                "The base and desired archives were left untouched. Only changed "
+                "payloads were copied beside the hash-bound plan."
+            )
+            if plan["blocking_reasons"]:
+                detail += "\n\nApply remains blocked:\n• " + "\n• ".join(
+                    plan["blocking_reasons"]
+                )
+            messagebox.showinfo(
+                "RPF change plan ready",
+                f"{detail}\n\nPlan: {result.plan_path}\n"
+                f"Payloads: {result.payload_directory or 'none'}",
+                parent=self,
+            )
+
+        RpfProgressDialog(
+            self, "Deriving RPF change plan", work, completed,
+            lambda error: (
+                self.status.set("RPF delta planning was refused or failed safely."),
+                messagebox.showerror(
+                    "RPF change plan failed", str(error), parent=self,
+                ),
+            ),
         )
 
     def _verify_archive_integrity(self) -> None:

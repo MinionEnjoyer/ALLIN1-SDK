@@ -48,6 +48,7 @@ AUTHORING_COMMANDS = frozenset({
     "create-rpf-graph",
     "diff-meta",
     "diff-rpf",
+    "derive-rpf-plan",
     "defragment-rpf",
     "dlc-inventory",
     "extract-rpf-entry",

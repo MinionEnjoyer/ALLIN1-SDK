@@ -137,6 +137,13 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   RSC7 headers plus decompressed resource bytes so compressor-level changes do not hide
   real edits or create noisy false positives; desktop, `diff-rpf --logical-content`, and
   the Agent API emit the same JSON and Markdown evidence.
+- **Before/after RPF plan derivation** — select a clean base archive and a finished
+  desired archive to automatically produce one reviewed, hash-bound multi-entry plan
+  plus a portable folder containing only changed payloads. The planner understands deep
+  nested archives, keeps newly added child RPFs as one payload, ignores harmless
+  container repacking, refuses ambiguous case/type changes, and rechecks both complete
+  source hashes before publishing. The desktop Archive Actions menu,
+  `derive-rpf-plan`, persistent console, and Agent API share the same implementation.
 - **Visual atomic RPF change sets** — stage replace, add, delete, directory create/
   remove, and same-parent rename actions in an embedded Explorer workspace. Change-set
   JSON binds the source archive and every payload by size and SHA-256, supports review
@@ -300,6 +307,7 @@ allin1-sdk undo-ytd-texture-edit C:\Work\vehicle-ytd-workspace --acknowledge-edi
 allin1-sdk extract-rpf-subtree C:\Mods\Example\dlc.rpf --archive-path x64\textures.rpf --directory vehicle --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Exports\vehicle
 allin1-sdk plan-rpf-sync C:\Mods\Example\dlc.rpf C:\Mods\Exports\vehicle --gta-path "D:\Games\GTA V Enhanced" --workspace-root C:\Mods -o subtree-sync-plan.json
 allin1-sdk diff-rpf C:\Mods\Before\dlc.rpf C:\Mods\After\dlc.rpf --exact-content --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Reports\archive-diff.json
+allin1-sdk derive-rpf-plan C:\Mods\Before\dlc.rpf C:\Mods\After\dlc.rpf --gta-path "D:\Games\GTA V Enhanced" --workspace-root C:\Mods\Before -o C:\Mods\Plans\dlc-change-plan.json
 allin1-sdk verify-rpf-archive C:\Mods\Example\dlc.rpf --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Reports\dlc-integrity.json
 allin1-sdk oiv-plan C:\Mods\Example.oiv -o oiv-plan.md --rpf-batches C:\Mods\Example-rpf-batches
 allin1-sdk oiv-plan C:\Mods\NewDlc.oiv -o new-dlc-plan.md --created-rpf-package C:\Mods\NewDlc-managed --gta-path "D:\Games\GTA V Enhanced"
@@ -355,6 +363,10 @@ service used by the launcher.
 - RPF exploration and extraction are read-only. Subtree extraction scans the outer
   archive once, refuses existing output folders, verifies that the source hash did
   not change, and emits `.allin1-rpf-export.json` with every exported file hash.
+- Before/after delta planning is also non-mutating. It writes a new plan and optional
+  payload sidecar outside GTA V, never overwrites an artifact, hashes both recursive
+  sources, and removes partial output if either archive drifts or extraction/planning
+  fails. Its output remains inert until the normal guarded apply workflow is invoked.
 - Global RPF catalogs atomically index up to 512 loose outer archives and all nested
   entries into a portable SQLite database outside the game. Incremental refresh
   reuses unchanged size/mtime records; `--refresh` reindexes and hashes everything.
