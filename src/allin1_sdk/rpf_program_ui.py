@@ -14,6 +14,10 @@ from allin1_sdk.rpf_program import NODE_SPECS, PROGRAM_TEMPLATES, RpfPackageProg
 
 NODE_WIDTH = 248
 NODE_HEIGHT = 92
+MIN_ZOOM = 0.35
+MAX_ZOOM = 2.0
+ZOOM_FACTOR = 1.2
+CANVAS_PADDING = 180
 
 
 class RpfProgramFrame(ttk.Frame):
@@ -32,11 +36,15 @@ class RpfProgramFrame(ttk.Frame):
     def __init__(
         self, parent: tk.Misc, graph: str | Path, project_root: str | Path,
         game_path: str | Path | None = None,
+        *, on_busy_change=None,
     ) -> None:
         super().__init__(parent, padding=8)
         self.graph = Path(graph).resolve()
         self.project_root = Path(project_root).resolve()
         self.game_path = Path(game_path).resolve() if game_path else None
+        self._on_busy_change = on_busy_change
+        self._busy = False
+        self._authoring_controls: list[tk.Widget] = []
         self.program: Path | None = None
         self.state: dict = {}
         self.selected: str | None = None
@@ -45,6 +53,8 @@ class RpfProgramFrame(ttk.Frame):
         self.connecting: str | None = None
         self.connection_line: int | None = None
         self.edge_items: dict[tuple[str, str], int] = {}
+        self.zoom = 1.0
+        self.zoom_text = tk.StringVar(value="100%")
         self.status = tk.StringVar(value="Create or open a build flow for this package graph.")
         self.detail = tk.StringVar(value="No operation node selected")
         self.config_text = tk.StringVar(value="")
@@ -63,12 +73,7 @@ class RpfProgramFrame(ttk.Frame):
             tools, text="Build flow", font=("Segoe UI Semibold", 14),
             foreground="#1f7f42",
         ).pack(side="left")
-        ttk.Label(
-            tools,
-            text="Typed pins prevent invalid package operations",
-            foreground="#52635c",
-        ).pack(side="left", padx=(12, 0))
-        create = ttk.Menubutton(tools, text="Create flow ▾")
+        create = ttk.Menubutton(tools, text="Create ▾")
         create_menu = tk.Menu(create, tearoff=False)
         for template_id, spec in PROGRAM_TEMPLATES.items():
             create_menu.add_command(
@@ -77,12 +82,33 @@ class RpfProgramFrame(ttk.Frame):
             )
         create.configure(menu=create_menu)
         create.pack(side="right", padx=(5, 0))
-        for text, command in (
-            ("Open flow", self._choose),
-            ("Auto layout", self._auto_layout), ("Validate", self._validate),
-            ("Dry-run plan", self._plan), ("Run flow", self._run),
-        ):
-            ttk.Button(tools, text=text, command=command).pack(side="right", padx=(5, 0))
+        self._authoring_controls.append(create)
+        open_button = ttk.Button(tools, text="Open", command=self._choose)
+        open_button.pack(
+            side="right", padx=(5, 0),
+        )
+        self._authoring_controls.append(open_button)
+        flow_tools = ttk.Menubutton(tools, text="Flow tools")
+        flow_menu = tk.Menu(flow_tools, tearoff=False)
+        flow_menu.add_command(label="Auto layout", command=self._auto_layout)
+        flow_menu.add_command(label="Validate", command=self._validate)
+        flow_tools.configure(menu=flow_menu)
+        flow_tools.pack(side="right", padx=(5, 0))
+        self._authoring_controls.append(flow_tools)
+        dry_run_button = ttk.Button(tools, text="Dry run", command=self._plan)
+        dry_run_button.pack(
+            side="right", padx=(5, 0),
+        )
+        self._authoring_controls.append(dry_run_button)
+        run_button = ttk.Button(tools, text="Run", command=self._run)
+        run_button.pack(
+            side="right", padx=(5, 0),
+        )
+        self._authoring_controls.append(run_button)
+
+        ttk.Label(self, textvariable=self.status, foreground="#52635c").pack(
+            side="bottom", fill="x", pady=(7, 0),
+        )
 
         body = ttk.Panedwindow(self, orient="horizontal")
         body.pack(fill="both", expand=True)
@@ -93,33 +119,59 @@ class RpfProgramFrame(ttk.Frame):
         body.add(canvas_host, weight=5)
         body.add(inspector, weight=1)
 
-        ttk.Label(palette, text="NODE PALETTE", font=("Segoe UI Semibold", 9)).pack(
-            anchor="w", pady=(0, 7),
+        ttk.Label(palette, text="NODE PALETTE", font=("Segoe UI Semibold", 9)).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 7),
         )
-        for node_type in (
-            "validate_graph", "materialize_tree", "build_rpf",
-            "defragment_rpf", "plan_origin", "artifact_output",
-        ):
-            spec = NODE_SPECS[node_type]
-            ttk.Button(
-                palette, text=f"＋  {spec.title}",
+        palette_labels = {
+            "validate_graph": "＋ Validate",
+            "materialize_tree": "＋ Materialize",
+            "build_rpf": "＋ Build RPF",
+            "defragment_rpf": "＋ Defragment",
+            "plan_origin": "＋ Plan origin",
+            "artifact_output": "＋ Output",
+        }
+        for index, node_type in enumerate(palette_labels):
+            button = ttk.Button(
+                palette, text=palette_labels[node_type],
                 command=lambda value=node_type: self._add(value),
-            ).pack(fill="x", pady=(0, 5))
-        ttk.Separator(palette).pack(fill="x", pady=10)
-        ttk.Label(
-            palette,
-            text=(
-                "Wire the gold artifact pin into a compatible white input pin. "
-                "A target accepts one input; reconnecting replaces it."
-            ),
-            foreground="#52635c", wraplength=185, justify="left",
-        ).pack(anchor="w")
+                padding=(6, 2),
+            )
+            button.grid(
+                row=1 + index // 2, column=index % 2, sticky="ew",
+                padx=(0 if index % 2 == 0 else 3, 3 if index % 2 == 0 else 0),
+                pady=(0, 5),
+            )
+            self._authoring_controls.append(button)
+        palette.columnconfigure(0, weight=1)
+        palette.columnconfigure(1, weight=1)
 
+        view_tools = ttk.Frame(canvas_host)
+        view_tools.pack(fill="x", pady=(0, 6))
+        ttk.Label(
+            view_tools, text="Canvas view", font=("Segoe UI Semibold", 9),
+        ).pack(side="left")
+        ttk.Button(
+            view_tools, text="−", width=3,
+            command=lambda: self._zoom_by(1 / ZOOM_FACTOR),
+        ).pack(side="left", padx=(8, 0))
+        ttk.Label(
+            view_tools, textvariable=self.zoom_text, width=6, anchor="center",
+        ).pack(side="left", padx=3)
+        ttk.Button(
+            view_tools, text="+", width=3,
+            command=lambda: self._zoom_by(ZOOM_FACTOR),
+        ).pack(side="left")
+        ttk.Button(view_tools, text="Fit", command=self._fit_graph).pack(
+            side="left", padx=(6, 0),
+        )
+        ttk.Button(view_tools, text="100%", command=self._reset_zoom).pack(
+            side="left", padx=(4, 0),
+        )
         surface = tk.Frame(canvas_host, background="#0F1512")
         surface.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(
             surface, background="#0F1512", highlightthickness=0,
-            scrollregion=(0, 0, 5000, 3200),
+            scrollregion=(0, 0, 5000, 3200), takefocus=True,
         )
         x_scroll = ttk.Scrollbar(surface, orient="horizontal", command=self.canvas.xview)
         y_scroll = ttk.Scrollbar(surface, orient="vertical", command=self.canvas.yview)
@@ -132,10 +184,19 @@ class RpfProgramFrame(ttk.Frame):
         self.canvas.bind("<ButtonPress-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._motion)
         self.canvas.bind("<ButtonRelease-1>", self._release)
+        self.canvas.bind("<MouseWheel>", self._mousewheel)
+        self.canvas.bind("<Shift-MouseWheel>", self._shift_mousewheel)
+        self.canvas.bind("<Control-MouseWheel>", self._zoom_mousewheel)
         self.canvas.bind(
-            "<MouseWheel>",
-            lambda event: self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units"),
+            "<Control-plus>", lambda _event: self._keyboard_zoom(ZOOM_FACTOR),
         )
+        self.canvas.bind(
+            "<Control-equal>", lambda _event: self._keyboard_zoom(ZOOM_FACTOR),
+        )
+        self.canvas.bind(
+            "<Control-minus>", lambda _event: self._keyboard_zoom(1 / ZOOM_FACTOR),
+        )
+        self.canvas.bind("<Control-0>", self._keyboard_reset_zoom)
 
         ttk.Label(
             inspector, text="Operation inspector", font=("Segoe UI Semibold", 13),
@@ -154,30 +215,42 @@ class RpfProgramFrame(ttk.Frame):
             inspector, textvariable=self.issue_text, foreground="#A35A28",
             wraplength=285, justify="left",
         ).pack(anchor="w", pady=(7, 0))
-        for text, command in (
-            ("Configure selected…", self._configure),
-            ("Disconnect selected input", self._disconnect),
-            ("Remove selected node", self._remove),
-        ):
-            ttk.Button(inspector, text=text, command=command).pack(
-                fill="x", pady=(12 if text.startswith("Configure") else 5, 0),
-            )
-        ttk.Separator(inspector).pack(fill="x", pady=14)
-        ttk.Label(
-            inspector,
-            text=(
-                "Dry-run compiles program + graph hashes and all expected outputs. "
-                "Run only creates new external artifacts; installation remains a "
-                "separate reviewed action."
-            ),
-            foreground="#52635c", wraplength=285, justify="left",
-        ).pack(anchor="w")
-        ttk.Label(self, textvariable=self.status, foreground="#52635c").pack(
-            fill="x", pady=(7, 0),
+        inspector_actions = ttk.Frame(inspector)
+        inspector_actions.pack(fill="x", pady=(12, 0))
+        inspector_actions.columnconfigure(0, weight=1)
+        inspector_actions.columnconfigure(1, weight=1)
+        configure_button = ttk.Button(
+            inspector_actions, text="Configure…", command=self._configure,
         )
+        configure_button.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        self._authoring_controls.append(configure_button)
+        node_actions = ttk.Menubutton(inspector_actions, text="Node actions")
+        node_menu = tk.Menu(node_actions, tearoff=False)
+        node_menu.add_command(
+            label="Disconnect input", command=self._disconnect,
+        )
+        node_menu.add_command(label="Remove node", command=self._remove)
+        node_actions.configure(menu=node_menu)
+        node_actions.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        self._authoring_controls.append(node_actions)
+
+    @property
+    def busy(self) -> bool:
+        """Whether an authoring job must finish before this frame can close."""
+        return self._busy
+
+    def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        state = "disabled" if busy else "normal"
+        for control in self._authoring_controls:
+            if control.winfo_exists():
+                control.configure(state=state)
+        if self._on_busy_change is not None:
+            self._on_busy_change(busy)
 
     def _show_empty(self) -> None:
         self.canvas.delete("all")
+        self.canvas.configure(scrollregion=(0, 0, 1240, 660))
         self.canvas.create_text(
             620, 330,
             text="No build flow is open\n\nCreate a typed flow or open an existing program JSON.",
@@ -245,17 +318,36 @@ class RpfProgramFrame(ttk.Frame):
 
     def _render(self) -> None:
         self.canvas.delete("all")
-        width, height = 5000, 3200
-        for x in range(0, width + 1, 100):
-            self.canvas.create_line(x, 0, x, height, fill="#18211D", tags=("grid",))
-        for y in range(0, height + 1, 100):
-            self.canvas.create_line(0, y, width, y, fill="#18211D", tags=("grid",))
+        nodes = tuple(self.state.get("nodes", {}).values())
+        min_x = min((float(node["x"]) for node in nodes), default=0.0)
+        min_y = min((float(node["y"]) for node in nodes), default=0.0)
+        max_x = max((float(node["x"]) + NODE_WIDTH for node in nodes), default=1060.0)
+        max_y = max((float(node["y"]) + NODE_HEIGHT for node in nodes), default=540.0)
+        left = min(0.0, min_x * self.zoom - CANVAS_PADDING)
+        top = min(0.0, min_y * self.zoom - CANVAS_PADDING)
+        right = max(
+            left + max(1, self.canvas.winfo_width()),
+            max_x * self.zoom + CANVAS_PADDING,
+        )
+        bottom = max(
+            top + max(1, self.canvas.winfo_height()),
+            max_y * self.zoom + CANVAS_PADDING,
+        )
+        self.canvas.configure(scrollregion=(left, top, right, bottom))
+        grid = max(35, round(100 * self.zoom))
+        grid_left = int(left // grid) * grid
+        grid_top = int(top // grid) * grid
+        for x in range(grid_left, int(right) + grid, grid):
+            self.canvas.create_line(x, top, x, bottom, fill="#18211D", tags=("grid",))
+        for y in range(grid_top, int(bottom) + grid, grid):
+            self.canvas.create_line(left, y, right, y, fill="#18211D", tags=("grid",))
         self.edge_items.clear()
         for link in self.state["links"]:
             key = (link["from"], link["to"])
             self.edge_items[key] = self.canvas.create_line(
                 0, 0, 0, 0, smooth=True, splinesteps=22,
-                width=4, fill="#C99B3A", tags=("program-edge",),
+                width=max(2, round(4 * self.zoom)),
+                fill="#C99B3A", tags=("program-edge",),
             )
         for node_id in self.state["nodes"]:
             self._draw_node(node_id)
@@ -269,53 +361,73 @@ class RpfProgramFrame(ttk.Frame):
     def _draw_node(self, node_id: str) -> None:
         node = self.state["nodes"][node_id]
         spec = NODE_SPECS[node["type"]]
-        x, y = node["x"], node["y"]
+        x, y = node["x"] * self.zoom, node["y"] * self.zoom
+        node_width, node_height = NODE_WIDTH * self.zoom, NODE_HEIGHT * self.zoom
+        shadow = max(2, 5 * self.zoom)
+        header_height = 29 * self.zoom
+        header_font = max(6, round(9 * self.zoom))
+        detail_font = max(5, round(8 * self.zoom))
         header, body = self.COLORS[node["type"]]
         tags = ("program-node", f"pnode:{node_id}")
         self.canvas.create_rectangle(
-            x + 5, y + 6, x + NODE_WIDTH + 5, y + NODE_HEIGHT + 6,
+            x + shadow, y + shadow,
+            x + node_width + shadow, y + node_height + shadow,
             fill="#080C0A", outline="", tags=tags,
         )
         self.canvas.create_rectangle(
-            x, y, x + NODE_WIDTH, y + NODE_HEIGHT, fill=body,
+            x, y, x + node_width, y + node_height, fill=body,
             outline="#E7B94B" if node_id == self.selected else "#53635C",
-            width=3 if node_id == self.selected else 1, tags=tags,
+            width=max(1, round((3 if node_id == self.selected else 1) * self.zoom)),
+            tags=tags,
         )
         self.canvas.create_rectangle(
-            x, y, x + NODE_WIDTH, y + 29, fill=header, outline="", tags=tags,
+            x, y, x + node_width, y + header_height,
+            fill=header, outline="", tags=tags,
         )
         self.canvas.create_text(
-            x + 10, y + 15, text=spec.title, anchor="w", fill="#FFFFFF",
-            font=("Segoe UI Semibold", 9), tags=tags,
+            x + 10 * self.zoom, y + 15 * self.zoom,
+            text=spec.title, anchor="w", width=(NODE_WIDTH - 20) * self.zoom,
+            fill="#FFFFFF", font=("Segoe UI Semibold", header_font), tags=tags,
         )
         in_text = " / ".join(spec.input_types) if spec.input_types else "START"
         out_text = spec.output_type or "END"
         self.canvas.create_text(
-            x + 12, y + 51, text=f"IN  {in_text}", anchor="w", fill="#B9C8C1",
-            font=("Consolas", 8), tags=tags,
+            x + 12 * self.zoom, y + 51 * self.zoom,
+            text=f"IN  {in_text}", anchor="w", width=(NODE_WIDTH - 24) * self.zoom,
+            fill="#B9C8C1", font=("Consolas", detail_font), tags=tags,
         )
         self.canvas.create_text(
-            x + 12, y + 70, text=f"OUT {out_text}", anchor="w", fill="#D8B660",
-            font=("Consolas", 8), tags=tags,
+            x + 12 * self.zoom, y + 70 * self.zoom,
+            text=f"OUT {out_text}", anchor="w", width=(NODE_WIDTH - 24) * self.zoom,
+            fill="#D8B660", font=("Consolas", detail_font), tags=tags,
         )
+        pin_radius = max(4, 7 * self.zoom)
+        pin_y = y + 46 * self.zoom
         if spec.input_types:
             self.canvas.create_oval(
-                x - 7, y + 39, x + 7, y + 53, fill="#E6EEEA", outline="#111714",
-                width=2, tags=(*tags, f"pin:{node_id}"),
+                x - pin_radius, pin_y - pin_radius,
+                x + pin_radius, pin_y + pin_radius,
+                fill="#E6EEEA", outline="#111714",
+                width=max(1, round(2 * self.zoom)), tags=(*tags, f"pin:{node_id}"),
             )
         if spec.output_type:
+            pin_x = x + node_width
             self.canvas.create_oval(
-                x + NODE_WIDTH - 7, y + 39, x + NODE_WIDTH + 7, y + 53,
-                fill="#E7B94B", outline="#111714", width=2,
+                pin_x - pin_radius, pin_y - pin_radius,
+                pin_x + pin_radius, pin_y + pin_radius,
+                fill="#E7B94B", outline="#111714",
+                width=max(1, round(2 * self.zoom)),
                 tags=(*tags, f"pout:{node_id}"),
             )
 
     def _update_edges(self) -> None:
         for (parent, child), item in self.edge_items.items():
             source, target = self.state["nodes"][parent], self.state["nodes"][child]
-            x1, y1 = source["x"] + NODE_WIDTH, source["y"] + 46
-            x2, y2 = target["x"], target["y"] + 46
-            curve = max(70, abs(x2 - x1) * 0.45)
+            x1 = (source["x"] + NODE_WIDTH) * self.zoom
+            y1 = (source["y"] + 46) * self.zoom
+            x2 = target["x"] * self.zoom
+            y2 = (target["y"] + 46) * self.zoom
+            curve = max(35, 70 * self.zoom, abs(x2 - x1) * 0.45)
             self.canvas.coords(item, x1, y1, x1 + curve, y1, x2 - curve, y2, x2, y2)
 
     @staticmethod
@@ -335,6 +447,9 @@ class RpfProgramFrame(ttk.Frame):
         return None
 
     def _press(self, event: tk.Event) -> None:
+        if self._busy:
+            return
+        self.canvas.focus_set()
         tags = self._current_tags()
         node_id = self._tag(tags, "pnode:")
         if node_id is None:
@@ -351,31 +466,37 @@ class RpfProgramFrame(ttk.Frame):
             self.connecting = output
             source = self.state["nodes"][output]
             self.connection_line = self.canvas.create_line(
-                source["x"] + NODE_WIDTH, source["y"] + 46, x, y,
-                fill="#E7B94B", width=3, dash=(7, 4),
+                (source["x"] + NODE_WIDTH) * self.zoom,
+                (source["y"] + 46) * self.zoom, x, y,
+                fill="#E7B94B", width=max(2, round(3 * self.zoom)), dash=(7, 4),
             )
         else:
             self.dragging, self.drag_last = node_id, (x, y)
 
     def _motion(self, event: tk.Event) -> None:
+        if self._busy:
+            return
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         if self.connecting and self.connection_line:
             source = self.state["nodes"][self.connecting]
             self.canvas.coords(
-                self.connection_line, source["x"] + NODE_WIDTH,
-                source["y"] + 46, x, y,
+                self.connection_line,
+                (source["x"] + NODE_WIDTH) * self.zoom,
+                (source["y"] + 46) * self.zoom, x, y,
             )
             return
         if not self.dragging:
             return
         dx, dy = x - self.drag_last[0], y - self.drag_last[1]
-        self.state["nodes"][self.dragging]["x"] += dx
-        self.state["nodes"][self.dragging]["y"] += dy
+        self.state["nodes"][self.dragging]["x"] += dx / self.zoom
+        self.state["nodes"][self.dragging]["y"] += dy / self.zoom
         self.canvas.move(f"pnode:{self.dragging}", dx, dy)
         self.drag_last = (x, y)
         self._update_edges()
 
     def _release(self, event: tk.Event) -> None:
+        if self._busy:
+            return
         if self.program is None:
             return
         if self.connecting:
@@ -401,6 +522,90 @@ class RpfProgramFrame(ttk.Frame):
             except (OSError, ValueError) as exc:
                 messagebox.showerror("Could not save node position", str(exc), parent=self)
             self._reload(node_id)
+
+    def _mousewheel(self, event: tk.Event) -> None:
+        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+    def _shift_mousewheel(self, event: tk.Event) -> None:
+        self.canvas.xview_scroll(-1 if event.delta > 0 else 1, "units")
+
+    def _zoom_mousewheel(self, event: tk.Event) -> str:
+        self._zoom_by(
+            ZOOM_FACTOR if event.delta > 0 else 1 / ZOOM_FACTOR,
+            event.x, event.y,
+        )
+        return "break"
+
+    def _keyboard_zoom(self, factor: float) -> str:
+        self._zoom_by(factor)
+        return "break"
+
+    def _keyboard_reset_zoom(self, _event: tk.Event) -> str:
+        self._reset_zoom()
+        return "break"
+
+    def _zoom_by(
+        self, factor: float, focus_x: float | None = None,
+        focus_y: float | None = None,
+    ) -> None:
+        self._set_zoom(self.zoom * factor, focus_x, focus_y)
+
+    def _set_zoom(
+        self, value: float, focus_x: float | None = None,
+        focus_y: float | None = None,
+    ) -> None:
+        if self.dragging or self.connecting:
+            return
+        target = max(MIN_ZOOM, min(MAX_ZOOM, value))
+        if abs(target - self.zoom) < 0.001:
+            return
+        view_x = self.canvas.winfo_width() / 2 if focus_x is None else focus_x
+        view_y = self.canvas.winfo_height() / 2 if focus_y is None else focus_y
+        logical_x = self.canvas.canvasx(view_x) / self.zoom
+        logical_y = self.canvas.canvasy(view_y) / self.zoom
+        self.zoom = target
+        self.zoom_text.set(f"{round(self.zoom * 100):d}%")
+        if self.state.get("nodes"):
+            self._render()
+        else:
+            self._show_empty()
+        region = tuple(float(item) for item in self.canvas.cget("scrollregion").split())
+        if len(region) != 4:
+            return
+        left, top, right, bottom = region
+        width, height = max(1.0, right - left), max(1.0, bottom - top)
+        wanted_left = logical_x * self.zoom - view_x
+        wanted_top = logical_y * self.zoom - view_y
+        self.canvas.xview_moveto(max(0.0, min(1.0, (wanted_left - left) / width)))
+        self.canvas.yview_moveto(max(0.0, min(1.0, (wanted_top - top) / height)))
+
+    def _reset_zoom(self) -> None:
+        self._set_zoom(1.0)
+
+    def _fit_graph(self) -> None:
+        nodes = tuple(self.state.get("nodes", {}).values())
+        if not nodes:
+            return
+        min_x = min(float(node["x"]) for node in nodes)
+        min_y = min(float(node["y"]) for node in nodes)
+        max_x = max(float(node["x"]) + NODE_WIDTH for node in nodes)
+        max_y = max(float(node["y"]) + NODE_HEIGHT for node in nodes)
+        available_width = max(1, self.canvas.winfo_width() - 40)
+        available_height = max(1, self.canvas.winfo_height() - 40)
+        target = min(
+            available_width / max(1.0, max_x - min_x + 40),
+            available_height / max(1.0, max_y - min_y + 40),
+        )
+        self._set_zoom(target, 0, 0)
+        region = tuple(float(item) for item in self.canvas.cget("scrollregion").split())
+        if len(region) != 4:
+            return
+        left, top, right, bottom = region
+        width, height = max(1.0, right - left), max(1.0, bottom - top)
+        wanted_left = min_x * self.zoom - 20
+        wanted_top = min_y * self.zoom - 20
+        self.canvas.xview_moveto(max(0.0, min(1.0, (wanted_left - left) / width)))
+        self.canvas.yview_moveto(max(0.0, min(1.0, (wanted_top - top) / height)))
 
     def _show_selected(self) -> None:
         node = self.state.get("nodes", {}).get(self.selected)
@@ -551,7 +756,15 @@ class RpfProgramFrame(ttk.Frame):
         )
 
     def _background(self, title: str, work, completed) -> None:
+        if self._busy:
+            messagebox.showinfo(
+                "Build flow already running",
+                "Wait for the current dry run or build to finish before starting "
+                "another operation.", parent=self,
+            )
+            return
         events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._set_busy(True)
         self.status.set(f"{title}…")
 
         def runner() -> None:
@@ -563,11 +776,14 @@ class RpfProgramFrame(ttk.Frame):
         threading.Thread(target=runner, daemon=True).start()
 
         def poll() -> None:
+            if not self.winfo_exists():
+                return
             try:
                 kind, value = events.get_nowait()
             except queue.Empty:
                 self.after(80, poll)
                 return
+            self._set_busy(False)
             if kind == "error":
                 self.status.set(f"{title} failed safely.")
                 messagebox.showerror(title, str(value), parent=self)

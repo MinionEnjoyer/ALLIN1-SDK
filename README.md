@@ -34,20 +34,27 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
 
 ## Features
 
-- **Integration Linker** — validate `addon.json`, follow references across
+- **Package Linker** — validate `addon.json`, follow references across
   weapon, ammo, animation, native-text, HUD, storefront, vehicle, handling,
   tuning, streamed-asset, archive, and rollback fields, and export an ordered
   integration plan before changing the game.
-- **Package Intelligence** — inventory loose DLC folders and OIV/ZIP/RAR/7z
+- **Package inspection and tools** — inventory loose DLC folders and OIV/ZIP/RAR/7z
   packages, classify scripts, plug-ins, shaders, replacements, and add-on DLC,
   detect Legacy/Enhanced compatibility, and surface incomplete or ambiguous
   content for review.
 - **OIV workbench** — preview ordered OIV operations, export a managed package
   when every operation fits receipt ownership, and translate existing nested-RPF
   adds/replacements/deletes into payload-backed atomic batch manifests. Official
-  OIV 2.2 XML add/replace/remove commands compile against an explicitly selected
+  OIV 2.1/2.2 XML add/replace/remove commands compile against an explicitly selected
   RPF into canonical-reparse-verified payloads and an inert hash-bound plan.
-- **Native Asset Viewer** — browse authored text and images, parse bounded RAGE
+  Line-oriented text recipes support ordered append/insert/replace/delete with
+  exact or prefix selectors that must match one line; encoding, BOM, and newline
+  style are preserved and verified. Bounded newly created archives can replay
+  declared adds, structured edits, and cleanup deletes before exact recursive
+  verification and managed export. Native PSO/META recipes use the matching game
+  keys, source-aware native rebuild, and a mandatory semantic reparse before an
+  inert archive plan is emitted.
+- **Asset Viewer** — browse authored text and images, parse bounded RAGE
   resource headers, convert supported resources to structured CodeWalker XML,
   generate YTD texture contact sheets, render bounded indexed-geometry previews for
   YDR/YDD/YFT models with vertex, triangle, LOD, drawable, bounds, shader, texture,
@@ -66,7 +73,7 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   through the SDK Console or structured Agent API.
   The embedded YTD editor catalogs and previews every DDS, imports common raster formats,
   synchronizes dimensions/mips/formats, supports add/replace/remove, and retains undo history.
-- **RPF Explorer** — search root and nested RPFs as one hierarchy, inspect entry
+- **RPF Archives** — search root and nested RPFs as one hierarchy, inspect entry
   metadata, export JSON/CSV indexes, extract an exact entry or complete directory
   subtree through one archive scan, compare two recursive archive trees by metadata
   or exact extracted-content hashes, and generate a
@@ -106,16 +113,17 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   recursive archive verifier. Validation reports identify every payload as either
   byte-exact or canonical RSC7 (identical resource header plus decompressed bytes).
   File cards receive non-blocking cached thumbnails for images, native visual assets,
-  text/configuration files, and deterministic type fallbacks. The same hash-bound
-  renderer is available as `render-rpf-graph-previews`, producing an atomic portable
-  bundle and per-preview SHA-256 report through the console or structured Agent API.
+  text/configuration files, and deterministic type fallbacks. **Create output >
+  Export preview bundle** publishes the same hash-bound renderer as
+  `render-rpf-graph-previews`, producing an atomic portable bundle and per-preview
+  SHA-256 report through the desktop, console, or structured Agent API.
   An already-built RPF can also be recursively expanded into a retained external
   graph workspace: nested archives become editable `.rpf.source` branches, the
   untouched origin hash remains in the graph, and one import report accounts for
   every extracted payload. Imported graphs can build/diff against that origin and
   emit a normal inert multi-entry plan; changes inside a nested archive collapse to
   one reviewed parent-container replacement instead of an order-dependent deep edit.
-  The graph window also includes an embedded **Build Flow** workspace: a typed visual
+  The embedded graph editor also includes a **Build Flow** workspace: a typed visual
   operation canvas with typed artifact pins for package source, validation, loose-tree
   materialization, exact RPF build, verified defragmentation, imported-origin planning,
   and named outputs. Invalid type connections and cycles are rejected at edit time.
@@ -137,6 +145,13 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   RSC7 headers plus decompressed resource bytes so compressor-level changes do not hide
   real edits or create noisy false positives; desktop, `diff-rpf --logical-content`, and
   the Agent API emit the same JSON and Markdown evidence.
+- **Before/after RPF plan derivation** — select a clean base archive and a finished
+  desired archive to automatically produce one reviewed, hash-bound multi-entry plan
+  plus a portable folder containing only changed payloads. The planner understands deep
+  nested archives, keeps newly added child RPFs as one payload, ignores harmless
+  container repacking, refuses ambiguous case/type changes, and rechecks both complete
+  source hashes before publishing. The desktop Archive Actions menu,
+  `derive-rpf-plan`, persistent console, and Agent API share the same implementation.
 - **Visual atomic RPF change sets** — stage replace, add, delete, directory create/
   remove, and same-parent rename actions in an embedded Explorer workspace. Change-set
   JSON binds the source archive and every payload by size and SHA-256, supports review
@@ -177,8 +192,8 @@ ALLIN1 Launcher
                      |
                      v
 ALLIN1 SDK
-  Integration Linker + Package Intelligence
-  Native Asset Viewer + RPF Explorer
+  Package Linker + Package Tools
+  Asset Viewer + RPF Archives
   OIV Workbench + DLC Inventory
   Vehicle Data Compiler
                      |
@@ -224,19 +239,21 @@ the checksum, extract the archive to a fresh directory, and run
 ## Desktop SDK
 
 The desktop application is one persistent developer window. Its sidebar moves
-between **Integration**, **Native Assets**, **RPF Explorer**, and **Help Center**.
+between **Package Linker**, **Asset Viewer**, **RPF Archives**, and **Help Center**.
 Pass `--rpf-graph <graph.json>` to the desktop executable to open a validated
 package graph directly; add `--gta-path <installation>` when its asset nodes need
 encrypted or edition-specific native previews.
 The SDK Console remains docked along the bottom and can expand over any context;
-opening a tool no longer creates another independent workspace
-window. Only file pickers, confirmations, and blocking transaction progress use
-temporary dialogs. Dense commands stay in contextual menus instead of covering
-content with large button rows:
+opening a tool no longer creates another independent workspace window. Package
+graphs, build flows, visual change sets, GXT2 text editing, texture editing, and
+transaction history stay in the primary application. Only file pickers,
+confirmations, standalone compatibility entry points, and blocking transaction
+progress use temporary dialogs. Common actions stay visible while advanced
+commands are grouped by task:
 
-- **Content** opens manifests, packages, folders, and installed DLC sources.
-- **Review** validates links, explains fields, and exports reports.
-- **Package Intelligence** opens OIV, DLC inventory, vehicle compiler, and structured
+- **Packages** opens manifests, packages, folders, and installed DLC sources.
+- **Inspect & Export** validates links, explains fields, and exports reports.
+- **Package Tools** opens OIV, DLC inventory, vehicle compiler, and structured
   META/XML tools.
 - **The bottom SDK Console dock** keeps the complete CLI available from every
   workspace. Its completion list narrows as you type, suggests commands,
@@ -300,10 +317,12 @@ allin1-sdk undo-ytd-texture-edit C:\Work\vehicle-ytd-workspace --acknowledge-edi
 allin1-sdk extract-rpf-subtree C:\Mods\Example\dlc.rpf --archive-path x64\textures.rpf --directory vehicle --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Exports\vehicle
 allin1-sdk plan-rpf-sync C:\Mods\Example\dlc.rpf C:\Mods\Exports\vehicle --gta-path "D:\Games\GTA V Enhanced" --workspace-root C:\Mods -o subtree-sync-plan.json
 allin1-sdk diff-rpf C:\Mods\Before\dlc.rpf C:\Mods\After\dlc.rpf --exact-content --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Reports\archive-diff.json
+allin1-sdk derive-rpf-plan C:\Mods\Before\dlc.rpf C:\Mods\After\dlc.rpf --gta-path "D:\Games\GTA V Enhanced" --workspace-root C:\Mods\Before -o C:\Mods\Plans\dlc-change-plan.json
 allin1-sdk verify-rpf-archive C:\Mods\Example\dlc.rpf --gta-path "D:\Games\GTA V Enhanced" -o C:\Mods\Reports\dlc-integrity.json
 allin1-sdk oiv-plan C:\Mods\Example.oiv -o oiv-plan.md --rpf-batches C:\Mods\Example-rpf-batches
 allin1-sdk oiv-plan C:\Mods\NewDlc.oiv -o new-dlc-plan.md --created-rpf-package C:\Mods\NewDlc-managed --gta-path "D:\Games\GTA V Enhanced"
 allin1-sdk compile-oiv-xml C:\Mods\XmlRecipe.oiv C:\Mods\Workspace\update.rpf --gta-path "D:\Games\GTA V Enhanced" --workspace-root C:\Mods\Workspace -o C:\Mods\XmlRecipe-compiled
+allin1-sdk compile-oiv-recipe C:\Mods\StructuredRecipe.oiv C:\Mods\Workspace\update.rpf --gta-path "D:\Games\GTA V Enhanced" --workspace-root C:\Mods\Workspace -o C:\Mods\StructuredRecipe-compiled
 allin1-sdk plan-rpf-batch "D:\Games\GTA V Enhanced\mods\update\update.rpf" C:\Mods\Example-rpf-batches\01-update-xxxxxxxx\changes.json --gta-path "D:\Games\GTA V Enhanced" -o atomic-plan.json
 allin1-sdk plan-rpf-replacement "D:\Games\GTA V Enhanced\mods\update\update.rpf" common/data/example.meta C:\Mods\example.meta --gta-path "D:\Games\GTA V Enhanced" -o replacement-plan.json
 allin1-sdk plan-rpf-add "D:\Games\GTA V Enhanced\mods\update\update.rpf" common/data/new.meta C:\Mods\new.meta --gta-path "D:\Games\GTA V Enhanced" -o add-plan.json
@@ -355,6 +374,10 @@ service used by the launcher.
 - RPF exploration and extraction are read-only. Subtree extraction scans the outer
   archive once, refuses existing output folders, verifies that the source hash did
   not change, and emits `.allin1-rpf-export.json` with every exported file hash.
+- Before/after delta planning is also non-mutating. It writes a new plan and optional
+  payload sidecar outside GTA V, never overwrites an artifact, hashes both recursive
+  sources, and removes partial output if either archive drifts or extraction/planning
+  fails. Its output remains inert until the normal guarded apply workflow is invoked.
 - Global RPF catalogs atomically index up to 512 loose outer archives and all nested
   entries into a portable SQLite database outside the game. Incremental refresh
   reuses unchanged size/mtime records; `--refresh` reindexes and hashes everything.
@@ -404,15 +427,24 @@ service used by the launcher.
 - Bounded OIV `createIfNotExist` containers are translated into retained loose
   `.rpf.source` workspaces and passed through that same builder. Safe top-level
   archives and new archives one level inside an existing RPF become validated,
-  checksum-owned package payloads. Recipe code is never executed; ambiguous ancestry,
-  deletes inside new archives and deep existing-archive creation roots remain
-  blocked. Official OIV 2.2 XML commands support First/Last/Before/After adds,
-  replacements, and removals only when every XPath selects exactly one textual
-  `.xml`/`.meta` entry inside one existing archive tree. Compilation replays the
-  recipe in order, preserves source encoding, blocks entities and unbounded XPath
-  constructs, reparses and canonically verifies every result, coalesces repeated
-  edits per entry, and emits the normal guarded multi-entry plan without writing
-  the archive. Text and PSO/META commands remain blocked.
+  checksum-owned package payloads. Declared adds, XML edits, bounded line edits,
+  and cleanup deletes inside those new archives replay in recipe order; edit and
+  delete targets must already exist at that point unless a text recipe explicitly
+  creates its file by adding the first line. XML output is reparsed and canonically
+  verified. Text output retains UTF-8/UTF-16 encoding, BOM, newline style, and final
+  newline state, then passes an encoding round trip; text-edited XML must still
+  parse. The package retains source bindings and the ordered operation audit.
+  Recipe code is never executed; ambiguous ancestry and deep existing-archive
+  creation roots remain blocked. Official OIV 2.2 XML commands also support
+  First/Last/Before/After adds, replacements, and removals when every XPath selects
+  exactly one textual `.xml`/`.meta` entry inside one existing archive tree.
+  Compilation preserves source encoding, blocks entities and unbounded XPath
+  constructs, coalesces repeated edits per entry, and emits the normal guarded
+  multi-entry plan without writing the archive. Wildcard text masks remain blocked.
+  Native PSO/META commands are limited to supported native resource types in an
+  existing archive: the exact resource is decoded with matching game keys, edited
+  through the same bounded XPath engine, rebuilt against its immutable source, and
+  required to reparse to semantically identical XML before entering the plan.
 - Native workspaces retain an immutable source snapshot, editable CodeWalker XML and
   dependencies, edition metadata, and hashes. Build refuses path escapes, links,
   collisions, source tampering, unsupported types, oversized inputs, and any result
@@ -478,9 +510,9 @@ service used by the launcher.
   full-outer-archive rollback receipt.
 - Canary mode never writes its selected source. It uses a generated external copy and
   is successful only after replace, add, delete, and exact final-hash rollback checks.
-- OIV conversion stops when an operation cannot be represented safely; XML
+- OIV conversion stops when an operation cannot be represented safely; structured
   compilation additionally binds `assembly.xml`, the selected archive, every
-  original target, and every resulting payload by SHA-256.
+  original target, decoded/edited PSO XML, and every resulting payload by SHA-256.
 - Temporary archive extraction is bounded and removed after inspection.
 - Edition uncertainty remains visible instead of silently selecting Legacy or
   Enhanced behavior.
@@ -535,8 +567,8 @@ release assets automatically.
 
 ## Documentation
 
-The in-app Help Center documents the Integration Linker, package intelligence,
-native previews, RPF explorer, replacement-plan boundary, and recovery paths.
+The in-app Help Center documents the Package Linker, package tools, asset previews,
+RPF Archives, replacement-plan boundary, and recovery paths.
 The schema and complete colored-smoke example are maintained under [`sdk/`](sdk/).
 
 ALLIN1 SDK is licensed under the [GNU General Public License v3.0 or later](LICENSE).

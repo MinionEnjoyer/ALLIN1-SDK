@@ -57,7 +57,7 @@ def test_meta_roundtrip_and_safe_parser_guards(tmp_path):
 
     binary = tmp_path / "binary.ymt"
     binary.write_bytes(b"RSC7\0\0\0")
-    with pytest.raises(ValueError, match="Native Asset Viewer"):
+    with pytest.raises(ValueError, match="Asset Viewer"):
         validate_meta_roundtrip(binary)
 
     dtd = tmp_path / "unsafe.xml"

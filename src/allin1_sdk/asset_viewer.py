@@ -96,6 +96,9 @@ class AssetViewerDialog(ttk.Frame):
         self.entries: dict[str, PackageEntry] = {}
         self.selected_entry: PackageEntry | None = None
         self.action_menus: list[tk.Menu] = []
+        self.native_action_menus: list[tk.Menu] = []
+        self.package_action_buttons: list[ttk.Button] = []
+        self.native_action_buttons: list[ttk.Button] = []
         self._texture_editor: TextureDictionaryEditorFrame | None = None
         self._photo: ImageTk.PhotoImage | None = None
         self._build()
@@ -108,8 +111,8 @@ class AssetViewerDialog(ttk.Frame):
         file_menu.add_separator()
         file_menu.add_command(label="Close", command=self._close_panel)
         menu.add_cascade(label="File", menu=file_menu)
-        action_menu = self._action_menu(menu)
-        menu.add_cascade(label="Actions", menu=action_menu)
+        menu.add_cascade(label="Package", menu=self._action_menu(menu))
+        menu.add_cascade(label="Native authoring", menu=self._native_menu(menu))
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(
             label="Asset Viewer Help", accelerator="F1",
@@ -136,25 +139,66 @@ class AssetViewerDialog(ttk.Frame):
                 "CodeWalker XML, texture contact sheets, and manifest-backed editable native "
                 "workspaces when supported. Package code is never executed."
             ),
-            wraplength=1080, justify="left", foreground="#52635c",
+            wraplength=900, justify="left", foreground="#52635c",
         ).pack(anchor="w", pady=(3, 12))
 
         toolbar = ttk.Frame(outer)
         toolbar.pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            toolbar, text="PACKAGE", style="FieldLabel.TLabel",
+        ).pack(side="left", padx=(0, 7))
         ttk.Menubutton(
             toolbar, text="Open package", menu=self._open_menu(toolbar),
             style="Accent.TButton",
         ).pack(side="left")
         ttk.Menubutton(
-            toolbar, text="Package actions", menu=self._action_menu(toolbar),
+            toolbar, text="Package tools", menu=self._action_menu(toolbar),
+        ).pack(side="left", padx=(7, 0))
+        ttk.Separator(toolbar, orient="vertical").pack(
+            side="left", fill="y", padx=12, pady=3,
+        )
+        ttk.Label(
+            toolbar, text="NATIVE AUTHORING", style="FieldLabel.TLabel",
+        ).pack(side="left", padx=(0, 7))
+        self.export_native_button = ttk.Button(
+            toolbar, text="Export selected for editing…",
+            command=self._export_native_workspace, state="disabled",
+        )
+        self.export_native_button.pack(side="left")
+        self.native_action_buttons.append(self.export_native_button)
+        ttk.Menubutton(
+            toolbar, text="Workspace tools", menu=self._native_menu(toolbar),
         ).pack(side="left", padx=(7, 0))
         self.status = tk.StringVar(
-            value="Open a package folder or OIV/ZIP/RAR/7z to begin."
+            value=(
+                "Open a package to inspect its files, or use Workspace tools to "
+                "continue an existing native-asset workspace."
+            )
         )
         ttk.Label(
             outer, textvariable=self.status, foreground="#52635c",
-            wraplength=1080, justify="left",
+            wraplength=900, justify="left",
         ).pack(fill="x", anchor="w", pady=(0, 10))
+
+        context_actions = ttk.Frame(outer)
+        context_actions.pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            context_actions, text="AVAILABLE FOR THIS PACKAGE",
+            style="FieldLabel.TLabel",
+        ).pack(side="left", padx=(0, 8))
+        self.export_inventory_button = ttk.Button(
+            context_actions, text="Export inventory…",
+            command=self._export_inventory, state="disabled",
+        )
+        self.export_inventory_button.pack(side="left")
+        self.open_location_button = ttk.Button(
+            context_actions, text="Open package folder",
+            command=self._open_location, state="disabled",
+        )
+        self.open_location_button.pack(side="left", padx=(7, 0))
+        self.package_action_buttons.extend((
+            self.export_inventory_button, self.open_location_button,
+        ))
 
         panes = ttk.Panedwindow(outer, orient="horizontal")
         panes.pack(fill="both", expand=True)
@@ -212,16 +256,14 @@ class AssetViewerDialog(ttk.Frame):
         )
 
     def _open_menu(self, parent: tk.Misc) -> tk.Menu:
+        """Return package-source choices only.
+
+        Native workspace operations intentionally live in their own menu so
+        opening content and authoring a rebuilt asset are never conflated.
+        """
         menu = tk.Menu(parent, tearoff=False)
-        menu.add_command(label="Open folder…", command=self._choose_folder)
-        menu.add_command(label="Open archive…", command=self._choose_archive)
-        menu.add_separator()
-        menu.add_command(
-            label="Build native workspace…", command=self._build_native_workspace,
-        )
-        menu.add_command(
-            label="Open YTD texture workspace…", command=self._open_texture_workspace,
-        )
+        menu.add_command(label="Open package folder…", command=self._choose_folder)
+        menu.add_command(label="Open package archive…", command=self._choose_archive)
         return menu
 
     def _action_menu(self, parent: tk.Misc) -> tk.Menu:
@@ -232,11 +274,25 @@ class AssetViewerDialog(ttk.Frame):
         menu.add_command(
             label="Open package location", command=self._open_location, state="disabled",
         )
+        self.action_menus.append(menu)
+        return menu
+
+    def _native_menu(self, parent: tk.Misc) -> tk.Menu:
+        """Return native-workspace authoring commands."""
+        menu = tk.Menu(parent, tearoff=False)
         menu.add_command(
-            label="Export editable native workspace…",
+            label="Export selected asset as editable workspace…",
             command=self._export_native_workspace, state="disabled",
         )
-        self.action_menus.append(menu)
+        menu.add_separator()
+        menu.add_command(
+            label="Build verified asset from workspace…",
+            command=self._build_native_workspace,
+        )
+        menu.add_command(
+            label="Open YTD texture workspace…", command=self._open_texture_workspace,
+        )
+        self.native_action_menus.append(menu)
         return menu
 
     def _set_package_actions(self, enabled: bool) -> None:
@@ -244,11 +300,17 @@ class AssetViewerDialog(ttk.Frame):
         for menu in self.action_menus:
             menu.entryconfigure("Export inventory…", state=state)
             menu.entryconfigure("Open package location", state=state)
+        for button in self.package_action_buttons:
+            button.configure(state=state)
 
     def _set_native_action(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        for menu in self.action_menus:
-            menu.entryconfigure("Export editable native workspace…", state=state)
+        for menu in self.native_action_menus:
+            menu.entryconfigure(
+                "Export selected asset as editable workspace…", state=state,
+            )
+        for button in self.native_action_buttons:
+            button.configure(state=state)
 
     def _show_help(self) -> None:
         if self._on_help is not None:

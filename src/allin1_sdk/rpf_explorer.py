@@ -25,8 +25,9 @@ from allin1_sdk.paths import user_data_root
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_catalog import RpfCatalogResult, RpfCatalogService
 from allin1_sdk.rpf_change_set_ui import RpfChangeSetFrame
+from allin1_sdk.rpf_delta import RpfDeltaPlanResult, derive_rpf_change_plan
 from allin1_sdk.rpf_graph import RpfPackageGraph
-from allin1_sdk.rpf_graph_ui import RpfPackageGraphDialog
+from allin1_sdk.rpf_graph_ui import RpfPackageGraphFrame
 from allin1_sdk.rpf_tools import RpfEntryRecord, RpfExplorerService, RpfIndex
 from allin1_sdk.help_center import HelpCenterDialog
 
@@ -103,18 +104,18 @@ class RpfProgressDialog(tk.Toplevel):
             self.after(80, self._poll)
 
 
-class Gxt2WorkspaceDialog(tk.Toplevel):
-    """Search and edit one validated GXT2 hash/text workspace."""
+class Gxt2WorkspaceFrame(ttk.Frame):
+    """Search and edit one validated GXT2 hash/text workspace in place."""
 
     DISPLAY_LIMIT = 2500
 
-    def __init__(self, parent: tk.Misc, workspace: str | Path) -> None:
+    def __init__(
+        self, parent: tk.Misc, workspace: str | Path, *, on_close=None,
+    ) -> None:
         super().__init__(parent)
+        self.pack(fill="both", expand=True)
         self.workspace = Path(workspace).resolve()
-        self.title("ALLIN1 — GXT2 Text Workspace")
-        self.geometry("1180x760")
-        self.minsize(860, 600)
-        self.transient(parent.winfo_toplevel())
+        self._on_close = on_close
         self.entries: dict[int, dict[str, object]] = {}
         self.query = tk.StringVar()
         self.status = tk.StringVar(value="Loading validated GXT2 table…")
@@ -131,7 +132,7 @@ class Gxt2WorkspaceDialog(tk.Toplevel):
                 "Edit label hashes and UTF-8 text in a recovery-backed workspace. "
                 "The immutable source and exact RPF binding are never modified here."
             ),
-            foreground="#52635c", wraplength=1080, justify="left",
+            foreground="#52635c", wraplength=900, justify="left",
         ).pack(anchor="w", pady=(3, 10))
 
         search = ttk.Frame(outer)
@@ -145,7 +146,12 @@ class Gxt2WorkspaceDialog(tk.Toplevel):
             side="left", padx=(6, 0),
         )
 
+        ttk.Label(outer, textvariable=self.status, foreground="#52635c").pack(
+            side="bottom", fill="x", pady=(8, 0),
+        )
+
         split = ttk.Panedwindow(outer, orient="vertical")
+        self._gxt2_split = split
         split.pack(fill="both", expand=True)
         table_frame = ttk.Frame(split)
         editor_frame = ttk.Frame(split, padding=(0, 10, 0, 0))
@@ -165,29 +171,44 @@ class Gxt2WorkspaceDialog(tk.Toplevel):
         scroll.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", self._select)
 
-        ttk.Label(editor_frame, text="Selected text", font=("Segoe UI Semibold", 10)).pack(
-            anchor="w",
-        )
+        editor_header = ttk.Frame(editor_frame)
+        editor_header.pack(fill="x")
+        ttk.Label(
+            editor_header, text="Selected text", font=("Segoe UI Semibold", 10),
+        ).pack(side="left")
+        for label, command in (
+            ("Save", self._save), ("Add entry…", self._add),
+            ("Remove", self._remove), ("Undo", self._undo),
+            ("Build verified…", self._build),
+        ):
+            ttk.Button(editor_header, text=label, command=command).pack(
+                side="left", padx=(7, 0),
+            )
+        ttk.Button(
+            editor_header, text="Close editor", command=self._close_panel,
+        ).pack(side="right")
         self.text = tk.Text(
             editor_frame, height=7, wrap="word", font=("Consolas", 10),
             undo=True, borderwidth=1, relief="solid",
         )
-        self.text.pack(fill="both", expand=True, pady=(4, 8))
-        actions = ttk.Frame(editor_frame)
-        actions.pack(fill="x")
-        for label, command in (
-            ("Save selected text", self._save), ("Add entry…", self._add),
-            ("Remove selected", self._remove), ("Undo latest edit", self._undo),
-            ("Build verified GXT2…", self._build),
-        ):
-            ttk.Button(actions, text=label, command=command).pack(
-                side="left", padx=(0, 6),
-            )
-        ttk.Button(actions, text="Close", command=self.destroy).pack(side="right")
-        ttk.Label(outer, textvariable=self.status, foreground="#52635c").pack(
-            fill="x", pady=(8, 0),
-        )
+        self.text.pack(fill="both", expand=True, pady=(4, 0))
         self._reload()
+        self.after_idle(self._balance_split)
+        self.after(120, self._balance_split)
+
+    def _balance_split(self) -> None:
+        split = getattr(self, "_gxt2_split", None)
+        if split is None or not split.winfo_exists():
+            return
+        height = split.winfo_height()
+        if height > 80:
+            split.sashpos(0, round(height * 0.58))
+
+    def _close_panel(self) -> None:
+        if self._on_close is not None:
+            self._on_close()
+        else:
+            self.destroy()
 
     def _clear_search(self) -> None:
         self.query.set("")
@@ -313,6 +334,20 @@ class Gxt2WorkspaceDialog(tk.Toplevel):
         )
 
 
+class Gxt2WorkspaceDialog(tk.Toplevel):
+    """Compatibility host for opening a GXT2 workspace independently."""
+
+    def __init__(self, parent: tk.Misc, workspace: str | Path) -> None:
+        super().__init__(parent)
+        self.title("ALLIN1 — GXT2 Text Workspace")
+        self.geometry("1180x760")
+        self.minsize(860, 600)
+        self.transient(parent.winfo_toplevel())
+        self.editor = Gxt2WorkspaceFrame(
+            self, workspace, on_close=self.destroy,
+        )
+
+
 class RpfTransactionHistoryDialog(ttk.Frame):
     """Receipt history embedded inside the RPF workspace."""
 
@@ -346,7 +381,7 @@ class RpfTransactionHistoryDialog(ttk.Frame):
                 "Receipts preserve the complete rollback snapshot. Recovery only reconciles "
                 "receipt state; it never completes an interrupted archive commit."
             ),
-            foreground="#52635c", wraplength=1080, justify="left",
+            foreground="#52635c", wraplength=900, justify="left",
         ).pack(anchor="w", pady=(3, 10))
         tools = ttk.Frame(outer)
         tools.pack(fill="x", pady=(0, 8))
@@ -517,7 +552,7 @@ class RpfExplorerDialog(ttk.Frame):
         host = parent
         if not embedded:
             self._window = tk.Toplevel(parent)
-            self._window.title("ALLIN1 — RPF Explorer")
+            self._window.title("ALLIN1 — RPF Archives")
             self._window.geometry("1320x840")
             self._window.minsize(980, 650)
             self._window.transient(parent.winfo_toplevel())
@@ -536,6 +571,12 @@ class RpfExplorerDialog(ttk.Frame):
         self.catalog_items: dict[str, RpfCatalogResult] = {}
         self.entry_action_menus: list[tk.Menu] = []
         self.file_menus: list[tk.Menu] = []
+        self._archive_bound_actions: list[tuple[tk.Menu, str]] = []
+        self._graph_import_actions: list[tuple[tk.Menu, str]] = []
+        self._entry_bound_actions: list[tuple[tk.Menu, str]] = []
+        self._subtree_actions: list[tuple[tk.Menu, str]] = []
+        self._native_authoring_actions: list[tuple[tk.Menu, str]] = []
+        self._gxt2_authoring_actions: list[tuple[tk.Menu, str]] = []
         self._photo: ImageTk.PhotoImage | None = None
         self._preview_temp = tempfile.TemporaryDirectory(prefix="allin1-rpf-preview-")
         if self._window is not None:
@@ -553,7 +594,7 @@ class RpfExplorerDialog(ttk.Frame):
         menu.add_cascade(label="Entry", menu=self._entry_menu(menu))
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(
-            label="RPF Explorer Help", accelerator="F1",
+            label="RPF Archives Help", accelerator="F1",
             command=self._show_help,
         )
         menu.add_cascade(label="Help", menu=help_menu)
@@ -564,19 +605,21 @@ class RpfExplorerDialog(ttk.Frame):
         outer = ttk.Frame(self, padding=14)
         self.main_surface = outer
         outer.pack(fill="both", expand=True)
-        ttk.Label(
-            outer, text="RPF explorer", font=("Segoe UI Semibold", 17),
+        archive_title = ttk.Label(
+            outer, text="RPF archives", font=("Segoe UI Semibold", 17),
             foreground="#1f7f42",
-        ).pack(anchor="w")
-        ttk.Label(
+        )
+        archive_title.pack(anchor="w")
+        archive_description = ttk.Label(
             outer,
             text=(
                 "Browse and safely author deep nested-RPF entries with edition-aware keys. "
                 "Writes require a reviewed plan, a mods or isolated workspace copy, "
                 "full-archive staging, exact-entry verification, and a rollback receipt."
             ),
-            wraplength=1180, justify="left", foreground="#52635c",
-        ).pack(anchor="w", pady=(3, 10))
+            wraplength=900, justify="left", foreground="#52635c",
+        )
+        archive_description.pack(anchor="w", pady=(3, 10))
 
         target = ttk.Frame(outer)
         target.pack(fill="x", pady=(0, 8))
@@ -595,18 +638,34 @@ class RpfExplorerDialog(ttk.Frame):
             style="Accent.TButton",
         ).pack(side="left")
         ttk.Menubutton(
-            toolbar, text="Entry actions", menu=self._entry_menu(toolbar),
+            toolbar, text="Selected entry", menu=self._entry_menu(toolbar),
         ).pack(side="left", padx=(7, 0))
         ttk.Menubutton(
-            toolbar, text="Archive actions", menu=self._file_menu(toolbar),
+            toolbar, text="Archive tools", menu=self._file_menu(toolbar),
+        ).pack(side="left", padx=(7, 0))
+        ttk.Button(
+            toolbar, text="Package graph",
+            command=lambda: self.workspace_tabs.select(self.graph_tab),
+        ).pack(side="left", padx=(7, 0))
+        ttk.Button(
+            toolbar, text="Transactions", command=self._transaction_history,
         ).pack(side="left", padx=(7, 0))
         self.status = tk.StringVar(value="Select a GTA V installation and open an RPF.")
-        ttk.Label(
+        status_label = ttk.Label(
             outer, textvariable=self.status, foreground="#52635c",
-            wraplength=1180, justify="left",
-        ).pack(fill="x", pady=(0, 8))
+            wraplength=900, justify="left",
+        )
+        status_label.pack(fill="x", pady=(0, 8))
+        self._browser_chrome = (
+            (archive_title, {"anchor": "w"}),
+            (archive_description, {"anchor": "w", "pady": (3, 10)}),
+            (target, {"fill": "x", "pady": (0, 8)}),
+            (toolbar, {"fill": "x", "pady": (0, 8)}),
+            (status_label, {"fill": "x", "pady": (0, 8)}),
+        )
 
         filter_row = ttk.Frame(outer)
+        self.browser_filter_row = filter_row
         filter_row.pack(fill="x", pady=(0, 8))
         ttk.Label(filter_row, text="Search").pack(side="left")
         self.query = tk.StringVar()
@@ -634,8 +693,13 @@ class RpfExplorerDialog(ttk.Frame):
         self.workspace_tabs.pack(fill="both", expand=True)
         browser_tab = ttk.Frame(self.workspace_tabs)
         changes_tab = ttk.Frame(self.workspace_tabs)
+        self.graph_tab = ttk.Frame(self.workspace_tabs)
+        self.gxt2_tab = ttk.Frame(self.workspace_tabs)
         self.workspace_tabs.add(browser_tab, text="Archive Browser")
         self.workspace_tabs.add(changes_tab, text="Visual Change Set")
+        self.workspace_tabs.add(self.graph_tab, text="Package Graph")
+        self.workspace_tabs.add(self.gxt2_tab, text="GXT2 Text")
+        self.browser_tab = browser_tab
 
         panes = ttk.Panedwindow(browser_tab, orient="horizontal")
         panes.pack(fill="both", expand=True)
@@ -680,6 +744,30 @@ class RpfExplorerDialog(ttk.Frame):
             wraplength=620, justify="left",
         ).pack(anchor="w", pady=(3, 10))
         ttk.Separator(preview).pack(fill="x", pady=(0, 8))
+        context_actions = ttk.Frame(preview)
+        context_actions.pack(fill="x", pady=(0, 8))
+        for column in range(4):
+            context_actions.columnconfigure(column, weight=1)
+        self.preview_entry_button = ttk.Button(
+            context_actions, text="Preview", command=self._preview_selected,
+            state="disabled", padding=(5, 4),
+        )
+        self.preview_entry_button.grid(row=0, column=0, sticky="ew", padx=(0, 2))
+        self.extract_entry_button = ttk.Button(
+            context_actions, text="Extract", command=self._extract_selected,
+            state="disabled", padding=(5, 4),
+        )
+        self.extract_entry_button.grid(row=0, column=1, sticky="ew", padx=2)
+        self.plan_entry_button = ttk.Button(
+            context_actions, text="Plan", command=self._plan_replacement,
+            state="disabled", padding=(5, 4),
+        )
+        self.plan_entry_button.grid(row=0, column=2, sticky="ew", padx=2)
+        self.edit_gxt2_button = ttk.Button(
+            context_actions, text="GXT2", command=self._export_gxt2_workspace,
+            state="disabled", padding=(5, 4),
+        )
+        self.edit_gxt2_button.grid(row=0, column=3, sticky="ew", padx=(2, 0))
         self.preview_surface = tk.Frame(preview, background="#ffffff")
         self.preview_surface.pack(fill="both", expand=True)
         self.image_preview = tk.Label(
@@ -699,14 +787,116 @@ class RpfExplorerDialog(ttk.Frame):
             get_selected=self._selected,
         )
         self.change_set_frame.pack(fill="both", expand=True)
+        self.graph_host = ttk.Frame(self.graph_tab)
+        self.graph_host.pack(fill="both", expand=True)
+        self.graph_host.pack_propagate(False)
+        self.gxt2_host = ttk.Frame(self.gxt2_tab)
+        self.gxt2_host.pack(fill="both", expand=True)
+        self.gxt2_host.pack_propagate(False)
+        self._graph_editor: RpfPackageGraphFrame | None = None
+        self._gxt2_editor: Gxt2WorkspaceFrame | None = None
+        self._show_graph_home()
+        self._show_gxt2_home()
+        self.workspace_tabs.bind("<<NotebookTabChanged>>", self._workspace_tab_changed)
+
+    def _workspace_tab_changed(self, _event: object | None = None) -> None:
+        browser_selected = self.workspace_tabs.select() == str(self.browser_tab)
+        for widget, options in self._browser_chrome:
+            if browser_selected and not widget.winfo_manager():
+                widget.pack(before=self.workspace_tabs, **options)
+            elif not browser_selected and widget.winfo_manager():
+                widget.pack_forget()
+        if browser_selected:
+            if not self.browser_filter_row.winfo_manager():
+                self.browser_filter_row.pack(
+                    fill="x", pady=(0, 8), before=self.workspace_tabs,
+                )
+        elif self.browser_filter_row.winfo_manager():
+            self.browser_filter_row.pack_forget()
+
+    @staticmethod
+    def _clear_workspace_host(host: ttk.Frame) -> None:
+        for child in host.winfo_children():
+            child.destroy()
+
+    def _show_graph_home(self) -> None:
+        self._clear_workspace_host(self.graph_host)
+        self._graph_editor = None
+        surface = ttk.Frame(self.graph_host, padding=20)
+        surface.pack(fill="both", expand=True)
+        ttk.Label(
+            surface, text="Package graph", font=("Segoe UI Semibold", 17),
+            foreground="#1f7f42",
+        ).pack(anchor="w")
+        ttk.Label(
+            surface,
+            text=(
+                "Visually arrange files and nested archives, then validate sources, "
+                "build a verified RPF, or create a reviewed change plan. The editor "
+                "stays inside this workspace."
+            ),
+            foreground="#52635c", wraplength=980, justify="left",
+        ).pack(anchor="w", pady=(4, 18))
+        choices = ttk.LabelFrame(surface, text="Start or continue", padding=14)
+        choices.pack(fill="x")
+        for column in range(4):
+            choices.columnconfigure(column, weight=1)
+        for index, (label, command) in enumerate((
+            ("Create from loose folder…", self._create_rpf_graph_from_folder),
+            ("Create empty graph…", self._create_empty_rpf_graph),
+            ("Open existing graph…", self._open_rpf_graph),
+        )):
+            ttk.Button(choices, text=label, command=command).grid(
+                row=0, column=index, sticky="ew",
+                padx=(0 if index == 0 else 4, 4 if index < 3 else 0),
+            )
+        self.graph_import_button = ttk.Button(
+            choices, text="Import currently open RPF…",
+            command=self._import_open_rpf_graph,
+            state="normal" if self.index is not None else "disabled",
+        )
+        self.graph_import_button.grid(
+            row=0, column=3, sticky="ew", padx=(4, 0),
+        )
+
+    def _show_gxt2_home(self) -> None:
+        self._clear_workspace_host(self.gxt2_host)
+        self._gxt2_editor = None
+        surface = ttk.Frame(self.gxt2_host, padding=20)
+        surface.pack(fill="both", expand=True)
+        ttk.Label(
+            surface, text="GXT2 text", font=("Segoe UI Semibold", 17),
+            foreground="#1f7f42",
+        ).pack(anchor="w")
+        ttk.Label(
+            surface,
+            text=(
+                "Open a recovery-backed GXT2 workspace, or select a .gxt2 entry in "
+                "Archive Browser and choose Edit GXT2. Editing and validation stay in "
+                "this tab."
+            ),
+            foreground="#52635c", wraplength=900, justify="left",
+        ).pack(anchor="w", pady=(4, 16))
+        ttk.Button(
+            surface, text="Open GXT2 workspace…", command=self._open_gxt2_workspace,
+            style="Accent.TButton",
+        ).pack(anchor="w")
+
+    def _open_gxt2_editor(self, workspace: str | Path) -> None:
+        self._clear_workspace_host(self.gxt2_host)
+        self._gxt2_editor = Gxt2WorkspaceFrame(
+            self.gxt2_host, workspace, on_close=self._show_gxt2_home,
+        )
+        self.workspace_tabs.select(self.gxt2_tab)
 
     def _file_menu(self, parent: tk.Misc) -> tk.Menu:
         menu = tk.Menu(parent, tearoff=False)
         menu.add_command(label="Open RPF…", command=self._choose_archive)
-        menu.add_command(
+        author_menu = tk.Menu(menu, tearoff=False)
+        author_menu.add_command(
             label="Build new RPF from folder…", command=self._build_new_archive,
         )
-        graph_menu = tk.Menu(menu, tearoff=False)
+        graph_menu = tk.Menu(author_menu, tearoff=False)
         graph_menu.add_command(
             label="Create from folder…", command=self._create_rpf_graph_from_folder,
         )
@@ -717,175 +907,176 @@ class RpfExplorerDialog(ttk.Frame):
             label="Import opened RPF…", command=self._import_open_rpf_graph,
             state="disabled",
         )
+        self._graph_import_actions.append((graph_menu, "Import opened RPF…"))
         graph_menu.add_command(label="Open graph…", command=self._open_rpf_graph)
-        menu.add_cascade(label="RPF package node graph", menu=graph_menu)
-        menu.add_command(
+        author_menu.add_cascade(label="Package graph", menu=graph_menu)
+        author_menu.add_command(
             label="Open GXT2 text workspace…", command=self._open_gxt2_workspace,
         )
-        menu.add_command(
-            label="Export index…", command=self._export_index, state="disabled",
-        )
-        menu.add_command(
-            label="Extract current archive tree…",
-            command=self._extract_current_archive, state="disabled",
-        )
-        menu.add_command(
-            label="Compare with archive…",
-            command=self._compare_archive, state="disabled",
-        )
-        menu.add_command(
-            label="Verify full archive integrity…",
-            command=self._verify_archive_integrity, state="disabled",
-        )
-        menu.add_command(
-            label="Build verified defragmented copy…",
-            command=self._defragment_archive_copy, state="disabled",
-        )
-        menu.add_separator()
-        menu.add_command(
+        menu.add_cascade(label="Build & Author", menu=author_menu)
+
+        inspect_menu = tk.Menu(menu, tearoff=False)
+        for label, command in (
+            ("Export index…", self._export_index),
+            ("Extract current archive tree…", self._extract_current_archive),
+            ("Compare with another archive…", self._compare_archive),
+            ("Verify full archive integrity…", self._verify_archive_integrity),
+            ("Build verified defragmented copy…", self._defragment_archive_copy),
+        ):
+            inspect_menu.add_command(label=label, command=command, state="disabled")
+            self._archive_bound_actions.append((inspect_menu, label))
+        menu.add_cascade(label="Inspect & Verify", menu=inspect_menu)
+
+        catalog_menu = tk.Menu(menu, tearoff=False)
+        catalog_menu.add_command(
             label="Build/update global RPF catalog…", command=self._build_catalog,
         )
-        menu.add_command(
+        catalog_menu.add_command(
             label="Search global RPF catalog…", command=self._search_catalog,
         )
-        menu.add_separator()
-        menu.add_command(
-            label="Create multi-entry plan…", command=self._plan_batch,
-            state="disabled",
-        )
-        menu.add_command(
-            label="Plan new directory…", command=self._plan_directory,
-            state="disabled",
-        )
-        menu.add_command(
-            label="Plan subtree workspace sync…", command=self._plan_subtree_sync,
-            state="disabled",
-        )
-        menu.add_command(
+        menu.add_cascade(label="Catalog", menu=catalog_menu)
+
+        plan_menu = tk.Menu(menu, tearoff=False)
+        for label, command in (
+            ("Derive plan from desired archive…", self._derive_change_plan),
+            ("Create multi-entry plan…", self._plan_batch),
+            ("Plan new directory…", self._plan_directory),
+            ("Plan subtree workspace sync…", self._plan_subtree_sync),
+        ):
+            plan_menu.add_command(label=label, command=command, state="disabled")
+            self._archive_bound_actions.append((plan_menu, label))
+        menu.add_cascade(label="Plan Changes", menu=plan_menu)
+
+        transaction_menu = tk.Menu(menu, tearoff=False)
+        transaction_menu.add_command(
             label="Apply entry-change plan…", command=self._apply_replacement_plan,
         )
-        menu.add_command(
+        transaction_menu.add_command(
             label="Verify transaction receipt…", command=self._verify_transaction,
         )
-        menu.add_command(
+        transaction_menu.add_command(
             label="Rollback transaction…", command=self._rollback_transaction,
         )
-        menu.add_command(label="Transaction history…", command=self._transaction_history)
-        menu.add_separator()
-        menu.add_command(
+        transaction_menu.add_command(
+            label="Transaction history…", command=self._transaction_history,
+        )
+        transaction_menu.add_separator()
+        transaction_menu.add_command(
             label="Run disposable archive canary…", command=self._run_canary,
             state="disabled",
         )
+        self._archive_bound_actions.append(
+            (transaction_menu, "Run disposable archive canary…")
+        )
+        menu.add_cascade(label="Transactions & Recovery", menu=transaction_menu)
         self.file_menus.append(menu)
         return menu
 
     def _entry_menu(self, parent: tk.Misc) -> tk.Menu:
         menu = tk.Menu(parent, tearoff=False)
-        menu.add_command(
-            label="Native preview", command=self._preview_selected, state="disabled",
-        )
-        menu.add_command(
-            label="Raw hex preview", command=self._preview_selected_hex, state="disabled",
-        )
-        menu.add_command(
-            label="Extract selected…", command=self._extract_selected, state="disabled",
-        )
-        menu.add_command(
+        preview_menu = tk.Menu(menu, tearoff=False)
+        for label, command in (
+            ("Native preview", self._preview_selected),
+            ("Raw hex preview", self._preview_selected_hex),
+        ):
+            preview_menu.add_command(label=label, command=command, state="disabled")
+            self._entry_bound_actions.append((preview_menu, label))
+        menu.add_cascade(label="Preview", menu=preview_menu)
+
+        export_menu = tk.Menu(menu, tearoff=False)
+        for label, command in (
+            ("Extract selected…", self._extract_selected),
+            ("Export binary patch workspace…", self._export_binary_workspace),
+        ):
+            export_menu.add_command(label=label, command=command, state="disabled")
+            self._entry_bound_actions.append((export_menu, label))
+        export_menu.add_command(
             label="Export editable native workspace…",
             command=self._export_native_workspace, state="disabled",
         )
-        menu.add_command(
-            label="Export binary patch workspace…",
-            command=self._export_binary_workspace, state="disabled",
+        self._native_authoring_actions.append(
+            (export_menu, "Export editable native workspace…")
         )
-        menu.add_command(
+        export_menu.add_command(
             label="Export GXT2 text workspace…",
             command=self._export_gxt2_workspace, state="disabled",
         )
-        menu.add_command(
+        self._gxt2_authoring_actions.append(
+            (export_menu, "Export GXT2 text workspace…")
+        )
+        export_menu.add_command(
             label="Extract selected subtree…",
             command=self._extract_selected_subtree, state="disabled",
         )
-        menu.add_separator()
-        menu.add_command(
-            label="Plan replacement…", command=self._plan_replacement, state="disabled",
-        )
-        menu.add_command(
+        self._subtree_actions.append((export_menu, "Extract selected subtree…"))
+        menu.add_cascade(label="Export Workspace", menu=export_menu)
+
+        plan_menu = tk.Menu(menu, tearoff=False)
+        for label, command in (
+            ("Plan replacement…", self._plan_replacement),
+            ("Plan replacement from binary workspace…", self._plan_binary_workspace_replacement),
+            ("Plan new entry…", self._plan_addition),
+            ("Plan deletion…", self._plan_deletion),
+            ("Plan rename…", self._plan_rename),
+        ):
+            plan_menu.add_command(label=label, command=command, state="disabled")
+            self._entry_bound_actions.append((plan_menu, label))
+        plan_menu.add_command(
             label="Plan replacement from native workspace…",
             command=self._plan_native_workspace_replacement, state="disabled",
         )
-        menu.add_command(
-            label="Plan replacement from binary workspace…",
-            command=self._plan_binary_workspace_replacement, state="disabled",
+        self._native_authoring_actions.append(
+            (plan_menu, "Plan replacement from native workspace…")
         )
-        menu.add_command(
+        plan_menu.add_command(
             label="Plan replacement from GXT2 workspace…",
             command=self._plan_gxt2_workspace_replacement, state="disabled",
         )
-        menu.add_command(
-            label="Plan new entry…", command=self._plan_addition, state="disabled",
+        self._gxt2_authoring_actions.append(
+            (plan_menu, "Plan replacement from GXT2 workspace…")
         )
-        menu.add_command(
-            label="Plan deletion…", command=self._plan_deletion, state="disabled",
-        )
-        menu.add_command(
-            label="Plan rename…", command=self._plan_rename, state="disabled",
-        )
+        menu.add_cascade(label="Plan Change", menu=plan_menu)
         self.entry_action_menus.append(menu)
         return menu
 
     def _set_archive_actions(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        for menu in self.file_menus:
-            menu.entryconfigure("Export index…", state=state)
-            menu.entryconfigure("Extract current archive tree…", state=state)
-            menu.entryconfigure("Compare with archive…", state=state)
-            menu.entryconfigure("Verify full archive integrity…", state=state)
-            menu.entryconfigure("Build verified defragmented copy…", state=state)
-            menu.entryconfigure("Create multi-entry plan…", state=state)
-            menu.entryconfigure("Plan new directory…", state=state)
-            menu.entryconfigure("Plan subtree workspace sync…", state=state)
-            menu.entryconfigure("Run disposable archive canary…", state=state)
-            graph_menu = menu.nametowidget(menu.entrycget("RPF package node graph", "menu"))
-            graph_menu.entryconfigure("Import opened RPF…", state=state)
+        for menu, label in self._archive_bound_actions:
+            menu.entryconfigure(label, state=state)
+        for menu, label in self._graph_import_actions:
+            menu.entryconfigure(label, state=state)
+        button = getattr(self, "graph_import_button", None)
+        if button is not None and button.winfo_exists():
+            button.configure(state=state)
 
     def _set_entry_actions(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        for menu in self.entry_action_menus:
-            menu.entryconfigure("Native preview", state=state)
-            menu.entryconfigure("Raw hex preview", state=state)
-            menu.entryconfigure("Extract selected…", state=state)
-            menu.entryconfigure("Export binary patch workspace…", state=state)
-            menu.entryconfigure("Export GXT2 text workspace…", state=state)
-            menu.entryconfigure("Export editable native workspace…", state=state)
-            menu.entryconfigure("Plan replacement…", state=state)
-            menu.entryconfigure("Plan replacement from native workspace…", state=state)
-            menu.entryconfigure("Plan replacement from binary workspace…", state=state)
-            menu.entryconfigure("Plan replacement from GXT2 workspace…", state=state)
-            menu.entryconfigure("Plan new entry…", state=state)
-            menu.entryconfigure("Plan deletion…", state=state)
-            menu.entryconfigure("Plan rename…", state=state)
+        for menu, label in self._entry_bound_actions:
+            menu.entryconfigure(label, state=state)
+        for button_name in (
+            "preview_entry_button", "extract_entry_button", "plan_entry_button",
+        ):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.configure(state=state)
 
     def _set_subtree_action(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        for menu in self.entry_action_menus:
-            menu.entryconfigure("Extract selected subtree…", state=state)
+        for menu, label in self._subtree_actions:
+            menu.entryconfigure(label, state=state)
 
     def _set_native_authoring_actions(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        for menu in self.entry_action_menus:
-            menu.entryconfigure("Export editable native workspace…", state=state)
-            menu.entryconfigure(
-                "Plan replacement from native workspace…", state=state,
-            )
+        for menu, label in self._native_authoring_actions:
+            menu.entryconfigure(label, state=state)
 
     def _set_gxt2_authoring_actions(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        for menu in self.entry_action_menus:
-            menu.entryconfigure("Export GXT2 text workspace…", state=state)
-            menu.entryconfigure(
-                "Plan replacement from GXT2 workspace…", state=state,
-            )
+        for menu, label in self._gxt2_authoring_actions:
+            menu.entryconfigure(label, state=state)
+        button = getattr(self, "edit_gxt2_button", None)
+        if button is not None:
+            button.configure(state=state)
 
     def _choose_game(self) -> None:
         selected = filedialog.askdirectory(parent=self, title="Select GTA V installation")
@@ -906,9 +1097,12 @@ class RpfExplorerDialog(ttk.Frame):
         return selected if selected and selected.is_dir() else None
 
     def _open_graph_dialog(self, graph: str | Path) -> None:
-        RpfPackageGraphDialog(
-            self, graph, self.project_root, self._graph_game_path(),
+        self._clear_workspace_host(self.graph_host)
+        self._graph_editor = RpfPackageGraphFrame(
+            self.graph_host, graph, self.project_root, self._graph_game_path(),
+            on_close=self._show_graph_home,
         )
+        self.workspace_tabs.select(self.graph_tab)
 
     def _create_rpf_graph_from_folder(self) -> None:
         source = filedialog.askdirectory(
@@ -1028,7 +1222,7 @@ class RpfExplorerDialog(ttk.Frame):
         except (OSError, ValueError) as exc:
             messagebox.showerror("Invalid GXT2 workspace", str(exc), parent=self)
             return
-        Gxt2WorkspaceDialog(self, selected)
+        self._open_gxt2_editor(selected)
 
     def _build_new_archive(self) -> None:
         game = Path(self.game_path.get().strip())
@@ -1127,6 +1321,10 @@ class RpfExplorerDialog(ttk.Frame):
         self.tree.delete(*self.tree.get_children())
         self.entry_items.clear()
         self.catalog_items.clear()
+        self._set_entry_actions(False)
+        self._set_subtree_action(False)
+        self._set_native_authoring_actions(False)
+        self._set_gxt2_authoring_actions(False)
         if self.index is None:
             return
         filtered = self._filtered()
@@ -1271,6 +1469,8 @@ class RpfExplorerDialog(ttk.Frame):
         self.catalog_items.clear()
         self._set_entry_actions(False)
         self._set_subtree_action(False)
+        self._set_native_authoring_actions(False)
+        self._set_gxt2_authoring_actions(False)
         grouped: dict[str, list[RpfCatalogResult]] = {}
         for result in results:
             grouped.setdefault(result.outer_archive, []).append(result)
@@ -1458,15 +1658,7 @@ class RpfExplorerDialog(ttk.Frame):
             messagebox.showerror("GXT2 workspace export failed", str(exc), parent=self)
             return
         self.status.set(f"Bound GXT2 text workspace exported: {workspace}")
-        messagebox.showinfo(
-            "GXT2 workspace exported",
-            "The validated hash/text table and immutable original are bound to this "
-            "exact archive entry. The editor will open now; console commands expose the "
-            "same guarded operations for automation. Return here afterward to create a "
-            f"reviewed replacement plan.\n\nWorkspace: {workspace}",
-            parent=self,
-        )
-        Gxt2WorkspaceDialog(self, workspace)
+        self._open_gxt2_editor(workspace)
 
     def _extract_selected(self) -> None:
         entry = self._selected()
@@ -1579,6 +1771,65 @@ class RpfExplorerDialog(ttk.Frame):
         self.status.set(
             f"RPF diff: {summary['added']} added · {summary['removed']} removed · "
             f"{summary['modified']} modified · {json_path}"
+        )
+
+    def _derive_change_plan(self) -> None:
+        if self.index is None or self.service is None:
+            return
+        selected = filedialog.askopenfilename(
+            parent=self, title="Select desired finished RPF archive",
+            filetypes=(("Rockstar archive", "*.rpf"), ("All files", "*.*")),
+        )
+        if not selected:
+            return
+        output = filedialog.asksaveasfilename(
+            parent=self, title="Save portable RPF change plan",
+            initialfile=(
+                f"{self.index.source.stem}-to-{Path(selected).stem}-change-plan.json"
+            ),
+            defaultextension=".json", filetypes=(("RPF change plan", "*.json"),),
+        )
+        if not output:
+            return
+        base, service = self.index, self.service
+        self.status.set("Deriving reviewed deep-entry changes from desired RPF…")
+
+        def work(progress) -> RpfDeltaPlanResult:
+            progress("Indexing desired recursive RPF tree", 3)
+            desired = service.index(selected)
+            return derive_rpf_change_plan(
+                service, base, desired, output, progress=progress,
+            )
+
+        def completed(result: RpfDeltaPlanResult) -> None:
+            plan = result.plan
+            self.status.set(
+                f"Derived {plan['status']} plan · {len(plan['changes']):,} action(s) · "
+                f"{result.plan_path}"
+            )
+            detail = (
+                "The base and desired archives were left untouched. Only changed "
+                "payloads were copied beside the hash-bound plan."
+            )
+            if plan["blocking_reasons"]:
+                detail += "\n\nApply remains blocked:\n• " + "\n• ".join(
+                    plan["blocking_reasons"]
+                )
+            messagebox.showinfo(
+                "RPF change plan ready",
+                f"{detail}\n\nPlan: {result.plan_path}\n"
+                f"Payloads: {result.payload_directory or 'none'}",
+                parent=self,
+            )
+
+        RpfProgressDialog(
+            self, "Deriving RPF change plan", work, completed,
+            lambda error: (
+                self.status.set("RPF delta planning was refused or failed safely."),
+                messagebox.showerror(
+                    "RPF change plan failed", str(error), parent=self,
+                ),
+            ),
         )
 
     def _verify_archive_integrity(self) -> None:
@@ -2364,7 +2615,21 @@ class RpfExplorerDialog(ttk.Frame):
         self.text_preview.configure(state="disabled")
         self.text_preview.pack(fill="both", expand=True)
 
+    def has_active_work(self) -> bool:
+        editor = getattr(self, "_graph_editor", None)
+        return bool(
+            editor is not None and editor.winfo_exists() and editor.has_active_work()
+        )
+
     def _close(self) -> None:
+        if self.has_active_work():
+            self.workspace_tabs.select(self.graph_tab)
+            messagebox.showinfo(
+                "Build flow still running",
+                "Wait for the current dry run or build to finish before closing RPF "
+                "Archives.", parent=self,
+            )
+            return
         if self._on_close is not None:
             self._on_close()
         elif self._window is not None:

@@ -77,15 +77,15 @@ class AddonSdkDialog(tk.Toplevel):
     def _build_menu(self) -> None:
         menu = tk.Menu(self, tearoff=False)
         content = self._make_content_menu(menu)
-        menu.add_cascade(label="Content", menu=content)
+        menu.add_cascade(label="Packages", menu=content)
         review = self._make_review_menu(menu)
-        menu.add_cascade(label="Review", menu=review)
+        menu.add_cascade(label="Inspect & Export", menu=review)
         intelligence = self._make_intelligence_menu(menu)
-        menu.add_cascade(label="Package Intelligence", menu=intelligence)
+        menu.add_cascade(label="Package Tools", menu=intelligence)
         view = tk.Menu(menu, tearoff=False)
         for index, (key, label) in enumerate((
-            ("linker", "Integration"), ("assets", "Native Assets"),
-            ("rpf", "RPF Explorer"), ("help", "Help Center"),
+            ("linker", "Package Linker"), ("assets", "Asset Viewer"),
+            ("rpf", "RPF Archives"), ("help", "Help Center"),
         ), start=1):
             view.add_command(
                 label=label, accelerator=f"Ctrl+{index}",
@@ -104,7 +104,7 @@ class AddonSdkDialog(tk.Toplevel):
             command=lambda: self._open_help("sdk"),
         )
         help_menu.add_command(
-            label="RPF Explorer Help",
+            label="RPF Archives Help",
             command=lambda: self._open_help("rpf-explorer"),
         )
         menu.add_cascade(label="Help", menu=help_menu)
@@ -134,7 +134,7 @@ class AddonSdkDialog(tk.Toplevel):
             label="Inspect package RPFs…", command=self._inspect_package_rpfs,
             state="disabled",
         )
-        menu.add_command(label="Open RPF Explorer…", command=self._open_rpf_explorer)
+        menu.add_command(label="Go to RPF Archives", command=self._open_rpf_explorer)
         self.review_menus.append(menu)
         return menu
 
@@ -172,6 +172,21 @@ class AddonSdkDialog(tk.Toplevel):
             "rpf": "rpf-explorer", "help": "input",
         }.get(getattr(self, "current_workspace", "linker"), "sdk")
         self._open_help(topic)
+
+    def request_close(self) -> bool:
+        """Close the SDK only when guarded authoring work is no longer active."""
+        rpf = getattr(self, "rpf_workspace", None)
+        if rpf is not None and rpf.has_active_work():
+            self._select_workspace("rpf")
+            rpf.workspace_tabs.select(rpf.graph_tab)
+            messagebox.showinfo(
+                "Build flow still running",
+                "Wait for the current dry run or build to finish before closing the SDK.",
+                parent=self,
+            )
+            return False
+        self.destroy()
+        return True
 
     def _select_workspace(self, key: str) -> None:
         pages = getattr(self, "workspace_pages", {})
@@ -217,7 +232,7 @@ class AddonSdkDialog(tk.Toplevel):
                 "Developer workspace for package integration, native assets, "
                 "archive inspection, compatibility, and safe authoring plans."
             ),
-            wraplength=1080, justify="left",
+            wraplength=760, justify="left",
         ).pack(anchor="w", pady=(3, 0))
         header_actions = ttk.Frame(header)
         header_actions.pack(side="right", padx=(18, 4), fill="y")
@@ -254,6 +269,9 @@ class AddonSdkDialog(tk.Toplevel):
         workspace.pack(side="left", fill="both", expand=True)
         workspace.rowconfigure(0, weight=1)
         workspace.columnconfigure(0, weight=1)
+        # Hidden workspaces must not force the main window wider than the
+        # user's selected size. The active page still fills the allotted area.
+        workspace.grid_propagate(False)
 
         linker_page = ttk.Frame(workspace)
         assets_page = ttk.Frame(workspace)
@@ -267,9 +285,9 @@ class AddonSdkDialog(tk.Toplevel):
         }
         self.workspace_buttons: dict[str, ttk.Button] = {}
         for index, (key, label) in enumerate((
-            ("linker", "Integration"),
-            ("assets", "Native Assets"),
-            ("rpf", "RPF Explorer"),
+            ("linker", "Package Linker"),
+            ("assets", "Asset Viewer"),
+            ("rpf", "RPF Archives"),
             ("help", "Help Center"),
         ), start=1):
             self.workspace_pages[key].grid(row=0, column=0, sticky="nsew")
@@ -288,16 +306,16 @@ class AddonSdkDialog(tk.Toplevel):
         toolbar.pack(fill="x", pady=(0, 10))
         content_menu = self._make_content_menu(toolbar)
         ttk.Menubutton(
-            toolbar, text="Import content", menu=content_menu,
+            toolbar, text="Import or audit package", menu=content_menu,
             style="Accent.TButton",
         ).pack(side="left")
         self.review_menu = self._make_review_menu(toolbar)
         ttk.Menubutton(
-            toolbar, text="Review actions", menu=self.review_menu,
+            toolbar, text="Inspect or export", menu=self.review_menu,
         ).pack(side="left", padx=(7, 0))
         intelligence_menu = self._make_intelligence_menu(toolbar)
         ttk.Menubutton(
-            toolbar, text="Package intelligence", menu=intelligence_menu,
+            toolbar, text="Package tools", menu=intelligence_menu,
         ).pack(side="left", padx=(7, 0))
         self.status = tk.StringVar(value="Loading SDK examples…")
         ttk.Label(toolbar, textvariable=self.status).pack(side="right")
@@ -306,7 +324,7 @@ class AddonSdkDialog(tk.Toplevel):
         panes.pack(fill="both", expand=True)
 
         examples = ttk.LabelFrame(panes, text="Packages", padding=8, width=250)
-        graph = ttk.LabelFrame(panes, text="Integration graph", padding=8)
+        graph = ttk.LabelFrame(panes, text="Package links", padding=8)
         inspector = ttk.LabelFrame(panes, text="Field inspector", padding=8)
         # Package names and compatibility tags need enough width to scan without
         # forcing users to resize the first pane every session.
@@ -328,7 +346,7 @@ class AddonSdkDialog(tk.Toplevel):
         self.example_list.configure(yscrollcommand=example_scroll.set)
         self.example_list.pack(side="left", fill="both", expand=True)
         example_scroll.pack(side="right", fill="y")
-        self.example_list.bind("<<ListboxSelect>>", self._select_example)
+        self.example_list.bind("<<TreeviewSelect>>", self._select_example)
 
         self.graph = ttk.Treeview(
             graph, columns=("type", "status"), show="tree headings", selectmode="browse",
@@ -649,15 +667,22 @@ class AddonSdkDialog(tk.Toplevel):
             messagebox.showerror("OIV inspection failed", str(exc), parent=self)
             return
         self.status.set(f"OIV plan written: {report.name}")
-        if plan.xml_compilable:
+        if plan.rpf_recipe_compilable:
+            recipe_summary = (
+                f"{len(plan.xml_operations)} XML and "
+                f"{len(plan.text_operations)} bounded text operation(s) and "
+                f"{len(plan.pso_operations)} native PSO operation(s)"
+            )
             if not messagebox.askyesno(
-                "Verified OIV XML compile available",
-                "This recipe uses the supported OIV 2.2 XML add/replace/remove "
-                "grammar. Select the matching outer RPF to compile every XPath "
-                "edit into reparsed payloads and a hash-bound inert plan?\n\n"
+                "Verified OIV RPF recipe compile available",
+                f"This recipe contains {recipe_summary}. Select the matching outer "
+                "RPF to replay the ordered edits into verified payloads and a "
+                "hash-bound inert plan? Native PSO resources are decoded and rebuilt "
+                "with the matching game keys. Exact and prefix text selectors must "
+                "match one line; wildcard masks remain blocked.\n\n"
                 "The selected archive will not be changed.", parent=self,
             ):
-                self.status.set(f"OIV XML plan written: {report.name}")
+                self.status.set(f"OIV recipe plan written: {report.name}")
                 return
             game = self.installation_roots[0] if len(self.installation_roots) == 1 else None
             if game is None:
@@ -671,19 +696,21 @@ class AddonSdkDialog(tk.Toplevel):
                 filetypes=(("RPF archive", "*.rpf"), ("All files", "*.*")),
             ) if game is not None else ""
             bundle_dir = filedialog.askdirectory(
-                parent=self, title="Select a new OIV XML compile folder",
+                parent=self, title="Select a new OIV recipe compile folder",
                 mustexist=False,
             ) if selected_archive else ""
             if game is None or not selected_archive or not bundle_dir:
                 return
 
-            def xml_completed(outputs) -> None:
+            def recipe_completed(outputs) -> None:
                 plan_path, audit_path = outputs
-                self.status.set(f"Verified OIV XML plan: {plan_path}")
+                self.status.set(f"Verified OIV RPF recipe plan: {plan_path}")
                 messagebox.showinfo(
-                    "OIV XML compile complete",
-                    "Every XML payload was reparsed and canonically verified. The "
-                    "selected archive was not changed.\n\n"
+                    "OIV RPF recipe compile complete",
+                    "Every XML payload was canonically verified, every text payload "
+                    "passed encoding round-trip verification, and every PSO payload "
+                    "was rebuilt, reparsed, and semantically checked. XML-shaped text "
+                    "remained well-formed. The selected archive was not changed.\n\n"
                     f"RPF plan: {plan_path}\nAudit: {audit_path}", parent=self,
                 )
 
@@ -693,13 +720,13 @@ class AddonSdkDialog(tk.Toplevel):
                 self.project_root, game, workspace_roots=(archive_path.parent,),
             )
             RpfProgressDialog(
-                self, "Compiling verified OIV XML payloads",
-                lambda _progress: workbench.compile_xml_rpf_bundle(
+                self, "Compiling verified OIV RPF recipe",
+                lambda _progress: workbench.compile_rpf_recipe_bundle(
                     plan, archive_path, bundle_dir, service=service,
                 ),
-                xml_completed,
+                recipe_completed,
                 lambda exc: messagebox.showerror(
-                    "OIV XML compile failed", str(exc), parent=self,
+                    "OIV recipe compile failed", str(exc), parent=self,
                 ),
             )
             return
@@ -736,14 +763,15 @@ class AddonSdkDialog(tk.Toplevel):
                 messagebox.showinfo(
                     "Atomic RPF batches exported",
                     f"Exported {len(manifests)} outer-archive manifest(s). Open the "
-                    "matching archive in RPF Explorer and choose Create multi-entry "
+                    "matching archive in RPF Archives and choose Create multi-entry "
                     "plan.", parent=self,
                 )
         if plan.created_archive_operations and messagebox.askyesno(
             "Verified created-RPF export available",
             "This recipe declares bounded createIfNotExist archives. Extract only its "
-            "declared payloads, build every archive, verify the recursive tree and "
-            "exact payload hashes, and create a managed package?",
+            "declared payloads, replay supported XML, bounded text edits, and cleanup "
+            "deletes in recipe order, build every archive, verify the recursive tree "
+            "and exact payload hashes, and create a managed package?",
             parent=self,
         ):
             game = self.installation_roots[0] if len(self.installation_roots) == 1 else None
@@ -763,8 +791,11 @@ class AddonSdkDialog(tk.Toplevel):
                     messagebox.showinfo(
                         "Created RPF package exported",
                         "Every new archive passed recursive and exact-payload "
-                        f"verification.\n\nManifest: {manifest}\n\nReview it before "
-                        "using Import & install.", parent=self,
+                        "verification. XML edits were canonically verified, text edits "
+                        "passed encoding round-trip checks, and the ordered recipe "
+                        "audit was retained."
+                        f"\n\nManifest: {manifest}\n\nReview it before using "
+                        "Import & install.", parent=self,
                     )
 
                 RpfProgressDialog(

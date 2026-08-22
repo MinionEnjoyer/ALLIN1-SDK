@@ -19,6 +19,7 @@ from allin1_sdk.rpf_graph_previews import (
     ASSET_PREVIEW_WIDTH,
     AssetPreviewRequest,
     render_asset_preview,
+    render_graph_preview_bundle,
 )
 from allin1_sdk.rpf_program_ui import RpfProgramFrame
 
@@ -78,8 +79,8 @@ class _GraphWorkDialog(tk.Toplevel):
             self.completed(payload)
 
 
-class RpfPackageGraphDialog(tk.Toplevel):
-    """Visual containment graph backed by the same CLI/API graph document."""
+class RpfPackageGraphFrame(ttk.Frame):
+    """Embeddable visual graph backed by the same CLI/API graph document."""
 
     COLORS = {
         "archive": ("#6D4AA0", "#251D32"),
@@ -90,15 +91,14 @@ class RpfPackageGraphDialog(tk.Toplevel):
     def __init__(
         self, parent: tk.Misc, graph: str | Path, project_root: str | Path,
         game_path: str | Path | None = None,
+        *, on_close=None,
     ) -> None:
         super().__init__(parent)
+        self.pack(fill="both", expand=True)
         self.graph = Path(graph).resolve()
         self.project_root = Path(project_root).resolve()
         self.game_path = Path(game_path).resolve() if game_path else None
-        self.title("ALLIN1 — RPF Package Node Graph")
-        self.geometry("1460x900")
-        self.minsize(1050, 680)
-        self.transient(parent.winfo_toplevel())
+        self._on_close = on_close
         self.graph_state: dict = {}
         self.visible: set[str] = set()
         self.edge_items: dict[tuple[str, str], int] = {}
@@ -125,6 +125,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
         self._preview_images: dict[str, Image.Image] = {}
         self._preview_photos: dict[str, ImageTk.PhotoImage] = {}
         self._preview_messages: dict[str, str] = {}
+        self._preview_stop = threading.Event()
         self._preview_worker_thread = threading.Thread(
             target=self._asset_preview_worker, daemon=True,
             name="allin1-rpf-asset-previews",
@@ -137,10 +138,13 @@ class RpfPackageGraphDialog(tk.Toplevel):
         self.after_idle(self._focus_initial_view)
         self.after(150, self._focus_initial_view)
         self.after(90, self._poll_asset_previews)
-        self.bind("<Control-plus>", lambda _event: self._zoom_by(ZOOM_FACTOR))
-        self.bind("<Control-equal>", lambda _event: self._zoom_by(ZOOM_FACTOR))
-        self.bind("<Control-minus>", lambda _event: self._zoom_by(1 / ZOOM_FACTOR))
-        self.bind("<Control-0>", lambda _event: self._reset_zoom())
+        for widget in (self, self.canvas):
+            widget.bind("<Control-plus>", lambda _event: self._zoom_by(ZOOM_FACTOR))
+            widget.bind("<Control-equal>", lambda _event: self._zoom_by(ZOOM_FACTOR))
+            widget.bind(
+                "<Control-minus>", lambda _event: self._zoom_by(1 / ZOOM_FACTOR),
+            )
+            widget.bind("<Control-0>", lambda _event: self._reset_zoom())
 
     def _focus_initial_view(self) -> None:
         if not self.winfo_exists():
@@ -166,6 +170,53 @@ class RpfPackageGraphDialog(tk.Toplevel):
         )
         ttk.Button(header, text="Auto layout", command=self._auto_layout).pack(
             side="right", padx=(0, 6),
+        )
+
+        authoring_bar = ttk.Frame(outer)
+        authoring_bar.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            authoring_bar, text="AUTHORING", font=("Segoe UI Semibold", 9),
+            foreground="#52635c",
+        ).pack(side="left", padx=(0, 7))
+        add_button = ttk.Menubutton(authoring_bar, text="Add to package")
+        add_menu = tk.Menu(add_button, tearoff=False)
+        add_menu.add_command(label="Directory…", command=self._add_directory)
+        add_menu.add_command(label="Nested RPF…", command=self._add_archive)
+        add_menu.add_command(label="Source file…", command=self._add_file)
+        add_button.configure(menu=add_menu)
+        add_button.pack(side="left")
+        ttk.Button(
+            authoring_bar, text="Rename selected…", command=self._rename,
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(
+            authoring_bar, text="Remove selected…", command=self._remove,
+        ).pack(side="left", padx=(6, 0))
+        output_button = ttk.Menubutton(authoring_bar, text="Create output")
+        output_menu = tk.Menu(output_button, tearoff=False)
+        output_menu.add_command(
+            label="Materialize loose source…", command=self._materialize,
+        )
+        output_menu.add_command(
+            label="Build + exactly verify RPF…", command=self._build_archive,
+        )
+        output_menu.add_command(
+            label="Plan changes to imported origin…",
+            command=self._plan_origin_changes,
+        )
+        output_menu.add_separator()
+        output_menu.add_command(
+            label="Export preview bundle…",
+            command=self._export_preview_bundle,
+        )
+        output_button.configure(menu=output_menu)
+        output_button.pack(side="left", padx=(12, 0))
+        self.close_button = ttk.Button(
+            authoring_bar, text="Close graph", command=self._close_panel,
+        )
+        self.close_button.pack(side="right")
+
+        ttk.Label(outer, textvariable=self.status, foreground="#52635c").pack(
+            side="bottom", fill="x", pady=(7, 0),
         )
 
         notebook = ttk.Notebook(outer)
@@ -203,11 +254,6 @@ class RpfPackageGraphDialog(tk.Toplevel):
         ttk.Button(search, text="100%", command=self._reset_zoom).pack(
             side="left", padx=(4, 0),
         )
-        ttk.Label(
-            search, text="Drag cards · drag an output port onto another card to reparent",
-            foreground="#52635c",
-        ).pack(side="right", padx=(12, 0))
-
         canvas_host = tk.Frame(canvas_frame, background="#111714")
         canvas_host.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(
@@ -245,39 +291,55 @@ class RpfPackageGraphDialog(tk.Toplevel):
             ).pack(anchor="w", pady=(3, 0))
 
         ttk.Label(
-            inspector, text="Authoring", font=("Segoe UI Semibold", 10),
-        ).pack(anchor="w", pady=(18, 6))
-        for text, command in (
-            ("Add directory", self._add_directory),
-            ("Add nested RPF", self._add_archive),
-            ("Add source file", self._add_file),
-            ("Rename selected", self._rename),
-            ("Remove selected subtree", self._remove),
-        ):
-            ttk.Button(inspector, text=text, command=command).pack(fill="x", pady=(0, 5))
-
-        ttk.Label(
-            inspector, text="Output", font=("Segoe UI Semibold", 10),
-        ).pack(anchor="w", pady=(15, 6))
-        ttk.Button(
-            inspector, text="Materialize loose source…", command=self._materialize,
-        ).pack(fill="x", pady=(0, 5))
-        ttk.Button(
-            inspector, text="Build + exactly verify RPF…", command=self._build_archive,
-        ).pack(fill="x", pady=(0, 5))
-        ttk.Button(
-            inspector, text="Plan changes to imported origin…",
-            command=self._plan_origin_changes,
-        ).pack(fill="x", pady=(0, 5))
-        ttk.Button(inspector, text="Close", command=self.destroy).pack(
-            fill="x", pady=(20, 0),
-        )
-        RpfProgramFrame(
+            inspector,
+            text=(
+                "Use the Authoring bar to add, rename, or remove nodes and to create "
+                "verified outputs."
+            ),
+            foreground="#52635c", wraplength=285, justify="left",
+        ).pack(anchor="w", pady=(18, 0))
+        self.program_frame = RpfProgramFrame(
             program_tab, self.graph, self.project_root, self.game_path,
-        ).pack(fill="both", expand=True)
-        ttk.Label(outer, textvariable=self.status, foreground="#52635c").pack(
-            fill="x", pady=(7, 0),
+            on_busy_change=self._set_program_busy,
         )
+        self.program_frame.pack(fill="both", expand=True)
+
+    def _set_program_busy(self, busy: bool) -> None:
+        button = getattr(self, "close_button", None)
+        if button is not None and button.winfo_exists():
+            button.configure(state="disabled" if busy else "normal")
+
+    def has_active_work(self) -> bool:
+        program = getattr(self, "program_frame", None)
+        return bool(program is not None and program.winfo_exists() and program.busy)
+
+    def _close_panel(self) -> bool:
+        if self.has_active_work():
+            messagebox.showinfo(
+                "Build flow still running",
+                "Wait for the current dry run or build to finish before closing this "
+                "package graph.", parent=self,
+            )
+            return False
+        if self._on_close is not None:
+            self._on_close()
+        else:
+            self.destroy()
+        return True
+
+    def destroy(self) -> None:
+        stop = getattr(self, "_preview_stop", None)
+        if stop is not None:
+            stop.set()
+        worker = getattr(self, "_preview_worker_thread", None)
+        if worker is not None and worker.is_alive():
+            while True:
+                try:
+                    self._preview_requests.get_nowait()
+                except queue.Empty:
+                    break
+            self._preview_requests.put(None)
+        super().destroy()
 
     def _reload(self, select: str | None = None) -> None:
         try:
@@ -453,6 +515,8 @@ class RpfPackageGraphDialog(tk.Toplevel):
         return "Enhanced"
 
     def _queue_asset_preview(self, node_id: str, node: dict) -> None:
+        if self._preview_stop.is_set():
+            return
         source_value = node.get("source")
         expected_hash = str(node.get("sha256", "")).casefold()
         expected_size = node.get("size")
@@ -487,14 +551,16 @@ class RpfPackageGraphDialog(tk.Toplevel):
         ))
 
     def _asset_preview_worker(self) -> None:
-        while True:
+        while not self._preview_stop.is_set():
             request = self._preview_requests.get()
-            if request is None:
+            if request is None or self._preview_stop.is_set():
                 return
             try:
                 preview = render_asset_preview(
                     request, self.project_root, self.game_path,
                 )
+                if self._preview_stop.is_set():
+                    return
                 self._preview_results.put(
                     (request.node_id, request.cache_key, preview, None)
                 )
@@ -502,11 +568,15 @@ class RpfPackageGraphDialog(tk.Toplevel):
                 OSError, RuntimeError, ValueError, UnidentifiedImageError,
                 Image.DecompressionBombError,
             ) as exc:
+                if self._preview_stop.is_set():
+                    return
                 self._preview_results.put(
                     (request.node_id, request.cache_key, None, str(exc))
                 )
 
     def _poll_asset_previews(self) -> None:
+        if self._preview_stop.is_set():
+            return
         changed = False
         while True:
             try:
@@ -875,6 +945,33 @@ class RpfPackageGraphDialog(tk.Toplevel):
             parent=self,
         )
 
+    def _export_preview_bundle(self) -> None:
+        destination = filedialog.asksaveasfilename(
+            parent=self, title="Create portable graph preview bundle",
+            initialfile=f"{self.graph.stem}-preview-bundle",
+            filetypes=(("Preview bundle folder", "*"),),
+        )
+        if not destination:
+            return
+
+        def completed(result) -> None:
+            bundle, report = result
+            self.status.set(f"Exported hash-verified preview bundle: {bundle}")
+            messagebox.showinfo(
+                "Graph previews exported",
+                f"Bundle: {bundle}\nReport: {report}", parent=self,
+            )
+
+        _GraphWorkDialog(
+            self, "Exporting graph previews",
+            "Rendering bounded, hash-verified previews into a portable bundle…",
+            lambda: render_graph_preview_bundle(
+                self.graph, destination, self.project_root,
+                game_path=self.game_path,
+            ),
+            completed,
+        )
+
     def _materialize(self) -> None:
         parent = filedialog.askdirectory(
             parent=self, title="Select parent folder for loose graph source",
@@ -938,7 +1035,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
             messagebox.showinfo(
                 "No imported origin",
                 "This graph was not imported from an existing RPF. Build a new archive "
-                "instead, or import an opened RPF from RPF Explorer.",
+                "instead, or import an opened RPF from RPF Archives.",
                 parent=self,
             )
             return
@@ -976,3 +1073,37 @@ class RpfPackageGraphDialog(tk.Toplevel):
             ),
             completed,
         )
+
+
+class RpfPackageGraphDialog(tk.Toplevel):
+    """Compatibility host for opening the package graph as a standalone window."""
+
+    def __init__(
+        self, parent: tk.Misc, graph: str | Path, project_root: str | Path,
+        game_path: str | Path | None = None,
+        *, on_close=None,
+    ) -> None:
+        super().__init__(parent)
+        self._on_close = on_close
+        self.title("ALLIN1 — RPF Package Node Graph")
+        self.geometry("1460x900")
+        self.minsize(1050, 680)
+        self.transient(parent.winfo_toplevel())
+        self.editor = RpfPackageGraphFrame(
+            self, graph, project_root, game_path, on_close=self._finish_close,
+        )
+
+    def _finish_close(self) -> None:
+        self.destroy()
+        if self._on_close is not None:
+            self._on_close()
+
+    def request_close(self) -> bool:
+        """Close only after any active Build Flow operation has completed."""
+        return self.editor._close_panel()
+
+    def destroy(self) -> None:
+        editor = getattr(self, "editor", None)
+        if editor is not None and editor.winfo_exists():
+            editor.destroy()
+        super().destroy()

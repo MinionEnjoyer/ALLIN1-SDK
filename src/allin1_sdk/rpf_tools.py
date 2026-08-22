@@ -2498,6 +2498,47 @@ class RpfExplorerService:
         plan_source = Path(plan_path).expanduser().resolve()
         plan = _read_json_object(plan_source, "RPF entry-change plan")
         if plan.get("operation") == "rpf_multi_entry_change":
+            derived = plan.get("derived_delta")
+            if derived is not None:
+                if not isinstance(derived, dict) or derived.get("schema_version") != 1:
+                    raise ValueError("Unsupported derived RPF delta metadata")
+                authored_root = derived.get("payload_directory")
+                if authored_root is not None:
+                    relative_root = Path(str(authored_root))
+                    if relative_root.is_absolute():
+                        raise ValueError(
+                            "Derived RPF delta payload directory must be relative to its plan"
+                        )
+                    if len(relative_root.parts) != 1 or relative_root.name in {
+                        "", ".", "..",
+                    }:
+                        raise ValueError(
+                            "Derived RPF delta payload directory must be one sibling folder"
+                        )
+                    payload_root = (plan_source.parent / relative_root).resolve()
+                    if not payload_root.is_relative_to(plan_source.parent):
+                        raise ValueError(
+                            "Derived RPF delta payload directory escapes its plan folder"
+                        )
+                    for change in plan.get("changes", ()):
+                        if not isinstance(change, dict) or change.get("payload") is None:
+                            continue
+                        payload = change["payload"]
+                        if not isinstance(payload, dict):
+                            raise ValueError(
+                                "Derived RPF delta contains invalid payload metadata"
+                            )
+                        authored_payload = Path(str(payload.get("path", "")))
+                        if authored_payload.is_absolute():
+                            raise ValueError(
+                                "Derived RPF delta payload paths must be relative to its plan"
+                            )
+                        resolved_payload = (plan_source.parent / authored_payload).resolve()
+                        if not resolved_payload.is_relative_to(payload_root):
+                            raise ValueError(
+                                "Derived RPF delta payload escapes its declared sidecar"
+                            )
+                        payload["path"] = str(resolved_payload)
             archive, changes = self._validate_multi_plan(plan)
             self._require_game_closed()
             lock = self._acquire_archive_lock(archive, plan["plan_id"])

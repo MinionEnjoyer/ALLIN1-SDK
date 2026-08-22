@@ -1825,6 +1825,10 @@ namespace RpfPatcher
                         var ymfEntry = LooseBinaryEntry(input);
                         var ymf = RpfFile.GetFile<YmfFile>(ymfEntry, data);
                         xml = MetaXml.GetXml(ymf, out _); break;
+                    case ".pso":
+                        var psoEntry = LooseBinaryEntry(input);
+                        var jpso = RpfFile.GetFile<JPsoFile>(psoEntry, data);
+                        xml = MetaXml.GetXml(jpso, out _); break;
                     case ".ynd":
                         var ynd = new YndFile(); ynd.Load(data);
                         xml = YndXml.GetXml(ynd); break;
@@ -1965,6 +1969,7 @@ namespace RpfPatcher
                         break;
                     case ".ymt":
                     case ".ymf":
+                    case ".pso":
                         if (sourceAsset == null)
                             throw new InvalidDataException(
                                 $"{suffix} XML import requires its original source asset to identify META, PSO, or RBF encoding.");
@@ -1980,7 +1985,7 @@ namespace RpfPatcher
                 if (suffix == ".awc")
                     LoadAwcKey(gtaPath, gen9);
                 if (sourceAsset != null && (suffix == ".ymap" || suffix == ".ytyp"
-                    || suffix == ".ymt" || suffix == ".ymf"))
+                    || suffix == ".ymt" || suffix == ".ymf" || suffix == ".pso"))
                 {
                     byte[] sourceData = File.ReadAllBytes(sourceAsset);
                     var sourceEntry = LooseBinaryEntry(sourceAsset);
@@ -2002,10 +2007,15 @@ namespace RpfPatcher
                         var parsed = RpfFile.GetFile<YmtFile>(sourceEntry, sourceData);
                         meta = parsed?.Meta; pso = parsed?.Pso; rbf = parsed?.Rbf;
                     }
-                    else
+                    else if (suffix == ".ymf")
                     {
                         var parsed = RpfFile.GetFile<YmfFile>(sourceEntry, sourceData);
                         meta = parsed?.Meta; pso = parsed?.Pso; rbf = parsed?.Rbf;
+                    }
+                    else
+                    {
+                        var parsed = RpfFile.GetFile<JPsoFile>(sourceEntry, sourceData);
+                        pso = parsed?.Pso;
                     }
                     if (meta != null)
                     {

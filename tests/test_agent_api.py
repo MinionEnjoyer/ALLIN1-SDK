@@ -19,6 +19,7 @@ def test_catalog_is_structured_and_classifies_risk():
     assert catalog["link"]["risk"] == "authoring_write"
     assert catalog["extract-rpf-subtree"]["risk"] == "authoring_write"
     assert catalog["diff-rpf"]["risk"] == "authoring_write"
+    assert catalog["derive-rpf-plan"]["risk"] == "authoring_write"
     assert catalog["plan-rpf-batch"]["risk"] == "authoring_write"
     assert catalog["plan-rpf-sync"]["risk"] == "authoring_write"
     assert catalog["export-native-workspace"]["risk"] == "authoring_write"

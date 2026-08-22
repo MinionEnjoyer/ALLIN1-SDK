@@ -30,12 +30,12 @@ from allin1_sdk.processes import run_hidden
 
 
 NATIVE_XML_SUFFIXES = frozenset({
-    ".awc", ".gxt2", ".rel", ".ybn", ".ycd", ".ydd", ".ydr",
+    ".awc", ".gxt2", ".pso", ".rel", ".ybn", ".ycd", ".ydd", ".ydr",
     ".yed", ".yfd", ".yft", ".ymap", ".ymf", ".ymt", ".ynd",
     ".ynv", ".ypt", ".ytd", ".ytyp", ".yvr", ".ywr",
 })
 NATIVE_XML_IMPORT_SUFFIXES = frozenset({
-    ".awc", ".rel", ".ybn", ".ycd", ".ydd", ".ydr", ".yed",
+    ".awc", ".pso", ".rel", ".ybn", ".ycd", ".ydd", ".ydr", ".yed",
     ".yfd", ".yft", ".ymap", ".ymf", ".ymt", ".ynd", ".ynv",
     ".ypt", ".ytd", ".ytyp", ".yvr", ".ywr",
 })
@@ -260,7 +260,9 @@ def _format_identity(name: str, data: bytes) -> tuple[str, dict[str, Any]]:
         ".ydr": "Rockstar drawable", ".ydd": "Rockstar drawable dictionary",
         ".yft": "Rockstar fragment", ".ybn": "Rockstar collision bounds",
         ".ymap": "Rockstar map placement", ".ytyp": "Rockstar archetype definition",
-        ".ymt": "Rockstar metadata resource", ".gxt2": "Rockstar GXT2 text table",
+        ".ymt": "Rockstar metadata resource", ".ymf": "Rockstar metadata manifest",
+        ".pso": "Rockstar PSO metadata resource",
+        ".gxt2": "Rockstar GXT2 text table",
         ".awc": "Rockstar AWC audio container", ".rel": "Rockstar audio relationship",
         ".gfx": "Scaleform interface movie", ".ycd": "Rockstar clip dictionary",
         ".ynd": "Rockstar path nodes", ".ynv": "Rockstar navigation mesh",
