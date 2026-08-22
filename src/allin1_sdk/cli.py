@@ -548,7 +548,7 @@ def compile_oiv_recipe(
     source: Path, archive: Path, output: Path, gta_path: Path | None,
     workspace_root: Path | None,
 ) -> None:
-    """Compile guarded OIV XML and text commands into an inert RPF plan."""
+    """Compile guarded OIV XML, text, and PSO commands into an inert RPF plan."""
     try:
         workbench = OivWorkbench()
         recipe = workbench.inspect(source)
@@ -561,7 +561,8 @@ def compile_oiv_recipe(
         raise click.ClickException(str(exc)) from exc
     click.echo(
         f"Compiled {len(recipe.xml_operations)} XML and "
-        f"{len(recipe.text_operations)} bounded text operation(s); wrote "
+        f"{len(recipe.text_operations)} bounded text operation(s) and "
+        f"{len(recipe.pso_operations)} native PSO operation(s); wrote "
         f"{authored['status']} inert RPF plan: {plan}"
     )
     click.echo(f"Structured recipe verification audit: {audit}")

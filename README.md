@@ -45,13 +45,15 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
 - **OIV workbench** — preview ordered OIV operations, export a managed package
   when every operation fits receipt ownership, and translate existing nested-RPF
   adds/replacements/deletes into payload-backed atomic batch manifests. Official
-  OIV 2.2 XML add/replace/remove commands compile against an explicitly selected
+  OIV 2.1/2.2 XML add/replace/remove commands compile against an explicitly selected
   RPF into canonical-reparse-verified payloads and an inert hash-bound plan.
   Line-oriented text recipes support ordered append/insert/replace/delete with
   exact or prefix selectors that must match one line; encoding, BOM, and newline
   style are preserved and verified. Bounded newly created archives can replay
   declared adds, structured edits, and cleanup deletes before exact recursive
-  verification and managed export.
+  verification and managed export. Native PSO/META recipes use the matching game
+  keys, source-aware native rebuild, and a mandatory semantic reparse before an
+  inert archive plan is emitted.
 - **Native Asset Viewer** — browse authored text and images, parse bounded RAGE
   resource headers, convert supported resources to structured CodeWalker XML,
   generate YTD texture contact sheets, render bounded indexed-geometry previews for
@@ -435,8 +437,11 @@ service used by the launcher.
   exactly one textual `.xml`/`.meta` entry inside one existing archive tree.
   Compilation preserves source encoding, blocks entities and unbounded XPath
   constructs, coalesces repeated edits per entry, and emits the normal guarded
-  multi-entry plan without writing the archive. Wildcard text masks and PSO/META
-  commands remain blocked.
+  multi-entry plan without writing the archive. Wildcard text masks remain blocked.
+  Native PSO/META commands are limited to supported native resource types in an
+  existing archive: the exact resource is decoded with matching game keys, edited
+  through the same bounded XPath engine, rebuilt against its immutable source, and
+  required to reparse to semantically identical XML before entering the plan.
 - Native workspaces retain an immutable source snapshot, editable CodeWalker XML and
   dependencies, edition metadata, and hashes. Build refuses path escapes, links,
   collisions, source tampering, unsupported types, oversized inputs, and any result
@@ -502,9 +507,9 @@ service used by the launcher.
   full-outer-archive rollback receipt.
 - Canary mode never writes its selected source. It uses a generated external copy and
   is successful only after replace, add, delete, and exact final-hash rollback checks.
-- OIV conversion stops when an operation cannot be represented safely; XML
+- OIV conversion stops when an operation cannot be represented safely; structured
   compilation additionally binds `assembly.xml`, the selected archive, every
-  original target, and every resulting payload by SHA-256.
+  original target, decoded/edited PSO XML, and every resulting payload by SHA-256.
 - Temporary archive extraction is bounded and removed after inspection.
 - Edition uncertainty remains visible instead of silently selecting Legacy or
   Enhanced behavior.

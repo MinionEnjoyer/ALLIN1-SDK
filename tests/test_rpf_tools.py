@@ -1926,6 +1926,8 @@ def test_native_asset_lightweight_gxt_dds_and_signatures(tmp_path):
     assert rsc.metadata["resource_container"] == "RSC8"
     assert rsc.metadata["resource_version"] == 159
     assert "safety limit" in rsc.warnings[0]
+    pso = inspector.inspect_bytes("metadata.pso", b"PSIN" + b"\0" * 12)
+    assert pso.format_name == "Rockstar PSO metadata resource"
 
     awc = inspector.inspect_bytes("sound.awc", b"ADAT" + b"\x01\0\0\0" + struct.pack("<I", 4))
     assert awc.metadata["endianness"] == "little"
@@ -2582,6 +2584,7 @@ def test_rpf_native_workspace_plan_cleans_failed_build(tmp_path, monkeypatch):
 
 
 def test_native_preview_limits():
+    assert native_preview_limit("metadata.pso", 20) == 21
     assert native_preview_limit("model.yft", 20) == 21
     assert native_preview_limit("huge.yft", MAX_NATIVE_PREVIEW_BYTES + 10) == MAX_NATIVE_PREVIEW_BYTES
     assert native_preview_limit("huge.bin", 20 * 1024 * 1024) == 8 * 1024 * 1024

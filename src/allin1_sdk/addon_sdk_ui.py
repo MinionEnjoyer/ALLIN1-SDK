@@ -652,14 +652,16 @@ class AddonSdkDialog(tk.Toplevel):
         if plan.rpf_recipe_compilable:
             recipe_summary = (
                 f"{len(plan.xml_operations)} XML and "
-                f"{len(plan.text_operations)} bounded text operation(s)"
+                f"{len(plan.text_operations)} bounded text operation(s) and "
+                f"{len(plan.pso_operations)} native PSO operation(s)"
             )
             if not messagebox.askyesno(
                 "Verified OIV RPF recipe compile available",
                 f"This recipe contains {recipe_summary}. Select the matching outer "
                 "RPF to replay the ordered edits into verified payloads and a "
-                "hash-bound inert plan? Exact and prefix text selectors must match "
-                "one line; wildcard masks remain blocked.\n\n"
+                "hash-bound inert plan? Native PSO resources are decoded and rebuilt "
+                "with the matching game keys. Exact and prefix text selectors must "
+                "match one line; wildcard masks remain blocked.\n\n"
                 "The selected archive will not be changed.", parent=self,
             ):
                 self.status.set(f"OIV recipe plan written: {report.name}")
@@ -687,9 +689,10 @@ class AddonSdkDialog(tk.Toplevel):
                 self.status.set(f"Verified OIV RPF recipe plan: {plan_path}")
                 messagebox.showinfo(
                     "OIV RPF recipe compile complete",
-                    "Every XML payload was canonically verified and every text "
-                    "payload passed encoding round-trip verification. XML-shaped "
-                    "text remained well-formed. The selected archive was not changed.\n\n"
+                    "Every XML payload was canonically verified, every text payload "
+                    "passed encoding round-trip verification, and every PSO payload "
+                    "was rebuilt, reparsed, and semantically checked. XML-shaped text "
+                    "remained well-formed. The selected archive was not changed.\n\n"
                     f"RPF plan: {plan_path}\nAudit: {audit_path}", parent=self,
                 )
 

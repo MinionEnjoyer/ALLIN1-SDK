@@ -31,6 +31,7 @@ from allin1_sdk.oiv_text import (
     OivTextEdit,
     OivTextMergeEngine,
 )
+from allin1_sdk.native_assets import NativeAssetInspector
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,10 @@ class OivPlan:
         return tuple(item for item in self.operations if item.kind == "text")
 
     @property
+    def pso_operations(self) -> tuple[OivOperation, ...]:
+        return tuple(item for item in self.operations if item.kind == "pso")
+
+    @property
     def rpf_batch_operations(self) -> tuple[OivOperation, ...]:
         created = self._created_archive_chains()
         return tuple(
@@ -106,12 +111,12 @@ class OivPlan:
     def translatable(self) -> bool:
         actionable = tuple(
             item for item in self.operations
-            if item.kind in {"add", "delete", "xml", "text"}
+            if item.kind in {"add", "delete", "xml", "text", "pso"}
         )
         created = self._created_archive_chains()
         structured_inside_created = all(
             any(item.archives[:len(chain)] == chain for chain in created)
-            for item in self.xml_operations + self.text_operations
+            for item in self.xml_operations + self.text_operations + self.pso_operations
         )
         return bool(actionable) and not any(
             not item.supported for item in self.operations
@@ -123,7 +128,7 @@ class OivPlan:
     def recipe_supported(self) -> bool:
         actionable = tuple(
             item for item in self.operations
-            if item.kind in {"add", "delete", "xml", "text"}
+            if item.kind in {"add", "delete", "xml", "text", "pso"}
         )
         return bool(actionable) and not any(
             not item.supported for item in self.operations
@@ -132,7 +137,9 @@ class OivPlan:
     @property
     def xml_compilable(self) -> bool:
         """Whether the recipe is an XML-only existing-RPF compile workflow."""
-        return bool(self.xml_operations) and not self.text_operations and (
+        return bool(self.xml_operations) and not (
+            self.text_operations or self.pso_operations
+        ) and (
             self.rpf_recipe_compilable
         )
 
@@ -146,11 +153,12 @@ class OivPlan:
             item.archives[0].casefold() for item in actionable if item.archives
         }
         return bool(
-            self.xml_operations or self.text_operations
+            self.xml_operations or self.text_operations or self.pso_operations
         ) and self.recipe_supported and not (
             self.created_archive_operations
         ) and len(outer_archives) == 1 and all(
-            item.kind in {"add", "delete", "xml", "text"} and bool(item.archives)
+            item.kind in {"add", "delete", "xml", "text", "pso"}
+            and bool(item.archives)
             for item in actionable
         )
 
@@ -208,7 +216,7 @@ class OivPlan:
         for item in self.operations:
             archive = " → ".join(item.archives) or "filesystem"
             status = "managed" if item.supported else "manual review"
-            if item.kind in {"xml", "text"} and item.supported:
+            if item.kind in {"xml", "text", "pso"} and item.supported:
                 status = "verified compile"
             lines.append(
                 f"| {item.number} | {item.kind} | `{archive}` | "
@@ -227,9 +235,10 @@ class OivPlan:
             "This report does not execute the OIV. Managed export is available only "
             "when every declared operation can be represented as an owned file copy, "
             "exact RPF-entry transaction, atomic nested-RPF batch, or a deterministic "
-            "XML or bounded line-oriented payload compiled against an explicitly "
-            "selected, hash-bound archive. Wildcard text masks, PSO merges, unbounded "
-            "archive creation, and unknown commands remain blocked.", "",
+            "XML, bounded line-oriented payload, or source-aware native PSO rebuild "
+            "compiled against an explicitly selected, hash-bound archive. Wildcard "
+            "text masks, PSO edits inside newly created archives, unbounded archive "
+            "creation, and unknown commands remain blocked.", "",
         ])
         return "\n".join(lines)
 
@@ -246,7 +255,8 @@ class OivPlan:
 class OivWorkbench:
     """Parse actual OIV 2.x operations without executing package code."""
 
-    _UNSUPPORTED = {"pso", "defragmentation"}
+    _UNSUPPORTED = {"defragmentation"}
+    _PSO_SUFFIXES = {".pso", ".ymap", ".ymf", ".ymt", ".ytyp"}
     _TEXT_SUFFIXES = {
         ".cfg", ".conf", ".csv", ".dat", ".ini", ".json", ".list",
         ".log", ".meta", ".txt", ".xml",
@@ -302,20 +312,20 @@ class OivWorkbench:
         operations = list(self._validate_created_recipe_operations(
             tuple(operations), findings,
         ))
-        if any(item.kind in {"xml", "text"} for item in operations) and format_version not in {
+        if any(item.kind in {"xml", "text", "pso"} for item in operations) and format_version not in {
             "2.1", "2.2",
         }:
             code = (
                 "unsupported_oiv_xml_format"
                 if any(item.kind == "xml" for item in operations)
-                and not any(item.kind == "text" for item in operations)
+                and not any(item.kind in {"text", "pso"} for item in operations)
                 else "unsupported_oiv_recipe_format"
             )
             findings.append(OivFinding(
                 "error", code,
-                "Verified XML/text compilation requires OIV package format 2.1 or 2.2.",
+                "Verified XML/text/PSO compilation requires OIV package format 2.1 or 2.2.",
             ))
-        if not any(item.kind in {"add", "xml", "text"} for item in operations):
+        if not any(item.kind in {"add", "xml", "text", "pso"} for item in operations):
             findings.append(OivFinding(
                 "warning", "no_managed_payload",
                 "The recipe contains no file additions that ALLIN1 can own.",
@@ -345,7 +355,7 @@ class OivWorkbench:
             )
 
         for item in operations:
-            if item.kind not in {"add", "delete", "xml", "text"} or not is_inside_created(item):
+            if item.kind not in {"add", "delete", "xml", "text", "pso"} or not is_inside_created(item):
                 continue
             identity = (
                 tuple(part.casefold() for part in item.archives),
@@ -505,14 +515,14 @@ class OivWorkbench:
                     "Delete requires one exact non-container entry inside a bounded "
                     "existing or newly created RPF archive tree.", number,
                 ))
-        elif kind == "xml":
+        elif kind in {"xml", "pso"}:
             target_path = self._target_path(target, mods=False)
             parsed_edits: list[OivXmlEdit] = []
             recipe_error: str | None = None
             unknown_parent_attributes = set(node.attrib).difference({"path"})
             if unknown_parent_attributes:
                 recipe_error = (
-                    "Unknown OIV XML attributes: "
+                    f"Unknown OIV {kind.upper()} attributes: "
                     + ", ".join(sorted(unknown_parent_attributes))
                 )
             for child in node:
@@ -520,7 +530,9 @@ class OivWorkbench:
                     break
                 action = _local_name(child.tag).casefold()
                 if action not in {"add", "replace", "remove"}:
-                    recipe_error = f"Unknown OIV XML child command <{action}>"
+                    recipe_error = (
+                        f"Unknown OIV {kind.upper()} child command <{action}>"
+                    )
                     break
                 allowed_attributes = (
                     {"xpath", "append"} if action == "add" else {"xpath"}
@@ -528,12 +540,14 @@ class OivWorkbench:
                 unknown_attributes = set(child.attrib).difference(allowed_attributes)
                 if unknown_attributes:
                     recipe_error = (
-                        f"Unknown OIV XML {action} attributes: "
+                        f"Unknown OIV {kind.upper()} {action} attributes: "
                         + ", ".join(sorted(unknown_attributes))
                     )
                     break
                 if child.text and child.text.strip():
-                    recipe_error = "OIV XML edit content must contain elements, not raw text"
+                    recipe_error = (
+                        f"OIV {kind.upper()} edit content must contain elements, not raw text"
+                    )
                     break
                 content = "".join(
                     ET.tostring(item, encoding="unicode") for item in child
@@ -555,29 +569,40 @@ class OivWorkbench:
                 parsed_edits.append(edit)
             edits = tuple(parsed_edits)
             suffix = PurePosixPath(target_path).suffix.casefold() if target_path else ""
+            suffixes = (
+                {".xml", ".meta"} if kind == "xml"
+                else self._PSO_SUFFIXES
+            )
             safe_context = bool(
                 archives and len(archives) <= 9
-                and target_path and suffix in {".xml", ".meta"}
+                and target_path and suffix in suffixes
+                and (kind != "pso" or not any(created_archives))
             )
             supported = bool(safe_context and edits and recipe_error is None)
             target = target_path
             detail = (
-                f"Compile {len(edits)} deterministic XPath edit(s) into a verified payload"
+                f"Compile {len(edits)} deterministic XPath edit(s) into a verified "
+                + ("native resource" if kind == "pso" else "payload")
             )
             if recipe_error:
                 findings.append(OivFinding(
-                    "error", "invalid_xml_recipe", recipe_error, number,
+                    "error", f"invalid_{kind}_recipe", recipe_error, number,
                 ))
             elif not safe_context:
                 findings.append(OivFinding(
-                    "error", "unsupported_xml",
-                    "XML commands require a textual .xml/.meta entry inside one "
-                    "bounded existing or newly created RPF archive tree.", number,
+                    "error", f"unsupported_{kind}",
+                    (
+                        "XML commands require a textual .xml/.meta entry inside one "
+                        "bounded existing or newly created RPF archive tree."
+                        if kind == "xml" else
+                        "PSO commands require a supported native resource inside one "
+                        "bounded existing RPF archive tree."
+                    ), number,
                 ))
             elif not edits:
                 findings.append(OivFinding(
-                    "error", "empty_xml_recipe",
-                    "The XML operation contains no add, replace, or remove commands.",
+                    "error", f"empty_{kind}_recipe",
+                    f"The {kind.upper()} operation contains no add, replace, or remove commands.",
                     number,
                 ))
         elif kind == "text":
@@ -736,7 +761,7 @@ class OivWorkbench:
         self, plan: OivPlan, archive: str | Path, destination: str | Path, *,
         service: Any,
     ) -> tuple[Path, Path]:
-        """Compile one supported XML/text recipe into an inert RPF plan.
+        """Compile one supported XML/text/PSO recipe into an inert RPF plan.
 
         The caller explicitly selects the existing outer RPF. Recipe operations are
         evaluated in order against extracted payloads, then coalesced into one final
@@ -744,7 +769,7 @@ class OivWorkbench:
         """
         if not plan.rpf_recipe_compilable:
             raise ValueError(
-                "OIV recipe is not a fully supported single-archive XML/text workflow"
+                "OIV recipe is not a fully supported single-archive XML/text/PSO workflow"
             )
         selected_archive = Path(archive).expanduser().resolve()
         if not selected_archive.is_file() or selected_archive.suffix.casefold() != ".rpf":
@@ -768,6 +793,13 @@ class OivWorkbench:
         if hashlib.sha256(current_assembly.data).hexdigest() != plan.assembly_sha256:
             raise RuntimeError("OIV assembly.xml changed after the operation plan was created")
         package_source_sha256 = self._sha256(plan.source) if plan.source.is_file() else None
+        if plan.pso_operations and not all(
+            hasattr(service, attribute) for attribute in ("project_root", "gta_path")
+        ):
+            raise ValueError(
+                "OIV PSO compilation requires an RPF service bound to the SDK and "
+                "matching GTA V installation"
+            )
 
         root = Path(destination).expanduser().resolve()
         if root.exists() or root.is_symlink():
@@ -793,7 +825,12 @@ class OivWorkbench:
             states: dict[tuple[str, str], dict[str, Any]] = {}
             xml_merge_audits: list[dict[str, object]] = []
             text_merge_audits: list[dict[str, object]] = []
+            pso_compile_audits: list[dict[str, object]] = []
             recipe_events: list[dict[str, object]] = []
+            native_inspector = (
+                NativeAssetInspector(service.project_root, service.gta_path)
+                if plan.pso_operations else None
+            )
 
             def load_state(operation: OivOperation) -> tuple[tuple[str, str], dict[str, Any]]:
                 nested = "!".join(operation.archives[1:])
@@ -937,6 +974,90 @@ class OivWorkbench:
                         "compiled_sha256": result.audit["output_sha256"],
                         "edits": len(operation.edits),
                     })
+                elif operation.kind == "pso":
+                    current = state["current"]
+                    if current is None:
+                        raise ValueError(
+                            "OIV PSO target does not exist at that point in the recipe: "
+                            f"{state['archive_path']}::{state['entry_path']}"
+                        )
+                    current = Path(current)
+                    suffix = PurePosixPath(operation.target).suffix.casefold()
+                    if suffix not in self._PSO_SUFFIXES:
+                        raise ValueError(
+                            f"OIV PSO target is not a supported native resource: "
+                            f"{state['archive_path']}::{state['entry_path']}"
+                        )
+                    if native_inspector is None:  # pragma: no cover - plan invariant
+                        raise RuntimeError("Native PSO compiler was not initialized")
+                    workspace = work_root / f"pso_{operation.number:04d}_workspace"
+                    native_inspector.export_workspace(
+                        current, workspace, edition=index.edition,
+                    )
+                    manifest = json.loads(
+                        (workspace / "native-workspace.json").read_text(encoding="utf-8")
+                    )
+                    xml_meta = manifest.get("xml")
+                    xml_relative = (
+                        xml_meta.get("path") if isinstance(xml_meta, dict) else None
+                    )
+                    if not isinstance(xml_relative, str):
+                        raise RuntimeError("Native PSO workspace did not declare editable XML")
+                    xml_path = workspace.joinpath(
+                        *PurePosixPath(xml_relative.replace("\\", "/")).parts
+                    ).resolve()
+                    if not xml_path.is_relative_to(
+                        workspace.resolve()
+                    ) or not xml_path.is_file():
+                        raise RuntimeError("Native PSO workspace XML path is unsafe or missing")
+                    result = OivXmlMergeEngine.apply(
+                        xml_path.read_bytes(), operation.edits,
+                        source_name=(
+                            f"{state['archive_path']}::{state['entry_path']} (decoded PSO)"
+                            if state["archive_path"] else
+                            f"{state['entry_path']} (decoded PSO)"
+                        ),
+                    )
+                    xml_path.write_bytes(result.data)
+                    compiled = work_root / f"op_{operation.number:04d}{suffix}"
+                    rebuilt, validation_report = native_inspector.build_workspace(
+                        workspace, compiled,
+                    )
+                    native_report = json.loads(
+                        validation_report.read_text(encoding="utf-8")
+                    )
+                    validation = native_report.get("validation")
+                    if not isinstance(validation, dict) or (
+                        validation.get("reparsed") is not True
+                        or validation.get("semantic_xml_match") is not True
+                    ):
+                        raise RuntimeError(
+                            "Rebuilt PSO resource did not semantically match the edited XML"
+                        )
+                    if native_report.get("source_sha256") != self._sha256(current):
+                        raise RuntimeError("Native PSO build report lost its source binding")
+                    if native_report.get("edited_xml_sha256") != self._sha256(xml_path):
+                        raise RuntimeError("Native PSO build report lost its edited XML binding")
+                    if Path(rebuilt) != compiled:
+                        raise RuntimeError("Native PSO builder returned an unexpected payload path")
+                    state["current"] = rebuilt
+                    pso_compile_audits.append({
+                        "oiv_operation": operation.number,
+                        "archive_path": state["archive_path"],
+                        "entry": state["entry_path"],
+                        "xml_merge": result.audit,
+                        "native_build": native_report,
+                    })
+                    event.update({
+                        "compiled_size": rebuilt.stat().st_size,
+                        "compiled_sha256": self._sha256(rebuilt),
+                        "decoded_xml_sha256": result.audit["source_sha256"],
+                        "edited_xml_sha256": result.audit["output_sha256"],
+                        "reparsed_semantic_xml_sha256": validation[
+                            "reparsed_semantic_xml_sha256"
+                        ],
+                        "edits": len(operation.edits),
+                    })
                 else:
                     raise ValueError(
                         f"Unsupported operation reached OIV recipe compiler: {operation.kind}"
@@ -1029,6 +1150,7 @@ class OivWorkbench:
                 "recipe_events": recipe_events,
                 "xml_merges": xml_merge_audits,
                 "text_merges": text_merge_audits,
+                "pso_compiles": pso_compile_audits,
                 "changes": audit_changes,
                 "rpf_plan": "rpf-plan.json",
                 "verification": {
@@ -1038,6 +1160,11 @@ class OivWorkbench:
                         "all_text_outputs_encoding_round_trip_verified": True,
                         "xml_shaped_text_outputs_reparsed": True,
                     } if text_merge_audits else {}),
+                    **({
+                        "all_pso_sources_decoded_with_game_keys": True,
+                        "all_pso_outputs_reparsed": True,
+                        "all_pso_outputs_semantically_verified": True,
+                    } if pso_compile_audits else {}),
                     "source_archive_hash_bound": True,
                     "source_assembly_hash_bound": True,
                     "payload_hashes_bound_by_rpf_plan": True,
@@ -1092,7 +1219,6 @@ class OivWorkbench:
         if hashlib.sha256(current_assembly.data).hexdigest() != plan.assembly_sha256:
             raise RuntimeError("OIV assembly.xml changed after the operation plan was created")
         package_source_sha256 = self._sha256(plan.source) if plan.source.is_file() else None
-
         root = Path(destination).expanduser().resolve()
         if root.exists() or root.is_symlink():
             raise ValueError("Created-RPF package destination must not already exist")
@@ -1356,9 +1482,9 @@ class OivWorkbench:
     ) -> tuple[Path, ...]:
         """Export the exact existing-RPF portion as atomic batch manifests."""
         operations = plan.rpf_batch_operations
-        if plan.xml_operations or plan.text_operations:
+        if plan.xml_operations or plan.text_operations or plan.pso_operations:
             raise ValueError(
-                "OIV recipes containing XML/text commands require verified recipe "
+                "OIV recipes containing XML/text/PSO commands require verified recipe "
                 "compilation; partial add/delete batch export is blocked"
             )
         if not operations:

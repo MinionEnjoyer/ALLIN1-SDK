@@ -85,7 +85,7 @@ def test_oiv_archive_export_streams_only_declared_sources(tmp_path):
         ("<delete>scripts/old.dll</delete>", "unsupported_delete"),
         ("<text path=\"x.txt\"><add>x</add></text>", "unsupported_text"),
         ("<xml path=\"x.xml\"><remove xpath=\"/x\" /></xml>", "unsupported_xml"),
-        ("<pso path=\"x.ymt\"><add xpath=\"/x\" /></pso>", "unsupported_pso"),
+        ("<pso path=\"x.ymt\"><remove xpath=\"/x\" /></pso>", "unsupported_pso"),
         ("<defragmentation archive=\"update.rpf\" />", "unsupported_defragmentation"),
         ("<mystery />", "unknown_operation"),
     ],
