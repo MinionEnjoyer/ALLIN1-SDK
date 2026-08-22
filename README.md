@@ -34,11 +34,11 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
 
 ## Features
 
-- **Integration Linker** — validate `addon.json`, follow references across
+- **Package Linker** — validate `addon.json`, follow references across
   weapon, ammo, animation, native-text, HUD, storefront, vehicle, handling,
   tuning, streamed-asset, archive, and rollback fields, and export an ordered
   integration plan before changing the game.
-- **Package Intelligence** — inventory loose DLC folders and OIV/ZIP/RAR/7z
+- **Package inspection and tools** — inventory loose DLC folders and OIV/ZIP/RAR/7z
   packages, classify scripts, plug-ins, shaders, replacements, and add-on DLC,
   detect Legacy/Enhanced compatibility, and surface incomplete or ambiguous
   content for review.
@@ -54,7 +54,7 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   verification and managed export. Native PSO/META recipes use the matching game
   keys, source-aware native rebuild, and a mandatory semantic reparse before an
   inert archive plan is emitted.
-- **Native Asset Viewer** — browse authored text and images, parse bounded RAGE
+- **Asset Viewer** — browse authored text and images, parse bounded RAGE
   resource headers, convert supported resources to structured CodeWalker XML,
   generate YTD texture contact sheets, render bounded indexed-geometry previews for
   YDR/YDD/YFT models with vertex, triangle, LOD, drawable, bounds, shader, texture,
@@ -73,7 +73,7 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   through the SDK Console or structured Agent API.
   The embedded YTD editor catalogs and previews every DDS, imports common raster formats,
   synchronizes dimensions/mips/formats, supports add/replace/remove, and retains undo history.
-- **RPF Explorer** — search root and nested RPFs as one hierarchy, inspect entry
+- **RPF Archives** — search root and nested RPFs as one hierarchy, inspect entry
   metadata, export JSON/CSV indexes, extract an exact entry or complete directory
   subtree through one archive scan, compare two recursive archive trees by metadata
   or exact extracted-content hashes, and generate a
@@ -113,16 +113,17 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   recursive archive verifier. Validation reports identify every payload as either
   byte-exact or canonical RSC7 (identical resource header plus decompressed bytes).
   File cards receive non-blocking cached thumbnails for images, native visual assets,
-  text/configuration files, and deterministic type fallbacks. The same hash-bound
-  renderer is available as `render-rpf-graph-previews`, producing an atomic portable
-  bundle and per-preview SHA-256 report through the console or structured Agent API.
+  text/configuration files, and deterministic type fallbacks. **Create output >
+  Export preview bundle** publishes the same hash-bound renderer as
+  `render-rpf-graph-previews`, producing an atomic portable bundle and per-preview
+  SHA-256 report through the desktop, console, or structured Agent API.
   An already-built RPF can also be recursively expanded into a retained external
   graph workspace: nested archives become editable `.rpf.source` branches, the
   untouched origin hash remains in the graph, and one import report accounts for
   every extracted payload. Imported graphs can build/diff against that origin and
   emit a normal inert multi-entry plan; changes inside a nested archive collapse to
   one reviewed parent-container replacement instead of an order-dependent deep edit.
-  The graph window also includes an embedded **Build Flow** workspace: a typed visual
+  The embedded graph editor also includes a **Build Flow** workspace: a typed visual
   operation canvas with typed artifact pins for package source, validation, loose-tree
   materialization, exact RPF build, verified defragmentation, imported-origin planning,
   and named outputs. Invalid type connections and cycles are rejected at edit time.
@@ -191,8 +192,8 @@ ALLIN1 Launcher
                      |
                      v
 ALLIN1 SDK
-  Integration Linker + Package Intelligence
-  Native Asset Viewer + RPF Explorer
+  Package Linker + Package Tools
+  Asset Viewer + RPF Archives
   OIV Workbench + DLC Inventory
   Vehicle Data Compiler
                      |
@@ -238,19 +239,21 @@ the checksum, extract the archive to a fresh directory, and run
 ## Desktop SDK
 
 The desktop application is one persistent developer window. Its sidebar moves
-between **Integration**, **Native Assets**, **RPF Explorer**, and **Help Center**.
+between **Package Linker**, **Asset Viewer**, **RPF Archives**, and **Help Center**.
 Pass `--rpf-graph <graph.json>` to the desktop executable to open a validated
 package graph directly; add `--gta-path <installation>` when its asset nodes need
 encrypted or edition-specific native previews.
 The SDK Console remains docked along the bottom and can expand over any context;
-opening a tool no longer creates another independent workspace
-window. Only file pickers, confirmations, and blocking transaction progress use
-temporary dialogs. Dense commands stay in contextual menus instead of covering
-content with large button rows:
+opening a tool no longer creates another independent workspace window. Package
+graphs, build flows, visual change sets, GXT2 text editing, texture editing, and
+transaction history stay in the primary application. Only file pickers,
+confirmations, standalone compatibility entry points, and blocking transaction
+progress use temporary dialogs. Common actions stay visible while advanced
+commands are grouped by task:
 
-- **Content** opens manifests, packages, folders, and installed DLC sources.
-- **Review** validates links, explains fields, and exports reports.
-- **Package Intelligence** opens OIV, DLC inventory, vehicle compiler, and structured
+- **Packages** opens manifests, packages, folders, and installed DLC sources.
+- **Inspect & Export** validates links, explains fields, and exports reports.
+- **Package Tools** opens OIV, DLC inventory, vehicle compiler, and structured
   META/XML tools.
 - **The bottom SDK Console dock** keeps the complete CLI available from every
   workspace. Its completion list narrows as you type, suggests commands,
@@ -564,8 +567,8 @@ release assets automatically.
 
 ## Documentation
 
-The in-app Help Center documents the Integration Linker, package intelligence,
-native previews, RPF explorer, replacement-plan boundary, and recovery paths.
+The in-app Help Center documents the Package Linker, package tools, asset previews,
+RPF Archives, replacement-plan boundary, and recovery paths.
 The schema and complete colored-smoke example are maintained under [`sdk/`](sdk/).
 
 ALLIN1 SDK is licensed under the [GNU General Public License v3.0 or later](LICENSE).

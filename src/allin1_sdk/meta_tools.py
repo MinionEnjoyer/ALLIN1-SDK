@@ -34,7 +34,7 @@ def _read_xml(path: str | Path) -> tuple[Path, etree._ElementTree]:
     except (OSError, etree.XMLSyntaxError) as exc:
         raise ValueError(
             f"Metadata is not safe, well-formed XML: {source.name}: {exc}. "
-            "Binary PSO/RBF resources must first be exported with Native Asset Viewer."
+            "Binary PSO/RBF resources must first be exported with Asset Viewer."
         ) from exc
     if tree.docinfo.doctype:
         raise ValueError("Metadata containing a DTD is not accepted")

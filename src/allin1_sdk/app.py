@@ -157,10 +157,10 @@ def main(argv: list[str] | None = None) -> None:
             root.destroy()
             return
         dialog = RpfPackageGraphDialog(
-            root, graph, project_root(), detected,
+            root, graph, project_root(), detected, on_close=root.destroy,
         )
         dialog.tk.call("wm", "transient", dialog._w, "")
-        dialog.protocol("WM_DELETE_WINDOW", root.destroy)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.request_close)
         dialog.deiconify()
         dialog.state("normal")
         dialog.lift()
@@ -174,7 +174,11 @@ def main(argv: list[str] | None = None) -> None:
         root, project_root(), installation_roots=roots, standalone=True,
     )
     dialog.title(f"ALLIN1 SDK {__version__} — Developer Workspace")
-    dialog.protocol("WM_DELETE_WINDOW", root.destroy)
+    def close_sdk() -> None:
+        if dialog.request_close():
+            root.destroy()
+
+    dialog.protocol("WM_DELETE_WINDOW", close_sdk)
     root.mainloop()
 
 
