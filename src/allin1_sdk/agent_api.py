@@ -41,6 +41,7 @@ AUTHORING_COMMANDS = frozenset({
     "canary-rpf-transaction",
     "compile-vehicle-data",
     "compile-oiv-xml",
+    "compile-oiv-recipe",
     "configure-rpf-program-node",
     "connect-rpf-program-nodes",
     "create-rpf-change-set",

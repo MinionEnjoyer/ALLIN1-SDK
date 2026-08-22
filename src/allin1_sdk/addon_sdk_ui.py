@@ -649,15 +649,20 @@ class AddonSdkDialog(tk.Toplevel):
             messagebox.showerror("OIV inspection failed", str(exc), parent=self)
             return
         self.status.set(f"OIV plan written: {report.name}")
-        if plan.xml_compilable:
+        if plan.rpf_recipe_compilable:
+            recipe_summary = (
+                f"{len(plan.xml_operations)} XML and "
+                f"{len(plan.text_operations)} bounded text operation(s)"
+            )
             if not messagebox.askyesno(
-                "Verified OIV XML compile available",
-                "This recipe uses the supported OIV 2.2 XML add/replace/remove "
-                "grammar. Select the matching outer RPF to compile every XPath "
-                "edit into reparsed payloads and a hash-bound inert plan?\n\n"
+                "Verified OIV RPF recipe compile available",
+                f"This recipe contains {recipe_summary}. Select the matching outer "
+                "RPF to replay the ordered edits into verified payloads and a "
+                "hash-bound inert plan? Exact and prefix text selectors must match "
+                "one line; wildcard masks remain blocked.\n\n"
                 "The selected archive will not be changed.", parent=self,
             ):
-                self.status.set(f"OIV XML plan written: {report.name}")
+                self.status.set(f"OIV recipe plan written: {report.name}")
                 return
             game = self.installation_roots[0] if len(self.installation_roots) == 1 else None
             if game is None:
@@ -671,19 +676,20 @@ class AddonSdkDialog(tk.Toplevel):
                 filetypes=(("RPF archive", "*.rpf"), ("All files", "*.*")),
             ) if game is not None else ""
             bundle_dir = filedialog.askdirectory(
-                parent=self, title="Select a new OIV XML compile folder",
+                parent=self, title="Select a new OIV recipe compile folder",
                 mustexist=False,
             ) if selected_archive else ""
             if game is None or not selected_archive or not bundle_dir:
                 return
 
-            def xml_completed(outputs) -> None:
+            def recipe_completed(outputs) -> None:
                 plan_path, audit_path = outputs
-                self.status.set(f"Verified OIV XML plan: {plan_path}")
+                self.status.set(f"Verified OIV RPF recipe plan: {plan_path}")
                 messagebox.showinfo(
-                    "OIV XML compile complete",
-                    "Every XML payload was reparsed and canonically verified. The "
-                    "selected archive was not changed.\n\n"
+                    "OIV RPF recipe compile complete",
+                    "Every XML payload was canonically verified and every text "
+                    "payload passed encoding round-trip verification. XML-shaped "
+                    "text remained well-formed. The selected archive was not changed.\n\n"
                     f"RPF plan: {plan_path}\nAudit: {audit_path}", parent=self,
                 )
 
@@ -693,13 +699,13 @@ class AddonSdkDialog(tk.Toplevel):
                 self.project_root, game, workspace_roots=(archive_path.parent,),
             )
             RpfProgressDialog(
-                self, "Compiling verified OIV XML payloads",
-                lambda _progress: workbench.compile_xml_rpf_bundle(
+                self, "Compiling verified OIV RPF recipe",
+                lambda _progress: workbench.compile_rpf_recipe_bundle(
                     plan, archive_path, bundle_dir, service=service,
                 ),
-                xml_completed,
+                recipe_completed,
                 lambda exc: messagebox.showerror(
-                    "OIV XML compile failed", str(exc), parent=self,
+                    "OIV recipe compile failed", str(exc), parent=self,
                 ),
             )
             return
@@ -742,9 +748,9 @@ class AddonSdkDialog(tk.Toplevel):
         if plan.created_archive_operations and messagebox.askyesno(
             "Verified created-RPF export available",
             "This recipe declares bounded createIfNotExist archives. Extract only its "
-            "declared payloads, replay supported XML edits and cleanup deletes in "
-            "recipe order, build every archive, verify the recursive tree and exact "
-            "payload hashes, and create a managed package?",
+            "declared payloads, replay supported XML, bounded text edits, and cleanup "
+            "deletes in recipe order, build every archive, verify the recursive tree "
+            "and exact payload hashes, and create a managed package?",
             parent=self,
         ):
             game = self.installation_roots[0] if len(self.installation_roots) == 1 else None
@@ -764,8 +770,9 @@ class AddonSdkDialog(tk.Toplevel):
                     messagebox.showinfo(
                         "Created RPF package exported",
                         "Every new archive passed recursive and exact-payload "
-                        "verification. XML edits were canonically verified and the "
-                        "ordered recipe audit was retained."
+                        "verification. XML edits were canonically verified, text edits "
+                        "passed encoding round-trip checks, and the ordered recipe "
+                        "audit was retained."
                         f"\n\nManifest: {manifest}\n\nReview it before using "
                         "Import & install.", parent=self,
                     )

@@ -47,8 +47,11 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   adds/replacements/deletes into payload-backed atomic batch manifests. Official
   OIV 2.2 XML add/replace/remove commands compile against an explicitly selected
   RPF into canonical-reparse-verified payloads and an inert hash-bound plan.
-  Bounded newly created archives can replay declared adds, XML edits, and cleanup
-  deletes in order before exact recursive verification and managed export.
+  Line-oriented text recipes support ordered append/insert/replace/delete with
+  exact or prefix selectors that must match one line; encoding, BOM, and newline
+  style are preserved and verified. Bounded newly created archives can replay
+  declared adds, structured edits, and cleanup deletes before exact recursive
+  verification and managed export.
 - **Native Asset Viewer** — browse authored text and images, parse bounded RAGE
   resource headers, convert supported resources to structured CodeWalker XML,
   generate YTD texture contact sheets, render bounded indexed-geometry previews for
@@ -314,6 +317,7 @@ allin1-sdk verify-rpf-archive C:\Mods\Example\dlc.rpf --gta-path "D:\Games\GTA V
 allin1-sdk oiv-plan C:\Mods\Example.oiv -o oiv-plan.md --rpf-batches C:\Mods\Example-rpf-batches
 allin1-sdk oiv-plan C:\Mods\NewDlc.oiv -o new-dlc-plan.md --created-rpf-package C:\Mods\NewDlc-managed --gta-path "D:\Games\GTA V Enhanced"
 allin1-sdk compile-oiv-xml C:\Mods\XmlRecipe.oiv C:\Mods\Workspace\update.rpf --gta-path "D:\Games\GTA V Enhanced" --workspace-root C:\Mods\Workspace -o C:\Mods\XmlRecipe-compiled
+allin1-sdk compile-oiv-recipe C:\Mods\StructuredRecipe.oiv C:\Mods\Workspace\update.rpf --gta-path "D:\Games\GTA V Enhanced" --workspace-root C:\Mods\Workspace -o C:\Mods\StructuredRecipe-compiled
 allin1-sdk plan-rpf-batch "D:\Games\GTA V Enhanced\mods\update\update.rpf" C:\Mods\Example-rpf-batches\01-update-xxxxxxxx\changes.json --gta-path "D:\Games\GTA V Enhanced" -o atomic-plan.json
 allin1-sdk plan-rpf-replacement "D:\Games\GTA V Enhanced\mods\update\update.rpf" common/data/example.meta C:\Mods\example.meta --gta-path "D:\Games\GTA V Enhanced" -o replacement-plan.json
 allin1-sdk plan-rpf-add "D:\Games\GTA V Enhanced\mods\update\update.rpf" common/data/new.meta C:\Mods\new.meta --gta-path "D:\Games\GTA V Enhanced" -o add-plan.json
@@ -418,18 +422,21 @@ service used by the launcher.
 - Bounded OIV `createIfNotExist` containers are translated into retained loose
   `.rpf.source` workspaces and passed through that same builder. Safe top-level
   archives and new archives one level inside an existing RPF become validated,
-  checksum-owned package payloads. Declared adds, XML edits, and cleanup deletes
-  inside those new archives replay in recipe order; XML and delete targets must
-  already exist at that point. XML output is reparsed and canonically verified,
-  and the managed package retains source bindings and the ordered operation audit.
+  checksum-owned package payloads. Declared adds, XML edits, bounded line edits,
+  and cleanup deletes inside those new archives replay in recipe order; edit and
+  delete targets must already exist at that point unless a text recipe explicitly
+  creates its file by adding the first line. XML output is reparsed and canonically
+  verified. Text output retains UTF-8/UTF-16 encoding, BOM, newline style, and final
+  newline state, then passes an encoding round trip; text-edited XML must still
+  parse. The package retains source bindings and the ordered operation audit.
   Recipe code is never executed; ambiguous ancestry and deep existing-archive
   creation roots remain blocked. Official OIV 2.2 XML commands also support
   First/Last/Before/After adds, replacements, and removals when every XPath selects
   exactly one textual `.xml`/`.meta` entry inside one existing archive tree.
   Compilation preserves source encoding, blocks entities and unbounded XPath
   constructs, coalesces repeated edits per entry, and emits the normal guarded
-  multi-entry plan without writing the archive. Text and PSO/META commands remain
-  blocked.
+  multi-entry plan without writing the archive. Wildcard text masks and PSO/META
+  commands remain blocked.
 - Native workspaces retain an immutable source snapshot, editable CodeWalker XML and
   dependencies, edition metadata, and hashes. Build refuses path escapes, links,
   collisions, source tampering, unsupported types, oversized inputs, and any result

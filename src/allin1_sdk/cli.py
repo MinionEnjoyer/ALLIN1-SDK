@@ -479,6 +479,7 @@ def oiv_plan(
         else "created RPF export ready" if plan.created_archive_operations
         and plan.translatable
         else "verified XML compile ready" if plan.xml_compilable
+        else "verified RPF recipe compile ready" if plan.rpf_recipe_compilable
         else "atomic RPF export ready" if plan.translatable
         else "manual review required"
     )
@@ -526,6 +527,44 @@ def compile_oiv_xml(
         f"wrote {authored['status']} inert RPF plan: {plan}"
     )
     click.echo(f"Canonical XML verification audit: {audit}")
+
+
+@main.command("compile-oiv-recipe")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--output", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option(
+    "--workspace-root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Explicitly authorize an external archive workspace for the inert plan.",
+)
+def compile_oiv_recipe(
+    source: Path, archive: Path, output: Path, gta_path: Path | None,
+    workspace_root: Path | None,
+) -> None:
+    """Compile guarded OIV XML and text commands into an inert RPF plan."""
+    try:
+        workbench = OivWorkbench()
+        recipe = workbench.inspect(source)
+        plan, audit = workbench.compile_rpf_recipe_bundle(
+            recipe, archive, output,
+            service=_rpf_service(gta_path, workspace_root),
+        )
+        authored = json.loads(plan.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Compiled {len(recipe.xml_operations)} XML and "
+        f"{len(recipe.text_operations)} bounded text operation(s); wrote "
+        f"{authored['status']} inert RPF plan: {plan}"
+    )
+    click.echo(f"Structured recipe verification audit: {audit}")
 
 
 @main.command("inspect-rpf")
