@@ -131,6 +131,10 @@ def _launch_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         "--gta-path", type=Path,
         help="Matching GTA installation for encrypted/native asset previews.",
     )
+    parser.add_argument(
+        "--graph-node",
+        help="Node id selected when opening a package graph directly.",
+    )
     return parser.parse_args(sys.argv[1:] if argv is None else argv)
 
 
@@ -167,6 +171,7 @@ def main(argv: list[str] | None = None) -> None:
             return
         dialog = RpfPackageGraphDialog(
             root, graph, project_root(), detected, on_close=root.destroy,
+            initial_select=arguments.graph_node,
         )
         dialog.tk.call("wm", "transient", dialog._w, "")
         dialog.protocol("WM_DELETE_WINDOW", dialog.request_close)

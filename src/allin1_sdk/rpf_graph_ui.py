@@ -14,6 +14,7 @@ from PIL import Image, ImageTk, UnidentifiedImageError
 
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_graph import RpfPackageGraph
+from allin1_sdk.package_relations import PackageRelationshipAnalyzer
 from allin1_sdk.rpf_graph_previews import (
     ASSET_PREVIEW_HEIGHT,
     ASSET_PREVIEW_WIDTH,
@@ -88,12 +89,28 @@ class RpfPackageGraphFrame(ttk.Frame):
         "sealed_archive": ("#A56B20", "#302416"),
         "directory": ("#23815A", "#182A23"),
         "file": ("#2E6D98", "#172731"),
+        "vehicle_entity": ("#C14775", "#321B25"),
+    }
+    RELATION_COLORS = {
+        "assets": "#48A9E6",
+        "metadata": "#54C987",
+        "tuning": "#C88AF4",
+        "registration": "#E6B84A",
+    }
+    RELATION_FILTERS = {
+        "All relationships": None,
+        "Assets": "assets",
+        "Metadata": "metadata",
+        "Tuning": "tuning",
+        "Registration": "registration",
+        "Containment only": "containment",
     }
 
     def __init__(
         self, parent: tk.Misc, graph: str | Path, project_root: str | Path,
         game_path: str | Path | None = None,
-        *, on_close=None,
+        *, on_close=None, on_open_asset=None, on_open_vehicle=None,
+        initial_select: str | None = None,
     ) -> None:
         super().__init__(parent)
         self.pack(fill="both", expand=True)
@@ -101,16 +118,21 @@ class RpfPackageGraphFrame(ttk.Frame):
         self.project_root = Path(project_root).resolve()
         self.game_path = Path(game_path).resolve() if game_path else None
         self._on_close = on_close
+        self._on_open_asset = on_open_asset
+        self._on_open_vehicle = on_open_vehicle
         self.graph_state: dict = {}
+        self.semantic_entities: dict[str, dict] = {}
         self.visible: set[str] = set()
         self.collapsed: set[str] = set()
         self.edge_items: dict[tuple[str, str], int] = {}
+        self.relation_edge_items: dict[tuple[str, str, str], int] = {}
         self.selected: str | None = None
         self.dragging: str | None = None
         self.drag_last = (0.0, 0.0)
         self.connecting_parent: str | None = None
         self.connection_line: int | None = None
         self.query = tk.StringVar()
+        self.relation_filter = tk.StringVar(value="All relationships")
         self.zoom = 1.0
         self.zoom_text = tk.StringVar(value="100%")
         self.status = tk.StringVar(value="Loading validated package graph…")
@@ -119,6 +141,8 @@ class RpfPackageGraphFrame(ttk.Frame):
         self.detail_id = tk.StringVar(value="")
         self.detail_parent = tk.StringVar(value="")
         self.detail_source = tk.StringVar(value="")
+        self.detail_metadata = tk.StringVar(value="")
+        self.detail_findings = tk.StringVar(value="")
         self._preview_requests: queue.Queue[AssetPreviewRequest | None] = queue.Queue()
         self._preview_results: queue.Queue[
             tuple[str, str, bytes | None, str | None]
@@ -135,11 +159,13 @@ class RpfPackageGraphFrame(ttk.Frame):
         )
         self._preview_worker_thread.start()
         self._build_ui()
-        self._reload()
+        self._reload(initial_select)
         # Tk can preserve the canvas' far-edge view while a toplevel is first
         # mapped. Always present the package root on initial open.
         self.after_idle(self._focus_initial_view)
         self.after(150, self._focus_initial_view)
+        if initial_select is not None:
+            self.after(220, self._focus_selected)
         self.after(90, self._poll_asset_previews)
         for widget in (self, self.canvas):
             widget.bind("<Control-plus>", lambda _event: self._zoom_by(ZOOM_FACTOR))
@@ -168,6 +194,12 @@ class RpfPackageGraphFrame(ttk.Frame):
             header, text=str(self.graph), foreground="#52635c",
         ).pack(side="left", padx=(14, 0))
         ttk.Button(header, text="Validate", command=self._validate_sources).pack(side="right")
+        self.analyze_links_button = ttk.Button(
+            header, text="Analyze links", command=self._analyze_links,
+        )
+        self.analyze_links_button.pack(
+            side="right", padx=(0, 6),
+        )
         ttk.Button(header, text="Refresh sources", command=self._refresh_sources).pack(
             side="right", padx=(0, 6),
         )
@@ -263,6 +295,26 @@ class RpfPackageGraphFrame(ttk.Frame):
         ttk.Button(search, text="Expand all", command=self._expand_all).pack(
             side="left", padx=(4, 0),
         )
+        ttk.Label(search, text="Links").pack(side="left", padx=(12, 4))
+        relationship_filter = ttk.Combobox(
+            search, textvariable=self.relation_filter,
+            values=tuple(self.RELATION_FILTERS), state="readonly", width=18,
+        )
+        relationship_filter.pack(side="left")
+        relationship_filter.bind("<<ComboboxSelected>>", lambda _event: self._render())
+        legend = ttk.Frame(canvas_frame)
+        legend.pack(fill="x", pady=(0, 5))
+        ttk.Label(legend, text="Legend:", foreground="#52635c").pack(side="left")
+        for label, color in (
+            ("contains", "#50655C"), ("asset", self.RELATION_COLORS["assets"]),
+            ("metadata", self.RELATION_COLORS["metadata"]),
+            ("tuning", self.RELATION_COLORS["tuning"]),
+            ("registration / target", self.RELATION_COLORS["registration"]),
+        ):
+            tk.Label(
+                legend, text=f" ● {label}", foreground=color,
+                background="#f4f7f5", font=("Segoe UI Semibold", 8),
+            ).pack(side="left", padx=(4, 0))
         canvas_host = tk.Frame(canvas_frame, background="#111714")
         canvas_host.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(
@@ -295,7 +347,10 @@ class RpfPackageGraphFrame(ttk.Frame):
             inspector, textvariable=self.detail_name, font=("Segoe UI Semibold", 11),
             wraplength=285, justify="left",
         ).pack(anchor="w")
-        for variable in (self.detail_type, self.detail_id, self.detail_parent, self.detail_source):
+        for variable in (
+            self.detail_type, self.detail_id, self.detail_parent, self.detail_source,
+            self.detail_metadata, self.detail_findings,
+        ):
             ttk.Label(
                 inspector, textvariable=variable, foreground="#52635c",
                 wraplength=285, justify="left",
@@ -306,6 +361,16 @@ class RpfPackageGraphFrame(ttk.Frame):
             command=self._expand_selected_sealed, state="disabled",
         )
         self.expand_sealed_button.pack(fill="x", pady=(14, 0))
+        self.open_asset_button = ttk.Button(
+            inspector, text="Open in Asset Viewer",
+            command=self._open_selected_asset, state="disabled",
+        )
+        self.open_asset_button.pack(fill="x", pady=(6, 0))
+        self.open_vehicle_button = ttk.Button(
+            inspector, text="Open in Vehicle Workbench",
+            command=self._open_selected_vehicle, state="disabled",
+        )
+        self.open_vehicle_button.pack(fill="x", pady=(6, 0))
 
         ttk.Label(
             inspector,
@@ -365,7 +430,19 @@ class RpfPackageGraphFrame(ttk.Frame):
             messagebox.showerror("RPF graph validation failed", str(exc), parent=self)
             self.status.set("Graph validation failed; the document was not changed.")
             return
-        valid_nodes = set(self.graph_state["nodes"])
+        semantic = self.graph_state.get("semantic") or {}
+        self.semantic_entities = {
+            item["id"]: {**item, "type": "vehicle_entity"}
+            for item in semantic.get("entities", [])
+        }
+        origin = self.graph_state.get("payload", {}).get("origin")
+        self.analyze_links_button.configure(
+            state=(
+                "normal" if isinstance(origin, dict)
+                and origin.get("type") == "mod_package_import" else "disabled"
+            ),
+        )
+        valid_nodes = set(self.graph_state["nodes"]) | set(self.semantic_entities)
         self.collapsed.intersection_update(valid_nodes)
         self._preview_pending.intersection_update(valid_nodes)
         for cache in (
@@ -375,8 +452,8 @@ class RpfPackageGraphFrame(ttk.Frame):
             for node_id in tuple(cache):
                 if node_id not in valid_nodes:
                     cache.pop(node_id, None)
-        self.selected = select if select in self.graph_state["nodes"] else self.selected
-        if self.selected not in self.graph_state["nodes"]:
+        self.selected = select if select in valid_nodes else self.selected
+        if self.selected not in valid_nodes:
             self.selected = self.graph_state["root_id"]
         self._render()
         self._show_selected()
@@ -394,9 +471,21 @@ class RpfPackageGraphFrame(ttk.Frame):
                 include(child)
 
         include(self.graph_state["root_id"])
+        selected_filter = self.RELATION_FILTERS.get(self.relation_filter.get())
+        semantic_order = (
+            [] if selected_filter == "containment"
+            else sorted(
+                self.semantic_entities,
+                key=lambda item: (
+                    self.semantic_entities[item]["name"].casefold(),
+                    self.semantic_entities[item]["edition"].casefold(),
+                ),
+            )
+        )
+        ordered.extend(semantic_order)
         self.visible = set(ordered[:CANVAS_LIMIT])
-        max_x = max((self.graph_state["nodes"][node]["x"] for node in self.visible), default=0)
-        max_y = max((self.graph_state["nodes"][node]["y"] for node in self.visible), default=0)
+        max_x = max((self._node(node)["x"] for node in self.visible), default=0)
+        max_y = max((self._node(node)["y"] for node in self.visible), default=0)
         width = max(
             self.canvas.winfo_width(), int((max_x + 500) * self.zoom),
         )
@@ -410,6 +499,7 @@ class RpfPackageGraphFrame(ttk.Frame):
             self.canvas.create_line(0, y, width, y, fill="#18211D", tags=("grid",))
         self.canvas.configure(scrollregion=(0, 0, width, height))
         self.edge_items.clear()
+        self.relation_edge_items.clear()
         for child, parent in self.graph_state["parents"].items():
             if child not in self.visible or parent not in self.visible:
                 continue
@@ -418,22 +508,46 @@ class RpfPackageGraphFrame(ttk.Frame):
                 width=3, fill="#50655C", tags=("edge",),
             )
             self.edge_items[(parent, child)] = item
+        if selected_filter != "containment":
+            semantic = self.graph_state.get("semantic") or {}
+            for relation in semantic.get("relations", []):
+                if (
+                    relation["source"] not in self.visible
+                    or relation["target"] not in self.visible
+                    or (
+                        selected_filter is not None
+                        and relation["group"] != selected_filter
+                    )
+                ):
+                    continue
+                key = (relation["source"], relation["target"], relation["type"])
+                self.relation_edge_items[key] = self.canvas.create_line(
+                    0, 0, 0, 0, 0, 0, 0, 0, smooth=True, splinesteps=20,
+                    width=3 if relation.get("required") else 2,
+                    dash=() if relation.get("required") else (7, 4),
+                    fill=self.RELATION_COLORS[relation["group"]],
+                    tags=("semantic-edge", f"relation:{relation['type']}"),
+                )
         for node_id in ordered:
             if node_id not in self.visible:
                 continue
             self._draw_node(node_id)
         self._update_edges()
-        hidden = len(nodes) - len(self.visible)
+        hidden = len(nodes) + len(self.semantic_entities) - len(self.visible)
         note = f" · {hidden:,} nodes collapsed/hidden" if hidden else ""
+        semantic = self.graph_state.get("semantic") or {}
+        relation_count = len(semantic.get("relations", []))
+        finding_count = len(semantic.get("findings", []))
         self.status.set(
             f"{len(nodes):,} nodes · {len(self.graph_state['parents']):,} links · "
+            f"{relation_count:,} semantic links · {finding_count:,} findings · "
             f"{self.graph_state['file_count']:,} sources · "
             f"{self.graph_state['sealed_archive_count']:,} sealed RPFs · "
             f"{self.graph_state['byte_count']:,} bytes{note}"
         )
 
     def _draw_node(self, node_id: str) -> None:
-        node = self.graph_state["nodes"][node_id]
+        node = self._node(node_id)
         x, y = node["x"] * self.zoom, node["y"] * self.zoom
         node_width, node_height = NODE_WIDTH * self.zoom, NODE_HEIGHT * self.zoom
         shadow = max(2, 5 * self.zoom)
@@ -460,6 +574,7 @@ class RpfPackageGraphFrame(ttk.Frame):
             x + 10 * self.zoom, y + 13 * self.zoom,
             text=(
                 "SEALED RPF" if node["type"] == "sealed_archive"
+                else "VEHICLE SYSTEM" if node["type"] == "vehicle_entity"
                 else node["type"].upper()
             ), anchor="w",
             fill="#FFFFFF", font=("Segoe UI Semibold", font_header), tags=tags,
@@ -478,7 +593,11 @@ class RpfPackageGraphFrame(ttk.Frame):
             text=node["name"], anchor="w", width=text_width,
             fill="#F0F5F2", font=("Segoe UI Semibold", font_name), tags=tags,
         )
-        subtitle = node_id if not is_source else f"{node['size']:,} bytes"
+        subtitle = (
+            f"{node['edition']} · vehicle system"
+            if node["type"] == "vehicle_entity"
+            else node_id if not is_source else f"{node['size']:,} bytes"
+        )
         self.canvas.create_text(
             x + 10 * self.zoom, y + 68 * self.zoom,
             text=subtitle, anchor="w", width=text_width,
@@ -486,7 +605,7 @@ class RpfPackageGraphFrame(ttk.Frame):
         )
         if is_file:
             self._draw_asset_preview(node_id, node, x, y, tags)
-        if node_id != self.graph_state["root_id"]:
+        if node_id in self.graph_state["nodes"] and node_id != self.graph_state["root_id"]:
             port_radius = max(4, 7 * self.zoom)
             port_y = y + 41 * self.zoom
             self.canvas.create_oval(
@@ -504,6 +623,12 @@ class RpfPackageGraphFrame(ttk.Frame):
                 fill="#E7B94B", outline="#111714", width=2,
                 tags=(*tags, f"out:{node_id}"),
             )
+
+    def _node(self, node_id: str) -> dict:
+        node = self.graph_state.get("nodes", {}).get(node_id)
+        if node is not None:
+            return node
+        return self.semantic_entities[node_id]
 
     def _draw_asset_preview(
         self, node_id: str, node: dict, x: float, y: float,
@@ -652,6 +777,14 @@ class RpfPackageGraphFrame(ttk.Frame):
             y2 = (target["y"] + 41) * self.zoom
             curve = max(60, abs(x2 - x1) * 0.45)
             self.canvas.coords(item, x1, y1, x1 + curve, y1, x2 - curve, y2, x2, y2)
+        for (source_id, target_id, _kind), item in self.relation_edge_items.items():
+            source, target = self._node(source_id), self._node(target_id)
+            x1 = source["x"] * self.zoom
+            y1 = (source["y"] + 41) * self.zoom
+            x2 = (target["x"] + NODE_WIDTH) * self.zoom
+            y2 = (target["y"] + 41) * self.zoom
+            curve = max(60, abs(x2 - x1) * 0.4)
+            self.canvas.coords(item, x1, y1, x1 - curve, y1, x2 + curve, y2, x2, y2)
 
     def _tags_at_current(self) -> tuple[str, ...]:
         current = self.canvas.find_withtag("current")
@@ -680,7 +813,7 @@ class RpfPackageGraphFrame(ttk.Frame):
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         if output:
             self.connecting_parent = output
-            source = self.graph_state["nodes"][output]
+            source = self._node(output)
             x1 = (source["x"] + NODE_WIDTH) * self.zoom
             y1 = (source["y"] + 41) * self.zoom
             self.connection_line = self.canvas.create_line(
@@ -694,7 +827,7 @@ class RpfPackageGraphFrame(ttk.Frame):
     def _motion(self, event: tk.Event) -> None:
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         if self.connecting_parent and self.connection_line:
-            source = self.graph_state["nodes"][self.connecting_parent]
+            source = self._node(self.connecting_parent)
             self.canvas.coords(
                 self.connection_line,
                 (source["x"] + NODE_WIDTH) * self.zoom,
@@ -704,7 +837,7 @@ class RpfPackageGraphFrame(ttk.Frame):
         if not self.dragging:
             return
         dx, dy = x - self.drag_last[0], y - self.drag_last[1]
-        node = self.graph_state["nodes"][self.dragging]
+        node = self._node(self.dragging)
         node["x"], node["y"] = (
             node["x"] + dx / self.zoom, node["y"] + dy / self.zoom,
         )
@@ -720,7 +853,7 @@ class RpfPackageGraphFrame(ttk.Frame):
             if self.connection_line:
                 self.canvas.delete(self.connection_line)
                 self.connection_line = None
-            if child and child != parent:
+            if child in self.graph_state["nodes"] and child != parent:
                 try:
                     RpfPackageGraph.reparent_node(self.graph, child, parent)
                 except (OSError, ValueError) as exc:
@@ -729,10 +862,17 @@ class RpfPackageGraphFrame(ttk.Frame):
             return
         if self.dragging:
             node_id = self.dragging
-            node = self.graph_state["nodes"][node_id]
+            node = self._node(node_id)
             self.dragging = None
             try:
-                RpfPackageGraph.set_position(self.graph, node_id, node["x"], node["y"])
+                if node_id in self.semantic_entities:
+                    RpfPackageGraph.set_semantic_position(
+                        self.graph, node_id, node["x"], node["y"],
+                    )
+                else:
+                    RpfPackageGraph.set_position(
+                        self.graph, node_id, node["x"], node["y"],
+                    )
             except (OSError, ValueError) as exc:
                 messagebox.showerror("Could not save node position", str(exc), parent=self)
                 self._reload(node_id)
@@ -784,8 +924,8 @@ class RpfPackageGraphFrame(ttk.Frame):
     def _fit_graph(self) -> None:
         if not self.visible:
             return
-        max_x = max(self.graph_state["nodes"][node]["x"] for node in self.visible)
-        max_y = max(self.graph_state["nodes"][node]["y"] for node in self.visible)
+        max_x = max(self._node(node)["x"] for node in self.visible)
+        max_y = max(self._node(node)["y"] for node in self.visible)
         available_width = max(1, self.canvas.winfo_width() - 40)
         available_height = max(1, self.canvas.winfo_height() - 40)
         target = min(
@@ -802,27 +942,96 @@ class RpfPackageGraphFrame(ttk.Frame):
         self._show_selected()
 
     def _show_selected(self) -> None:
-        node = self.graph_state.get("nodes", {}).get(self.selected)
+        node = (
+            self._node(self.selected) if self.selected in (
+                set(self.graph_state.get("nodes", {})) | set(self.semantic_entities)
+            ) else None
+        )
         if node is None:
             self.detail_name.set("Nothing selected")
             for variable in (
                 self.detail_type, self.detail_id, self.detail_parent, self.detail_source,
+                self.detail_metadata, self.detail_findings,
             ):
                 variable.set("")
             self.expand_sealed_button.configure(state="disabled")
+            self.open_asset_button.configure(state="disabled")
+            self.open_vehicle_button.configure(state="disabled")
             return
         self.detail_name.set(node["name"])
-        self.detail_type.set(f"Type: {node['type']}")
+        authored_type = (
+            "vehicle system" if node["type"] == "vehicle_entity" else node["type"]
+        )
+        self.detail_type.set(f"Type: {authored_type}")
         self.detail_id.set(f"ID: {node['id']}")
         parent = self.graph_state["parents"].get(node["id"])
-        self.detail_parent.set(f"Parent: {parent or '(package root)'}")
+        self.detail_parent.set(
+            f"Parent: {parent or ('(semantic overlay)' if node['type'] == 'vehicle_entity' else '(package root)')}"
+        )
         expanded = node.get("expanded_from")
         source = node.get("source") or (
             expanded.get("path") if isinstance(expanded, dict) else None
         )
+        source = source or node.get("source_root")
         self.detail_source.set(f"Source: {source or '(generated container)'}")
+        semantic = self.graph_state.get("semantic") or {}
+        if node["type"] == "vehicle_entity":
+            metadata = node.get("metadata", {})
+            tuning = ", ".join(metadata.get("tuning_kits", [])) or "none"
+            relation_groups = {}
+            for relation in semantic.get("relations", []):
+                if relation.get("source") == node["id"]:
+                    relation_groups[relation["group"]] = (
+                        relation_groups.get(relation["group"], 0) + 1
+                    )
+            linked = " · ".join(
+                f"{name}: {count}" for name, count in relation_groups.items()
+            ) or "none"
+            self.detail_metadata.set(
+                f"Edition: {node['edition']}\nHandling: "
+                f"{metadata.get('handling_id') or '(none)'}\nTexture: "
+                f"{metadata.get('texture_dictionary') or '(none)'}\n"
+                f"Tuning kits: {tuning}\nLinks: {linked}"
+            )
+        else:
+            linked_from = []
+            for relation in semantic.get("relations", []):
+                if relation.get("target") != node["id"]:
+                    continue
+                entity = self.semantic_entities.get(relation.get("source"))
+                if entity is not None:
+                    linked_from.append(
+                        f"{relation['label']}: {entity['name']} ({entity['edition']})"
+                    )
+            self.detail_metadata.set(
+                "Relationships:\n" + "\n".join(linked_from[:8])
+                if linked_from else ""
+            )
+        related_findings = [
+            item for item in semantic.get("findings", [])
+            if item.get("entity_id") == node["id"] or item.get("node_id") == node["id"]
+        ]
+        self.detail_findings.set(
+            "Findings: none" if not related_findings else
+            "Findings:\n" + "\n".join(
+                f"{item['severity'].upper()} · {item['message']}"
+                for item in related_findings[:5]
+            )
+        )
         self.expand_sealed_button.configure(
             state="normal" if node["type"] == "sealed_archive" else "disabled",
+        )
+        self.open_asset_button.configure(
+            state=(
+                "normal" if node["type"] == "file"
+                and self._on_open_asset is not None else "disabled"
+            ),
+        )
+        self.open_vehicle_button.configure(
+            state=(
+                "normal" if node["type"] == "vehicle_entity"
+                and self._on_open_vehicle is not None else "disabled"
+            ),
         )
 
     def _activate_selected(self, _event: tk.Event | None = None) -> None:
@@ -853,7 +1062,7 @@ class RpfPackageGraphFrame(ttk.Frame):
         if node_id is None:
             return
         self._select(node_id)
-        node = self.graph_state["nodes"][node_id]
+        node = self._node(node_id)
         menu = tk.Menu(self, tearoff=False)
         if node["type"] in {"archive", "directory"}:
             menu.add_command(
@@ -865,11 +1074,19 @@ class RpfPackageGraphFrame(ttk.Frame):
                 label="Expand sealed RPF into nodes…",
                 command=self._expand_selected_sealed,
             )
+        if node["type"] == "file" and self._on_open_asset is not None:
+            menu.add_command(
+                label="Open in Asset Viewer", command=self._open_selected_asset,
+            )
+        if node["type"] == "vehicle_entity" and self._on_open_vehicle is not None:
+            menu.add_command(
+                label="Open in Vehicle Workbench", command=self._open_selected_vehicle,
+            )
         menu.add_command(label="Focus node", command=self._focus_selected)
         menu.tk_popup(event.x_root, event.y_root)
 
     def _focus_selected(self) -> None:
-        node = self.graph_state.get("nodes", {}).get(self.selected)
+        node = self._node(self.selected) if self.selected in self.visible else None
         if node is None or node["id"] not in self.visible:
             return
         region = self.canvas.cget("scrollregion").split()
@@ -907,10 +1124,16 @@ class RpfPackageGraphFrame(ttk.Frame):
 
         def completed(result: dict) -> None:
             self.collapsed.discard(node_id)
+            try:
+                semantic = PackageRelationshipAnalyzer.analyze(self.graph)
+                result["semantic_links"] = semantic["summary"]["relations"]
+            except (OSError, ValueError):
+                result["semantic_links"] = None
             self._reload(node_id)
             self.status.set(
                 f"Expanded {result['files']:,} files across "
-                f"{result['archives']:,} RPF archive(s)."
+                f"{result['archives']:,} RPF archive(s) · "
+                f"{result['semantic_links'] or 0:,} semantic links."
             )
 
         _GraphWorkDialog(
@@ -919,14 +1142,60 @@ class RpfPackageGraphFrame(ttk.Frame):
             work, completed,
         )
 
+    def _analyze_links(self) -> None:
+        def completed(report: dict) -> None:
+            selected = self.selected
+            self._reload(selected)
+            summary = report["summary"]
+            self.status.set(
+                f"Relationship analysis complete · {summary['entities']:,} vehicle "
+                f"systems · {summary['relations']:,} links · "
+                f"{summary['errors']:,} errors · {summary['warnings']:,} warnings"
+            )
+
+        _GraphWorkDialog(
+            self, "Analyzing package relationships",
+            "Resolving vehicle assets, metadata, tuning, registrations, and targets…",
+            lambda: PackageRelationshipAnalyzer.analyze(self.graph), completed,
+        )
+
+    def _open_selected_asset(self) -> None:
+        node = self.graph_state.get("nodes", {}).get(self.selected)
+        if (
+            node is None or node.get("type") != "file"
+            or self._on_open_asset is None
+        ):
+            return
+        source = Path(node["source"])
+        root = source.parent
+        semantic = self.graph_state.get("semantic") or {}
+        for relation in semantic.get("relations", []):
+            if relation.get("target") != node["id"]:
+                continue
+            entity = self.semantic_entities.get(relation.get("source"))
+            if entity is not None:
+                root = Path(entity["source_root"])
+                break
+        self._on_open_asset(str(source), str(root))
+
+    def _open_selected_vehicle(self) -> None:
+        entity = self.semantic_entities.get(self.selected)
+        if entity is None or self._on_open_vehicle is None:
+            return
+        self._on_open_vehicle(
+            entity["source_root"], entity["name"],
+        )
+
     def _focus_search(self) -> None:
         wanted = self.query.get().strip().casefold()
         if not wanted:
             return
+        all_nodes = {**self.graph_state["nodes"], **self.semantic_entities}
         found = next((
-            node_id for node_id, node in self.graph_state["nodes"].items()
+            node_id for node_id, node in all_nodes.items()
             if wanted in node_id.casefold() or wanted in node["name"].casefold()
-            or wanted in str(node.get("source", "")).casefold()
+            or wanted in str(node.get("source", node.get("source_root", ""))).casefold()
+            or wanted in str(node.get("metadata", {})).casefold()
         ), None)
         if found is None:
             self.status.set(f"No node matches {self.query.get()!r}")
@@ -940,7 +1209,7 @@ class RpfPackageGraphFrame(ttk.Frame):
             self.status.set("The matching node is beyond the canvas display limit.")
             return
         self._select(found)
-        node = self.graph_state["nodes"][found]
+        node = self._node(found)
         region = self.canvas.cget("scrollregion").split()
         width, height = max(1.0, float(region[2])), max(1.0, float(region[3]))
         self.canvas.xview_moveto(max(0, (node["x"] * self.zoom - 100) / width))
@@ -948,6 +1217,8 @@ class RpfPackageGraphFrame(ttk.Frame):
 
     def _container_parent(self) -> str:
         selected = self.selected or self.graph_state["root_id"]
+        if selected in self.semantic_entities:
+            return self.graph_state["root_id"]
         if self.graph_state["nodes"][selected]["type"] in {
             "file", "sealed_archive",
         }:
@@ -1016,7 +1287,13 @@ class RpfPackageGraphFrame(ttk.Frame):
         self._reload(node)
 
     def _rename(self) -> None:
-        if not self.selected:
+        if not self.selected or self.selected in self.semantic_entities:
+            if self.selected in self.semantic_entities:
+                messagebox.showinfo(
+                    "Derived relationship node",
+                    "Vehicle-system nodes are derived from package metadata and cannot "
+                    "be renamed here.", parent=self,
+                )
             return
         node = self.graph_state["nodes"][self.selected]
         name = simpledialog.askstring(
@@ -1032,6 +1309,13 @@ class RpfPackageGraphFrame(ttk.Frame):
         self._reload(self.selected)
 
     def _remove(self) -> None:
+        if self.selected in self.semantic_entities:
+            messagebox.showinfo(
+                "Derived relationship node",
+                "Vehicle-system nodes are derived from package metadata. Edit the "
+                "source records or change the relationship filter instead.", parent=self,
+            )
+            return
         if not self.selected or self.selected == self.graph_state["root_id"]:
             messagebox.showinfo("Root retained", "The package root cannot be removed.", parent=self)
             return
@@ -1226,7 +1510,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
     def __init__(
         self, parent: tk.Misc, graph: str | Path, project_root: str | Path,
         game_path: str | Path | None = None,
-        *, on_close=None,
+        *, on_close=None, initial_select: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._on_close = on_close
@@ -1236,6 +1520,7 @@ class RpfPackageGraphDialog(tk.Toplevel):
         self.transient(parent.winfo_toplevel())
         self.editor = RpfPackageGraphFrame(
             self, graph, project_root, game_path, on_close=self._finish_close,
+            initial_select=initial_select,
         )
 
     def _finish_close(self) -> None:

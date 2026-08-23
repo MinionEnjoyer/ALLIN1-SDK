@@ -27,6 +27,7 @@ from allin1_sdk.native_assets import (
 from allin1_sdk.mods import ModIntegrationService, ModManifest
 from allin1_sdk.oiv_workbench import OivWorkbench
 from allin1_sdk.package_graph import PackageGraphWorkspace
+from allin1_sdk.package_relations import PackageRelationshipAnalyzer
 from allin1_sdk.paths import project_root
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.rage_data_compiler import RageVehicleDataCompiler
@@ -108,10 +109,29 @@ def _field_assignments(
     return updates
 
 
-def _open_graph_window(graph: Path, gta_path: Path | None = None) -> int:
+def _open_graph_window(
+    graph: Path, gta_path: Path | None = None, focus_node: str | None = None,
+) -> int:
     """Start the desktop graph editor without routing paths through a shell."""
     resolved = graph.expanduser().resolve(strict=True)
-    RpfPackageGraph.validate(resolved, verify_sources=False)
+    state = RpfPackageGraph.validate(resolved, verify_sources=False)
+    selected_node: str | None = None
+    if focus_node:
+        semantic = state.get("semantic") or {}
+        candidates = list(state["nodes"].values()) + semantic.get("entities", [])
+        matches = [
+            item["id"] for item in candidates
+            if item["id"].casefold() == focus_node.casefold()
+            or item["name"].casefold() == focus_node.casefold()
+            or (
+                isinstance(item.get("edition"), str)
+                and f"{item['name']}@{item['edition']}".casefold()
+                == focus_node.casefold()
+            )
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"Graph focus was not found uniquely: {focus_node}")
+        selected_node = matches[0]
     selected_game = gta_path.expanduser().resolve(strict=True) if gta_path else None
 
     executable = Path(sys.executable).resolve()
@@ -170,6 +190,8 @@ def _open_vehicle_workbench_window(
         ]
     if selected_game is not None:
         command.extend(("--gta-path", str(selected_game)))
+    if selected_node is not None:
+        command.extend(("--graph-node", selected_node))
     options: dict[str, object] = {}
     if os.name == "nt":
         options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -273,14 +295,21 @@ def agent_api(allow_game_writes: bool) -> None:
     "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
     help="Matching GTA installation for encrypted/native asset previews.",
 )
-def open_rpf_graph(graph: Path, gta_path: Path | None) -> None:
+@click.option("--focus-node", help="Select one node id or exact node name on open.")
+def open_rpf_graph(
+    graph: Path, gta_path: Path | None, focus_node: str | None,
+) -> None:
     """Open an RPF package graph in the desktop node editor."""
     try:
-        pid = _open_graph_window(graph, gta_path)
+        pid = (
+            _open_graph_window(graph, gta_path, focus_node)
+            if focus_node else _open_graph_window(graph, gta_path)
+        )
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps({
-        "operation": "open_rpf_graph", "graph": str(graph.resolve()), "pid": pid,
+        "operation": "open_rpf_graph", "graph": str(graph.resolve()),
+        "focus_node": focus_node, "pid": pid,
     }, indent=2))
 
 
@@ -1478,6 +1507,36 @@ def expand_rpf_graph_sealed(
         "operation": "expand_rpf_graph_sealed", "graph": str(graph.resolve()),
         **report,
     }, indent=2))
+
+
+@main.command("analyze-package-graph")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--output", "-o", type=click.Path(dir_okay=False, path_type=Path))
+def analyze_package_graph(graph: Path, output: Path | None) -> None:
+    """Resolve and persist typed vehicle relationships in a package graph."""
+    try:
+        report = PackageRelationshipAnalyzer.analyze(graph)
+        _write_rpf_graph_report({
+            "operation": "analyze_package_graph", "graph": str(graph.resolve()),
+            **report,
+        }, output)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@main.command("inspect-package-graph-relations")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--output", "-o", type=click.Path(dir_okay=False, path_type=Path))
+def inspect_package_graph_relations(graph: Path, output: Path | None) -> None:
+    """Inspect persisted vehicle links and relationship findings."""
+    try:
+        report = PackageRelationshipAnalyzer.inspect(graph)
+        _write_rpf_graph_report({
+            "operation": "inspect_package_graph_relations",
+            "graph": str(graph.resolve()), **report,
+        }, output)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @main.command("rename-rpf-graph-node")
@@ -3103,6 +3162,7 @@ for _command in (
     create_rpf_graph, import_rpf_graph, import_package_graph,
     render_rpf_graph_previews,
     inspect_rpf_graph, validate_rpf_graph,
+    analyze_package_graph, inspect_package_graph_relations,
     add_rpf_graph_container, add_rpf_graph_file, expand_rpf_graph_sealed,
     rename_rpf_graph_node,
     reparent_rpf_graph_node, position_rpf_graph_node, remove_rpf_graph_node,

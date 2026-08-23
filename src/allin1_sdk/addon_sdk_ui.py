@@ -253,6 +253,8 @@ class AddonSdkDialog(tk.Toplevel):
                 installation_roots=self.installation_roots,
                 embedded=True, on_help=self._open_help,
                 on_close=lambda: self._select_workspace("linker"),
+                on_open_asset=self._open_graph_asset,
+                on_open_vehicle=self._open_graph_vehicle,
             )
             self.rpf_workspace = workspace
         elif key == "recipes":
@@ -726,6 +728,39 @@ class AddonSdkDialog(tk.Toplevel):
                 self.package_source, self.package_scan,
             )
         self.asset_workspace.select_asset(path)
+
+    def _open_graph_asset(self, source: str, root: str) -> None:
+        source_path = Path(source).expanduser().resolve()
+        root_path = Path(root).expanduser().resolve()
+        try:
+            relative = source_path.relative_to(root_path).as_posix()
+            scan = AddonPackageInspector().inspect(root_path)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror(
+                "Could not route graph asset", str(exc), parent=self,
+            )
+            return
+        self._select_workspace("assets")
+        self.asset_workspace.open_source(root_path, scan)
+        if not self.asset_workspace.select_asset(relative):
+            messagebox.showerror(
+                "Asset not found",
+                "The selected graph source was not found in its retained package root.",
+                parent=self,
+            )
+
+    def _open_graph_vehicle(self, root: str, model: str) -> None:
+        root_path = Path(root).expanduser().resolve()
+        try:
+            scan = AddonPackageInspector().inspect(root_path)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror(
+                "Could not route vehicle system", str(exc), parent=self,
+            )
+            return
+        self._select_workspace("vehicles")
+        self.vehicle_workspace.open_source(root_path, scan)
+        self.vehicle_workspace.select_model(model)
 
     def _open_rpf_explorer(self) -> None:
         self._select_workspace("rpf")

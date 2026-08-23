@@ -151,6 +151,10 @@ class PackageGraphWorkspace:
                     raise ValueError(
                         f"Package graph workspace conflicts with this import: {final}"
                     )
+                if state.get("semantic") is None:
+                    from allin1_sdk.package_relations import PackageRelationshipAnalyzer
+
+                    PackageRelationshipAnalyzer.analyze(final_graph)
                 shutil.rmtree(staging)
                 return PackageGraphProject(
                     package, final, final_graph, fingerprint, len(scan.entries),
@@ -188,6 +192,9 @@ class PackageGraphWorkspace:
             staging.rename(final)
             published = final
             RpfPackageGraph.validate(final_graph, verify_sources=True)
+            from allin1_sdk.package_relations import PackageRelationshipAnalyzer
+
+            PackageRelationshipAnalyzer.analyze(final_graph)
             return PackageGraphProject(
                 package, final, final_graph, fingerprint, len(scan.entries),
                 sealed_rpfs, False,

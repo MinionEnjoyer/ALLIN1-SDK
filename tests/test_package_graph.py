@@ -31,6 +31,7 @@ def test_package_graph_is_persistent_and_preserves_sealed_rpfs(tmp_path):
     assert created.sealed_rpf_count == 1
     assert state["sealed_archive_count"] == 1
     assert state["payload"]["origin"]["type"] == "mod_package_import"
+    assert state["semantic"]["summary"]["entities"] == 0
     sealed = next(
         node for node in state["nodes"].values()
         if node["type"] == "sealed_archive"

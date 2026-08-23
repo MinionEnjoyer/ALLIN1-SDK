@@ -153,6 +153,15 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   Export preview bundle** publishes the same hash-bound renderer as
   `render-rpf-graph-previews`, producing an atomic portable bundle and per-preview
   SHA-256 report through the desktop, console, or structured Agent API.
+  Complete mod-package imports are retained as content-addressed projects and add a
+  separate semantic overlay for vehicle systems. Pink vehicle cards link to their
+  primary/high-detail models, texture dictionaries, handling, variations, tuning,
+  registrations, text labels, edition, and install target. Typed colors, relationship
+  filters, a legend, missing/mismatched/orphan findings, and direct Asset Viewer or
+  Vehicle Workbench actions turn package structure into an explorable dependency map
+  without changing the buildable containment tree. `analyze-package-graph`,
+  `inspect-package-graph-relations`, and `open-rpf-graph --focus-node` expose the same
+  evidence through the console and structured Agent API.
   An already-built RPF can also be recursively expanded into a retained external
   graph workspace: nested archives become editable `.rpf.source` branches, the
   untouched origin hash remains in the graph, and one import report accounts for

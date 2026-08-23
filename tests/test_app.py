@@ -27,9 +27,30 @@ def test_desktop_accepts_direct_rpf_graph_launch_arguments(tmp_path):
     game = tmp_path / "game"
     parsed = _launch_arguments([
         "--rpf-graph", str(graph), "--gta-path", str(game),
+        "--graph-node", "vehicle_example",
     ])
     assert parsed.rpf_graph == Path(graph)
     assert parsed.gta_path == Path(game)
+    assert parsed.graph_node == "vehicle_example"
+
+
+def test_open_graph_cli_routes_a_focus_node(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from allin1_sdk.cli import main
+
+    graph = tmp_path / "rpf-graph.json"
+    graph.write_text("{}", encoding="utf-8")
+    launched = []
+    monkeypatch.setattr(
+        "allin1_sdk.cli._open_graph_window",
+        lambda selected, game, focus: launched.append((selected, game, focus)) or 7313,
+    )
+    result = CliRunner().invoke(main, [
+        "open-rpf-graph", str(graph), "--focus-node", "graphcar@Enhanced",
+    ])
+    assert result.exit_code == 0
+    assert launched == [(graph, None, "graphcar@Enhanced")]
 
 
 def test_open_vehicle_workbench_cli_launches_desktop(tmp_path, monkeypatch):

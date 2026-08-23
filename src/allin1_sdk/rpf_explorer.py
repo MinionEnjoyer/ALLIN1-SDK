@@ -547,10 +547,13 @@ class RpfExplorerDialog(ttk.Frame):
         self, parent: tk.Misc, project_root: str | Path,
         installation_roots: tuple[Path, ...] = (), archive: str | Path | None = None,
         *, embedded: bool = False, on_help=None, on_close=None,
+        on_open_asset=None, on_open_vehicle=None,
     ) -> None:
         self._window: tk.Toplevel | None = None
         self._on_help = on_help
         self._on_close = on_close
+        self._on_open_asset = on_open_asset
+        self._on_open_vehicle = on_open_vehicle
         host = parent
         if not embedded:
             self._window = tk.Toplevel(parent)
@@ -1223,6 +1226,8 @@ class RpfExplorerDialog(ttk.Frame):
         self._graph_editor = RpfPackageGraphFrame(
             self.graph_host, graph, self.project_root, self._graph_game_path(),
             on_close=self._show_graph_home,
+            on_open_asset=self._on_open_asset,
+            on_open_vehicle=self._on_open_vehicle,
         )
         self.workspace_tabs.select(self.graph_tab)
 

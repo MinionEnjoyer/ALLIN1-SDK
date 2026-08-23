@@ -840,6 +840,20 @@ class VehicleWorkbenchFrame(ttk.Frame):
         else:
             self._clear_model("No vehicles.meta records were found in this package.")
 
+    def select_model(self, model_name: str) -> bool:
+        """Select one resolved model when another SDK workspace routes to it."""
+        match = next((
+            item_id for item_id, model in self.models.items()
+            if model.model.casefold() == model_name.casefold()
+        ), None)
+        if match is None:
+            return False
+        self.model_tree.selection_set(match)
+        self.model_tree.focus(match)
+        self.model_tree.see(match)
+        self._select_model()
+        return True
+
     def _select_model(self, _event: object | None = None) -> None:
         selection = self.model_tree.selection()
         model = self.models.get(selection[0]) if selection else None

@@ -39,6 +39,11 @@ def test_graph_binary_and_gxt2_authoring_are_embedded_with_compatibility_hosts()
     assert 'text="Recent package projects"' in explorer
     assert "PackageGraphWorkspace().import_package" in explorer
     assert 'text="Expand sealed RPF into nodes…"' in graph
+    assert 'text="Analyze links"' in graph
+    assert '"vehicle_entity"' in graph
+    assert "RELATION_FILTERS" in graph
+    assert 'text="Open in Asset Viewer"' in graph
+    assert 'text="Open in Vehicle Workbench"' in graph
     assert "_toggle_selected_collapse" in graph
     assert "self._binary_editor = BinaryWorkspaceFrame(" in explorer
     assert "self._gxt2_editor = Gxt2WorkspaceFrame(" in explorer

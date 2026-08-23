@@ -161,7 +161,7 @@ def _path_suggestions(
 
 
 def suggestions_for(
-    command_line: str, *, cwd: Path, history: Iterable[str] = (), limit: int = 12,
+    command_line: str, *, cwd: Path, history: Iterable[str] = (), limit: int = 16,
 ) -> tuple[ConsoleSuggestion, ...]:
     """Return progressively filtered command, option, history, and path matches."""
     text = command_line.lstrip()

@@ -55,6 +55,8 @@ def test_catalog_is_structured_and_classifies_risk():
     assert catalog["import-package-graph"]["risk"] == "authoring_write"
     assert catalog["expand-rpf-graph-sealed"]["risk"] == "authoring_write"
     assert catalog["inspect-rpf-graph"]["risk"] == "read_only"
+    assert catalog["analyze-package-graph"]["risk"] == "authoring_write"
+    assert catalog["inspect-package-graph-relations"]["risk"] == "read_only"
     assert catalog["validate-rpf-graph"]["risk"] == "read_only"
     assert catalog["inspect-binary-workspace"]["risk"] == "read_only"
     assert catalog["patch-binary-workspace"]["risk"] == "authoring_write"

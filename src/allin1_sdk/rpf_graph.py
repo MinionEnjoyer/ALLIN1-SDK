@@ -30,6 +30,10 @@ RPF_GRAPH_NODE_TYPES = frozenset({
     "archive", "sealed_archive", "directory", "file",
 })
 RPF_GRAPH_SOURCE_NODE_TYPES = frozenset({"sealed_archive", "file"})
+RPF_GRAPH_SEMANTIC_TYPES = frozenset({"vehicle"})
+RPF_GRAPH_RELATION_GROUPS = frozenset({
+    "assets", "metadata", "tuning", "registration",
+})
 MAX_RPF_GRAPH_NODES = MAX_RPF_BUILD_FILES * 2
 MAX_RPF_GRAPH_COORDINATE = 1_000_000
 MAX_RPF_GRAPH_TREE_DEPTH = 256
@@ -124,6 +128,12 @@ def _stable_node_id(kind: str, logical_path: str) -> str:
         f"{kind}\0{logical_path.casefold()}".encode("utf-8")
     ).hexdigest()[:20]
     return f"{kind[0]}_{digest}"
+
+
+def _semantic_text(value: object, label: str, *, maximum: int = 4096) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+        raise ValueError(f"RPF graph semantic {label} is invalid")
+    return value
 
 
 class RpfPackageGraph:
@@ -499,6 +509,124 @@ class RpfPackageGraph:
         walk(root_id, 0)
         if visited != set(nodes):
             raise ValueError("RPF graph contains unreachable nodes")
+        semantic_payload = payload.get("semantic")
+        semantic: dict[str, Any] | None = None
+        if semantic_payload is not None:
+            if (
+                not isinstance(semantic_payload, dict)
+                or semantic_payload.get("schema_version") != 1
+                or semantic_payload.get("analyzer") != "vehicle_relationships"
+            ):
+                raise ValueError("RPF graph semantic relationship schema is invalid")
+            authored_entities = semantic_payload.get("entities")
+            authored_relations = semantic_payload.get("relations")
+            authored_findings = semantic_payload.get("findings")
+            if (
+                not isinstance(authored_entities, list)
+                or not isinstance(authored_relations, list)
+                or not isinstance(authored_findings, list)
+                or len(authored_entities) > MAX_RPF_GRAPH_NODES
+                or len(authored_relations) > MAX_RPF_GRAPH_NODES * 8
+                or len(authored_findings) > MAX_RPF_GRAPH_NODES * 8
+            ):
+                raise ValueError("RPF graph semantic relationship collection is invalid")
+            entities: dict[str, dict[str, Any]] = {}
+            semantic_ids = {node_id.casefold() for node_id in nodes}
+            for authored in authored_entities:
+                if not isinstance(authored, dict):
+                    raise ValueError("RPF graph semantic entities must be objects")
+                entity_id = _safe_id(authored.get("id"))
+                if entity_id.casefold() in semantic_ids:
+                    raise ValueError(f"Duplicate RPF graph semantic id: {entity_id}")
+                semantic_ids.add(entity_id.casefold())
+                entity_type = str(authored.get("type", "")).casefold()
+                if entity_type not in RPF_GRAPH_SEMANTIC_TYPES:
+                    raise ValueError(
+                        f"Unsupported RPF graph semantic entity type: {entity_type}"
+                    )
+                metadata = authored.get("metadata")
+                finding_codes = authored.get("finding_codes", [])
+                if not isinstance(metadata, dict) or not isinstance(finding_codes, list):
+                    raise ValueError("RPF graph semantic entity metadata is invalid")
+                if any(not isinstance(item, str) for item in finding_codes):
+                    raise ValueError("RPF graph semantic finding codes are invalid")
+                source_root = authored.get("source_root")
+                if (
+                    not isinstance(source_root, str)
+                    or not Path(source_root).is_absolute()
+                ):
+                    raise ValueError("RPF graph semantic source root must be absolute")
+                entities[entity_id] = {
+                    "id": entity_id, "type": entity_type,
+                    "name": _semantic_text(authored.get("name"), "entity name", maximum=256),
+                    "x": _number(authored.get("x", 0), "semantic x"),
+                    "y": _number(authored.get("y", 0), "semantic y"),
+                    "source_root": str(Path(source_root).resolve()),
+                    "edition": _semantic_text(
+                        authored.get("edition"), "edition", maximum=64,
+                    ),
+                    "metadata": metadata,
+                    "finding_codes": finding_codes,
+                }
+            endpoints = set(nodes) | set(entities)
+            normalized_relations: list[dict[str, Any]] = []
+            seen_relations: set[tuple[str, str, str]] = set()
+            for authored in authored_relations:
+                if not isinstance(authored, dict):
+                    raise ValueError("RPF graph semantic relations must be objects")
+                source = _safe_id(authored.get("source"))
+                target = _safe_id(authored.get("target"))
+                relation_type = _semantic_text(
+                    authored.get("type"), "relation type", maximum=64,
+                ).casefold()
+                group = str(authored.get("group", "")).casefold()
+                if (
+                    source not in endpoints or target not in endpoints
+                    or source == target or group not in RPF_GRAPH_RELATION_GROUPS
+                ):
+                    raise ValueError("RPF graph semantic relation endpoint/group is invalid")
+                key = (source.casefold(), target.casefold(), relation_type)
+                if key in seen_relations:
+                    raise ValueError("RPF graph has a duplicate semantic relation")
+                seen_relations.add(key)
+                normalized_relations.append({
+                    "source": source, "target": target, "type": relation_type,
+                    "group": group,
+                    "label": _semantic_text(
+                        authored.get("label"), "relation label", maximum=256,
+                    ),
+                    "required": bool(authored.get("required", False)),
+                })
+            normalized_findings: list[dict[str, Any]] = []
+            for authored in authored_findings:
+                if not isinstance(authored, dict):
+                    raise ValueError("RPF graph semantic findings must be objects")
+                severity = str(authored.get("severity", "")).casefold()
+                if severity not in {"info", "warning", "error"}:
+                    raise ValueError("RPF graph semantic finding severity is invalid")
+                finding = dict(authored)
+                finding.update({
+                    "severity": severity,
+                    "code": _semantic_text(
+                        authored.get("code"), "finding code", maximum=128,
+                    ),
+                    "message": _semantic_text(
+                        authored.get("message"), "finding message",
+                    ),
+                })
+                for key in ("entity_id", "node_id"):
+                    endpoint = finding.get(key)
+                    if endpoint is not None and endpoint not in endpoints:
+                        raise ValueError(
+                            f"RPF graph semantic finding references an invalid {key}"
+                        )
+                normalized_findings.append(finding)
+            semantic = {
+                **semantic_payload,
+                "entities": list(entities.values()),
+                "relations": normalized_relations,
+                "findings": normalized_findings,
+            }
         return {
             "payload": payload, "root_id": root_id, "nodes": nodes,
             "parents": parents, "children": children,
@@ -508,6 +636,7 @@ class RpfPackageGraph:
                 1 for node in nodes.values() if node["type"] == "sealed_archive"
             ),
             "directory_count": sum(1 for node in nodes.values() if node["type"] == "directory"),
+            "semantic": semantic,
         }
 
     @classmethod
@@ -539,6 +668,7 @@ class RpfPackageGraph:
             "nodes": list(state["nodes"].values()),
             "edges": list(state["payload"]["edges"]),
             "origin": state["payload"].get("origin"),
+            "semantic": state["semantic"],
         }
 
     @classmethod
@@ -680,6 +810,17 @@ class RpfPackageGraph:
                 item for item in payload["edges"]
                 if item["parent"] not in removed_set and item["child"] not in removed_set
             ]
+            semantic = payload.get("semantic")
+            if isinstance(semantic, dict):
+                semantic["relations"] = [
+                    item for item in semantic.get("relations", [])
+                    if item.get("source") not in removed_set
+                    and item.get("target") not in removed_set
+                ]
+                semantic["findings"] = [
+                    item for item in semantic.get("findings", [])
+                    if item.get("node_id") not in removed_set
+                ]
             return tuple(removed)
 
         return cls._mutate(path, update)
@@ -697,6 +838,39 @@ class RpfPackageGraph:
             if node is None:
                 raise ValueError(f"RPF graph node was not found: {wanted}")
             node["x"], node["y"] = safe_x, safe_y
+
+        cls._mutate(path, update)
+
+    @classmethod
+    def set_semantic_report(
+        cls, path: str | Path, report: dict[str, Any],
+    ) -> None:
+        """Replace the derived semantic overlay without changing containment nodes."""
+        if not isinstance(report, dict):
+            raise ValueError("RPF graph semantic report must be an object")
+
+        def update(payload: dict[str, Any]) -> None:
+            payload["semantic"] = report
+
+        cls._mutate(path, update)
+
+    @classmethod
+    def set_semantic_position(
+        cls, path: str | Path, entity_id: str, x: float, y: float,
+    ) -> None:
+        wanted = _safe_id(entity_id)
+        safe_x = _number(x, "semantic x")
+        safe_y = _number(y, "semantic y")
+
+        def update(payload: dict[str, Any]) -> None:
+            semantic = payload.get("semantic")
+            entities = semantic.get("entities", []) if isinstance(semantic, dict) else []
+            entity = next(
+                (item for item in entities if item.get("id") == wanted), None,
+            )
+            if entity is None:
+                raise ValueError(f"RPF graph semantic entity was not found: {wanted}")
+            entity["x"], entity["y"] = safe_x, safe_y
 
         cls._mutate(path, update)
 
@@ -727,6 +901,12 @@ class RpfPackageGraph:
                     place(child, depth + 1)
 
             place(payload["root_id"], 0)
+            semantic = payload.get("semantic")
+            if isinstance(semantic, dict):
+                semantic_x = max(item["x"] for item in nodes.values()) + safe_x_spacing
+                for index, entity in enumerate(semantic.get("entities", [])):
+                    entity["x"] = semantic_x
+                    entity["y"] = 80.0 + index * max(safe_y_spacing, 132.0)
             return row
 
         return cls._mutate(path, update)

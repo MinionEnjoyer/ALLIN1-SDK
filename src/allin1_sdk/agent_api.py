@@ -30,6 +30,7 @@ GAME_WRITE_COMMANDS = frozenset({
 })
 AUTHORING_COMMANDS = frozenset({
     "add-vehicle-tuning-entry",
+    "analyze-package-graph",
     "add-ytd-texture",
     "add-rpf-program-node",
     "audit-folder",
