@@ -29,6 +29,7 @@ from allin1_sdk.rpf_change_set_ui import RpfChangeSetFrame
 from allin1_sdk.rpf_delta import RpfDeltaPlanResult, derive_rpf_change_plan
 from allin1_sdk.rpf_graph import RpfPackageGraph
 from allin1_sdk.rpf_graph_ui import RpfPackageGraphFrame
+from allin1_sdk.package_graph import PackageGraphWorkspace
 from allin1_sdk.rpf_tools import RpfEntryRecord, RpfExplorerService, RpfIndex
 from allin1_sdk.help_center import HelpCenterDialog
 
@@ -852,9 +853,10 @@ class RpfExplorerDialog(ttk.Frame):
         ).pack(anchor="w", pady=(4, 18))
         choices = ttk.LabelFrame(surface, text="Start or continue", padding=14)
         choices.pack(fill="x")
-        for column in range(4):
+        for column in range(5):
             choices.columnconfigure(column, weight=1)
         for index, (label, command) in enumerate((
+            ("Import mod package…", self._import_mod_package_graph),
             ("Create from loose folder…", self._create_rpf_graph_from_folder),
             ("Create empty graph…", self._create_empty_rpf_graph),
             ("Open existing graph…", self._open_rpf_graph),
@@ -869,8 +871,35 @@ class RpfExplorerDialog(ttk.Frame):
             state="normal" if self.index is not None else "disabled",
         )
         self.graph_import_button.grid(
-            row=0, column=3, sticky="ew", padx=(4, 0),
+            row=0, column=4, sticky="ew", padx=(4, 0),
         )
+        projects = PackageGraphWorkspace().list_projects()
+        recent = ttk.LabelFrame(surface, text="Recent package projects", padding=10)
+        recent.pack(fill="both", expand=True, pady=(14, 0))
+        self.package_graph_projects: dict[str, Path] = {}
+        tree = ttk.Treeview(
+            recent, columns=("source", "nodes", "rpfs"), show="headings", height=6,
+        )
+        tree.heading("source", text="Source package")
+        tree.heading("nodes", text="Nodes")
+        tree.heading("rpfs", text="RPF state")
+        tree.column("source", width=620, anchor="w")
+        tree.column("nodes", width=80, anchor="center")
+        tree.column("rpfs", width=190, anchor="w")
+        tree.pack(fill="both", expand=True)
+        for index, project in enumerate(projects):
+            item = f"package-project:{index}"
+            self.package_graph_projects[item] = Path(project["graph"])
+            tree.insert("", "end", iid=item, values=(
+                Path(project["source"]).name, project["nodes"],
+                f"{project['expanded_rpfs']} expanded · "
+                f"{project['sealed_rpfs']} sealed",
+            ))
+        if not projects:
+            tree.insert("", "end", values=(
+                "No retained package projects yet", "—", "Import a package above",
+            ))
+        tree.bind("<Double-1>", lambda _event: self._open_recent_package_graph(tree))
 
     def _show_binary_home(self) -> None:
         current = getattr(self, "_binary_editor", None)
@@ -985,6 +1014,9 @@ class RpfExplorerDialog(ttk.Frame):
         graph_menu = tk.Menu(author_menu, tearoff=False)
         graph_menu.add_command(
             label="Create from folder…", command=self._create_rpf_graph_from_folder,
+        )
+        graph_menu.add_command(
+            label="Import mod package…", command=self._import_mod_package_graph,
         )
         graph_menu.add_command(
             label="Create empty graph…", command=self._create_empty_rpf_graph,
@@ -1193,6 +1225,39 @@ class RpfExplorerDialog(ttk.Frame):
             on_close=self._show_graph_home,
         )
         self.workspace_tabs.select(self.graph_tab)
+
+    def _open_recent_package_graph(self, tree: ttk.Treeview) -> None:
+        selection = tree.selection()
+        graph = self.package_graph_projects.get(selection[0]) if selection else None
+        if graph is not None:
+            self._open_graph_dialog(graph)
+
+    def _import_mod_package_graph(self) -> None:
+        selected = filedialog.askopenfilename(
+            parent=self, title="Import a mod package into the node graph",
+            filetypes=(
+                ("GTA mod package", "*.oiv *.zip *.rar *.7z"),
+                ("All files", "*.*"),
+            ),
+        )
+        if not selected:
+            return
+
+        def completed(project) -> None:
+            self.status.set(
+                f"Package graph {'reused' if project.reused else 'created'}: "
+                f"{project.graph}"
+            )
+            self._open_graph_dialog(project.graph)
+
+        RpfProgressDialog(
+            self, "Importing mod package graph",
+            lambda _progress: PackageGraphWorkspace().import_package(selected),
+            completed,
+            lambda exc: messagebox.showerror(
+                "Package graph import failed", str(exc), parent=self,
+            ),
+        )
 
     def _create_rpf_graph_from_folder(self) -> None:
         source = filedialog.askdirectory(

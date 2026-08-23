@@ -26,7 +26,10 @@ from allin1_sdk.rpf_tools import RpfExplorerService, RpfIndex
 
 RPF_GRAPH_SCHEMA = 1
 RPF_GRAPH_OPERATION = "rpf_package_graph"
-RPF_GRAPH_NODE_TYPES = frozenset({"archive", "directory", "file"})
+RPF_GRAPH_NODE_TYPES = frozenset({
+    "archive", "sealed_archive", "directory", "file",
+})
+RPF_GRAPH_SOURCE_NODE_TYPES = frozenset({"sealed_archive", "file"})
 MAX_RPF_GRAPH_NODES = MAX_RPF_BUILD_FILES * 2
 MAX_RPF_GRAPH_COORDINATE = 1_000_000
 MAX_RPF_GRAPH_TREE_DEPTH = 256
@@ -164,7 +167,8 @@ class RpfPackageGraph:
     @classmethod
     def create_from_folder(
         cls, source_folder: str | Path, destination: str | Path, *,
-        root_name: str = "",
+        root_name: str = "", allow_sealed_rpfs: bool = False,
+        origin: dict[str, Any] | None = None,
     ) -> Path:
         source = Path(source_folder).expanduser().resolve()
         if not source.is_dir() or _is_link(source):
@@ -175,6 +179,8 @@ class RpfPackageGraph:
             else:
                 root_name = f"{source.name}.rpf"
         payload = cls._new_payload(root_name)
+        if origin is not None:
+            payload["origin"] = origin
         nodes: list[dict[str, Any]] = payload["nodes"]
         edges: list[dict[str, str]] = payload["edges"]
         row_by_depth: Counter[int] = Counter()
@@ -192,8 +198,18 @@ class RpfPackageGraph:
                     raise ValueError(f"RPF graph source cannot contain links: {child}")
                 nested = child.is_dir() and child.name.casefold().endswith(".rpf.source")
                 authored_name = child.name[:-len(".source")] if nested else child.name
-                kind = "archive" if nested else "directory" if child.is_dir() else "file"
-                authored_name = _safe_name(authored_name, archive=kind == "archive")
+                sealed = child.is_file() and child.suffix.casefold() == ".rpf"
+                if sealed and not allow_sealed_rpfs:
+                    raise ValueError(
+                        f"Prebuilt RPF files cannot be graph source nodes: {child}"
+                    )
+                kind = (
+                    "archive" if nested else "directory" if child.is_dir()
+                    else "sealed_archive" if sealed else "file"
+                )
+                authored_name = _safe_name(
+                    authored_name, archive=kind in {"archive", "sealed_archive"},
+                )
                 if authored_name.casefold() in emitted:
                     raise ValueError(
                         f"RPF graph source has a case-insensitive sibling collision: {child}"
@@ -207,11 +223,7 @@ class RpfPackageGraph:
                     "id": node_id, "type": kind, "name": authored_name,
                     "x": 80.0 + depth * 300.0, "y": 80.0 + row * 112.0,
                 }
-                if kind == "file":
-                    if child.suffix.casefold() == ".rpf":
-                        raise ValueError(
-                            f"Prebuilt RPF files cannot be graph source nodes: {child}"
-                        )
+                if kind in RPF_GRAPH_SOURCE_NODE_TYPES:
                     size = child.stat().st_size
                     if size > MAX_RPF_BUILD_FILE_BYTES:
                         raise ValueError(f"RPF graph source file is too large: {child}")
@@ -221,7 +233,7 @@ class RpfPackageGraph:
                     })
                 nodes.append(node)
                 edges.append({"parent": parent_id, "child": node_id})
-                if kind != "file":
+                if kind in {"archive", "directory"}:
                     scan(child, node_id, child_logical, depth + 1)
 
         scan(source, "root", "", 1)
@@ -308,24 +320,44 @@ class RpfPackageGraph:
             raise ValueError("Unsupported RPF package graph schema")
         origin = payload.get("origin")
         if origin is not None:
-            if (
-                not isinstance(origin, dict)
-                or origin.get("type") != "rpf_archive_import"
-                or not isinstance(origin.get("path"), str)
-                or not Path(origin["path"]).is_absolute()
-                or not isinstance(origin.get("edition"), str)
-                or not isinstance(origin.get("size"), int)
-                or isinstance(origin.get("size"), bool)
-                or origin["size"] < 0
-                or not _is_sha256(origin.get("sha256"))
-                or not isinstance(origin.get("archives"), int)
-                or isinstance(origin.get("archives"), bool)
-                or origin["archives"] < 1
-                or not isinstance(origin.get("files"), int)
-                or isinstance(origin.get("files"), bool)
-                or origin["files"] < 0
-            ):
-                raise ValueError("RPF graph has invalid archive-import provenance")
+            if not isinstance(origin, dict):
+                raise ValueError("RPF graph has invalid origin provenance")
+            origin_type = origin.get("type")
+            if origin_type == "rpf_archive_import":
+                valid_origin = (
+                    isinstance(origin.get("path"), str)
+                    and Path(origin["path"]).is_absolute()
+                    and isinstance(origin.get("edition"), str)
+                    and isinstance(origin.get("size"), int)
+                    and not isinstance(origin.get("size"), bool)
+                    and origin["size"] >= 0
+                    and _is_sha256(origin.get("sha256"))
+                    and isinstance(origin.get("archives"), int)
+                    and not isinstance(origin.get("archives"), bool)
+                    and origin["archives"] >= 1
+                    and isinstance(origin.get("files"), int)
+                    and not isinstance(origin.get("files"), bool)
+                    and origin["files"] >= 0
+                )
+            elif origin_type == "mod_package_import":
+                valid_origin = (
+                    isinstance(origin.get("path"), str)
+                    and Path(origin["path"]).is_absolute()
+                    and origin.get("source_kind") in {
+                        "folder", "oiv", "zip", "rar", "7z",
+                    }
+                    and _is_sha256(origin.get("package_fingerprint"))
+                    and isinstance(origin.get("entries"), int)
+                    and not isinstance(origin.get("entries"), bool)
+                    and origin["entries"] >= 1
+                    and isinstance(origin.get("sealed_rpfs"), int)
+                    and not isinstance(origin.get("sealed_rpfs"), bool)
+                    and 0 <= origin["sealed_rpfs"] <= origin["entries"]
+                )
+            else:
+                valid_origin = False
+            if not valid_origin:
+                raise ValueError("RPF graph has invalid origin provenance")
         authored_nodes = payload.get("nodes")
         authored_edges = payload.get("edges")
         if (
@@ -348,13 +380,35 @@ class RpfPackageGraph:
             kind = str(authored.get("type", "")).casefold()
             if kind not in RPF_GRAPH_NODE_TYPES:
                 raise ValueError(f"Unsupported RPF graph node type: {kind}")
-            name = _safe_name(authored.get("name"), archive=kind == "archive")
+            name = _safe_name(
+                authored.get("name"),
+                archive=kind in {"archive", "sealed_archive"},
+            )
             node: dict[str, Any] = {
                 "id": node_id, "type": kind, "name": name,
                 "x": _number(authored.get("x", 0), "x"),
                 "y": _number(authored.get("y", 0), "y"),
             }
-            if kind == "file":
+            expanded_from = authored.get("expanded_from")
+            if expanded_from is not None:
+                if (
+                    kind != "archive" or not isinstance(expanded_from, dict)
+                    or not isinstance(expanded_from.get("path"), str)
+                    or not Path(expanded_from["path"]).is_absolute()
+                    or not isinstance(expanded_from.get("size"), int)
+                    or isinstance(expanded_from.get("size"), bool)
+                    or expanded_from["size"] < 0
+                    or not _is_sha256(expanded_from.get("sha256"))
+                    or not isinstance(expanded_from.get("edition"), str)
+                ):
+                    raise ValueError(f"RPF graph expanded provenance is invalid: {name}")
+                node["expanded_from"] = {
+                    "path": str(Path(expanded_from["path"]).resolve()),
+                    "size": expanded_from["size"],
+                    "sha256": str(expanded_from["sha256"]).casefold(),
+                    "edition": expanded_from["edition"],
+                }
+            if kind in RPF_GRAPH_SOURCE_NODE_TYPES:
                 source_value = authored.get("source")
                 if not isinstance(source_value, str) or not Path(source_value).is_absolute():
                     raise ValueError(f"RPF graph file source must be absolute: {name}")
@@ -392,8 +446,8 @@ class RpfPackageGraph:
             child = _safe_id(authored.get("child"))
             if parent not in nodes or child not in nodes or parent == child:
                 raise ValueError("RPF graph edge references an invalid node")
-            if nodes[parent]["type"] == "file":
-                raise ValueError("RPF graph files cannot contain child nodes")
+            if nodes[parent]["type"] in RPF_GRAPH_SOURCE_NODE_TYPES:
+                raise ValueError("RPF graph source nodes cannot contain child nodes")
             edge = (parent.casefold(), child.casefold())
             if edge in seen_edges or child in parents:
                 raise ValueError("RPF graph nodes must have exactly one unique parent")
@@ -450,6 +504,9 @@ class RpfPackageGraph:
             "parents": parents, "children": children,
             "file_count": file_count, "byte_count": byte_count,
             "archive_count": sum(1 for node in nodes.values() if node["type"] == "archive"),
+            "sealed_archive_count": sum(
+                1 for node in nodes.values() if node["type"] == "sealed_archive"
+            ),
             "directory_count": sum(1 for node in nodes.values() if node["type"] == "directory"),
         }
 
@@ -475,6 +532,7 @@ class RpfPackageGraph:
             "summary": {
                 "nodes": len(state["nodes"]), "edges": len(state["parents"]),
                 "archives": state["archive_count"],
+                "sealed_archives": state["sealed_archive_count"],
                 "directories": state["directory_count"],
                 "files": state["file_count"], "source_bytes": state["byte_count"],
             },
@@ -507,7 +565,7 @@ class RpfPackageGraph:
         def update(payload: dict[str, Any]) -> str:
             nodes = {item["id"]: item for item in payload["nodes"]}
             parent = _safe_id(parent_id)
-            if parent not in nodes or nodes[parent]["type"] == "file":
+            if parent not in nodes or nodes[parent]["type"] in RPF_GRAPH_SOURCE_NODE_TYPES:
                 raise ValueError(f"RPF graph parent cannot contain nodes: {parent}")
             payload["nodes"].append({
                 "id": new_id, "type": kind, "name": safe_name,
@@ -541,7 +599,7 @@ class RpfPackageGraph:
         def update(payload: dict[str, Any]) -> str:
             nodes = {item["id"]: item for item in payload["nodes"]}
             parent = _safe_id(parent_id)
-            if parent not in nodes or nodes[parent]["type"] == "file":
+            if parent not in nodes or nodes[parent]["type"] in RPF_GRAPH_SOURCE_NODE_TYPES:
                 raise ValueError(f"RPF graph parent cannot contain nodes: {parent}")
             payload["nodes"].append({
                 "id": new_id, "type": "file", "name": authored_name,
@@ -562,7 +620,8 @@ class RpfPackageGraph:
             if wanted not in nodes:
                 raise ValueError(f"RPF graph node was not found: {wanted}")
             nodes[wanted]["name"] = _safe_name(
-                name, archive=nodes[wanted]["type"] == "archive",
+                name,
+                archive=nodes[wanted]["type"] in {"archive", "sealed_archive"},
             )
 
         cls._mutate(path, update)
@@ -578,7 +637,10 @@ class RpfPackageGraph:
             if wanted == payload["root_id"]:
                 raise ValueError("The RPF graph root cannot be reparented")
             nodes = {item["id"]: item for item in payload["nodes"]}
-            if wanted not in nodes or parent not in nodes or nodes[parent]["type"] == "file":
+            if (
+                wanted not in nodes or parent not in nodes
+                or nodes[parent]["type"] in RPF_GRAPH_SOURCE_NODE_TYPES
+            ):
                 raise ValueError("RPF graph reparent nodes are invalid")
             edge = next(
                 (item for item in payload["edges"] if item["child"] == wanted), None,
@@ -674,7 +736,7 @@ class RpfPackageGraph:
         def update(payload: dict[str, Any]) -> int:
             changed = 0
             for node in payload["nodes"]:
-                if node["type"] != "file":
+                if node["type"] not in RPF_GRAPH_SOURCE_NODE_TYPES:
                     continue
                 source = Path(node["source"]).resolve()
                 if not source.is_file() or _is_link(source):
@@ -688,6 +750,120 @@ class RpfPackageGraph:
             return changed
 
         return cls._mutate(path, update)
+
+    @classmethod
+    def relocate_sources(
+        cls, path: str | Path, old_root: str | Path, new_root: str | Path,
+    ) -> int:
+        """Rebind source nodes when an atomic graph workspace is published."""
+        previous = Path(old_root).expanduser().resolve()
+        destination = Path(new_root).expanduser().resolve()
+
+        def update(payload: dict[str, Any]) -> int:
+            changed = 0
+            for node in payload["nodes"]:
+                if node["type"] not in RPF_GRAPH_SOURCE_NODE_TYPES:
+                    continue
+                source = Path(node["source"]).resolve()
+                if not source.is_relative_to(previous):
+                    raise ValueError(
+                        f"RPF graph source is outside its workspace: {source}"
+                    )
+                node["source"] = str(destination / source.relative_to(previous))
+                changed += 1
+            return changed
+
+        return cls._mutate(path, update)
+
+    @classmethod
+    def expand_sealed_archive(
+        cls, path: str | Path, node_id: str, service: RpfExplorerService,
+    ) -> dict[str, Any]:
+        """Expand one immutable package RPF into editable, source-hashed nodes."""
+        graph = Path(path).expanduser().resolve()
+        state = cls.validate(graph, verify_sources=True)
+        wanted = _safe_id(node_id)
+        sealed = state["nodes"].get(wanted)
+        if sealed is None or sealed["type"] != "sealed_archive":
+            raise ValueError("Select a sealed RPF node to expand")
+        expansions = graph.parent / "expanded-rpfs"
+        expansions.mkdir(parents=True, exist_ok=True)
+        target = expansions / f"{wanted}.rpf.source"
+        if target.exists() or target.is_symlink():
+            raise ValueError(f"Sealed RPF expansion already exists: {target}")
+        index = service.index(sealed["source"])
+        loose: Path | None = None
+        try:
+            loose, report = service.extract_authoring_tree(index, target)
+            with tempfile.TemporaryDirectory(
+                prefix="allin1-rpf-subgraph-", dir=graph.parent,
+            ) as temporary:
+                subgraph = cls.create_from_folder(
+                    loose, Path(temporary) / "subgraph.json",
+                    root_name=sealed["name"],
+                )
+                substate = cls.validate(subgraph, verify_sources=True)
+
+            def update(payload: dict[str, Any]) -> dict[str, Any]:
+                nodes = {item["id"]: item for item in payload["nodes"]}
+                authored = nodes.get(wanted)
+                if authored is None or authored["type"] != "sealed_archive":
+                    raise ValueError("Sealed RPF node changed during expansion")
+                authored.update({
+                    "type": "archive",
+                    "expanded_from": {
+                        "path": authored.pop("source"),
+                        "size": authored.pop("size"),
+                        "sha256": authored.pop("sha256"),
+                        "edition": index.edition,
+                    },
+                })
+                mapping = {
+                    item: f"{wanted}_{item}"
+                    for item in substate["nodes"] if item != substate["root_id"]
+                }
+                root_x = substate["nodes"][substate["root_id"]]["x"]
+                root_y = substate["nodes"][substate["root_id"]]["y"]
+                added = 0
+                for item, replacement in mapping.items():
+                    source_node = dict(substate["nodes"][item])
+                    if source_node["name"] == ".allin1-rpf-export.json":
+                        continue
+                    source_node["id"] = replacement
+                    source_node["x"] = authored["x"] + source_node["x"] - root_x
+                    source_node["y"] = authored["y"] + source_node["y"] - root_y
+                    payload["nodes"].append(source_node)
+                    added += 1
+                included = {
+                    item for item in mapping
+                    if substate["nodes"][item]["name"] != ".allin1-rpf-export.json"
+                }
+                for edge in substate["payload"]["edges"]:
+                    if edge["child"] not in included:
+                        continue
+                    parent = (
+                        wanted if edge["parent"] == substate["root_id"]
+                        else mapping[edge["parent"]]
+                    )
+                    payload["edges"].append({
+                        "parent": parent, "child": mapping[edge["child"]],
+                    })
+                return {
+                    "node_id": wanted, "edition": index.edition,
+                    "added_nodes": added,
+                    "archives": report["summary"]["archives"],
+                    "files": report["summary"]["files"],
+                    "workspace": str(target),
+                }
+
+            result = cls._mutate(graph, update)
+            cls.auto_layout(graph)
+            cls.validate(graph, verify_sources=True)
+            return result
+        except Exception:
+            if loose is not None and target.is_dir() and target.parent == expansions:
+                shutil.rmtree(target)
+            raise
 
     @classmethod
     def materialize(cls, path: str | Path, destination: str | Path) -> Path:
@@ -708,7 +884,7 @@ class RpfPackageGraph:
                         f"{node['name']}.source" if kind == "archive" else node["name"]
                     )
                     target = folder / authored_name
-                    if kind == "file":
+                    if kind in RPF_GRAPH_SOURCE_NODE_TYPES:
                         shutil.copyfile(node["source"], target)
                         if _sha256_file(target) != node["sha256"]:
                             raise RuntimeError(f"RPF graph source changed while copying: {node['source']}")
@@ -732,6 +908,16 @@ class RpfPackageGraph:
         cls, path: str | Path, builder: RpfArchiveBuilder, output_rpf: str | Path,
     ) -> tuple[Path, Path]:
         state = cls.validate(path, verify_sources=True)
+        origin = state["payload"].get("origin")
+        if isinstance(origin, dict) and origin.get("type") == "mod_package_import":
+            raise ValueError(
+                "A package-review graph cannot be built as one RPF; create a dedicated "
+                "RPF authoring graph from the desired subtree."
+            )
+        if state["sealed_archive_count"]:
+            raise ValueError(
+                "Sealed RPF nodes must be expanded or removed before building an RPF."
+            )
         output = Path(output_rpf).expanduser().resolve()
         with tempfile.TemporaryDirectory(prefix="allin1-rpf-graph-build-") as temporary:
             source = cls.materialize(path, Path(temporary) / "source")

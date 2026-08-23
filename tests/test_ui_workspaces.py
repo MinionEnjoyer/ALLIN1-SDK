@@ -36,6 +36,10 @@ def test_graph_binary_and_gxt2_authoring_are_embedded_with_compatibility_hosts()
     assert 'self.workspace_tabs.add(self.binary_tab, text="Binary Workspace")' in explorer
     assert 'self.workspace_tabs.add(self.gxt2_tab, text="GXT2 Text")' in explorer
     assert "self._graph_editor = RpfPackageGraphFrame(" in explorer
+    assert 'text="Recent package projects"' in explorer
+    assert "PackageGraphWorkspace().import_package" in explorer
+    assert 'text="Expand sealed RPF into nodes…"' in graph
+    assert "_toggle_selected_collapse" in graph
     assert "self._binary_editor = BinaryWorkspaceFrame(" in explorer
     assert "self._gxt2_editor = Gxt2WorkspaceFrame(" in explorer
     assert "RpfPackageGraphDialog(\n            self" not in explorer

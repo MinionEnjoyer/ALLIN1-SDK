@@ -75,14 +75,15 @@ def test_open_package_graph_cli_routes_to_guarded_viewer(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "allin1_sdk.cli._open_package_graph_window",
         lambda selected, game: (
-            launched.append((selected, game)) or (9124, graph, 18, 2)
+            launched.append((selected, game)) or (9124, graph, 20, 2, False)
         ),
     )
     result = CliRunner().invoke(main, ["open-package-graph", str(package)])
     assert result.exit_code == 0
     assert '"operation": "open_package_graph"' in result.output
-    assert '"materialized_members": 18' in result.output
-    assert '"excluded_sealed_rpfs": 2' in result.output
+    assert '"package_members": 20' in result.output
+    assert '"sealed_rpf_nodes": 2' in result.output
+    assert '"workspace_reused": false' in result.output
     assert launched == [(package, None)]
 
 

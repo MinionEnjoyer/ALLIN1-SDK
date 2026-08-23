@@ -22,6 +22,7 @@ from allin1_sdk.rpf_graph_previews import (
     render_graph_preview_bundle,
 )
 from allin1_sdk.rpf_program_ui import RpfProgramFrame
+from allin1_sdk.rpf_tools import RpfExplorerService
 
 
 NODE_WIDTH = 270
@@ -84,6 +85,7 @@ class RpfPackageGraphFrame(ttk.Frame):
 
     COLORS = {
         "archive": ("#6D4AA0", "#251D32"),
+        "sealed_archive": ("#A56B20", "#302416"),
         "directory": ("#23815A", "#182A23"),
         "file": ("#2E6D98", "#172731"),
     }
@@ -101,6 +103,7 @@ class RpfPackageGraphFrame(ttk.Frame):
         self._on_close = on_close
         self.graph_state: dict = {}
         self.visible: set[str] = set()
+        self.collapsed: set[str] = set()
         self.edge_items: dict[tuple[str, str], int] = {}
         self.selected: str | None = None
         self.dragging: str | None = None
@@ -158,7 +161,7 @@ class RpfPackageGraphFrame(ttk.Frame):
         header = ttk.Frame(outer)
         header.pack(fill="x", pady=(0, 10))
         ttk.Label(
-            header, text="RPF package node graph", font=("Segoe UI Semibold", 18),
+            header, text="Package node graph", font=("Segoe UI Semibold", 18),
             foreground="#1f7f42",
         ).pack(side="left")
         ttk.Label(
@@ -254,6 +257,12 @@ class RpfPackageGraphFrame(ttk.Frame):
         ttk.Button(search, text="100%", command=self._reset_zoom).pack(
             side="left", padx=(4, 0),
         )
+        ttk.Button(
+            search, text="Collapse", command=self._toggle_selected_collapse,
+        ).pack(side="left", padx=(10, 0))
+        ttk.Button(search, text="Expand all", command=self._expand_all).pack(
+            side="left", padx=(4, 0),
+        )
         canvas_host = tk.Frame(canvas_frame, background="#111714")
         canvas_host.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(
@@ -274,6 +283,8 @@ class RpfPackageGraphFrame(ttk.Frame):
         self.canvas.bind("<MouseWheel>", self._mousewheel)
         self.canvas.bind("<Shift-MouseWheel>", self._shift_mousewheel)
         self.canvas.bind("<Control-MouseWheel>", self._zoom_mousewheel)
+        self.canvas.bind("<Double-1>", self._activate_selected)
+        self.canvas.bind("<Button-3>", self._show_context_menu)
 
         ttk.Label(
             inspector, text="Node inspector", font=("Segoe UI Semibold", 14),
@@ -289,6 +300,12 @@ class RpfPackageGraphFrame(ttk.Frame):
                 inspector, textvariable=variable, foreground="#52635c",
                 wraplength=285, justify="left",
             ).pack(anchor="w", pady=(3, 0))
+
+        self.expand_sealed_button = ttk.Button(
+            inspector, text="Expand sealed RPF into nodes…",
+            command=self._expand_selected_sealed, state="disabled",
+        )
+        self.expand_sealed_button.pack(fill="x", pady=(14, 0))
 
         ttk.Label(
             inspector,
@@ -349,6 +366,7 @@ class RpfPackageGraphFrame(ttk.Frame):
             self.status.set("Graph validation failed; the document was not changed.")
             return
         valid_nodes = set(self.graph_state["nodes"])
+        self.collapsed.intersection_update(valid_nodes)
         self._preview_pending.intersection_update(valid_nodes)
         for cache in (
             self._preview_keys, self._preview_images, self._preview_photos,
@@ -366,9 +384,16 @@ class RpfPackageGraphFrame(ttk.Frame):
     def _render(self) -> None:
         self.canvas.delete("all")
         nodes = list(self.graph_state["nodes"])
-        ordered = [self.graph_state["root_id"], *(
-            node for node in nodes if node != self.graph_state["root_id"]
-        )]
+        ordered: list[str] = []
+
+        def include(node_id: str) -> None:
+            ordered.append(node_id)
+            if node_id in self.collapsed:
+                return
+            for child in self.graph_state["children"][node_id]:
+                include(child)
+
+        include(self.graph_state["root_id"])
         self.visible = set(ordered[:CANVAS_LIMIT])
         max_x = max((self.graph_state["nodes"][node]["x"] for node in self.visible), default=0)
         max_y = max((self.graph_state["nodes"][node]["y"] for node in self.visible), default=0)
@@ -399,10 +424,12 @@ class RpfPackageGraphFrame(ttk.Frame):
             self._draw_node(node_id)
         self._update_edges()
         hidden = len(nodes) - len(self.visible)
-        note = f" · {hidden:,} nodes hidden by canvas limit" if hidden else ""
+        note = f" · {hidden:,} nodes collapsed/hidden" if hidden else ""
         self.status.set(
             f"{len(nodes):,} nodes · {len(self.graph_state['parents']):,} links · "
-            f"{self.graph_state['file_count']:,} files · {self.graph_state['byte_count']:,} bytes{note}"
+            f"{self.graph_state['file_count']:,} sources · "
+            f"{self.graph_state['sealed_archive_count']:,} sealed RPFs · "
+            f"{self.graph_state['byte_count']:,} bytes{note}"
         )
 
     def _draw_node(self, node_id: str) -> None:
@@ -431,17 +458,27 @@ class RpfPackageGraphFrame(ttk.Frame):
         )
         self.canvas.create_text(
             x + 10 * self.zoom, y + 13 * self.zoom,
-            text=node["type"].upper(), anchor="w",
+            text=(
+                "SEALED RPF" if node["type"] == "sealed_archive"
+                else node["type"].upper()
+            ), anchor="w",
             fill="#FFFFFF", font=("Segoe UI Semibold", font_header), tags=tags,
         )
+        if node["type"] in {"archive", "directory"}:
+            self.canvas.create_text(
+                x + node_width - 10 * self.zoom, y + 13 * self.zoom,
+                text="+" if node_id in self.collapsed else "−", anchor="e",
+                fill="#FFFFFF", font=("Segoe UI Semibold", font_header), tags=tags,
+            )
         is_file = node["type"] == "file"
+        is_source = node["type"] in {"file", "sealed_archive"}
         text_width = (NODE_WIDTH - 116 if is_file else NODE_WIDTH - 20) * self.zoom
         self.canvas.create_text(
             x + 10 * self.zoom, y + 49 * self.zoom,
             text=node["name"], anchor="w", width=text_width,
             fill="#F0F5F2", font=("Segoe UI Semibold", font_name), tags=tags,
         )
-        subtitle = node_id if not is_file else f"{node['size']:,} bytes"
+        subtitle = node_id if not is_source else f"{node['size']:,} bytes"
         self.canvas.create_text(
             x + 10 * self.zoom, y + 68 * self.zoom,
             text=subtitle, anchor="w", width=text_width,
@@ -458,7 +495,7 @@ class RpfPackageGraphFrame(ttk.Frame):
                 fill="#D9E4DF", outline="#111714",
                 width=2, tags=(*tags, f"in:{node_id}"),
             )
-        if node["type"] != "file":
+        if node["type"] in {"archive", "directory"}:
             port_radius = max(4, 7 * self.zoom)
             port_x, port_y = x + node_width, y + 41 * self.zoom
             self.canvas.create_oval(
@@ -772,14 +809,114 @@ class RpfPackageGraphFrame(ttk.Frame):
                 self.detail_type, self.detail_id, self.detail_parent, self.detail_source,
             ):
                 variable.set("")
+            self.expand_sealed_button.configure(state="disabled")
             return
         self.detail_name.set(node["name"])
         self.detail_type.set(f"Type: {node['type']}")
         self.detail_id.set(f"ID: {node['id']}")
         parent = self.graph_state["parents"].get(node["id"])
         self.detail_parent.set(f"Parent: {parent or '(package root)'}")
-        self.detail_source.set(
-            f"Source: {node.get('source', '(generated container)')}"
+        expanded = node.get("expanded_from")
+        source = node.get("source") or (
+            expanded.get("path") if isinstance(expanded, dict) else None
+        )
+        self.detail_source.set(f"Source: {source or '(generated container)'}")
+        self.expand_sealed_button.configure(
+            state="normal" if node["type"] == "sealed_archive" else "disabled",
+        )
+
+    def _activate_selected(self, _event: tk.Event | None = None) -> None:
+        node = self.graph_state.get("nodes", {}).get(self.selected)
+        if node is not None and node["type"] == "sealed_archive":
+            self._expand_selected_sealed()
+        elif node is not None and node["type"] in {"archive", "directory"}:
+            self._toggle_selected_collapse()
+
+    def _toggle_selected_collapse(self) -> None:
+        node = self.graph_state.get("nodes", {}).get(self.selected)
+        if node is None or node["type"] not in {"archive", "directory"}:
+            return
+        if node["id"] in self.collapsed:
+            self.collapsed.remove(node["id"])
+        else:
+            self.collapsed.add(node["id"])
+        self._render()
+        self._show_selected()
+
+    def _expand_all(self) -> None:
+        self.collapsed.clear()
+        self._render()
+        self._show_selected()
+
+    def _show_context_menu(self, event: tk.Event) -> None:
+        node_id = self._node_at(event)
+        if node_id is None:
+            return
+        self._select(node_id)
+        node = self.graph_state["nodes"][node_id]
+        menu = tk.Menu(self, tearoff=False)
+        if node["type"] in {"archive", "directory"}:
+            menu.add_command(
+                label="Expand children" if node_id in self.collapsed else "Collapse children",
+                command=self._toggle_selected_collapse,
+            )
+        if node["type"] == "sealed_archive":
+            menu.add_command(
+                label="Expand sealed RPF into nodes…",
+                command=self._expand_selected_sealed,
+            )
+        menu.add_command(label="Focus node", command=self._focus_selected)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _focus_selected(self) -> None:
+        node = self.graph_state.get("nodes", {}).get(self.selected)
+        if node is None or node["id"] not in self.visible:
+            return
+        region = self.canvas.cget("scrollregion").split()
+        width, height = max(1.0, float(region[2])), max(1.0, float(region[3]))
+        self.canvas.xview_moveto(max(0, (node["x"] * self.zoom - 100) / width))
+        self.canvas.yview_moveto(max(0, (node["y"] * self.zoom - 100) / height))
+
+    def _expand_selected_sealed(self) -> None:
+        node = self.graph_state.get("nodes", {}).get(self.selected)
+        if node is None or node["type"] != "sealed_archive":
+            return
+        if self.game_path is None or not self.game_path.is_dir():
+            messagebox.showerror(
+                "GTA V installation required",
+                "Select or detect the matching GTA V installation before expanding "
+                "a sealed RPF.", parent=self,
+            )
+            return
+        if not messagebox.askyesno(
+            "Expand sealed RPF",
+            "Index this immutable RPF and create a retained editable node subtree?\n\n"
+            "The source package and game files will not be changed.", parent=self,
+        ):
+            return
+        node_id = node["id"]
+
+        def work() -> dict:
+            service = RpfExplorerService(
+                self.project_root, self.game_path,
+                workspace_roots=(self.graph.parent,),
+            )
+            return RpfPackageGraph.expand_sealed_archive(
+                self.graph, node_id, service,
+            )
+
+        def completed(result: dict) -> None:
+            self.collapsed.discard(node_id)
+            self._reload(node_id)
+            self.status.set(
+                f"Expanded {result['files']:,} files across "
+                f"{result['archives']:,} RPF archive(s)."
+            )
+
+        _GraphWorkDialog(
+            self, "Expanding sealed RPF",
+            "Indexing nested archives and creating hash-bound source nodes…",
+            work, completed,
         )
 
     def _focus_search(self) -> None:
@@ -794,6 +931,11 @@ class RpfPackageGraphFrame(ttk.Frame):
         if found is None:
             self.status.set(f"No node matches {self.query.get()!r}")
             return
+        parent = self.graph_state["parents"].get(found)
+        while parent is not None:
+            self.collapsed.discard(parent)
+            parent = self.graph_state["parents"].get(parent)
+        self._render()
         if found not in self.visible:
             self.status.set("The matching node is beyond the canvas display limit.")
             return
@@ -806,7 +948,9 @@ class RpfPackageGraphFrame(ttk.Frame):
 
     def _container_parent(self) -> str:
         selected = self.selected or self.graph_state["root_id"]
-        if self.graph_state["nodes"][selected]["type"] == "file":
+        if self.graph_state["nodes"][selected]["type"] in {
+            "file", "sealed_archive",
+        }:
             return self.graph_state["parents"][selected]
         return selected
 
@@ -940,6 +1084,7 @@ class RpfPackageGraphFrame(ttk.Frame):
         messagebox.showinfo(
             "RPF graph is valid",
             f"Nodes: {summary['nodes']:,}\nArchives: {summary['archives']:,}\n"
+            f"Sealed RPFs: {summary['sealed_archives']:,}\n"
             f"Directories: {summary['directories']:,}\nFiles: {summary['files']:,}\n"
             f"Source bytes: {summary['source_bytes']:,}\n\nAll referenced hashes match.",
             parent=self,

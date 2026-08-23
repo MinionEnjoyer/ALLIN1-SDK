@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import click
 
@@ -26,10 +26,11 @@ from allin1_sdk.native_assets import (
 )
 from allin1_sdk.mods import ModIntegrationService, ModManifest
 from allin1_sdk.oiv_workbench import OivWorkbench
+from allin1_sdk.package_graph import PackageGraphWorkspace
 from allin1_sdk.paths import project_root
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.rage_data_compiler import RageVehicleDataCompiler
-from allin1_sdk.rpf_builder import MAX_RPF_BUILD_FILE_BYTES, RpfArchiveBuilder
+from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_catalog import RpfCatalogService
 from allin1_sdk.rpf_change_set import CHANGE_ACTIONS, RpfChangeSet
 from allin1_sdk.rpf_delta import derive_rpf_change_plan
@@ -178,56 +179,14 @@ def _open_vehicle_workbench_window(
 
 def _open_package_graph_window(
     source: Path, gta_path: Path | None = None,
-) -> tuple[int, Path, int, int]:
-    """Safely materialize graphable package members and open the node viewer."""
-    resolved = source.expanduser().resolve(strict=True)
-    scan = AddonPackageInspector().inspect(resolved)
-    errors = [item for item in scan.findings if item.severity == "error"]
-    if errors:
-        raise ValueError(
-            "Package inspection found blocking errors: "
-            + "; ".join(item.message for item in errors[:5])
-        )
-    graphable = [entry for entry in scan.entries if entry.suffix != ".rpf"]
-    sealed_rpfs = len(scan.entries) - len(graphable)
-    if not graphable:
-        raise ValueError(
-            "The package only contains sealed RPF archives; import an individual "
-            "RPF to inspect its internal node tree."
-        )
-
-    workspace = Path(tempfile.mkdtemp(prefix="allin1-package-graph-"))
-    materialized = workspace / "package-source"
-    graph = workspace / "package-graph.json"
-    materialized.mkdir()
-    reader = PackageAssetReader(resolved)
-    try:
-        for entry in graphable:
-            if entry.size > MAX_RPF_BUILD_FILE_BYTES:
-                raise ValueError(
-                    f"Package member exceeds the graph limit: {entry.path}"
-                )
-            relative = PurePosixPath(entry.path)
-            target = materialized.joinpath(*relative.parts).resolve()
-            if not target.is_relative_to(materialized):
-                raise ValueError(f"Package member escapes the graph workspace: {entry.path}")
-            content = reader.read(entry.path, limit=entry.size + 1)
-            if (
-                content.truncated
-                or content.size != entry.size
-                or len(content.data) != entry.size
-            ):
-                raise ValueError(f"Package member size mismatch: {entry.path}")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(content.data)
-        RpfPackageGraph.create_from_folder(
-            materialized, graph, root_name="package-preview.rpf",
-        )
-        pid = _open_graph_window(graph, gta_path)
-    except Exception:
-        shutil.rmtree(workspace, ignore_errors=True)
-        raise
-    return pid, graph, len(graphable), sealed_rpfs
+) -> tuple[int, Path, int, int, bool]:
+    """Open or reuse a persistent, provenance-checked package graph."""
+    project = PackageGraphWorkspace().import_package(source)
+    pid = _open_graph_window(project.graph, gta_path)
+    return (
+        pid, project.graph, project.member_count,
+        project.sealed_rpf_count, project.reused,
+    )
 
 
 def _native_report_payload(
@@ -356,9 +315,9 @@ def open_vehicle_workbench(source: Path, gta_path: Path | None) -> None:
     help="Matching GTA installation for encrypted/native asset previews.",
 )
 def open_package_graph(source: Path, gta_path: Path | None) -> None:
-    """Open a guarded loose-content view of a mod package in the node viewer."""
+    """Open or reuse a complete persistent mod-package node graph."""
     try:
-        pid, graph, member_count, sealed_rpfs = _open_package_graph_window(
+        pid, graph, member_count, sealed_rpfs, reused = _open_package_graph_window(
             source, gta_path,
         )
     except (OSError, ValueError) as exc:
@@ -367,9 +326,32 @@ def open_package_graph(source: Path, gta_path: Path | None) -> None:
         "operation": "open_package_graph",
         "source": str(source.resolve()),
         "graph": str(graph),
-        "materialized_members": member_count,
-        "excluded_sealed_rpfs": sealed_rpfs,
+        "package_members": member_count,
+        "sealed_rpf_nodes": sealed_rpfs,
+        "workspace_reused": reused,
         "pid": pid,
+    }, indent=2))
+
+
+@main.command("import-package-graph")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--workspace-root", type=click.Path(file_okay=False, path_type=Path),
+    help="Optional retained project root; defaults to the SDK user-data directory.",
+)
+def import_package_graph(source: Path, workspace_root: Path | None) -> None:
+    """Create or reuse a persistent, provenance-checked package node graph."""
+    try:
+        project = PackageGraphWorkspace(workspace_root).import_package(source)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "import_package_graph", "source": str(project.source),
+        "workspace": str(project.workspace), "graph": str(project.graph),
+        "package_fingerprint": project.package_fingerprint,
+        "package_members": project.member_count,
+        "sealed_rpf_nodes": project.sealed_rpf_count,
+        "workspace_reused": project.reused,
     }, indent=2))
 
 
@@ -1470,6 +1452,32 @@ def add_rpf_graph_file(
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Added RPF graph file node: {node_id}")
+
+
+@main.command("expand-rpf-graph-sealed")
+@click.argument("graph", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("node_id")
+@click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--acknowledge-edit", is_flag=True)
+def expand_rpf_graph_sealed(
+    graph: Path, node_id: str, gta_path: Path | None, acknowledge_edit: bool,
+) -> None:
+    """Expand one immutable package RPF into retained editable graph nodes."""
+    _require_rpf_graph_edit_acknowledgement(acknowledge_edit)
+    try:
+        service = RpfExplorerService(
+            PROJECT_ROOT, _game_path(gta_path),
+            workspace_roots=(graph.resolve().parent,),
+        )
+        report = RpfPackageGraph.expand_sealed_archive(
+            graph, node_id, service,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "expand_rpf_graph_sealed", "graph": str(graph.resolve()),
+        **report,
+    }, indent=2))
 
 
 @main.command("rename-rpf-graph-node")
@@ -3092,9 +3100,11 @@ for _command in (
     set_vehicle_fields, undo_vehicle_edit,
     index_rpf, catalog_rpfs,
     search_rpf_catalog, build_rpf_tree,
-    create_rpf_graph, import_rpf_graph, render_rpf_graph_previews,
+    create_rpf_graph, import_rpf_graph, import_package_graph,
+    render_rpf_graph_previews,
     inspect_rpf_graph, validate_rpf_graph,
-    add_rpf_graph_container, add_rpf_graph_file, rename_rpf_graph_node,
+    add_rpf_graph_container, add_rpf_graph_file, expand_rpf_graph_sealed,
+    rename_rpf_graph_node,
     reparent_rpf_graph_node, position_rpf_graph_node, remove_rpf_graph_node,
     layout_rpf_graph, refresh_rpf_graph_sources, materialize_rpf_graph, build_rpf_graph,
     plan_rpf_graph_origin,

@@ -40,7 +40,8 @@ def test_imports_validates_and_materializes_nested_rpf_graph(tmp_path):
     assert state["nodes"][state["root_id"]]["name"] == "sample.rpf"
     assert report["summary"] == {
         "nodes": 8, "edges": 7, "archives": 2,
-        "directories": 4, "files": 2, "source_bytes": 12,
+        "sealed_archives": 0, "directories": 4, "files": 2,
+        "source_bytes": 12,
     }
     materialized = RpfPackageGraph.materialize(graph, tmp_path / "materialized")
     assert (materialized / "common" / "empty").is_dir()
