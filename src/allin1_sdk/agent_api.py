@@ -29,6 +29,7 @@ GAME_WRITE_COMMANDS = frozenset({
     "uninstall-package",
 })
 AUTHORING_COMMANDS = frozenset({
+    "add-vehicle-tuning-entry",
     "add-ytd-texture",
     "add-rpf-program-node",
     "audit-folder",
@@ -37,6 +38,8 @@ AUTHORING_COMMANDS = frozenset({
     "build-gxt2-workspace",
     "build-rpf-tree",
     "build-rpf-graph",
+    "build-vehicle-package",
+    "create-vehicle-authoring",
     "catalog-rpfs",
     "canary-rpf-transaction",
     "compile-vehicle-data",
@@ -57,6 +60,7 @@ AUTHORING_COMMANDS = frozenset({
     "add-rpf-graph-container",
     "add-rpf-graph-file",
     "export-native-workspace",
+    "export-vehicle-project",
     "export-rpf-binary-workspace",
     "export-rpf-gxt2-workspace",
     "export-rpf-native-workspace",
@@ -84,19 +88,28 @@ AUTHORING_COMMANDS = frozenset({
     "plan-rpf-replacement",
     "materialize-rpf-graph",
     "move-rpf-change",
+    "move-vehicle-tuning-entry",
     "position-rpf-graph-node",
     "position-rpf-program-node",
     "refresh-rpf-graph-sources",
     "render-rpf-graph-previews",
     "remove-rpf-graph-node",
     "remove-rpf-program-node",
+    "remove-vehicle-tuning-entry",
     "rename-rpf-graph-node",
     "reparent-rpf-graph-node",
     "run-rpf-program",
+    "migrate-vehicle-identity",
+    "set-vehicle-appearance",
     "stage-rpf-change",
+    "set-vehicle-light-profile",
+    "set-vehicle-fields",
+    "set-vehicle-tuning-kit",
+    "set-vehicle-tuning-entry",
     "disconnect-rpf-program-node",
     "remove-ytd-texture",
     "replace-ytd-texture",
+    "undo-vehicle-edit",
     "patch-binary-workspace",
     "add-gxt2-entry",
     "remove-gxt2-entry",
@@ -141,6 +154,9 @@ def _parameter_schema(parameter: click.Parameter) -> dict[str, Any]:
         })
     else:
         item["kind"] = "argument"
+    if isinstance(parameter.type, click.Choice):
+        item["choices"] = [str(value) for value in parameter.type.choices]
+        item["case_sensitive"] = parameter.type.case_sensitive
     return item
 
 

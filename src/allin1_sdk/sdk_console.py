@@ -7,6 +7,7 @@ import shlex
 import threading
 import tkinter as tk
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from tkinter import ttk
 from typing import Iterable
@@ -47,6 +48,7 @@ class ConsoleResult:
     action: str = ""
 
 
+@lru_cache(maxsize=1)
 def _cli_group() -> click.Group:
     # Import lazily so opening the main SDK window does not eagerly construct
     # every command dependency.
@@ -69,6 +71,7 @@ def split_command_line(command_line: str) -> list[str]:
     ]
 
 
+@lru_cache(maxsize=1)
 def command_catalog() -> tuple[ConsoleCommand, ...]:
     """Return CLI and console built-ins in stable display order."""
     group = _cli_group()

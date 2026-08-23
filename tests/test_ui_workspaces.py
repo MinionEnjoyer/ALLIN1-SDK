@@ -87,7 +87,8 @@ def test_package_recipes_replace_the_oiv_prompt_cascade_with_one_workspace():
     assert "class OivWorkbenchFrame(ttk.Frame)" in recipes
     assert "tk.Toplevel" not in recipes
     assert '"recipes": recipes_page' in shell
-    assert "self.recipe_workspace = OivWorkbenchFrame(" in shell
+    assert "from allin1_sdk.oiv_workbench_ui import OivWorkbenchFrame" in shell
+    assert "self.recipe_workspace = workspace" in shell
     assert 'label="Open Package Recipes"' in shell
     assert "def _preview_oiv" not in shell
     assert "RpfProgressDialog" not in shell
@@ -115,6 +116,68 @@ def test_asset_viewer_separates_package_browsing_from_native_authoring():
     open_menu = source[source.index("def _open_menu"):source.index("def _action_menu")]
     assert "Build native workspace" not in open_menu
     assert "Open YTD texture workspace" not in open_menu
+
+
+def test_vehicle_workbench_is_integrated_and_exposes_viewport_controls():
+    shell = _source("addon_sdk_ui.py")
+    workbench = _source("vehicle_workbench.py")
+    assert '"vehicles": vehicles_page' in shell
+    assert '("vehicles", "Vehicle Workbench")' in shell
+    assert "from allin1_sdk.vehicle_workbench import VehicleWorkbenchFrame" in shell
+    assert "self.vehicle_workspace = workspace" in shell
+    assert 'workspace.pack(fill="both", expand=True)' in shell
+    assert 'label="Open vehicle workbench…"' in shell
+    assert "class VehicleWorkbenchFrame(ttk.Frame)" in workbench
+    assert "tk.Toplevel" not in workbench
+    for control in (
+        'text="−"', 'text="100%"', 'text="+"', 'text="Fit"',
+        'text="Fragment"', 'text="LOD"', 'text="Component"',
+        'text="Reset camera"', 'text="Open texture dictionary"',
+        'text="Build installable package…"',
+        'text="Create authoring workspace…"',
+        'text="Apply + validate"', 'text="Undo latest"',
+        'text="Appearance"', 'text="Apply appearance + validate"',
+        'text="Apply kit"', 'text="Apply field"',
+        'text="Tuning Builder"', 'text="Add + validate"',
+        'text="Duplicate"', 'text="Remove"', 'text="Apply field + validate"',
+        'text="Use for new part"', 'text="Open in Asset Viewer"',
+        'text="Migrate + validate"',
+        '"<MouseWheel>"', '"<ButtonPress-1>"', '"<ButtonPress-3>"',
+    ):
+        assert control in workbench
+    assert "report.model_scene" in workbench
+    assert "scene.render(" in workbench
+    assert "scene.components" in workbench
+    assert "VehicleAddonPackageBuilder(" in workbench
+    assert "VehicleAuthoringWorkspace.create(" in workbench
+    assert "workspace.update(" in workbench
+    assert "workspace.update_appearance(" in workbench
+    assert "workspace.update_tuning_kit(" in workbench
+    assert "workspace.tuning_builder(" in workbench
+    assert "workspace.add_tuning_entry(" in workbench
+    assert "workspace.update_tuning_entry(" in workbench
+    assert "workspace.remove_tuning_entry(" in workbench
+    assert "workspace.move_tuning_entry(" in workbench
+    assert "workspace.update_light_profile(" in workbench
+    assert "workspace.migrate_identity(" in workbench
+    assert "workspace.undo()" in workbench
+    assert 'text="Open selected in Asset Viewer"' in workbench
+    assert "on_open_asset=self._open_vehicle_asset" in shell
+    assert "self.asset_workspace.select_asset(path)" in shell
+    assert "def select_asset(self, path: str) -> bool" in _source("asset_viewer.py")
+
+
+def test_specialist_workspaces_are_lazy_loaded_inside_the_unified_shell():
+    shell = _source("addon_sdk_ui.py")
+    imports, _separator, body = shell.partition("class AddonSdkDialog")
+    for module in (
+        "asset_viewer", "vehicle_workbench", "rpf_explorer",
+        "oiv_workbench_ui", "help_center",
+    ):
+        assert f"from allin1_sdk.{module} import" not in imports
+        assert f"from allin1_sdk.{module} import" in body
+    assert "self._workspace_instances: dict[str, ttk.Frame] = {}" in shell
+    assert "self._ensure_workspace(key)" in shell
 
 
 def test_both_visual_canvases_offer_matching_zoom_controls():

@@ -332,6 +332,21 @@ class AssetViewerDialog(ttk.Frame):
         """Load a package into an existing embedded asset workspace."""
         self._load_source(Path(source), scan)
 
+    def select_asset(self, path: str) -> bool:
+        """Select one exact package member after another workspace routes to it."""
+        self.search.set("")
+        match = next((
+            item_id for item_id, entry in self.entries.items()
+            if entry.path.casefold() == path.casefold()
+        ), None)
+        if match is None:
+            return False
+        self.tree.selection_set(match)
+        self.tree.focus(match)
+        self.tree.see(match)
+        self._select_asset()
+        return True
+
     def _choose_folder(self) -> None:
         selected = filedialog.askdirectory(
             parent=self, title="Select a package or loose DLC folder",

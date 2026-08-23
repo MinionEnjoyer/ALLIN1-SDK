@@ -80,7 +80,7 @@ This API is the stable foundation for AI-assisted package inspection and approve
         "Use the integration graph, field inspector, menus, and search efficiently.",
         """Package imports and audits are grouped under Import or audit package. Inspect or export applies to the selected package, and Package tools contains cross-package workflows.
 
-Use the persistent sidebar to move between Package Linker, Asset Viewer, RPF Archives, Package Recipes, and Help Center. Ctrl+1–5 selects those workspaces without opening another application window. The SDK Console remains available along the bottom in every context.
+Use the persistent sidebar to move between Package Linker, Asset Viewer, Vehicle Workbench, RPF Archives, Package Recipes, and Help Center. Ctrl+1–6 selects those workspaces without opening another application window. The SDK Console remains available along the bottom in every context.
 
 Select an integration node to see its source, contract, and linked fields. Select a field for a plain-language explanation. Ctrl+` focuses or expands the console dock and F1 routes to contextual help.""",
         ("navigation", "menus", "graph", "field", "keyboard"),
@@ -129,6 +129,28 @@ For a supported native resource, Native authoring > Export selected asset as edi
 
 Workspace tools > Open YTD texture workspace switches this same window into a searchable texture editor. It previews DDS images, imports DDS or common raster formats, updates width/height/mip/format metadata, supports add/replace/remove, and retains local undo history. Build + validate YTD reparses the completed dictionary before it is accepted. Raster imports become uncompressed DDS; provide a prepared DDS when compression and mip control must be retained. Compiled DLL, ASI, and script payloads are never executed.""",
         ("ytd", "ydr", "yft", "awc", "audio", "texture", "model", "preview", "codewalker"),
+    ),
+    HelpTopic(
+        "vehicle-workbench", "Inspectors", "Vehicle Workbench",
+        "Inspect each vehicle as one linked model, texture, metadata, and registration project.",
+        """Open a loose DLC folder or supported package archive. The workbench resolves every vehicles.meta record against its primary and high-detail YFT fragments, YTD texture dictionary, handling record, variation record, tuning kits, labels, and DLC registration evidence.
+
+Select a vehicle on the left to see its resolved project members and unresolved links. The central diagnostic viewport uses the same bounded native conversion as Asset Viewer. Use the mouse wheel or plus/minus controls to zoom, left-drag to pan, right-drag to orbit, the tilt controls to change elevation, Fit to fill the workspace, and 100% to reset the image scale. Switch between primary and high-detail fragments, isolate any decoded LOD, or select one drawable component without reconverting the model. The component summary reports geometry counts, shader/material names, and named texture references. The workbench retains at most two decoded fragment scenes to keep memory bounded.
+
+Select a project member and choose Open selected in Asset Viewer, or double-click it, to continue detailed inspection and supported native workspace export inside the same SDK window. Open texture dictionary jumps directly to the linked YTD, where the existing editable texture workspace can be exported, changed, validated, and rebuilt.
+
+Create authoring workspace makes a verified copy of every visible package member before enabling edits. The Author tab exposes player-facing labels, texture dictionary, class/type/layout/audio, and common mass/drive/brake/steering values. The Appearance tab manages structured spawn color and livery sets, linked tuning kits, selected light and siren profiles, tuning-kit type and livery labels, and every existing scalar field in local light-profile definitions. The Tuning Builder tab groups visible parts, linked companion parts, performance upgrades, and category labels. Pick an unlinked model asset to start a new part, add or duplicate entries, edit every known or already-present scalar/array field, reorder shop choices, and review missing assets, duplicate identities, companion links, and array mismatches beside the editor. Apply actions snapshot all affected XML files, commit them as one operation, reparse the result, and run the package relationship compiler again. A new missing texture, handling, variation, tuning kit, tuning model, or registration causes every touched file to roll back. Undo latest retains an additional recovery snapshot.
+
+Identity migration safely renames modelName and handlingId across owned metadata while renaming matching primary/high-detail YFT and YTD files in the same transaction. It rejects collisions and shared handling records, then verifies that the renamed model still resolves before retaining the edit. Tuning-kit names and numeric IDs stay locked because changing those IDs can collide with content outside the package. Additional guarded handling fields are available through set-vehicle-fields in the console and Agent API. Binary GXT2 labels and YTD textures continue through their dedicated validated workspaces rather than unsafe raw text edits. After metadata changes, package publication requires a rebuildable dlc.rpf.source; the SDK blocks an unchanged prebuilt dlc.rpf from silently discarding those edits.
+
+Export vehicle project writes a new portable vehicle-project.json plus a readable relationship report without copying or modifying the package. Build installable package accepts exactly one existing dlc.rpf, or compiles one reviewed dlc.rpf.source when a matching GTA path is available. It generates the standard mods/update/x64/dlcpacks destination, SHA-256 checksum, audit report, and validated mod.toml in a new atomic output folder; it never installs or changes the game. Console and Agent API commands create-vehicle-authoring, inspect-vehicle-authoring, set-vehicle-fields, set-vehicle-appearance, set-vehicle-tuning-kit, inspect-vehicle-tuning, add-vehicle-tuning-entry, set-vehicle-tuning-entry, remove-vehicle-tuning-entry, move-vehicle-tuning-entry, set-vehicle-light-profile, migrate-vehicle-identity, undo-vehicle-edit, inspect-vehicle-project, export-vehicle-project, and build-vehicle-package expose the same guarded implementation. Missing or opaque data stays visible as a finding rather than being guessed.""",
+        (
+            "vehicle", "workbench", "yft", "ytd", "handling", "carvariations",
+            "carcols", "tuning", "viewport", "zoom", "pan", "component",
+            "material", "package", "dlc.rpf", "author", "handling", "undo",
+            "colors", "liveries", "lights", "sirens", "identity", "migration",
+            "parts", "performance", "slot", "builder",
+        ),
     ),
     HelpTopic(
         "rpf-explorer", "Inspectors", "RPF Archives",

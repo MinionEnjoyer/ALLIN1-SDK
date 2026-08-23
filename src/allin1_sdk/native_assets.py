@@ -81,6 +81,7 @@ class _ConvertedAsset:
     texture_count: int
     metadata: dict[str, Any] = field(default_factory=dict)
     conversion_error: str | None = None
+    model_scene: NativeModelScene | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,113 @@ class _ModelGeometry:
     vertices: tuple[tuple[float, float, float], ...]
     triangles: tuple[tuple[int, int, int], ...]
     lod: str
+    component: str = "Default drawable"
+    material_index: int | None = None
+    material_name: str = ""
+    texture_names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class NativeModelMaterial:
+    """One shader/material record referenced by decoded model geometry."""
+
+    index: int
+    name: str
+    texture_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class NativeModelComponent:
+    """Aggregated drawable component surfaced by the diagnostic model scene."""
+
+    name: str
+    lod: str
+    geometry_count: int
+    vertex_count: int
+    triangle_count: int
+    material_names: tuple[str, ...]
+    texture_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class NativeModelScene:
+    """Bounded decoded geometry that can be rendered from multiple camera views."""
+
+    name: str
+    geometries: tuple[_ModelGeometry, ...]
+    metadata: dict[str, Any] = field(default_factory=dict)
+    materials: tuple[NativeModelMaterial, ...] = ()
+
+    @property
+    def lods(self) -> tuple[str, ...]:
+        return tuple(sorted(
+            {item.lod for item in self.geometries}, key=str.casefold,
+        ))
+
+    @property
+    def components(self) -> tuple[NativeModelComponent, ...]:
+        grouped: dict[tuple[str, str], list[_ModelGeometry]] = {}
+        for geometry in self.geometries:
+            grouped.setdefault((geometry.component, geometry.lod), []).append(geometry)
+        return tuple(
+            NativeModelComponent(
+                name=name,
+                lod=lod,
+                geometry_count=len(items),
+                vertex_count=sum(len(item.vertices) for item in items),
+                triangle_count=sum(len(item.triangles) for item in items),
+                material_names=tuple(sorted(
+                    {item.material_name for item in items if item.material_name},
+                    key=str.casefold,
+                )),
+                texture_names=tuple(sorted(
+                    {value for item in items for value in item.texture_names},
+                    key=str.casefold,
+                )),
+            )
+            for (name, lod), items in grouped.items()
+        )
+
+    def render(
+        self, *, yaw: float = 34.0, pitch: float = 24.0,
+        lod: str | None = None, component: str | None = None,
+    ) -> tuple[bytes, dict[str, Any]]:
+        if not math.isfinite(yaw) or not math.isfinite(pitch):
+            raise ValueError("Model camera angles must be finite")
+        normalized_yaw = yaw % 360.0
+        normalized_pitch = min(89.0, max(-89.0, pitch))
+        selected = self.geometries
+        selected_lod = "All"
+        if lod and lod.casefold() != "all":
+            selected = tuple(
+                item for item in self.geometries
+                if item.lod.casefold() == lod.casefold()
+            )
+            if not selected:
+                raise ValueError(f"Model LOD was not found: {lod}")
+            selected_lod = selected[0].lod
+        selected_component = "All"
+        if component and component.casefold() != "all":
+            selected = tuple(
+                item for item in selected
+                if item.component.casefold() == component.casefold()
+            )
+            if not selected:
+                raise ValueError(f"Model component was not found in the selected LOD: {component}")
+            selected_component = selected[0].component
+        image, rendered = _render_model_wireframe(
+            list(selected), self.name, camera_yaw=normalized_yaw,
+            camera_pitch=normalized_pitch,
+        )
+        metadata = dict(self.metadata)
+        metadata.update(rendered)
+        metadata.update({
+            "model_camera_yaw": round(normalized_yaw, 2),
+            "model_camera_pitch": round(normalized_pitch, 2),
+            "model_camera_lod": selected_lod,
+            "model_camera_component": selected_component,
+        })
+        return image, metadata
 
 
 @dataclass(frozen=True)
@@ -185,6 +293,7 @@ class NativeAssetReport:
     structured_text: str | None = None
     image_png: bytes | None = None
     warnings: tuple[str, ...] = ()
+    model_scene: NativeModelScene | None = None
 
     def summary(self) -> str:
         lines = [
@@ -353,8 +462,90 @@ def _model_lod(vertex_buffer: etree._Element) -> str:
     return "Default"
 
 
-def _read_model_geometry(
+def _direct_model_text(parent: etree._Element, name: str) -> str:
+    for child in parent:
+        if isinstance(child.tag, str) and _local_name(child) == name:
+            return (child.text or child.get("value", "")).strip()
+    return ""
+
+
+def _model_materials(root: etree._Element) -> tuple[NativeModelMaterial, ...]:
+    materials: list[NativeModelMaterial] = []
+    shaders = root.xpath(
+        ".//*[local-name()='ShaderGroup']/*[local-name()='Shaders']/*[local-name()='Item']"
+    )
+    for index, shader in enumerate(shaders):
+        materials.append(_model_material_record(shader, index))
+    return tuple(materials)
+
+
+def _model_material_record(
+    shader: etree._Element, index: int,
+) -> NativeModelMaterial:
+    textures = tuple(dict.fromkeys(
+        texture_name
+        for parameter in shader.xpath(
+            "./*[local-name()='Parameters']/*[local-name()='Item']"
+        )
+        if parameter.get("type", "").casefold() == "texture"
+        for texture_name in (_direct_model_text(parameter, "Name"),)
+        if texture_name
+    ))
+    return NativeModelMaterial(
+        index=index,
+        name=_direct_model_text(shader, "Name") or f"Shader {index}",
+        texture_names=textures,
+    )
+
+
+def _model_component_name(vertex_buffer: etree._Element, ordinal: int) -> str:
+    geometry = vertex_buffer.getparent()
+    geometries = None if geometry is None else geometry.getparent()
+    drawable = None if geometries is None else geometries.getparent()
+    if drawable is None:
+        return f"{_model_lod(vertex_buffer)} drawable {ordinal + 1}"
+    authored_name = _direct_model_text(drawable, "Name")
+    if authored_name:
+        return authored_name
+    container = drawable.getparent()
+    siblings = (
+        [item for item in container if isinstance(item.tag, str) and _local_name(item) == "Item"]
+        if container is not None else []
+    )
+    drawable_index = siblings.index(drawable) + 1 if drawable in siblings else ordinal + 1
+    return f"{_model_lod(vertex_buffer)} drawable {drawable_index}"
+
+
+def _model_geometry_material(
     vertex_buffer: etree._Element,
+    _materials: tuple[NativeModelMaterial, ...],
+) -> NativeModelMaterial | None:
+    geometry = vertex_buffer.getparent()
+    if geometry is None:
+        return None
+    raw_index = _direct_model_text(geometry, "ShaderIndex")
+    if not raw_index:
+        return None
+    try:
+        index = int(raw_index, 10)
+    except ValueError as exc:
+        raise ValueError("A model geometry has a non-integer ShaderIndex") from exc
+    ancestor = geometry
+    while ancestor is not None:
+        shaders = ancestor.xpath(
+            "./*[local-name()='ShaderGroup']/*[local-name()='Shaders']/*[local-name()='Item']"
+        )
+        if shaders:
+            if index < 0 or index >= len(shaders):
+                return None
+            return _model_material_record(shaders[index], index)
+        ancestor = ancestor.getparent()
+    return None
+
+
+def _read_model_geometry(
+    vertex_buffer: etree._Element, *, ordinal: int = 0,
+    materials: tuple[NativeModelMaterial, ...] = (),
 ) -> _ModelGeometry | None:
     layout = vertex_buffer.find("./Layout")
     data = vertex_buffer.find("./Data")
@@ -381,9 +572,19 @@ def _read_model_geometry(
         return None
 
     geometry = vertex_buffer.getparent()
+    material = _model_geometry_material(vertex_buffer, materials)
+    component = _model_component_name(vertex_buffer, ordinal)
+    geometry_details = {
+        "component": component,
+        "material_index": material.index if material is not None else None,
+        "material_name": material.name if material is not None else "",
+        "texture_names": material.texture_names if material is not None else (),
+    }
     index_data = None if geometry is None else geometry.find("./IndexBuffer/Data")
     if index_data is None or not index_data.text:
-        return _ModelGeometry(tuple(vertices), (), _model_lod(vertex_buffer))
+        return _ModelGeometry(
+            tuple(vertices), (), _model_lod(vertex_buffer), **geometry_details,
+        )
     indices: list[int] = []
     triangles: list[tuple[int, int, int]] = []
     for line in index_data.text.splitlines():
@@ -402,7 +603,10 @@ def _read_model_geometry(
                     raise ValueError("Model preview exceeds the guarded triangle limit")
     if indices:
         raise ValueError("A model index buffer does not contain complete triangles")
-    return _ModelGeometry(tuple(vertices), tuple(triangles), _model_lod(vertex_buffer))
+    return _ModelGeometry(
+        tuple(vertices), tuple(triangles), _model_lod(vertex_buffer),
+        **geometry_details,
+    )
 
 
 def _model_drawable_count(root: etree._Element) -> int:
@@ -482,10 +686,11 @@ def _model_resource_metadata(root: etree._Element) -> dict[str, Any]:
 def _project_model_point(
     point: tuple[float, float, float],
     center: tuple[float, float, float],
+    *, yaw_degrees: float = 34.0, pitch_degrees: float = 24.0,
 ) -> tuple[float, float, float]:
     x, y, z = (point[index] - center[index] for index in range(3))
-    yaw = math.radians(34.0)
-    pitch = math.radians(24.0)
+    yaw = math.radians(yaw_degrees)
+    pitch = math.radians(pitch_degrees)
     rotated_x = (x * math.cos(yaw)) - (y * math.sin(yaw))
     rotated_y = (x * math.sin(yaw)) + (y * math.cos(yaw))
     screen_y = (z * math.cos(pitch)) - (rotated_y * math.sin(pitch))
@@ -496,12 +701,18 @@ def _project_model_point(
 def _render_model_wireframe(
     geometries: list[_ModelGeometry], name: str, *,
     title: str = "MODEL PREVIEW", geometry_label: str = "geometries",
+    camera_yaw: float = 34.0, camera_pitch: float = 24.0,
 ) -> tuple[bytes, dict[str, Any]]:
     vertices = [point for geometry in geometries for point in geometry.vertices]
     minima = tuple(min(point[axis] for point in vertices) for axis in range(3))
     maxima = tuple(max(point[axis] for point in vertices) for axis in range(3))
     center = tuple((minima[axis] + maxima[axis]) / 2.0 for axis in range(3))
-    projected = [_project_model_point(point, center) for point in vertices]
+    projected = [
+        _project_model_point(
+            point, center, yaw_degrees=camera_yaw, pitch_degrees=camera_pitch,
+        )
+        for point in vertices
+    ]
     min_x = min(point[0] for point in projected)
     max_x = max(point[0] for point in projected)
     min_y = min(point[1] for point in projected)
@@ -515,7 +726,9 @@ def _render_model_wireframe(
     center_y = (view_top + view_bottom) / 2.0
 
     def screen(point: tuple[float, float, float]) -> tuple[float, float, float]:
-        px, py, depth = _project_model_point(point, center)
+        px, py, depth = _project_model_point(
+            point, center, yaw_degrees=camera_yaw, pitch_degrees=camera_pitch,
+        )
         return center_x + (px * scale), center_y - (py * scale), depth
 
     total_triangles = sum(len(geometry.triangles) for geometry in geometries)
@@ -574,7 +787,8 @@ def _render_model_wireframe(
     draw.text(
         (38, height - 32),
         f"{len(vertices):,} vertices  |  {total_triangles:,} triangles  |  "
-        f"{len(geometries):,} {geometry_label}  |  isometric diagnostic view",
+        f"{len(geometries):,} {geometry_label}  |  "
+        f"yaw {camera_yaw:.0f}°  pitch {camera_pitch:.0f}°",
         fill="#AFC5B9",
     )
     output = io.BytesIO()
@@ -722,19 +936,24 @@ def _awc_preview_from_xml(
         return {}, f"AWC stream preview unavailable: {exc}"
 
 
-def _model_preview_from_xml(
+def _model_scene_from_xml(
     xml: Path, name: str,
-) -> tuple[bytes | None, dict[str, Any], str | None]:
-    """Build a bounded diagnostic preview from CodeWalker model XML."""
+) -> tuple[NativeModelScene | None, dict[str, Any], str | None]:
+    """Decode a bounded reusable model scene from structured native XML."""
     try:
         tree = _safe_codewalker_xml(xml)
         root = tree.getroot()
+        materials = _model_materials(root)
         geometries: list[_ModelGeometry] = []
         total_vertices = 0
         total_triangles = 0
         skipped_layouts = 0
-        for vertex_buffer in root.xpath(".//*[local-name()='VertexBuffer']"):
-            geometry = _read_model_geometry(vertex_buffer)
+        for ordinal, vertex_buffer in enumerate(
+            root.xpath(".//*[local-name()='VertexBuffer']")
+        ):
+            geometry = _read_model_geometry(
+                vertex_buffer, ordinal=ordinal, materials=materials,
+            )
             if geometry is None:
                 skipped_layouts += 1
                 continue
@@ -750,14 +969,37 @@ def _model_preview_from_xml(
                 "model_drawable_count": _model_drawable_count(root),
                 "model_preview": "No supported position buffers were found",
             }, None
-        image, metadata = _render_model_wireframe(geometries, name)
+        metadata = {}
         metadata["model_drawable_count"] = _model_drawable_count(root)
         metadata.update(_model_resource_metadata(root))
+        metadata["model_component_count"] = len({
+            (item.component, item.lod) for item in geometries
+        })
+        metadata["model_material_binding_count"] = sum(
+            item.material_index is not None for item in geometries
+        )
         if skipped_layouts:
             metadata["model_skipped_buffers"] = skipped_layouts
-        return image, metadata, None
+        scene = NativeModelScene(
+            name, tuple(geometries), metadata, materials=materials,
+        )
+        return scene, metadata, None
     except (OSError, ValueError, etree.XMLSyntaxError, OverflowError) as exc:
-        return None, {}, f"Model preview unavailable: {exc}"
+        return None, {}, f"Model scene unavailable: {exc}"
+
+
+def _model_preview_from_xml(
+    xml: Path, name: str,
+) -> tuple[bytes | None, dict[str, Any], str | None]:
+    """Build the default diagnostic preview from a reusable model scene."""
+    scene, metadata, warning = _model_scene_from_xml(xml, name)
+    if scene is None:
+        return None, metadata, warning
+    try:
+        image, rendered = scene.render()
+        return image, rendered, warning
+    except ValueError as exc:
+        return None, metadata, f"Model preview unavailable: {exc}"
 
 
 def _vector_attributes(
@@ -1858,6 +2100,7 @@ class NativeAssetInspector:
         warnings: list[str] = []
         structured: str | None = None
         image_png: bytes | None = None
+        model_scene: NativeModelScene | None = None
         if truncated:
             warnings.append("Deep preview skipped because the asset exceeded the safety limit.")
         if suffix == ".gxt2" and not truncated:
@@ -1882,6 +2125,7 @@ class NativeAssetInspector:
             if converted is not None:
                 structured = converted.structured_text
                 image_png = converted.image_png
+                model_scene = converted.model_scene
                 metadata.update(converted.metadata)
                 if converted.texture_count:
                     metadata["exported_textures"] = converted.texture_count
@@ -1895,7 +2139,7 @@ class NativeAssetInspector:
             name=name, suffix=suffix, format_name=format_name, size=len(data),
             sha256=hashlib.sha256(data).hexdigest(), metadata=metadata,
             structured_text=structured, image_png=image_png,
-            warnings=tuple(warnings),
+            warnings=tuple(warnings), model_scene=model_scene,
         )
 
     def _convert(
@@ -1921,11 +2165,14 @@ class NativeAssetInspector:
             xml_size = xml.stat().st_size
             preview_metadata: dict[str, Any] = {}
             geometry_image: bytes | None = None
+            model_scene: NativeModelScene | None = None
             suffix = Path(name).suffix.casefold()
             if suffix in MODEL_PREVIEW_SUFFIXES:
-                geometry_image, preview_metadata, preview_warning = _model_preview_from_xml(
+                model_scene, preview_metadata, preview_warning = _model_scene_from_xml(
                     xml, Path(name).name,
                 )
+                if model_scene is not None:
+                    geometry_image, preview_metadata = model_scene.render()
                 if preview_warning:
                     preview_metadata["model_preview"] = preview_warning
             elif suffix in COLLISION_PREVIEW_SUFFIXES:
@@ -1972,7 +2219,7 @@ class NativeAssetInspector:
             texture_image, count = _texture_contact_sheet(assets)
             return _ConvertedAsset(
                 text, geometry_image or texture_image, count,
-                metadata=preview_metadata,
+                metadata=preview_metadata, model_scene=model_scene,
             )
 
     def export_workspace(

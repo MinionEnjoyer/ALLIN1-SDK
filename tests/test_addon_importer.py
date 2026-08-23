@@ -905,6 +905,25 @@ def test_asset_reader_reads_archives_and_rejects_ambiguous_members(tmp_path):
         PackageAssetReader(archive_path).read("missing.txt")
 
 
+def test_loose_package_parallel_reads_keep_deterministic_entry_content(tmp_path):
+    package = tmp_path / "many-readable-assets"
+    package.mkdir()
+    expected = {}
+    for index in range(12):
+        name = f"notes-{index:02d}.txt"
+        content = f"package note {index}".encode()
+        (package / name).write_bytes(content)
+        expected[name] = content
+    (package / "payload.dll").write_bytes(b"MZ" + (b"\0" * 200))
+
+    scan = AddonPackageInspector().inspect(package)
+
+    readable = {entry.path: entry.content for entry in scan.entries}
+    assert [entry.path for entry in scan.entries] == sorted(readable)
+    assert all(readable[path] == content for path, content in expected.items())
+    assert readable["payload.dll"] == b"MZ" + (b"\0" * 200)
+
+
 def test_asset_reader_rejects_unsupported_sources(tmp_path):
     source = tmp_path / "asset.bin"
     source.write_bytes(b"binary")

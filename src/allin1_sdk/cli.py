@@ -38,6 +38,12 @@ from allin1_sdk.rpf_graph_previews import render_graph_preview_bundle
 from allin1_sdk.rpf_program import NODE_SPECS, PROGRAM_TEMPLATES, RpfPackageProgram
 from allin1_sdk.rpf_tools import RpfExplorerService, _running_gta_processes
 from allin1_sdk.texture_workspace import TextureDictionaryWorkspace
+from allin1_sdk.vehicle_project import VehicleProjectResolver
+from allin1_sdk.vehicle_package import VehicleAddonPackageBuilder
+from allin1_sdk.vehicle_authoring import (
+    TUNING_COLLECTIONS,
+    VehicleAuthoringWorkspace,
+)
 
 
 PROJECT_ROOT = project_root()
@@ -84,6 +90,21 @@ def _mod_service(gta_path: Path | None) -> ModIntegrationService:
 
 def _progress(message: str, percent: int) -> None:
     click.echo(f"[{percent:3d}%] {message}")
+
+
+def _field_assignments(
+    assignments: tuple[str, ...], label: str,
+) -> dict[str, str]:
+    updates: dict[str, str] = {}
+    for assignment in assignments:
+        if "=" not in assignment:
+            raise ValueError(f"{label} assignments must use FIELD=VALUE")
+        key, value = assignment.split("=", 1)
+        key = key.strip()
+        if not key or key in updates:
+            raise ValueError(f"Duplicate or empty {label.casefold()} field: {key}")
+        updates[key] = value
+    return updates
 
 
 def _open_graph_window(graph: Path, gta_path: Path | None = None) -> int:
@@ -625,6 +646,432 @@ def compile_vehicle_data(source: Path, output_dir: Path) -> None:
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Compiled {len(report.vehicles)} vehicles into {written[-1].parent}")
+
+
+@main.command("inspect-vehicle-project")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option("--model", help="Return one vehicle model instead of the full project.")
+def inspect_vehicle_project(source: Path, model: str | None) -> None:
+    """Resolve a package's vehicle models, assets, and metadata links."""
+    try:
+        project = VehicleProjectResolver().inspect(source)
+        payload: dict[str, object] = project.to_dict()
+        if model:
+            payload = {
+                "schema_version": payload["schema_version"],
+                "source": payload["source"],
+                "source_kind": payload["source_kind"],
+                "edition": payload["edition"],
+                "inventory_fingerprint": payload["inventory_fingerprint"],
+                "model": project.model(model).to_dict(),
+            }
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(payload, indent=2))
+
+
+@main.command("export-vehicle-project")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--output-dir", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+def export_vehicle_project(source: Path, output_dir: Path) -> None:
+    """Publish a portable vehicle asset project and relationship report."""
+    try:
+        project = VehicleProjectResolver().inspect(source)
+        manifest = project.write(output_dir)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Exported {len(project.models)} vehicle projects: {manifest}"
+    )
+
+
+@main.command("build-vehicle-package")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--output-dir", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+@click.option("--pack-name", help="DLC pack folder name; inferred when omitted.")
+@click.option("--mod-id", help="Managed package id; inferred when omitted.")
+@click.option("--name", "package_name", help="Player-facing package name.")
+@click.option("--version", default="1.0.0", show_default=True)
+@click.option(
+    "--edition", "editions", multiple=True,
+    type=click.Choice(("legacy", "enhanced"), case_sensitive=False),
+    help="Supported game edition; repeat to select both. Defaults to both.",
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Required only when compiling a dlc.rpf.source directory.",
+)
+def build_vehicle_package(
+    source: Path,
+    output_dir: Path,
+    pack_name: str | None,
+    mod_id: str | None,
+    package_name: str | None,
+    version: str,
+    editions: tuple[str, ...],
+    gta_path: Path | None,
+) -> None:
+    """Publish a vehicle DLC as a validated, installable ALLIN1 package."""
+    try:
+        result = VehicleAddonPackageBuilder(PROJECT_ROOT, gta_path).build(
+            source, output_dir, pack_name=pack_name, mod_id=mod_id,
+            name=package_name, version=version,
+            editions=editions or ("legacy", "enhanced"),
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("create-vehicle-authoring")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--output-dir", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+def create_vehicle_authoring(source: Path, output_dir: Path) -> None:
+    """Copy visible vehicle DLC source into a safe editable workspace."""
+    try:
+        workspace = VehicleAuthoringWorkspace.create(source, output_dir)
+        project = workspace.inspect()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "workspace": str(workspace.root),
+        "content_root": str(workspace.source),
+        "revision": workspace.revision,
+        "models": [item.model for item in project.models],
+    }, indent=2))
+
+
+@main.command("inspect-vehicle-authoring")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option("--model", help="Include editable values for one vehicle model.")
+def inspect_vehicle_authoring(workspace: Path, model: str | None) -> None:
+    """Inspect a vehicle authoring workspace and its current validation state."""
+    try:
+        authoring = VehicleAuthoringWorkspace(workspace)
+        project = authoring.inspect()
+        payload: dict[str, object] = {
+            "workspace": str(authoring.root),
+            "content_root": str(authoring.source),
+            "revision": authoring.revision,
+            "validation": project.to_dict(),
+        }
+        if model:
+            payload["authoring"] = authoring.values(model).to_dict()
+            payload["appearance"] = authoring.appearance(model).to_dict()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(payload, indent=2))
+
+
+@main.command("set-vehicle-fields")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("model")
+@click.option(
+    "--set", "assignments", multiple=True, required=True,
+    help="Editable field assignment as FIELD=VALUE; repeat for multiple fields.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def set_vehicle_fields(
+    workspace: Path, model: str, assignments: tuple[str, ...],
+    acknowledge_edit: bool,
+) -> None:
+    """Transactionally update copied vehicle metadata and revalidate its links."""
+    del acknowledge_edit
+    updates: dict[str, str] = {}
+    try:
+        for assignment in assignments:
+            if "=" not in assignment:
+                raise ValueError("Vehicle field assignments must use FIELD=VALUE")
+            key, value = assignment.split("=", 1)
+            key = key.strip()
+            if not key or key in updates:
+                raise ValueError(f"Duplicate or empty vehicle field assignment: {key}")
+            updates[key] = value
+        result = VehicleAuthoringWorkspace(workspace).update(model, updates)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("set-vehicle-appearance")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("model")
+@click.option(
+    "--colors-json", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="JSON array of {indices: [...], liveries: [...]} color sets.",
+)
+@click.option("--kits", help="Comma-separated linked tuning-kit names; empty clears.")
+@click.option("--light-settings", type=int)
+@click.option("--siren-settings", type=int)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def set_vehicle_appearance(
+    workspace: Path, model: str, colors_json: Path | None, kits: str | None,
+    light_settings: int | None, siren_settings: int | None,
+    acknowledge_edit: bool,
+) -> None:
+    """Edit colors, liveries, tuning links, and light/siren selections."""
+    del acknowledge_edit
+    try:
+        colors = None
+        if colors_json is not None:
+            colors = json.loads(colors_json.read_text(encoding="utf-8"))
+            if not isinstance(colors, list):
+                raise ValueError("Vehicle colors JSON must contain an array")
+        kit_values = None if kits is None else [
+            value.strip() for value in kits.split(",") if value.strip()
+        ]
+        result = VehicleAuthoringWorkspace(workspace).update_appearance(
+            model, colors=colors, kits=kit_values,
+            light_settings=light_settings, siren_settings=siren_settings,
+        )
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("set-vehicle-tuning-kit")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("model")
+@click.argument("kit_name")
+@click.option("--kit-type")
+@click.option("--livery-names", help="Comma-separated livery label hashes; empty clears.")
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def set_vehicle_tuning_kit(
+    workspace: Path, model: str, kit_name: str, kit_type: str | None,
+    livery_names: str | None, acknowledge_edit: bool,
+) -> None:
+    """Edit safe structured fields on an existing linked tuning kit."""
+    del acknowledge_edit
+    try:
+        labels = None if livery_names is None else [
+            value.strip() for value in livery_names.split(",") if value.strip()
+        ]
+        result = VehicleAuthoringWorkspace(workspace).update_tuning_kit(
+            model, kit_name, kit_type=kit_type, livery_names=labels,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("inspect-vehicle-tuning")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("model")
+@click.option("--kit", "kit_name", help="Linked kit name or numeric kit ID.")
+def inspect_vehicle_tuning(
+    workspace: Path, model: str, kit_name: str | None,
+) -> None:
+    """Inspect tuning parts, performance entries, assets, and validation findings."""
+    try:
+        builder = VehicleAuthoringWorkspace(workspace).tuning_builder(
+            model, kit_name,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(builder.to_dict(), indent=2))
+
+
+@main.command("add-vehicle-tuning-entry")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("model")
+@click.argument("kit_name")
+@click.argument("collection", type=click.Choice(TUNING_COLLECTIONS))
+@click.option(
+    "--set", "assignments", multiple=True,
+    help="Tuning field as FIELD=VALUE; repeat for multiple fields.",
+)
+@click.option(
+    "--duplicate-index", type=click.IntRange(min=0),
+    help="Clone this zero-based entry, applying any --set overrides.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def add_vehicle_tuning_entry(
+    workspace: Path, model: str, kit_name: str, collection: str,
+    assignments: tuple[str, ...], duplicate_index: int | None,
+    acknowledge_edit: bool,
+) -> None:
+    """Add or duplicate one validated tuning-kit entry."""
+    del acknowledge_edit
+    try:
+        updates = _field_assignments(assignments, "Tuning")
+        result = VehicleAuthoringWorkspace(workspace).add_tuning_entry(
+            model, kit_name, collection, updates,
+            duplicate_index=duplicate_index,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("set-vehicle-tuning-entry")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("model")
+@click.argument("kit_name")
+@click.argument("collection", type=click.Choice(TUNING_COLLECTIONS))
+@click.argument("index", type=click.IntRange(min=0))
+@click.option(
+    "--set", "assignments", multiple=True, required=True,
+    help="Tuning field as FIELD=VALUE; repeat for multiple fields.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def set_vehicle_tuning_entry(
+    workspace: Path, model: str, kit_name: str, collection: str, index: int,
+    assignments: tuple[str, ...], acknowledge_edit: bool,
+) -> None:
+    """Update scalar or array fields on one tuning entry."""
+    del acknowledge_edit
+    try:
+        updates = _field_assignments(assignments, "Tuning")
+        result = VehicleAuthoringWorkspace(workspace).update_tuning_entry(
+            model, kit_name, collection, index, updates,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("remove-vehicle-tuning-entry")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("model")
+@click.argument("kit_name")
+@click.argument("collection", type=click.Choice(TUNING_COLLECTIONS))
+@click.argument("index", type=click.IntRange(min=0))
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def remove_vehicle_tuning_entry(
+    workspace: Path, model: str, kit_name: str, collection: str, index: int,
+    acknowledge_edit: bool,
+) -> None:
+    """Remove one tuning entry while retaining an undo snapshot."""
+    del acknowledge_edit
+    try:
+        result = VehicleAuthoringWorkspace(workspace).remove_tuning_entry(
+            model, kit_name, collection, index,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("move-vehicle-tuning-entry")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("model")
+@click.argument("kit_name")
+@click.argument("collection", type=click.Choice(TUNING_COLLECTIONS))
+@click.argument("index", type=click.IntRange(min=0))
+@click.argument("new_index", type=click.IntRange(min=0))
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def move_vehicle_tuning_entry(
+    workspace: Path, model: str, kit_name: str, collection: str,
+    index: int, new_index: int, acknowledge_edit: bool,
+) -> None:
+    """Reorder a tuning entry within its collection."""
+    del acknowledge_edit
+    try:
+        result = VehicleAuthoringWorkspace(workspace).move_tuning_entry(
+            model, kit_name, collection, index, new_index,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("set-vehicle-light-profile")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("model")
+@click.argument("profile_id")
+@click.option(
+    "--set", "assignments", multiple=True, required=True,
+    help="Existing flattened profile field as FIELD=VALUE; repeat as needed.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def set_vehicle_light_profile(
+    workspace: Path, model: str, profile_id: str,
+    assignments: tuple[str, ...], acknowledge_edit: bool,
+) -> None:
+    """Edit scalar values on one existing carcols light profile."""
+    del acknowledge_edit
+    updates: dict[str, str] = {}
+    try:
+        for assignment in assignments:
+            if "=" not in assignment:
+                raise ValueError("Light profile assignments must use FIELD=VALUE")
+            key, value = assignment.split("=", 1)
+            if not key.strip() or key.strip() in updates:
+                raise ValueError(f"Duplicate or empty light-profile field: {key}")
+            updates[key.strip()] = value
+        result = VehicleAuthoringWorkspace(workspace).update_light_profile(
+            model, profile_id, updates,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("migrate-vehicle-identity")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("model")
+@click.option("--new-model")
+@click.option("--new-handling")
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def migrate_vehicle_identity(
+    workspace: Path, model: str, new_model: str | None,
+    new_handling: str | None, acknowledge_edit: bool,
+) -> None:
+    """Transactionally migrate model/handling references and streamed filenames."""
+    del acknowledge_edit
+    try:
+        result = VehicleAuthoringWorkspace(workspace).migrate_identity(
+            model, new_model=new_model, new_handling=new_handling,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("undo-vehicle-edit")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def undo_vehicle_edit(workspace: Path, acknowledge_edit: bool) -> None:
+    """Restore the latest vehicle metadata edit from retained local history."""
+    del acknowledge_edit
+    try:
+        result = VehicleAuthoringWorkspace(workspace).undo()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
 
 
 @main.command("index-rpf")
@@ -2500,7 +2947,11 @@ def sdk_compatibility_group() -> None:
 for _command in (
     list_examples, validate, link, import_package, audit_folder, oiv_plan,
     compile_oiv_xml,
-    inspect_rpf, dlc_inventory, compile_vehicle_data, index_rpf, catalog_rpfs,
+    inspect_rpf, dlc_inventory, compile_vehicle_data,
+    inspect_vehicle_project, export_vehicle_project, build_vehicle_package,
+    create_vehicle_authoring, inspect_vehicle_authoring,
+    set_vehicle_fields, undo_vehicle_edit,
+    index_rpf, catalog_rpfs,
     search_rpf_catalog, build_rpf_tree,
     create_rpf_graph, import_rpf_graph, render_rpf_graph_previews,
     inspect_rpf_graph, validate_rpf_graph,

@@ -16,12 +16,8 @@ from PIL import Image, ImageTk
 from allin1_sdk import __version__
 from allin1_sdk.addon_importer import AddonDraftBuilder, AddonPackageInspector, PackageScan
 from allin1_sdk.branding import apply_sdk_window_icon
-from allin1_sdk.asset_viewer import AssetViewerDialog
-from allin1_sdk.rpf_explorer import RpfExplorerDialog
 from allin1_sdk.sdk_console import SdkConsoleDialog
 from allin1_sdk.processes import run_hidden
-from allin1_sdk.help_center import HelpCenterDialog
-from allin1_sdk.oiv_workbench_ui import OivWorkbenchFrame
 from allin1_sdk.paths import user_data_root
 from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
 from allin1_sdk.addon_sdk import (
@@ -86,8 +82,8 @@ class AddonSdkDialog(tk.Toplevel):
         view = tk.Menu(menu, tearoff=False)
         for index, (key, label) in enumerate((
             ("linker", "Package Linker"), ("assets", "Asset Viewer"),
-            ("rpf", "RPF Archives"), ("recipes", "Package Recipes"),
-            ("help", "Help Center"),
+            ("vehicles", "Vehicle Workbench"), ("rpf", "RPF Archives"),
+            ("recipes", "Package Recipes"), ("help", "Help Center"),
         ), start=1):
             view.add_command(
                 label=label, accelerator=f"Ctrl+{index}",
@@ -133,6 +129,10 @@ class AddonSdkDialog(tk.Toplevel):
             state="disabled",
         )
         menu.add_command(
+            label="Open vehicle workbench…", command=self._open_vehicle_workbench,
+            state="disabled",
+        )
+        menu.add_command(
             label="Inspect package RPFs…", command=self._inspect_package_rpfs,
             state="disabled",
         )
@@ -152,13 +152,19 @@ class AddonSdkDialog(tk.Toplevel):
         )
         return menu
 
-    def _set_package_actions(self, *, assets: bool, rpfs: bool) -> None:
+    def _set_package_actions(
+        self, *, assets: bool, rpfs: bool, vehicles: bool = False,
+    ) -> None:
         for menu in self.review_menus:
             menu.entryconfigure(
                 "Browse package assets…", state="normal" if assets else "disabled",
             )
             menu.entryconfigure(
                 "Inspect package RPFs…", state="normal" if rpfs else "disabled",
+            )
+            menu.entryconfigure(
+                "Open vehicle workbench…",
+                state="normal" if vehicles else "disabled",
             )
 
     def _open_console(self) -> None:
@@ -171,7 +177,8 @@ class AddonSdkDialog(tk.Toplevel):
     def _open_context_help(self) -> None:
         topic = {
             "linker": "sdk", "assets": "asset-viewer",
-            "rpf": "rpf-explorer", "recipes": "package-recipes", "help": "input",
+            "vehicles": "vehicle-workbench", "rpf": "rpf-explorer",
+            "recipes": "package-recipes", "help": "input",
         }.get(getattr(self, "current_workspace", "linker"), "sdk")
         self._open_help(topic)
 
@@ -204,12 +211,71 @@ class AddonSdkDialog(tk.Toplevel):
         pages = getattr(self, "workspace_pages", {})
         if key not in pages:
             return
+        self._ensure_workspace(key)
         pages[key].tkraise()
         self.current_workspace = key
         for name, button in self.workspace_buttons.items():
             button.configure(
                 style="NavSelected.TButton" if name == key else "Nav.TButton",
             )
+
+    def _ensure_workspace(self, key: str) -> ttk.Frame | None:
+        """Construct a specialist workspace only when the user first opens it."""
+        if key == "linker":
+            return None
+        existing = self._workspace_instances.get(key)
+        if existing is not None:
+            return existing
+        page = self.workspace_pages[key]
+        if key == "assets":
+            from allin1_sdk.asset_viewer import AssetViewerDialog
+            workspace = AssetViewerDialog(
+                page, installation_roots=self.installation_roots,
+                embedded=True, on_help=self._open_help,
+                on_close=lambda: self._select_workspace("linker"),
+            )
+            self.asset_workspace = workspace
+        elif key == "vehicles":
+            from allin1_sdk.vehicle_workbench import VehicleWorkbenchFrame
+            workspace = VehicleWorkbenchFrame(
+                page, self.project_root,
+                installation_roots=self.installation_roots,
+                on_help=self._open_help,
+                on_close=lambda: self._select_workspace("linker"),
+                on_open_asset=self._open_vehicle_asset,
+            )
+            workspace.pack(fill="both", expand=True)
+            self.vehicle_workspace = workspace
+        elif key == "rpf":
+            from allin1_sdk.rpf_explorer import RpfExplorerDialog
+            workspace = RpfExplorerDialog(
+                page, self.project_root,
+                installation_roots=self.installation_roots,
+                embedded=True, on_help=self._open_help,
+                on_close=lambda: self._select_workspace("linker"),
+            )
+            self.rpf_workspace = workspace
+        elif key == "recipes":
+            from allin1_sdk.oiv_workbench_ui import OivWorkbenchFrame
+            workspace = OivWorkbenchFrame(
+                page, self.project_root,
+                installation_roots=self.installation_roots,
+                on_help=self._open_help,
+                on_close=lambda: self._select_workspace("linker"),
+            )
+            self.recipe_workspace = workspace
+        elif key == "help":
+            from allin1_sdk.help_center import HelpCenterDialog
+            workspace = HelpCenterDialog(
+                page, initial_topic="sdk", embedded=True,
+            )
+            self.help_workspace = workspace
+        else:  # Defensive guard for future navigation entries.
+            return None
+        if not workspace.winfo_manager():
+            workspace.pack(fill="both", expand=True)
+        self._workspace_instances[key] = workspace
+        return workspace
 
     def _build(self) -> None:
         self._build_menu()
@@ -287,12 +353,14 @@ class AddonSdkDialog(tk.Toplevel):
 
         linker_page = ttk.Frame(workspace)
         assets_page = ttk.Frame(workspace)
+        vehicles_page = ttk.Frame(workspace)
         rpf_page = ttk.Frame(workspace)
         recipes_page = ttk.Frame(workspace)
         help_page = ttk.Frame(workspace)
         self.workspace_pages = {
             "linker": linker_page,
             "assets": assets_page,
+            "vehicles": vehicles_page,
             "rpf": rpf_page,
             "recipes": recipes_page,
             "help": help_page,
@@ -301,6 +369,7 @@ class AddonSdkDialog(tk.Toplevel):
         for index, (key, label) in enumerate((
             ("linker", "Package Linker"),
             ("assets", "Asset Viewer"),
+            ("vehicles", "Vehicle Workbench"),
             ("rpf", "RPF Archives"),
             ("recipes", "Package Recipes"),
             ("help", "Help Center"),
@@ -413,26 +482,9 @@ class AddonSdkDialog(tk.Toplevel):
             justify="left", foreground="#52635c",
         ).pack(fill="x", pady=(8, 0))
 
-        self.asset_workspace = AssetViewerDialog(
-            assets_page, installation_roots=self.installation_roots,
-            embedded=True, on_help=self._open_help,
-            on_close=lambda: self._select_workspace("linker"),
-        )
-        self.rpf_workspace = RpfExplorerDialog(
-            rpf_page, self.project_root, installation_roots=self.installation_roots,
-            embedded=True, on_help=self._open_help,
-            on_close=lambda: self._select_workspace("linker"),
-        )
-        self.recipe_workspace = OivWorkbenchFrame(
-            recipes_page, self.project_root, installation_roots=self.installation_roots,
-            on_help=self._open_help,
-            on_close=lambda: self._select_workspace("linker"),
-        )
+        self._workspace_instances: dict[str, ttk.Frame] = {}
         self.console_workspace = SdkConsoleDialog(
             console_host, self.project_root, embedded=True, docked=True,
-        )
-        self.help_workspace = HelpCenterDialog(
-            help_page, initial_topic="sdk", embedded=True,
         )
         self.current_workspace = "linker"
         self._select_workspace("linker")
@@ -620,14 +672,32 @@ class AddonSdkDialog(tk.Toplevel):
         self._set_package_actions(
             assets=True,
             rpfs=any(entry.suffix == ".rpf" for entry in scan.entries),
+            vehicles=bool(scan.vehicles),
         )
 
     def _open_asset_viewer(self) -> None:
+        self._select_workspace("assets")
         if self.package_source is not None:
             self.asset_workspace.open_source(
                 self.package_source, self.package_scan,
             )
+
+    def _open_vehicle_workbench(self) -> None:
+        self._select_workspace("vehicles")
+        if self.package_source is not None:
+            self.vehicle_workspace.open_source(
+                self.package_source, self.package_scan,
+            )
+
+    def _open_vehicle_asset(self, path: str) -> None:
+        if self.package_source is None:
+            return
         self._select_workspace("assets")
+        if self.asset_workspace.source != self.package_source.expanduser().resolve():
+            self.asset_workspace.open_source(
+                self.package_source, self.package_scan,
+            )
+        self.asset_workspace.select_asset(path)
 
     def _open_rpf_explorer(self) -> None:
         self._select_workspace("rpf")
@@ -823,6 +893,7 @@ class AddonSdkDialog(tk.Toplevel):
         self.package_scan = None
         self._set_package_actions(
             assets=self.package_source is not None, rpfs=False,
+            vehicles=self.package_source is not None,
         )
         self.report = self.linker.link(manifest)
         self._selection.clear()

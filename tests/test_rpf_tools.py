@@ -2058,6 +2058,30 @@ def test_native_asset_helper_renders_bounded_model_geometry(tmp_path, monkeypatc
     assert report.metadata["model_skeleton_bones"] == 2
     assert report.metadata["model_light_count"] == 1
     assert report.metadata["model_preview"] == "isometric geometry diagnostic"
+    assert report.model_scene is not None
+    assert report.model_scene.lods == ("High",)
+    assert len(report.model_scene.materials) == 1
+    assert report.model_scene.materials[0].name == "vehicle_paint"
+    assert report.model_scene.materials[0].texture_names == ("vehicle_diff",)
+    assert len(report.model_scene.components) == 1
+    component = report.model_scene.components[0]
+    assert component.name == "High drawable 1"
+    assert component.material_names == ("vehicle_paint",)
+    assert component.texture_names == ("vehicle_diff",)
+    rotated, camera = report.model_scene.render(
+        yaw=124.0, pitch=10.0, lod="high", component=component.name,
+    )
+    assert rotated.startswith(b"\x89PNG") and rotated != report.image_png
+    assert camera["model_camera_yaw"] == 124.0
+    assert camera["model_camera_pitch"] == 10.0
+    assert camera["model_camera_lod"] == "High"
+    assert camera["model_camera_component"] == "High drawable 1"
+    with pytest.raises(ValueError, match="LOD was not found"):
+        report.model_scene.render(lod="Missing")
+    with pytest.raises(ValueError, match="must be finite"):
+        report.model_scene.render(yaw=float("nan"))
+    with pytest.raises(ValueError, match="component was not found"):
+        report.model_scene.render(component="Missing")
 
 
 def test_native_asset_helper_renders_collision_geometry(tmp_path, monkeypatch):

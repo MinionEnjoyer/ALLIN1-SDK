@@ -12,7 +12,7 @@ make weapons, vehicles, archives, and other add-ons work coherently.
 ALLIN1 SDK supports GTA V Legacy and GTA V Enhanced. Its inspection and planning
 workflows are designed for Story Mode mod development.
 
-> **Current public release:** **0.5.0**. Install it from ALLIN1 Launcher or
+> **Current public release:** **0.5.1**. Install it from ALLIN1 Launcher or
 > download the self-contained Windows package from
 > [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases).
 
@@ -75,6 +75,33 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   through the SDK Console or structured Agent API.
   The embedded YTD editor catalogs and previews every DDS, imports common raster formats,
   synchronizes dimensions/mips/formats, supports add/replace/remove, and retains undo history.
+- **Vehicle Asset Workbench** — open a loose DLC folder or package archive and work
+  with each vehicle as one resolved project instead of unrelated files. The workbench
+  links primary and high-detail YFT fragments, YTD textures, handling, variations,
+  tuning kits, labels, and DLC registration evidence; unresolved relationships stay
+  visible beside the selected model. Its embedded diagnostic viewport decodes each
+  fragment once, then supports orbit, tilt, zoom, pan, fit, primary/high-detail fragment
+  switching, LOD filtering, and individual drawable-component isolation. Each component
+  exposes its shader/material and named texture references, while the linked YTD routes
+  directly into the embedded Asset Viewer and texture-authoring workflow. **Build
+  installable package** accepts one reviewed `dlc.rpf` or provenance-preserving
+  `dlc.rpf.source`, writes the standard DLC destination and checksum, validates the
+  generated `mod.toml`, and publishes atomically without touching the game. Portable
+  JSON/Markdown project exports, the SDK Console, and the Agent API use the same resolver
+  and guarded package builder. **Create authoring workspace** first copies every visible
+  package member into a new project, preserving the download. The embedded Author tab can
+  edit labels, texture links, class/type/layout/audio, common driving values, light
+  settings, and tuning-kit selection. The dedicated **Tuning Builder** inventories
+  streamed part assets and edits visible parts, linked companion parts, performance
+  upgrades, category labels, arrays, booleans, and existing package-specific scalar
+  fields. It can add, duplicate, remove, and reorder entries while identifying missing
+  model files, duplicate identities, broken companion links, and malformed arrays.
+  Each Apply snapshots every touched file, reparses
+  the XML, rescans all cross-file relationships, and rolls the complete edit back if it
+  introduces a broken link. Undo retains a recovery snapshot as well. Identity fields
+  use a guarded migration that renames linked metadata and streamed files together.
+  An edited workspace can publish only from `dlc.rpf.source`; the SDK refuses to hide
+  changed loose metadata behind an unchanged prebuilt archive.
 - **RPF Archives** — search root and nested RPFs as one hierarchy, inspect entry
   metadata, export JSON/CSV indexes, extract an exact entry or complete directory
   subtree through one archive scan, compare two recursive archive trees by metadata
@@ -202,7 +229,8 @@ ALLIN1 Launcher
                      v
 ALLIN1 SDK
   Package Linker + Package Tools
-  Asset Viewer + RPF Archives
+  Asset Viewer + Vehicle Workbench
+  RPF Archives + Package Recipes
   OIV Workbench + DLC Inventory
   Vehicle Data Compiler
                      |
@@ -248,7 +276,8 @@ the checksum, extract the archive to a fresh directory, and run
 ## Desktop SDK
 
 The desktop application is one persistent developer window. Its sidebar moves
-between **Package Linker**, **Asset Viewer**, **RPF Archives**, and **Help Center**.
+between **Package Linker**, **Asset Viewer**, **Vehicle Workbench**, **RPF Archives**,
+**Package Recipes**, and **Help Center**.
 Pass `--rpf-graph <graph.json>` to the desktop executable to open a validated
 package graph directly; add `--gta-path <installation>` when its asset nodes need
 encrypted or edition-specific native previews.
@@ -266,6 +295,14 @@ commands are grouped by task:
   batch, new-archive, or managed-package output in the main SDK window.
 - **Package Tools** opens Package Recipes, DLC inventory, vehicle compiler, and structured
   META/XML tools.
+- **Vehicle Workbench** resolves a vehicle's linked model, textures, handling,
+  variation, tuning, labels, and registration in one view. A copied authoring
+  workspace can edit driving fields, spawn colors/liveries, selected light and
+  siren profiles, tuning-kit metadata, local light definitions, and complete structured
+  tuning-part collections. Candidate YFT/YTD assets and relationship findings remain
+  visible beside the part builder. Transactional
+  identity migration renames model/handling references and matching streamed
+  files together, with validation and undo before package publication.
 - **The bottom SDK Console dock** keeps the complete CLI available from every
   workspace. Its completion list narrows as you type, suggests commands,
   options, paths, and history, and runs work off the UI thread. Press Ctrl+backtick to focus or expand it,
@@ -345,6 +382,18 @@ allin1-sdk canary-rpf-transaction "D:\Games\GTA V Enhanced\x64\audio\sfx\ANIMALS
 allin1-sdk diff-meta original.meta modified.meta -o structured-diff.md
 allin1-sdk validate-meta-roundtrip handling.meta -o roundtrip.json
 allin1-sdk compile-vehicle-data C:\Mods\Example -o compiled-vehicle-data
+allin1-sdk inspect-vehicle-project C:\Mods\Example --model examplecar
+allin1-sdk export-vehicle-project C:\Mods\Example -o C:\Work\examplecar-project
+allin1-sdk create-vehicle-authoring C:\Mods\Example -o C:\Work\examplecar-authoring
+allin1-sdk set-vehicle-fields C:\Work\examplecar-authoring examplecar --set handling.fMass=1600 --acknowledge-edit
+allin1-sdk set-vehicle-appearance C:\Work\examplecar-authoring examplecar --colors-json C:\Work\colors.json --light-settings 18 --acknowledge-edit
+allin1-sdk set-vehicle-tuning-kit C:\Work\examplecar-authoring examplecar 123_example_modkit --kit-type MKT_SPORT --acknowledge-edit
+allin1-sdk inspect-vehicle-tuning C:\Work\examplecar-authoring examplecar --kit 123_example_modkit
+allin1-sdk add-vehicle-tuning-entry C:\Work\examplecar-authoring examplecar 123_example_modkit visibleMods --set modelName=examplecar_spoiler_1 --set modShopLabel=EXAMPLE_SPOILER --set type=VMT_SPOILER --acknowledge-edit
+allin1-sdk set-vehicle-tuning-entry C:\Work\examplecar-authoring examplecar 123_example_modkit visibleMods 0 --set bone=chassis --acknowledge-edit
+allin1-sdk set-vehicle-light-profile C:\Work\examplecar-authoring examplecar 18 --set headLight.intensity=2.5 --acknowledge-edit
+allin1-sdk migrate-vehicle-identity C:\Work\examplecar-authoring examplecar --new-model examplecar2 --new-handling EXAMPLECAR2 --acknowledge-edit
+allin1-sdk build-vehicle-package C:\Mods\Example -o C:\Work\examplecar-package
 ```
 
 Run `allin1-sdk --help` or `allin1-sdk <command> --help` for the complete command

@@ -9,7 +9,9 @@ from allin1_sdk.sdk_console import (
 
 
 def test_command_catalog_combines_cli_and_console_builtins():
-    catalog = {item.name: item for item in command_catalog()}
+    first = command_catalog()
+    assert command_catalog() is first
+    catalog = {item.name: item for item in first}
     assert "index-rpf" in catalog
     assert catalog["index-rpf"].syntax.startswith("index-rpf <ARCHIVE>")
     assert catalog["help"].syntax == "help [command]"
@@ -35,7 +37,8 @@ def test_progressive_command_option_and_alias_suggestions(tmp_path):
         "inspect-package-rpfs ",
         "inspect-rpf ", "inspect-rpf-change-set ", "inspect-rpf-graph ",
         "inspect-rpf-native-entry ",
-        "inspect-rpf-program ",
+        "inspect-rpf-program ", "inspect-vehicle-authoring ",
+        "inspect-vehicle-project ", "inspect-vehicle-tuning ",
         "install-package ",
     ]
 

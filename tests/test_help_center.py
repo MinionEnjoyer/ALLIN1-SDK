@@ -6,7 +6,7 @@ def test_help_center_has_unique_keys_and_core_workflows():
     assert len(keys) == len(set(keys))
     assert {
         "getting-started", "packages", "package-recipes", "asset-viewer",
-        "rpf-explorer", "recovery",
+        "vehicle-workbench", "rpf-explorer", "recovery",
     } <= set(keys)
 
 

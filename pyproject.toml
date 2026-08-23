@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "allin1-sdk"
-version = "0.5.0"
+version = "0.5.1"
 description = "Standalone GTA V add-on authoring, package auditing, and native asset inspection SDK"
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"
@@ -45,6 +45,7 @@ omit = [
     "src/allin1_sdk/app.py",
     "src/allin1_sdk/addon_sdk_ui.py",
     "src/allin1_sdk/asset_viewer.py",
+    "src/allin1_sdk/vehicle_workbench.py",
     "src/allin1_sdk/binary_workspace_ui.py",
     "src/allin1_sdk/oiv_workbench_ui.py",
     "src/allin1_sdk/rpf_explorer.py",

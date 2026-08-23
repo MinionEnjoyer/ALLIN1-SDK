@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -21,6 +22,7 @@ MAX_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_XML_BYTES = 16 * 1024 * 1024
 MAX_PREVIEW_BYTES = 8 * 1024 * 1024
 MAX_BINARY_HEADER_BYTES = 1024 * 1024
+MAX_FOLDER_READ_WORKERS = 8
 XML_SUFFIXES = frozenset({".xml", ".meta"})
 EXTERNAL_ARCHIVE_SUFFIXES = frozenset({".rar", ".7z"})
 MANIFEST_TEXT_SUFFIXES = frozenset({".lua"})
@@ -970,6 +972,7 @@ class AddonPackageInspector:
     ) -> tuple[list[PackageEntry], list[PackageFinding]]:
         entries: list[PackageEntry] = []
         findings: list[PackageFinding] = []
+        pending_reads: list[tuple[int, Path, bool]] = []
         total = 0
         for candidate in sorted(root.rglob("*")):
             if candidate.is_symlink():
@@ -994,16 +997,34 @@ class AddonPackageInspector:
             content = None
             if candidate.suffix.lower() in INSPECTION_TEXT_SUFFIXES:
                 if size <= MAX_XML_BYTES:
-                    content = candidate.read_bytes()
+                    pending_reads.append((len(entries), candidate, False))
                 else:
                     findings.append(PackageFinding(
                         "warning", "xml_too_large",
                         "XML metadata exceeds the 16 MiB parser limit.", relative,
                     ))
             elif candidate.suffix.lower() in BINARY_PLUGIN_SUFFIXES:
-                with candidate.open("rb") as stream:
-                    content = stream.read(MAX_BINARY_HEADER_BYTES)
+                pending_reads.append((len(entries), candidate, True))
             entries.append(PackageEntry(relative, size, content))
+
+        def read_content(request: tuple[int, Path, bool]) -> tuple[int, bytes]:
+            index, candidate, bounded = request
+            if bounded:
+                with candidate.open("rb") as stream:
+                    return index, stream.read(MAX_BINARY_HEADER_BYTES)
+            return index, candidate.read_bytes()
+
+        if len(pending_reads) < 4:
+            loaded = map(read_content, pending_reads)
+        else:
+            workers = min(MAX_FOLDER_READ_WORKERS, len(pending_reads))
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="allin1-package-read",
+            ) as executor:
+                loaded = tuple(executor.map(read_content, pending_reads))
+        for index, content in loaded:
+            entry = entries[index]
+            entries[index] = PackageEntry(entry.path, entry.size, content)
         return entries, findings
 
     def _read_zip(
