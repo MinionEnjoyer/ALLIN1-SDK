@@ -34,6 +34,54 @@ jobs:
           python -m pip install -e ".[test]" pyinstaller
           python -m pytest --cov=allin1_sdk --cov-report=term-missing
 
+  manual-build:
+    if: github.event_name == 'workflow_dispatch'
+    needs: windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pyinstaller
+          $version = python -c "from allin1_sdk import __version__; print(__version__)"
+          "SDK_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build self-contained Windows SDK
+        shell: pwsh
+        run: |
+          dotnet publish tools/RpfPatcher/RpfPatcher.csproj -c Release --nologo --self-contained true -r win-x64 -o build/rpf
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name ALLIN1-SDK --icon "${{ github.workspace }}/assets/favicon.ico" --add-data "${{ github.workspace }}/assets;assets" --distpath build/app --workpath build/pyinstaller --specpath build src/allin1_sdk/app.py
+          python -m PyInstaller --noconfirm --clean --console --onefile --name ALLIN1-SDK-Agent --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK --workpath build/pyinstaller-agent --specpath build src/allin1_sdk/agent_host.py
+
+      - name: Package checksum-verifiable unsigned build
+        shell: pwsh
+        run: |
+          python scripts/package_release.py --app-dir build/app/ALLIN1-SDK --rpf-dir build/rpf --output build/releases --version "$env:SDK_VERSION"
+          "This GitHub Actions artifact is an unsigned test build from commit $env:GITHUB_SHA. It is not an official signed release." |
+            Set-Content build/releases/UNSIGNED_BUILD.txt -Encoding utf8
+
+      - name: Upload unsigned SDK build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ALLIN1-SDK-${{ env.SDK_VERSION }}-unsigned-win-x64
+          path: build/releases/*
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: windows
