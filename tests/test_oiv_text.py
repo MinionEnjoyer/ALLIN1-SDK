@@ -258,10 +258,14 @@ def test_created_empty_text_must_begin_with_add_line(tmp_path):
 def test_recipe_compiler_is_discoverable_through_cli_console_and_agent_api(
     tmp_path, monkeypatch,
 ):
-    source = _text_recipe(tmp_path)
-    archive = tmp_path / "update.rpf"
+    game = tmp_path / "game"
+    workspace = tmp_path / "workspace"
+    game.mkdir()
+    workspace.mkdir()
+    source = _text_recipe(workspace)
+    archive = workspace / "update.rpf"
     archive.write_bytes(b"RPF7")
-    output = tmp_path / "bundle"
+    output = workspace / "bundle"
 
     def fake_compile(self, recipe, selected, destination, *, service):
         assert recipe.text_operations
@@ -277,7 +281,8 @@ def test_recipe_compiler_is_discoverable_through_cli_console_and_agent_api(
     monkeypatch.setattr(OivWorkbench, "compile_rpf_recipe_bundle", fake_compile)
     result = CliRunner().invoke(main, [
         "compile-oiv-recipe", str(source), str(archive), "-o", str(output),
-        "--workspace-root", str(tmp_path),
+        "--gta-path", str(game),
+        "--workspace-root", str(workspace),
     ])
     assert result.exit_code == 0, result.output
     assert "1 bounded text operation" in result.output
