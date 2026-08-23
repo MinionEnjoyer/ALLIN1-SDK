@@ -65,6 +65,7 @@ AUTHORING_COMMANDS = frozenset({
     "export-rpf-gxt2-workspace",
     "export-rpf-native-workspace",
     "import-package",
+    "open-package-graph",
     "index-rpf",
     "import-rpf-graph",
     "inspect-native-asset",

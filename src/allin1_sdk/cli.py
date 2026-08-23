@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import click
 
@@ -29,7 +29,7 @@ from allin1_sdk.oiv_workbench import OivWorkbench
 from allin1_sdk.paths import project_root
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.rage_data_compiler import RageVehicleDataCompiler
-from allin1_sdk.rpf_builder import RpfArchiveBuilder
+from allin1_sdk.rpf_builder import MAX_RPF_BUILD_FILE_BYTES, RpfArchiveBuilder
 from allin1_sdk.rpf_catalog import RpfCatalogService
 from allin1_sdk.rpf_change_set import CHANGE_ACTIONS, RpfChangeSet
 from allin1_sdk.rpf_delta import derive_rpf_change_plan
@@ -139,6 +139,97 @@ def _open_graph_window(graph: Path, gta_path: Path | None = None) -> int:
     return process.pid
 
 
+def _open_vehicle_workbench_window(
+    source: Path, gta_path: Path | None = None,
+) -> tuple[int, int]:
+    """Validate a vehicle package and open it in the desktop workbench."""
+    resolved = source.expanduser().resolve(strict=True)
+    project = VehicleProjectResolver().inspect(resolved)
+    if not project.models:
+        raise ValueError("The selected package does not contain a vehicle project.")
+    selected_game = gta_path.expanduser().resolve(strict=True) if gta_path else None
+
+    executable = Path(sys.executable).resolve()
+    if getattr(sys, "frozen", False):
+        desktop = executable.with_name("ALLIN1-SDK.exe")
+        if executable.name.casefold() == "allin1-sdk.exe":
+            desktop = executable
+        if not desktop.is_file():
+            raise FileNotFoundError(f"SDK desktop executable was not found: {desktop}")
+        command = [str(desktop), "--vehicle-package", str(resolved)]
+    else:
+        interpreter = executable
+        if os.name == "nt":
+            windowed = executable.with_name("pythonw.exe")
+            if windowed.is_file():
+                interpreter = windowed
+        command = [
+            str(interpreter), "-m", "allin1_sdk.app",
+            "--vehicle-package", str(resolved),
+        ]
+    if selected_game is not None:
+        command.extend(("--gta-path", str(selected_game)))
+    options: dict[str, object] = {}
+    if os.name == "nt":
+        options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = subprocess.Popen(command, cwd=PROJECT_ROOT, **options)
+    return process.pid, len(project.models)
+
+
+def _open_package_graph_window(
+    source: Path, gta_path: Path | None = None,
+) -> tuple[int, Path, int, int]:
+    """Safely materialize graphable package members and open the node viewer."""
+    resolved = source.expanduser().resolve(strict=True)
+    scan = AddonPackageInspector().inspect(resolved)
+    errors = [item for item in scan.findings if item.severity == "error"]
+    if errors:
+        raise ValueError(
+            "Package inspection found blocking errors: "
+            + "; ".join(item.message for item in errors[:5])
+        )
+    graphable = [entry for entry in scan.entries if entry.suffix != ".rpf"]
+    sealed_rpfs = len(scan.entries) - len(graphable)
+    if not graphable:
+        raise ValueError(
+            "The package only contains sealed RPF archives; import an individual "
+            "RPF to inspect its internal node tree."
+        )
+
+    workspace = Path(tempfile.mkdtemp(prefix="allin1-package-graph-"))
+    materialized = workspace / "package-source"
+    graph = workspace / "package-graph.json"
+    materialized.mkdir()
+    reader = PackageAssetReader(resolved)
+    try:
+        for entry in graphable:
+            if entry.size > MAX_RPF_BUILD_FILE_BYTES:
+                raise ValueError(
+                    f"Package member exceeds the graph limit: {entry.path}"
+                )
+            relative = PurePosixPath(entry.path)
+            target = materialized.joinpath(*relative.parts).resolve()
+            if not target.is_relative_to(materialized):
+                raise ValueError(f"Package member escapes the graph workspace: {entry.path}")
+            content = reader.read(entry.path, limit=entry.size + 1)
+            if (
+                content.truncated
+                or content.size != entry.size
+                or len(content.data) != entry.size
+            ):
+                raise ValueError(f"Package member size mismatch: {entry.path}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content.data)
+        RpfPackageGraph.create_from_folder(
+            materialized, graph, root_name="package-preview.rpf",
+        )
+        pid = _open_graph_window(graph, gta_path)
+    except Exception:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise
+    return pid, graph, len(graphable), sealed_rpfs
+
+
 def _native_report_payload(
     report: NativeAssetReport, *, source: str, edition: str,
     binding: dict[str, object] | None = None,
@@ -231,6 +322,54 @@ def open_rpf_graph(graph: Path, gta_path: Path | None) -> None:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps({
         "operation": "open_rpf_graph", "graph": str(graph.resolve()), "pid": pid,
+    }, indent=2))
+
+
+@main.command("open-vehicle-workbench")
+@click.argument(
+    "source", type=click.Path(exists=True, path_type=Path),
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation for encrypted/native asset previews.",
+)
+def open_vehicle_workbench(source: Path, gta_path: Path | None) -> None:
+    """Open a vehicle add-on package in the desktop Vehicle Workbench."""
+    try:
+        pid, model_count = _open_vehicle_workbench_window(source, gta_path)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "open_vehicle_workbench",
+        "source": str(source.resolve()),
+        "vehicle_models": model_count,
+        "pid": pid,
+    }, indent=2))
+
+
+@main.command("open-package-graph")
+@click.argument(
+    "source", type=click.Path(exists=True, path_type=Path),
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation for encrypted/native asset previews.",
+)
+def open_package_graph(source: Path, gta_path: Path | None) -> None:
+    """Open a guarded loose-content view of a mod package in the node viewer."""
+    try:
+        pid, graph, member_count, sealed_rpfs = _open_package_graph_window(
+            source, gta_path,
+        )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "open_package_graph",
+        "source": str(source.resolve()),
+        "graph": str(graph),
+        "materialized_members": member_count,
+        "excluded_sealed_rpfs": sealed_rpfs,
+        "pid": pid,
     }, indent=2))
 
 

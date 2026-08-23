@@ -118,9 +118,14 @@ def _configure_style(root: tk.Tk) -> None:
 
 def _launch_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=True)
-    parser.add_argument(
+    direct_open = parser.add_mutually_exclusive_group()
+    direct_open.add_argument(
         "--rpf-graph", type=Path,
         help="Open a validated RPF package graph directly in the visual node editor.",
+    )
+    direct_open.add_argument(
+        "--vehicle-package", type=Path,
+        help="Open a vehicle add-on package directly in the Vehicle Workbench.",
     )
     parser.add_argument(
         "--gta-path", type=Path,
@@ -136,7 +141,11 @@ def main(argv: list[str] | None = None) -> None:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
             "MinionEnjoyer.ALLIN1SDK"
         )
-    if arguments.rpf_graph is None and not _claim_single_instance():
+    if (
+        arguments.rpf_graph is None
+        and arguments.vehicle_package is None
+        and not _claim_single_instance()
+    ):
         return
     root = tk.Tk()
     root.withdraw()
@@ -179,6 +188,9 @@ def main(argv: list[str] | None = None) -> None:
             root.destroy()
 
     dialog.protocol("WM_DELETE_WINDOW", close_sdk)
+    if arguments.vehicle_package is not None:
+        package = arguments.vehicle_package
+        dialog.after_idle(lambda: dialog.open_vehicle_package(package))
     root.mainloop()
 
 

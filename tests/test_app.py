@@ -32,7 +32,62 @@ def test_desktop_accepts_direct_rpf_graph_launch_arguments(tmp_path):
     assert parsed.gta_path == Path(game)
 
 
+def test_open_vehicle_workbench_cli_launches_desktop(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from allin1_sdk.cli import main
+
+    package = tmp_path / "vehicle.zip"
+    package.write_bytes(b"package")
+    launched = []
+    monkeypatch.setattr(
+        "allin1_sdk.cli._open_vehicle_workbench_window",
+        lambda selected, game: launched.append((selected, game)) or (8451, 2),
+    )
+    result = CliRunner().invoke(main, ["open-vehicle-workbench", str(package)])
+    assert result.exit_code == 0
+    assert '"operation": "open_vehicle_workbench"' in result.output
+    assert '"vehicle_models": 2' in result.output
+    assert '"pid": 8451' in result.output
+    assert launched == [(package, None)]
+
+
+def test_desktop_accepts_direct_vehicle_workbench_launch_arguments(tmp_path):
+    package = tmp_path / "vehicle.rar"
+    game = tmp_path / "game"
+    parsed = _launch_arguments([
+        "--vehicle-package", str(package), "--gta-path", str(game),
+    ])
+    assert parsed.vehicle_package == Path(package)
+    assert parsed.rpf_graph is None
+    assert parsed.gta_path == Path(game)
+
+
+def test_open_package_graph_cli_routes_to_guarded_viewer(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from allin1_sdk.cli import main
+
+    package = tmp_path / "vehicle.rar"
+    package.write_bytes(b"package")
+    graph = tmp_path / "workspace" / "package-graph.json"
+    launched = []
+    monkeypatch.setattr(
+        "allin1_sdk.cli._open_package_graph_window",
+        lambda selected, game: (
+            launched.append((selected, game)) or (9124, graph, 18, 2)
+        ),
+    )
+    result = CliRunner().invoke(main, ["open-package-graph", str(package)])
+    assert result.exit_code == 0
+    assert '"operation": "open_package_graph"' in result.output
+    assert '"materialized_members": 18' in result.output
+    assert '"excluded_sealed_rpfs": 2' in result.output
+    assert launched == [(package, None)]
+
+
 def test_desktop_launch_arguments_default_to_workspace():
     parsed = _launch_arguments([])
     assert parsed.rpf_graph is None
+    assert parsed.vehicle_package is None
     assert parsed.gta_path is None

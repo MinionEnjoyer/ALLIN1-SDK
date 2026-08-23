@@ -689,6 +689,34 @@ class AddonSdkDialog(tk.Toplevel):
                 self.package_source, self.package_scan,
             )
 
+    def open_vehicle_package(self, source: str | Path) -> bool:
+        """Load a package directly into the embedded Vehicle Workbench."""
+        try:
+            resolved = Path(source).expanduser().resolve(strict=True)
+            scan = AddonPackageInspector().inspect(resolved)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror(
+                "Could not open vehicle package", str(exc), parent=self,
+            )
+            return False
+        if not scan.vehicles:
+            messagebox.showerror(
+                "No vehicle content found",
+                "The selected package does not contain any linked vehicle metadata.",
+                parent=self,
+            )
+            return False
+        self.package_source = resolved
+        self.package_scan = scan
+        self._set_package_actions(
+            assets=True,
+            rpfs=any(entry.suffix == ".rpf" for entry in scan.entries),
+            vehicles=True,
+        )
+        self._select_workspace("vehicles")
+        self.vehicle_workspace.open_source(resolved, scan)
+        return True
+
     def _open_vehicle_asset(self, path: str) -> None:
         if self.package_source is None:
             return
