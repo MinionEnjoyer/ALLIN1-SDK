@@ -835,6 +835,7 @@ class VehicleAuthoringWorkspace:
             for key, expected in changed.items():
                 if after_values.values.get(key) != expected:
                     raise RuntimeError(f"Authored field did not round-trip: {key}")
+            self._record_post_edit_state(history)
             revision = self.revision + 1
             self.manifest["revision"] = revision
             self.manifest["updated_utc"] = datetime.now(timezone.utc).isoformat()
@@ -1431,7 +1432,8 @@ class VehicleAuthoringWorkspace:
         if not candidates:
             raise ValueError("Vehicle authoring workspace has no edit to undo")
         history = candidates[0]
-        record = json.loads((history / "edit.json").read_text(encoding="utf-8"))
+        self._verify_post_edit_state(history)
+        record = self._history_record(history)
         model = str(record.get("model", ""))
         recovery = self._snapshot_current_for_undo(history, model)
         previous_manifest = dict(self.manifest)
@@ -1452,6 +1454,7 @@ class VehicleAuthoringWorkspace:
             self._restore_history(recovery)
             shutil.rmtree(recovery, ignore_errors=True)
             raise
+        shutil.rmtree(recovery, ignore_errors=True)
         return VehicleAuthoringResult(
             workspace=self.root,
             revision=revision,
@@ -2049,6 +2052,7 @@ class VehicleAuthoringWorkspace:
         return value
 
     def _finish_revision(self, history: Path, project: VehicleProject) -> int:
+        self._record_post_edit_state(history)
         revision = self.revision + 1
         self.manifest["revision"] = revision
         self.manifest["updated_utc"] = datetime.now(timezone.utc).isoformat()
@@ -2074,16 +2078,23 @@ class VehicleAuthoringWorkspace:
         files = history / "files"
         files.mkdir()
         paths = tuple(dict.fromkeys((*trees, *extra_files)))
-        for relative in sorted(paths, key=str.casefold):
-            source = self._member(relative)
-            target = files / Path(*PurePosixPath(relative).parts)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
+        hashes: dict[str, str] = {}
+        try:
+            for relative in sorted(paths, key=str.casefold):
+                source = self._member(relative)
+                target = files / Path(*PurePosixPath(relative).parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+                hashes[relative] = _sha256(target)
+        except Exception:
+            shutil.rmtree(history, ignore_errors=True)
+            raise
         record = {
             "operation": operation,
             "model": model,
             "revision_before": self.revision,
             "files": sorted(paths, key=str.casefold),
+            "sha256": hashes,
             "changes": list(changes),
             "renames": list(renames),
         }
@@ -2093,7 +2104,7 @@ class VehicleAuthoringWorkspace:
         return history
 
     def _snapshot_current_for_undo(self, original: Path, model: str) -> Path:
-        record = json.loads((original / "edit.json").read_text(encoding="utf-8"))
+        record = self._history_record(original)
         renames = tuple(
             item for item in record.get("renames", ())
             if isinstance(item, dict)
@@ -2119,7 +2130,29 @@ class VehicleAuthoringWorkspace:
         return recovery
 
     def _restore_history(self, history: Path) -> None:
-        record = json.loads((history / "edit.json").read_text(encoding="utf-8"))
+        record = self._history_record(history)
+        files = record.get("files")
+        hashes = record.get("sha256")
+        if not isinstance(files, list) or not all(
+            isinstance(item, str) for item in files
+        ):
+            raise ValueError("Vehicle authoring history contains invalid files")
+        if not isinstance(hashes, dict) or set(hashes) != set(files):
+            raise ValueError("Vehicle authoring history has invalid backup hashes")
+        backups: dict[str, Path] = {}
+        for relative in files:
+            # Validate the destination boundary before deriving the backup path.
+            self._destination(relative)
+            backup = history / "files" / Path(*PurePosixPath(relative).parts)
+            expected = hashes.get(relative)
+            if (
+                not backup.is_file() or backup.is_symlink()
+                or not isinstance(expected, str) or _sha256(backup) != expected
+            ):
+                raise ValueError(
+                    f"Vehicle authoring backup hash is invalid: {relative}"
+                )
+            backups[relative] = backup
         renames = record.get("renames", ())
         if not isinstance(renames, list):
             raise ValueError("Vehicle authoring history contains invalid renames")
@@ -2138,15 +2171,105 @@ class VehicleAuthoringWorkspace:
                 after_path.replace(before_path)
             elif not before_path.exists():
                 raise ValueError(f"Vehicle authoring renamed member is missing: {after}")
-        for relative in record.get("files", ()):
-            if not isinstance(relative, str):
-                raise ValueError("Vehicle authoring history contains an invalid path")
-            backup = history / "files" / Path(*PurePosixPath(relative).parts)
-            if not backup.is_file() or backup.is_symlink():
-                raise ValueError(f"Vehicle authoring backup is missing: {relative}")
+        for relative in files:
+            backup = backups[relative]
             destination = self._destination(relative)
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(backup, destination)
+
+    def _record_post_edit_state(self, history: Path) -> None:
+        record = self._history_record(history)
+        files = record.get("files")
+        renames = record.get("renames", ())
+        if not isinstance(files, list) or not all(
+            isinstance(item, str) for item in files
+        ):
+            raise ValueError("Vehicle authoring history contains invalid files")
+        if not isinstance(renames, list):
+            raise ValueError("Vehicle authoring history contains invalid renames")
+        current_names: dict[str, str] = {}
+        for rename in renames:
+            if not isinstance(rename, dict):
+                raise ValueError("Vehicle authoring history contains an invalid rename")
+            before = rename.get("before")
+            after = rename.get("after")
+            if not isinstance(before, str) or not isinstance(after, str):
+                raise ValueError("Vehicle authoring history contains an invalid rename")
+            self._destination(before)
+            self._destination(after)
+            current_names[before] = after
+        record["sha256_after"] = {
+            relative: {
+                "path": current_names.get(relative, relative),
+                "sha256": _sha256(
+                    self._member(current_names.get(relative, relative))
+                ),
+            }
+            for relative in files
+        }
+        self._write_history_record(history, record)
+
+    def _verify_post_edit_state(self, history: Path) -> None:
+        record = self._history_record(history)
+        files = record.get("files")
+        state = record.get("sha256_after")
+        if not isinstance(files, list) or not all(
+            isinstance(item, str) for item in files
+        ):
+            raise ValueError("Vehicle authoring history contains invalid files")
+        if not isinstance(state, dict) or set(state) != set(files):
+            raise ValueError(
+                "Vehicle authoring history has no verified post-edit state"
+            )
+        for relative in files:
+            descriptor = state.get(relative)
+            if not isinstance(descriptor, dict):
+                raise ValueError(
+                    f"Vehicle authoring post-edit state is invalid: {relative}"
+                )
+            current_path = descriptor.get("path")
+            expected = descriptor.get("sha256")
+            if not isinstance(current_path, str) or not isinstance(expected, str):
+                raise ValueError(
+                    f"Vehicle authoring post-edit state is invalid: {relative}"
+                )
+            try:
+                current = _sha256(self._member(current_path))
+            except (OSError, ValueError) as exc:
+                raise ValueError(
+                    "Vehicle authoring member changed after its edit: "
+                    + current_path
+                ) from exc
+            if current != expected:
+                raise ValueError(
+                    "Vehicle authoring member changed after its edit: "
+                    + current_path
+                )
+
+    def _history_record(self, history: Path) -> dict[str, Any]:
+        if history.parent != self.root / "history" or history.is_symlink():
+            raise ValueError("Unsafe vehicle authoring history directory")
+        try:
+            value = json.loads((history / "edit.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Invalid vehicle authoring history: {exc}") from exc
+        if not isinstance(value, dict):
+            raise ValueError("Invalid vehicle authoring history")
+        return value
+
+    def _write_history_record(self, history: Path, record: dict[str, Any]) -> None:
+        self._history_record(history)
+        destination = history / "edit.json"
+        temporary = destination.with_name(f".{destination.name}.tmp")
+        if temporary.exists() or temporary.is_symlink():
+            raise ValueError(f"Stale vehicle history temporary file exists: {temporary}")
+        try:
+            temporary.write_text(
+                json.dumps(record, indent=2) + "\n", encoding="utf-8",
+            )
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _commit_trees(self, trees: dict[str, etree._ElementTree]) -> None:
         staged: dict[str, Path] = {}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import zipfile
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -197,6 +198,22 @@ def test_loose_package_scan_generates_a_linkable_review_draft(tmp_path):
     assert [item.name for item in scan.ammo] == ["AMMO_TEST_SMOKE"]
     assert scan.animation_weapons == ("WEAPON_TEST_SMOKE",)
     assert scan.shop_weapons == ("WEAPON_TEST_SMOKE",)
+    assert asdict(scan.weapon_animation_records[0]) == {
+        "source": "weaponanimations.meta",
+        "weapon_name": "WEAPON_TEST_SMOKE",
+        "field_name": "key",
+        "representation": "attribute",
+        "set_name": "",
+        "set_ordinal": 0,
+        "ordinal": 0,
+    }
+    assert asdict(scan.weapon_shop_records[0]) == {
+        "source": "weapon_shop.meta",
+        "weapon_name": "WEAPON_TEST_SMOKE",
+        "field_name": "nameHash",
+        "representation": "text",
+        "ordinal": 0,
+    }
     assert {item.code for item in scan.findings} == {
         "edition_compatibility_unresolved",
     }
@@ -245,6 +262,345 @@ def test_weapon_component_links_are_retained_for_workbench_and_draft(tmp_path):
         item["relationship"] == "offers_components"
         for item in draft["references"]
     )
+
+
+def test_weapon_records_are_deduplicated_case_insensitively(tmp_path):
+    package = _write_weapon_component_package(tmp_path)
+    (package / "duplicate-weapons.meta").write_text(
+        WEAPON_WITH_COMPONENT_META
+        .replace("WEAPON_TEST_COMPONENT", "WEAPON_test_COMPONENT")
+        .replace("AMMO_TEST_COMPONENT", "AMMO_test_COMPONENT"),
+        encoding="utf-8",
+    )
+    (package / "duplicate-components.meta").write_text(
+        WEAPON_COMPONENT_META.replace(
+            "COMPONENT_TEST_CLIP_01", "COMPONENT_test_CLIP_01",
+        ),
+        encoding="utf-8",
+    )
+
+    scan = AddonPackageInspector().inspect(package)
+
+    assert len(scan.weapons) == 1
+    assert len(scan.ammo) == 1
+    assert len(scan.weapon_components) == 1
+    duplicate_findings = [
+        item for item in scan.findings if item.code == "duplicate_record"
+    ]
+    assert len(duplicate_findings) >= 3
+
+
+def test_weapon_registration_sources_retain_syntax_and_duplicate_evidence(
+    tmp_path,
+):
+    package = _write_loose_package(tmp_path)
+    (package / "weaponanimations.meta").write_text(
+        "<WeaponAnimations>"
+        '<Item key="WEAPON_TEST_SMOKE"/>'
+        '<Item key="WEAPON_test_SMOKE"/>'
+        "</WeaponAnimations>",
+        encoding="utf-8",
+    )
+    (package / "weapon_shop.meta").write_text(
+        "<Shop><Item>"
+        "<nameHash>WEAPON_TEST_SMOKE</nameHash>"
+        '<nameHash value="WEAPON_test_SMOKE"/>'
+        '<weaponName ref="WEAPON_TEST_SMOKE"/>'
+        "</Item></Shop>",
+        encoding="utf-8",
+    )
+
+    scan = AddonPackageInspector().inspect(package)
+
+    # Compatibility projections are stable and compare game hashes by case.
+    assert scan.animation_weapons == ("WEAPON_TEST_SMOKE",)
+    assert scan.shop_weapons == ("WEAPON_TEST_SMOKE",)
+
+    # Source records retain every ambiguous target so authoring can fail closed.
+    assert [item.ordinal for item in scan.weapon_animation_records] == [0, 1]
+    assert {
+        (item.field_name, item.representation, item.ordinal)
+        for item in scan.weapon_shop_records
+    } == {
+        ("nameHash", "text", 0),
+        ("nameHash", "value", 1),
+        ("weaponName", "ref", 2),
+    }
+    assert {
+        item.code for item in scan.findings
+    } >= {
+        "duplicate_weapon_animation_record",
+        "duplicate_weapon_shop_record",
+    }
+
+
+def test_weapon_animation_duplicates_are_scoped_to_the_native_set(tmp_path):
+    package = _write_loose_package(tmp_path)
+    (package / "weaponanimations.meta").write_text(
+        "<CWeaponAnimationsSets><WeaponAnimationsSets>"
+        '<Item key="Ballistic"><WeaponAnimations>'
+        '<Item key="WEAPON_TEST_SMOKE"/>'
+        '<Item key="WEAPON_test_SMOKE"/>'
+        "</WeaponAnimations></Item>"
+        '<Item key="FirstPerson"><WeaponAnimations>'
+        '<Item key="WEAPON_TEST_SMOKE"/>'
+        "</WeaponAnimations></Item>"
+        "</WeaponAnimationsSets></CWeaponAnimationsSets>",
+        encoding="utf-8",
+    )
+
+    scan = AddonPackageInspector().inspect(package)
+
+    assert [
+        (item.set_name, item.set_ordinal, item.ordinal)
+        for item in scan.weapon_animation_records
+    ] == [
+        ("Ballistic", 0, 0),
+        ("Ballistic", 0, 1),
+        ("FirstPerson", 1, 2),
+    ]
+    duplicate_findings = [
+        item for item in scan.findings
+        if item.code == "duplicate_weapon_animation_record"
+    ]
+    assert len(duplicate_findings) == 1
+    assert scan.animation_weapons == ("WEAPON_TEST_SMOKE",)
+
+
+def test_native_weapon_shop_records_ignore_nested_and_unowned_identities(tmp_path):
+    package = _write_loose_package(tmp_path)
+    (package / "shop_weapon.meta").write_text(
+        "<WeaponShopItemArray><weaponShopItems>"
+        "<Item><nameHash>WEAPON_TEST_SMOKE</nameHash>"
+        "<weaponComponents><Item>"
+        "<weaponName>WEAPON_NESTED_COMPONENT_DECOY</weaponName>"
+        "</Item></weaponComponents></Item>"
+        "</weaponShopItems>"
+        "<nameHash>WEAPON_UNOWNED_DECOY</nameHash>"
+        "</WeaponShopItemArray>",
+        encoding="utf-8",
+    )
+
+    scan = AddonPackageInspector().inspect(package)
+
+    assert scan.shop_weapons == ("WEAPON_TEST_SMOKE",)
+    assert [
+        (item.weapon_name, item.source)
+        for item in scan.weapon_shop_records
+        if item.source == "shop_weapon.meta"
+    ] == [("WEAPON_TEST_SMOKE", "shop_weapon.meta")]
+
+
+def test_game_identifiers_are_case_insensitive_without_prefix_collisions(tmp_path):
+    package = tmp_path / "cased-identities"
+    package.mkdir()
+    (package / "weapons.meta").write_text(
+        "<CWeaponInfoBlob><Infos>"
+        "<Item><Name>weapon_case</Name><Slot>SLOT_CASE</Slot>"
+        '<AmmoInfo ref="">ammo_case</AmmoInfo><Model>w_case</Model>'
+        "<HumanNameHash/><StatName>CASE</StatName></Item>"
+        "<Item><Name>WEAPON_CASE_MK2</Name><Slot>SLOT_CASE_MK2</Slot>"
+        '<AmmoInfo ref="AMMO_CASE_MK2"/><Model>w_case_mk2</Model>'
+        "<HumanNameHash>WT_CASE2</HumanNameHash></Item>"
+        "<Item><Name>ammo_case</Name><AmmoMax value=\"20\"/></Item>"
+        "<Item><Name>AMMO_CASE_MK2</Name><AmmoMax value=\"30\"/></Item>"
+        "</Infos></CWeaponInfoBlob>",
+        encoding="utf-8",
+    )
+    (package / "weaponcomponents.meta").write_text(
+        "<CWeaponComponentInfoBlob><Infos><Item>"
+        "<Name>component_case_clip</Name><Model>w_case_clip</Model>"
+        "</Item></Infos></CWeaponComponentInfoBlob>",
+        encoding="utf-8",
+    )
+    (package / "weaponanimations.meta").write_text(
+        "<WeaponAnimations><Item key=\"weapon_case\"/>"
+        "<Item key=\"WEAPON_CASE_MK2\"/></WeaponAnimations>",
+        encoding="utf-8",
+    )
+    (package / "weapon_shop.meta").write_text(
+        "<Shop><Item><nameHash>weapon_case</nameHash></Item>"
+        "<Item><nameHash>WEAPON_CASE_MK2</nameHash></Item></Shop>",
+        encoding="utf-8",
+    )
+
+    scan = AddonPackageInspector().inspect(package)
+
+    assert [item.name for item in scan.weapons] == [
+        "weapon_case", "WEAPON_CASE_MK2",
+    ]
+    assert [item.ammo_info for item in scan.weapons] == [
+        "ammo_case", "AMMO_CASE_MK2",
+    ]
+    assert [item.name for item in scan.ammo] == ["ammo_case", "AMMO_CASE_MK2"]
+    assert [item.name for item in scan.weapon_components] == [
+        "component_case_clip",
+    ]
+    codes = {item.code for item in scan.findings}
+    assert "duplicate_record" not in codes
+    assert "ammo_definition_not_found" not in codes
+    assert "animation_mapping_not_found" not in codes
+    assert "storefront_mapping_not_found" not in codes
+
+
+def test_nested_managed_manifest_is_authoritative_for_edition_detection(tmp_path):
+    archive = tmp_path / "managed.zip"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr(
+            "source-repo/package/MOD.TOML",
+            'schema_version = 1\nid = "test.managed"\n'
+            'name = "Managed"\nversion = "1.0.0"\ntype = "config"\n'
+            'editions = ["enhanced"]\n',
+        )
+        package.writestr(
+            "source-repo/package/README.md",
+            "Legacy is not supported. Built for GTA V Enhanced.",
+        )
+        package.writestr("source-repo/package/settings.ini", "enabled=true")
+
+    scan = AddonPackageInspector().inspect(archive)
+
+    assert scan.edition_hints == ("enhanced",)
+    assert scan.edition_tag == "Enhanced"
+    codes = {item.code for item in scan.findings}
+    assert "edition_compatibility_unresolved" not in codes
+    assert "managed_manifest_not_found" not in codes
+
+
+def test_multiple_managed_manifests_are_advisory_and_identify_the_path(tmp_path):
+    archive = tmp_path / "multi-package.zip"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr("one/mod.toml", 'editions = ["legacy"]')
+        package.writestr("two/MOD.TOML", 'editions = ["enhanced"]')
+
+    scan = AddonPackageInspector().inspect(archive)
+
+    finding = next(
+        item for item in scan.findings
+        if item.code == "managed_manifest_ambiguous"
+    )
+    assert finding.severity == "warning"
+    assert finding.path == "one/mod.toml"
+    assert "two/MOD.TOML" in finding.message
+    assert scan.valid
+    assert "managed_manifest_not_found" not in {
+        item.code for item in scan.findings
+    }
+
+
+def test_unrelated_loose_assets_do_not_flag_partial_vehicle_or_ped_metadata(
+    tmp_path,
+):
+    package = tmp_path / "partial-mixed-package"
+    package.mkdir()
+    (package / "vehicles.meta").write_text(VEHICLES_META, encoding="utf-8")
+    (package / "handling.meta").write_text(HANDLING_META, encoding="utf-8")
+    (package / "carvariations.meta").write_text(VARIATIONS_META, encoding="utf-8")
+    (package / "peds.meta").write_text(PEDS_META, encoding="utf-8")
+    stream = package / "stream"
+    stream.mkdir()
+    (stream / "unrelated_world_prop.ytd").write_bytes(b"texture")
+    (stream / "unrelated_vehicle.yft").write_bytes(b"fragment")
+
+    scan = AddonPackageInspector().inspect(package)
+
+    codes = {item.code for item in scan.findings}
+    assert "vehicle_model_asset_not_found" not in codes
+    assert "vehicle_texture_asset_not_found" not in codes
+    assert "ped_model_asset_not_found" not in codes
+    assert "ped_texture_asset_not_found" not in codes
+
+
+def test_loose_assets_for_one_vehicle_do_not_scope_another_vehicles_tuning(
+    tmp_path,
+):
+    package = tmp_path / "mixed-vehicle-storage"
+    package.mkdir()
+    other_vehicle = (
+        "<Item><modelName>othercar</modelName><txdName>othercar</txdName>"
+        "<handlingId>OTHERCAR</handlingId><gameName>OTHERCAR</gameName>"
+        "<vehicleMakeName>OTHER</vehicleMakeName><audioNameHash>TAILGATER</audioNameHash>"
+        "<layout>LAYOUT_STANDARD</layout><type>VEHICLE_TYPE_CAR</type>"
+        "<vehicleClass>VC_SPORT</vehicleClass></Item>"
+    )
+    (package / "vehicles.meta").write_text(
+        VEHICLES_META.replace("</InitDatas>", other_vehicle + "</InitDatas>"),
+        encoding="utf-8",
+    )
+    (package / "handling.meta").write_text(
+        HANDLING_META.replace(
+            "</HandlingData>",
+            "<Item><handlingName>OTHERCAR</handlingName></Item></HandlingData>",
+        ),
+        encoding="utf-8",
+    )
+    (package / "carvariations.meta").write_text(
+        VARIATIONS_META.replace(
+            "</variationData>",
+            "<Item><modelName>othercar</modelName><kits/></Item></variationData>",
+        ),
+        encoding="utf-8",
+    )
+    (package / "carcols.meta").write_text(CARCOLS_META, encoding="utf-8")
+    stream = package / "stream"
+    stream.mkdir()
+    (stream / "othercar.yft").write_bytes(b"fragment")
+    (stream / "othercar.ytd").write_bytes(b"texture")
+
+    scan = AddonPackageInspector().inspect(package)
+
+    assert "tuning_model_asset_not_found" not in {
+        item.code for item in scan.findings
+    }
+
+
+def test_nested_archives_and_known_non_content_packages_are_informational(tmp_path):
+    archive = tmp_path / "outer.zip"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr("optional/settings.ini", "enabled=true")
+        package.writestr("optional/extras.zip", b"nested")
+
+    scan = AddonPackageInspector().inspect(archive)
+
+    nested = next(
+        item for item in scan.findings
+        if item.code == "nested_package_not_inspected"
+    )
+    assert (nested.severity, nested.path) == (
+        "info", "optional/extras.zip",
+    )
+    no_records = next(
+        item for item in scan.findings if item.code == "no_content_records"
+    )
+    assert no_records.severity == "info"
+
+
+def test_explicit_edition_exclusion_is_not_counted_as_support(tmp_path):
+    package = tmp_path / "enhanced-only"
+    package.mkdir()
+    (package / "README.txt").write_text(
+        "Legacy is not supported. Built for GTA V Enhanced.", encoding="utf-8",
+    )
+
+    scan = AddonPackageInspector().inspect(package)
+
+    assert scan.edition_hints == ("enhanced",)
+    assert scan.edition_tag == "Enhanced"
+
+
+def test_obsolete_edition_exclusion_does_not_hide_later_support(tmp_path):
+    package = tmp_path / "support-added"
+    package.mkdir()
+    (package / "README.txt").write_text(
+        "Version 1: Legacy was unsupported.\n"
+        "Version 2: Legacy support added; Enhanced remains supported.",
+        encoding="utf-8",
+    )
+
+    scan = AddonPackageInspector().inspect(package)
+
+    assert scan.edition_hints == ("legacy", "enhanced")
+    assert scan.edition_tag == "Legacy + Enhanced"
 
 
 def test_ped_packages_are_discovered_and_linked_into_imported_drafts(tmp_path):
@@ -496,7 +852,9 @@ def test_vehicle_scan_reports_structural_gaps_and_resource_manifest(tmp_path):
         "files { 'vehicles.meta', 'missing.meta' }",
         encoding="utf-8",
     )
-    (package / "different.yft").write_bytes(b"model")
+    # A matching high-detail fragment proves this vehicle is being shipped as
+    # loose assets, so the absent primary YFT and texture remain actionable.
+    (package / "devcar_hi.yft").write_bytes(b"model")
     (package / "different.ytd").write_bytes(b"texture")
     for index in range(21):
         (package / f"nested-{index}.rpf").write_bytes(b"rpf")
@@ -669,6 +1027,16 @@ def test_scanner_enforces_xml_and_package_limits(tmp_path, monkeypatch):
     scan = AddonPackageInspector().inspect(package)
     assert scan.entries[0].content is None
     assert "xml_too_large" in {item.code for item in scan.findings}
+
+    notes = package / "README.md"
+    notes.write_text("documentation", encoding="utf-8")
+    text_scan = AddonPackageInspector().inspect(package)
+    text_finding = next(
+        item for item in text_scan.findings
+        if item.code == "inspection_text_too_large"
+    )
+    assert text_finding.path == "README.md"
+    assert "XML" not in text_finding.message
 
     monkeypatch.setattr(importer, "MAX_PACKAGE_FILES", 0)
     with pytest.raises(ValueError, match="more than 0 files"):

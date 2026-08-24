@@ -269,6 +269,61 @@ def test_oiv_builds_safe_created_archive_tree_into_managed_package(
     assert seen["game"] == game
 
 
+def test_oiv_reopens_created_archive_case_insensitively_in_recipe_order(
+    tmp_path, monkeypatch,
+):
+    assembly = """<package version="2.2"><metadata><name>Case-safe recipe</name>
+      </metadata><content>
+      <archive path="new.rpf" createIfNotExist=" TRUE ">
+        <add source="data.xml">Common/Data/Config.XML</add>
+      </archive>
+      <archive path="MODS/NEW.RPF">
+        <xml path="common/data/config.xml">
+          <replace xpath="/Root/Value"><Value>new</Value></replace>
+        </xml>
+      </archive>
+    </content></package>"""
+    source = _oiv_folder(tmp_path, assembly)
+    (source / "content" / "data.xml").write_text(
+        "<Root><Value>old</Value></Root>", encoding="utf-8",
+    )
+
+    plan = OivWorkbench().inspect(source)
+
+    assert plan.translatable
+    assert [item.kind for item in plan.operations] == [
+        "archive", "add", "archive", "xml",
+    ]
+    assert not [item for item in plan.findings if item.severity == "error"]
+
+    class FakeBuilder:
+        def __init__(self, project_root, gta_path):
+            assert Path(project_root) == tmp_path / "project"
+            assert Path(gta_path) == tmp_path / "game"
+
+        def build(self, loose, output):
+            authored = Path(loose) / "Common" / "Data" / "Config.XML"
+            assert authored.read_text(encoding="utf-8") == (
+                "<Root><Value>new</Value></Root>"
+            )
+            output = Path(output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"RPF7-case-safe")
+            report = output.with_name(f"{output.name}.validation.json")
+            report.write_text("{}", encoding="utf-8")
+            return output, report
+
+    monkeypatch.setattr("allin1_sdk.rpf_builder.RpfArchiveBuilder", FakeBuilder)
+    (tmp_path / "game").mkdir()
+    manifest = OivWorkbench().export_created_rpf_package(
+        plan, tmp_path / "managed-case-safe",
+        project_root=tmp_path / "project", gta_path=tmp_path / "game",
+    )
+    assert ModManifest.load(manifest).files[0].destination.as_posix() == (
+        "mods/new.rpf"
+    )
+
+
 def test_oiv_created_parent_requires_nested_archive_creation_declaration(tmp_path):
     assembly = """<package><content>
       <archive path="update/x64/dlcpacks/created/dlc.rpf" createIfNotExist="true">

@@ -3338,9 +3338,10 @@ class NativeAssetInspector:
             or any(character not in "0123456789abcdefABCDEF" for character in source_sha256)
         ):
             raise ValueError("Native workspace source metadata is malformed")
+        normalized_source_sha256 = source_sha256.casefold()
         if source_snapshot.stat().st_size != source_size or _sha256_file(
             source_snapshot
-        ) != source_sha256:
+        ) != normalized_source_sha256:
             raise ValueError("Native workspace source snapshot was modified")
         if expected_suffix not in NATIVE_XML_IMPORT_SUFFIXES:
             raise ValueError("Native workspace has an unsupported output format")
@@ -3402,7 +3403,7 @@ class NativeAssetInspector:
                 "operation": "native_asset_workspace_build",
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "workspace": str(root), "edition": edition,
-                "source_sha256": source["sha256"],
+                "source_sha256": normalized_source_sha256,
                 "edited_xml_sha256": _sha256_file(xml),
                 "output": {
                     "path": str(destination), "size": staged.stat().st_size,

@@ -195,6 +195,18 @@ def _safe_materialized_path(value: str) -> str:
     return normalized
 
 
+def _nonnegative_integer(value: object, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
+    return value
+
+
+def _required_string(value: object, label: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        raise ValueError(f"{label} must be text")
+    return value
+
+
 @dataclass(frozen=True)
 class RpfArchiveRecord:
     path: str
@@ -249,22 +261,83 @@ class RpfIndex:
     )
 
     def __post_init__(self) -> None:
+        if not isinstance(self.edition, str) or not self.edition.strip():
+            raise ValueError("RPF index has an invalid edition")
+        if (
+            not isinstance(self.archive_size, int)
+            or isinstance(self.archive_size, bool)
+            or self.archive_size < 0
+        ):
+            raise ValueError("RPF index has an invalid archive size")
         lookup: dict[str, RpfEntryRecord] = {}
         archive_paths = [archive.path.casefold() for archive in self.archives]
         if not self.archives or "" not in archive_paths:
             raise ValueError("RPF index does not contain a root archive")
         if len(archive_paths) != len(set(archive_paths)):
             raise ValueError("RPF index contains duplicate archive paths")
+        for archive in self.archives:
+            if _safe_virtual_path(archive.path, allow_empty=True) != archive.path:
+                raise ValueError(f"RPF archive path is not normalized: {archive.path}")
+            if not isinstance(archive.name, str) or not archive.name:
+                raise ValueError(f"RPF archive has an invalid name: {archive.path}")
+            if (
+                not isinstance(archive.version, int)
+                or isinstance(archive.version, bool)
+                or archive.version < 0
+                or not isinstance(archive.encryption, str)
+                or not archive.encryption.strip()
+                or not isinstance(archive.size, int)
+                or isinstance(archive.size, bool)
+                or archive.size < 0
+                or not isinstance(archive.entry_count, int)
+                or isinstance(archive.entry_count, bool)
+                or archive.entry_count < 0
+            ):
+                raise ValueError(f"RPF archive metadata is invalid: {archive.path}")
         for entry in self.entries:
             expected_id = f"{entry.archive_path}::{entry.path}"
             if entry.id != expected_id:
                 raise ValueError(f"RPF entry id does not match its path: {entry.id}")
+            if (
+                _safe_virtual_path(entry.archive_path, allow_empty=True)
+                != entry.archive_path
+                or _safe_virtual_path(entry.path) != entry.path
+            ):
+                raise ValueError(f"RPF entry path is not normalized: {entry.id}")
             if entry.archive_path.casefold() not in archive_paths:
                 raise ValueError(f"RPF entry references an unknown archive: {entry.archive_path}")
             if entry.kind not in {"directory", "resource", "binary", "archive"}:
                 raise ValueError(f"Unknown RPF entry kind: {entry.kind}")
-            if entry.size < 0 or entry.stored_size < 0:
+            if (
+                not isinstance(entry.size, int) or isinstance(entry.size, bool)
+                or not isinstance(entry.stored_size, int)
+                or isinstance(entry.stored_size, bool)
+                or entry.size < 0 or entry.stored_size < 0
+            ):
                 raise ValueError(f"Negative RPF entry size: {entry.id}")
+            if entry.encrypted is not None and not isinstance(entry.encrypted, bool):
+                raise ValueError(f"Invalid RPF entry encrypted flag: {entry.id}")
+            if entry.compressed is not None and not isinstance(entry.compressed, bool):
+                raise ValueError(f"Invalid RPF entry compressed flag: {entry.id}")
+            for label, value in (
+                ("offset", entry.offset),
+                ("resource version", entry.resource_version),
+                ("system size", entry.system_size),
+                ("graphics size", entry.graphics_size),
+                ("child count", entry.child_count),
+            ):
+                if value is not None and (
+                    not isinstance(value, int) or isinstance(value, bool) or value < 0
+                ):
+                    raise ValueError(f"Invalid RPF entry {label}: {entry.id}")
+            for label, value in (
+                ("system flags", entry.system_flags),
+                ("graphics flags", entry.graphics_flags),
+            ):
+                if value is not None and (
+                    not isinstance(value, str) or not value.strip()
+                ):
+                    raise ValueError(f"Invalid RPF entry {label}: {entry.id}")
             if entry.id.casefold() in lookup:
                 raise ValueError(f"Duplicate RPF entry id: {entry.id}")
             lookup[entry.id.casefold()] = entry
@@ -276,38 +349,72 @@ class RpfIndex:
             payload = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"Invalid RPF index: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("Malformed RPF index: expected a JSON object")
         if payload.get("schema_version") != 1:
             raise ValueError("Unsupported RPF index schema")
         try:
+            if not isinstance(payload["archives"], list) or not isinstance(
+                payload["entries"], list
+            ):
+                raise TypeError("archives and entries must be arrays")
+            if any(not isinstance(item, dict) for item in payload["archives"]):
+                raise TypeError("archives must contain objects")
             archives = tuple(
                 RpfArchiveRecord(
-                    path=_safe_virtual_path(item.get("path", ""), allow_empty=True),
-                    name=str(item["name"]), version=int(item["version"]),
-                    encryption=str(item["encryption"]), size=int(item["size"]),
-                    entry_count=int(item["entry_count"]),
+                    path=_safe_virtual_path(
+                        _required_string(
+                            item.get("path", ""), "RPF archive path", allow_empty=True,
+                        ),
+                        allow_empty=True,
+                    ),
+                    name=_required_string(item["name"], "RPF archive name"),
+                    version=_nonnegative_integer(
+                        item["version"], "RPF archive version",
+                    ),
+                    encryption=_required_string(
+                        item["encryption"], "RPF archive encryption",
+                    ),
+                    size=_nonnegative_integer(item["size"], "RPF archive size"),
+                    entry_count=_nonnegative_integer(
+                        item["entry_count"], "RPF archive entry count",
+                    ),
                 )
                 for item in payload["archives"]
             )
             allowed = set(RpfEntryRecord.__dataclass_fields__)
             entries = []
             for authored in payload["entries"]:
+                if not isinstance(authored, dict):
+                    raise TypeError("entries must contain objects")
                 item = {key: value for key, value in authored.items() if key in allowed}
                 item["archive_path"] = _safe_virtual_path(
-                    str(item.get("archive_path", "")), allow_empty=True,
+                    _required_string(
+                        item.get("archive_path", ""), "RPF entry archive path",
+                        allow_empty=True,
+                    ),
+                    allow_empty=True,
                 )
-                item["path"] = _safe_virtual_path(str(item["path"]))
-                item["id"] = str(item["id"])
-                item["name"] = str(item["name"])
-                item["kind"] = str(item["kind"])
-                item["size"] = int(item["size"])
-                item["stored_size"] = int(item["stored_size"])
+                item["path"] = _safe_virtual_path(
+                    _required_string(item["path"], "RPF entry path"),
+                )
+                item["id"] = _required_string(item["id"], "RPF entry id")
+                item["name"] = _required_string(item["name"], "RPF entry name")
+                item["kind"] = _required_string(item["kind"], "RPF entry kind")
+                item["size"] = _nonnegative_integer(item["size"], "RPF entry size")
+                item["stored_size"] = _nonnegative_integer(
+                    item["stored_size"], "RPF entry stored size",
+                )
                 entries.append(RpfEntryRecord(**item))
-            source = Path(payload["source"]).resolve()
+            source = Path(_required_string(payload["source"], "RPF index source")).resolve()
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"Malformed RPF index: {exc}") from exc
         return cls(
-            source=source, edition=str(payload["edition"]),
-            archive_size=int(payload["archive_size"]), archives=archives,
+            source=source, edition=_required_string(payload["edition"], "RPF index edition"),
+            archive_size=_nonnegative_integer(
+                payload["archive_size"], "RPF index archive size",
+            ),
+            archives=archives,
             entries=tuple(entries),
             warnings=tuple(str(item) for item in payload.get("warnings", ())),
         )
@@ -389,7 +496,10 @@ class RpfExplorerService:
                     "outside the game installation or its mods directory."
                 )
             roots.append(root)
-        self.workspace_roots = tuple(dict.fromkeys(roots))
+        self.workspace_roots = tuple(sorted(
+            dict.fromkeys(roots),
+            key=lambda item: (-len(item.parts), str(item).casefold(), str(item)),
+        ))
 
     def _require_tool(self) -> None:
         if not self.patcher.is_file():
@@ -1877,6 +1987,8 @@ class RpfExplorerService:
                 existing = index.entry(f"{archive_path}::{entry_path}")
             except KeyError:
                 existing = None
+            if existing is not None:
+                entry_path = existing.path
             action = (
                 ("replace" if existing is not None else "add")
                 if authored_action == "upsert" else authored_action
@@ -2069,6 +2181,15 @@ class RpfExplorerService:
         original_hashes = self._batch_content_hashes(
             index, existing_entries, expected_source_sha256=archive_hash,
         )
+        for item in prepared:
+            existing = item["existing"]
+            if (
+                item["action"] == "replace" and existing is not None
+                and item["payload"]["sha256"] == original_hashes[existing.id]
+            ):
+                raise ValueError(
+                    f"RPF replacement payload is unchanged: {existing.virtual_name}"
+                )
         changes: list[dict[str, Any]] = []
         for item in prepared:
             existing = item.pop("existing")
@@ -2433,6 +2554,11 @@ class RpfExplorerService:
                     "exists": True, "size": extracted.stat().st_size,
                     "sha256": _sha256_file(extracted),
                 }
+        if (
+            action == "replace" and payload_meta is not None
+            and payload_meta["sha256"] == original.get("sha256")
+        ):
+            raise ValueError(f"RPF replacement payload is unchanged: {existing.virtual_name}")
         if _sha256_file(index.source) != archive_hash:
             raise RuntimeError("RPF changed while the entry-change plan was being created")
 
@@ -3034,10 +3160,9 @@ class RpfExplorerService:
 
     def _authorized_workspace_root(self, archive: Path) -> Path | None:
         resolved = archive.resolve()
-        return next(
-            (root for root in self.workspace_roots if resolved.is_relative_to(root)),
-            None,
-        )
+        return next((
+            root for root in self.workspace_roots if resolved.is_relative_to(root)
+        ), None)
 
     def _receipt_scope_is_authorized(
         self, receipt: dict[str, Any], archive: Path,

@@ -180,6 +180,28 @@ def _contained_source(root: Path, source: str) -> Path:
     return candidate
 
 
+def _reference_matches(source_value: Any, target_value: Any) -> bool:
+    """Compare JSON-shaped linker fields without assuming hashable members."""
+    if isinstance(target_value, Mapping):
+        if isinstance(source_value, (list, tuple, set)):
+            try:
+                return all(value in target_value for value in source_value)
+            except TypeError:
+                return False
+        try:
+            return source_value in target_value
+        except TypeError:
+            return False
+    if isinstance(target_value, (list, tuple, set)):
+        try:
+            if isinstance(source_value, (list, tuple, set)):
+                return all(value in target_value for value in source_value)
+            return source_value in target_value
+        except TypeError:
+            return False
+    return source_value == target_value
+
+
 @dataclass(frozen=True)
 class AddonNode:
     node_id: str
@@ -437,10 +459,16 @@ class AddonLinker:
             if node.kind == "hud_alias":
                 names = node.fields.get("SourceWeaponNames", [])
                 expected = node.fields.get("ExpectedFrames", {})
-                if not isinstance(names, list) or not isinstance(expected, dict):
+                if (
+                    not isinstance(names, list)
+                    or not all(isinstance(name, str) and name for name in names)
+                    or not isinstance(expected, dict)
+                    or not all(isinstance(name, str) for name in expected)
+                ):
                     issues.append(AddonIssue(
                         "error", "invalid_hud_alias",
-                        "HUD aliases require SourceWeaponNames[] and ExpectedFrames{}.",
+                        "HUD aliases require string SourceWeaponNames[] and "
+                        "string-keyed ExpectedFrames{}.",
                         node.node_id,
                     ))
                 else:
@@ -493,20 +521,7 @@ class AddonLinker:
                 continue
             source_value = source.fields[reference.source_field]
             target_value = target.fields[reference.target_field]
-            if isinstance(target_value, Mapping):
-                matches = (
-                    all(value in target_value for value in source_value)
-                    if isinstance(source_value, (list, tuple, set))
-                    else source_value in target_value
-                )
-            elif isinstance(target_value, (list, tuple, set)):
-                matches = (
-                    set(source_value).issubset(set(target_value))
-                    if isinstance(source_value, (list, tuple, set))
-                    else source_value in target_value
-                )
-            else:
-                matches = source_value == target_value
+            matches = _reference_matches(source_value, target_value)
             message = "Reference resolved." if matches else (
                 f"Value mismatch: {source_value!r} is not linked to {target_value!r}."
             )

@@ -282,6 +282,32 @@ def test_context_retrieves_selected_symbols_and_rejects_vague_native_operation(
     assert "allin1-sdk validate-package <mod.toml>" not in context.validation_commands
 
 
+def test_root_cause_wording_does_not_misclassify_package_installation_as_source_code() -> None:
+    from allin1_sdk.agent_api import command_catalog
+    from allin1_sdk.assistant_context import retrieve_operations
+
+    operations = {
+        item["name"] for item in retrieve_operations(
+            "Find the root cause of this package installation failure",
+            command_catalog(),
+        )
+    }
+
+    assert {"validate-package", "install-package"} <= operations
+    assert "inspect-source" not in operations
+
+    renderer_operations = {
+        item["name"] for item in retrieve_operations(
+            "Diagnose a circular renderer source dependency and validate the fix",
+            command_catalog(),
+        )
+    }
+    assert "inspect-source" in renderer_operations
+    assert not renderer_operations.intersection({
+        "validate-package", "install-package", "inspect-package-receipt",
+    })
+
+
 def test_failed_package_validation_keeps_raw_manifest_grounded(
     tmp_path: Path,
 ) -> None:
@@ -412,6 +438,18 @@ def test_context_budget_prunes_explicit_evidence_and_reports_omissions(tmp_path:
         context, "Inspect AdmitRoot admission", "", context_tokens=6144, max_tokens=900,
     )
     assert plan.estimated_input_tokens <= plan.input_budget_tokens
+    planned_symbols = {
+        excerpt["symbol"]
+        for record in plan.context["selected_grounding"]
+        for excerpt in record.get("excerpts", [])
+    }
+    assert planned_symbols == set(symbols)
+    assert plan.context["context_budget"]["reserved_tokens"] >= 512
+    assert (
+        plan.context["context_budget"]["estimated_input_tokens"]
+        == plan.estimated_input_tokens
+    )
+    assert plan.context["grounding_preflight"]["explicit_symbols_preserved"] is True
     assert all(
         excerpt["preserve_full"] and not excerpt["truncated"]
         for record in plan.context["selected_grounding"]
@@ -451,12 +489,99 @@ def test_context_budget_compacts_large_requested_definitions_without_dropping_sy
     excerpts = plan.context["selected_grounding"][0]["excerpts"]
     assert {item["symbol"] for item in excerpts} == {"FirstGate", "SecondGate"}
     assert all(item["truncated"] and not item["preserve_full"] for item in excerpts)
-    assert all("middle of requested definition omitted" in item["text"] for item in excerpts)
+    assert all("not confirmation evidence" in item["text"] for item in excerpts)
     assert plan.estimated_input_tokens <= plan.input_budget_tokens
     assert any(
         "every requested symbol remains represented" in item
         for item in plan.omitted_context
     )
+
+
+def test_compacted_symbols_prioritize_query_relevant_middle_lines(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path / "GTAV-ALLIN1-VR")
+    source = repository / "bootstrap.cpp"
+    filler = "\n".join(
+        f"  total += {index}; // generic bookkeeping" for index in range(300)
+    )
+    source.write_text(
+        "bool AdmitPromotedRoot() {\n"
+        "  int total = 0;\n"
+        f"{filler}\n"
+        "  if (bootstrapCounter == 0) { return false; } // decisive admission guard\n"
+        f"{filler}\n"
+        "  return total > 0;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    question = (
+        "Does the bootstrapCounter admission guard create a circular dependency "
+        "inside AdmitPromotedRoot?"
+    )
+    context = build_assistant_context(
+        question, repository_root=repository,
+        sources=(source,), symbols=("AdmitPromotedRoot",),
+    )
+
+    plan = plan_grounding(
+        context, question, "", context_tokens=4096, max_tokens=640,
+    )
+
+    excerpt = plan.context["selected_grounding"][0]["excerpts"][0]
+    assert excerpt["preserve_full"] is False
+    assert excerpt["compaction"] == "query_ranked_numbered_windows"
+    assert "bootstrapCounter == 0" in excerpt["text"]
+    assert "bootstrapcounter" in excerpt["query_terms_retained"]
+    assert plan.context["grounding_preflight"] == {
+        "explicit_symbol_count": 1,
+        "explicit_symbols_preserved": False,
+        "compacted_symbols": ["AdmitPromotedRoot"],
+        "confirmed_findings_allowed": False,
+        "policy": "omitted_symbol_lines_are_missing_context_and_cannot_confirm_findings",
+    }
+
+
+def test_compacted_symbol_cannot_support_confirmed_finding(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path / "GTAV-ALLIN1-VR")
+    source = repository / "renderer.cpp"
+    body = "\n".join(f"  state += {index};" for index in range(700))
+    source.write_text(
+        f"bool AdmitRoot() {{\n{body}\n  return state > 0;\n}}\n",
+        encoding="utf-8",
+    )
+    question = "Confirm the renderer admission behavior in AdmitRoot"
+    context = build_assistant_context(
+        question, repository_root=repository,
+        sources=(source,), symbols=("AdmitRoot",),
+    )
+    plan = plan_grounding(
+        context, question, "", context_tokens=4096, max_tokens=640,
+    )
+    assert plan.context["grounding_preflight"]["explicit_symbols_preserved"] is False
+    response = json.dumps({
+        "summary": "The behavior is confirmed.",
+        "findings": [{
+            "severity_domain": "engineering", "severity": "high",
+            "evidence": "The requested function confirms the admission behavior.",
+            "file": str(source.resolve()), "line": 702, "confidence": 0.99,
+            "status": "confirmed",
+        }],
+        "recommended_operations": [], "proposed_changes": [],
+        "missing_context": [], "abstentions": [],
+    })
+
+    advisory, flags = validate_advisory(
+        response, context, grounding_context=plan.context,
+    )
+
+    finding = advisory["findings"][0]
+    assert finding["status"] == "inferred" and finding["confidence"] == 0.75
+    assert "confirmed_finding_downgraded_for_compacted_symbol" in flags
+    assert any("cannot support confirmed findings" in item for item in advisory["missing_context"])
+    assert any("downgraded" in item for item in advisory["abstentions"])
 
 
 def test_advisory_can_propose_grounded_change_and_rejects_redundant_inspection(
@@ -549,6 +674,54 @@ def test_prompt_reports_progress_usage_and_bounded_receipt(tmp_path: Path) -> No
     assert receipt["structured_response"]["summary"] == "No mutation is required."
 
 
+def test_prompt_surfaces_symbol_compaction_before_inference(tmp_path: Path) -> None:
+    assistant = tmp_path / "Assistant"
+    _assistant_config(assistant, context_tokens=6144)
+    repository = _repository(tmp_path / "GTAV-ALLIN1-VR")
+    source = repository / "renderer.cpp"
+    source.write_text(
+        "bool AdmitRoot() {\n"
+        + "\n".join(f"  state += {index};" for index in range(900))
+        + "\n  return state > 0;\n}\n",
+        encoding="utf-8",
+    )
+    progress: list[str] = []
+
+    def opener(request, timeout):
+        assert timeout == 20
+        assert any("explicit_symbols_preserved=false" in item for item in progress)
+        body = json.loads(request.data)
+        system = body["messages"][0]["content"]
+        assert '"explicit_symbols_preserved":false' in system
+        response = {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": json.dumps({
+                    "summary": "The omitted lines prevent confirmation.",
+                    "findings": [], "recommended_operations": [],
+                    "proposed_changes": [],
+                    "missing_context": ["The compacted middle is required."],
+                    "abstentions": [],
+                })},
+            }],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 80},
+        }
+        return Response(json.dumps(response).encode("utf-8"))
+
+    result = prompt_assistant(
+        "Confirm AdmitRoot behavior", root=assistant,
+        repository_root=repository, sources=(source,), symbols=("AdmitRoot",),
+        timeout=20, opener=opener, max_tokens=640, progress=progress.append,
+    )
+
+    warning_index = next(
+        index for index, item in enumerate(progress)
+        if "explicit_symbols_preserved=false" in item
+    )
+    assert warning_index < progress.index("prefill")
+    assert result.context["grounding_preflight"]["explicit_symbols_preserved"] is False
+
+
 @pytest.mark.parametrize(("first_content", "finish_reason", "was_truncated"), [
     ("```json\n{\"summary\":\"partial", "length", True),
     (json.dumps({"analysis": "Valid JSON, but not the advisory schema."}), "stop", False),
@@ -603,11 +776,14 @@ def test_prompt_retries_truncated_unstructured_output_as_strict_json(
         assert schema["additionalProperties"] is False
         assert schema["properties"]["findings"]["maxItems"] == 8
     assert bodies[1]["temperature"] == 0
+    assert bodies[1]["max_tokens"] == 600
     assert result.advisory["summary"] == "The telemetry shows a containment gap."
     assert "structured_response_repaired" in result.safety_flags
     assert "initial_response_unstructured" in result.safety_flags
     assert ("initial_response_truncated" in result.safety_flags) is was_truncated
     assert "unstructured_response" not in result.safety_flags
+    # Usage remains cumulative for performance receipts even though each
+    # generation request is capped at the user's 600-token output budget.
     assert result.actual_input_tokens == 620 and result.actual_output_tokens == 690
     assert result.truncated is was_truncated
     assert progress == [
@@ -656,11 +832,12 @@ def test_generic_structured_prompt_validates_and_repairs_once(tmp_path: Path) ->
     result = prompt_structured_assistant(
         "Propose settings without applying them.", response_schema=schema,
         schema_name="settings_proposal_v1", root=assistant, timeout=20,
-        opener=opener,
+        opener=opener, max_tokens=300,
     )
 
     assert result.payload == {"summary": "Safe proposal", "changes": []}
     assert result.repaired is True and len(bodies) == 2
+    assert bodies[1]["max_tokens"] == 300
     assert all(body["response_format"]["type"] == "json_schema" for body in bodies)
     assert all(body["response_format"]["json_schema"]["strict"] for body in bodies)
 

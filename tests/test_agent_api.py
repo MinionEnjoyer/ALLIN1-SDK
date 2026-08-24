@@ -56,6 +56,17 @@ def test_catalog_is_structured_and_classifies_risk():
     assert catalog["open-rpf-graph"]["risk"] == "read_only"
     assert catalog["open-workbench"]["risk"] == "read_only"
     assert catalog["inspect-workbench"]["risk"] == "read_only"
+    assert catalog["inspect-weapon-authoring"]["risk"] == "read_only"
+    assert catalog["inspect-weapon-animation"]["risk"] == "read_only"
+    assert catalog["inspect-weapon-shop"]["risk"] == "read_only"
+    assert catalog["plan-weapon-clone"]["risk"] == "read_only"
+    for command in (
+        "create-weapon-authoring", "set-weapon-fields",
+        "set-weapon-component", "set-weapon-attachment", "undo-weapon-edit",
+        "clone-weapon-animation", "clone-weapon-bundle",
+        "set-weapon-shop-fields",
+    ):
+        assert catalog[command]["risk"] == "authoring_write"
     assert catalog["open-vehicle-workbench"]["risk"] == "read_only"
     assert catalog["open-package-graph"]["risk"] == "authoring_write"
     assert catalog["import-package-graph"]["risk"] == "authoring_write"

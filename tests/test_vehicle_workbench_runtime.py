@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from dataclasses import replace
 from pathlib import Path
 from tkinter import ttk
 
@@ -406,6 +407,16 @@ def test_vehicle_workbench_warns_before_discarding_unapplied_form_edits(
         "allin1_sdk.vehicle_workbench.messagebox.askyesno",
         lambda title, message, **_kwargs: prompts.append((title, message)) or False,
     )
+    assert frame.selected_model is not None
+    original = frame.selected_model
+    routed = replace(original, model="runtimecar_second")
+    frame.models["model:routed"] = routed
+    frame.model_tree.insert(
+        "", "end", iid="model:routed", text=routed.model,
+        values=("Complete",),
+    )
+    assert not frame.select_model("runtimecar_second")
+    assert frame.selected_model is original
     assert not frame.confirm_navigation()
     assert prompts and prompts[0][0] == "Discard unsaved vehicle edits?"
     frame.destroy()

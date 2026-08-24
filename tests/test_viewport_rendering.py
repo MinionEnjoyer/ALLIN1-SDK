@@ -197,6 +197,28 @@ def test_invalidation_discards_active_result_and_worker_surfaces_next_error():
     assert str(outcome.error) == "render failed"
 
 
+def test_clear_cache_invalidation_cannot_be_undone_by_stale_active_render():
+    started = threading.Event()
+    release = threading.Event()
+    cache = WeightedLruCache[str, bytes](weigh=len)
+
+    def slow():
+        started.set()
+        assert release.wait(1.0)
+        return b"stale"
+
+    with LatestOnlyRenderWorker[str, bytes](cache=cache) as worker:
+        worker.submit("stale", slow)
+        assert started.wait(1.0)
+        worker.invalidate(clear_cache=True)
+        release.set()
+        deadline = time.monotonic() + 1.0
+        while worker.busy and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+    assert cache.lookup("stale") == (False, None)
+
+
 def test_viewport_key_normalizes_angles_filters_and_quality():
     key = ViewportRenderKey.create(
         "scene", yaw=394.00001, pitch=120,

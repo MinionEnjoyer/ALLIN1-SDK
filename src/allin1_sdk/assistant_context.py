@@ -39,12 +39,13 @@ CORE_PACKAGE_COMMANDS = (
     "list-installed-packages",
 )
 PACKAGE_DOMAIN_TERMS = frozenset({
-    "package", "manifest", "receipt", "ownership", "deploy", "mod.toml",
+    "package", "manifest", "receipt", "ownership", "deploy", "deployment",
+    "install", "installation", "uninstall", "mod.toml",
 })
 OPERATION_DOMAINS = {
     "inspect-source": frozenset({
         "source", "code", "cpp", "c++", "symbol", "function", "renderer",
-        "class", "implementation", "bloom", "root", "admission",
+        "class", "implementation", "bloom", "admission",
     }),
     "inspect-log": frozenset({
         "log", "logs", "telemetry", "runtime", "trace", "diagnostic", "counter",
@@ -57,6 +58,48 @@ OPERATION_DOMAINS = {
     }),
     "render-native-model": frozenset({
         "yft", "ydd", "ydr", "blender", "eevee", "cycles", "lighting", "studio",
+    }),
+    "create-weapon-authoring": frozenset({
+        "weapon", "weapons", "ammo", "attachment", "attachments",
+    }),
+    "inspect-weapon-authoring": frozenset({
+        "weapon", "weapons", "ammo", "attachment", "attachments",
+    }),
+    "inspect-weapon-animation": frozenset({
+        "weapon", "weapons", "animation", "animations", "clip", "clips",
+    }),
+    "clone-weapon-animation": frozenset({
+        "weapon", "weapons", "animation", "animations", "clip", "clips",
+        "template", "mapping", "mappings",
+    }),
+    "plan-weapon-clone": frozenset({
+        "weapon", "weapons", "clone", "bundle", "donor", "template",
+        "ammo", "animation", "shop", "storefront", "component",
+        "attachment", "plan", "schema",
+    }),
+    "clone-weapon-bundle": frozenset({
+        "weapon", "weapons", "clone", "bundle", "donor", "template",
+        "ammo", "animation", "shop", "storefront", "component",
+        "attachment", "author", "schema",
+    }),
+    "inspect-weapon-shop": frozenset({
+        "weapon", "weapons", "shop", "store", "storefront", "price", "cost",
+    }),
+    "set-weapon-shop-fields": frozenset({
+        "weapon", "weapons", "shop", "store", "storefront", "price", "cost",
+        "label", "labels",
+    }),
+    "set-weapon-fields": frozenset({
+        "weapon", "weapons", "ammo", "attachment", "attachments",
+    }),
+    "set-weapon-component": frozenset({
+        "weapon", "weapons", "ammo", "attachment", "attachments",
+    }),
+    "set-weapon-attachment": frozenset({
+        "weapon", "weapons", "ammo", "attachment", "attachments",
+    }),
+    "undo-weapon-edit": frozenset({
+        "weapon", "weapons", "ammo", "attachment", "attachments",
     }),
 }
 MANAGED_PACKAGE_POLICY = (

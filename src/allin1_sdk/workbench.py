@@ -128,7 +128,7 @@ class WorkbenchFrame(ttk.Frame):
         *, category: str = "auto",
     ) -> bool:
         """Inspect a package once and route the shared result to all three tabs."""
-        if self.source is not None and not self.vehicle_workspace.confirm_navigation():
+        if self.source is not None and not self.confirm_navigation():
             return False
         try:
             resolved = Path(source).expanduser().resolve(strict=True)
@@ -163,8 +163,15 @@ class WorkbenchFrame(ttk.Frame):
         return True
 
     def _request_close(self) -> None:
-        if self.vehicle_workspace.confirm_navigation() and self._on_close is not None:
+        if self.confirm_navigation() and self._on_close is not None:
             self._on_close()
+
+    def confirm_navigation(self) -> bool:
+        """Keep unapplied specialist-workbench edits from being discarded."""
+        return (
+            self.vehicle_workspace.confirm_navigation()
+            and self.weapon_workspace.confirm_navigation()
+        )
 
     def reload(self) -> bool:
         if self.source is None:

@@ -60,6 +60,7 @@ from allin1_sdk.vehicle_authoring import (
     TUNING_COLLECTIONS,
     VehicleAuthoringWorkspace,
 )
+from allin1_sdk.weapon_authoring import WeaponAuthoringWorkspace
 
 
 PROJECT_ROOT = project_root()
@@ -1683,6 +1684,468 @@ def undo_vehicle_edit(workspace: Path, acknowledge_edit: bool) -> None:
     del acknowledge_edit
     try:
         result = VehicleAuthoringWorkspace(workspace).undo()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("create-weapon-authoring")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--output-dir", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+def create_weapon_authoring(source: Path, output_dir: Path) -> None:
+    """Copy visible weapon metadata into a safe editable workspace."""
+    try:
+        workspace = WeaponAuthoringWorkspace.create(source, output_dir)
+        project = workspace.inspect()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "workspace": str(workspace.root),
+        "content_root": str(workspace.source),
+        "revision": workspace.revision,
+        "weapons": [item.name for item in project.weapons],
+        "components": [item.name for item in project.components],
+    }, indent=2))
+
+
+@main.command("inspect-weapon-authoring")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option("--weapon", help="Include editable values for one weapon record.")
+@click.option("--component", help="Include editable values for one component record.")
+def inspect_weapon_authoring(
+    workspace: Path, weapon: str | None, component: str | None,
+) -> None:
+    """Inspect a weapon workspace, relationships, and editable values."""
+    try:
+        authoring = WeaponAuthoringWorkspace(workspace)
+        project = authoring.inspect()
+        payload: dict[str, object] = {
+            "workspace": str(authoring.root),
+            "content_root": str(authoring.source),
+            "revision": authoring.revision,
+            "validation": project.to_dict(),
+        }
+        if weapon:
+            payload["weapon_authoring"] = authoring.values(weapon).to_dict()
+        if component:
+            payload["component_authoring"] = authoring.component_values(
+                component,
+            ).to_dict()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(payload, indent=2))
+
+
+@main.command("plan-weapon-clone")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("donor")
+@click.option("--weapon-name", required=True, help="New WEAPON_ identity.")
+@click.option("--slot", required=True, help="New SLOT_ identity.")
+@click.option(
+    "--ammo-info", required=True,
+    help="Ammo identity referenced by the cloned weapon.",
+)
+@click.option("--model", required=True, help="New weapon model identity.")
+@click.option(
+    "--human-name-hash", required=True,
+    help="New player-facing weapon label key.",
+)
+@click.option("--stat-name", required=True, help="New weapon stat identity.")
+@click.option(
+    "--ammo-mode", type=click.Choice(("clone", "reuse"), case_sensitive=False),
+    default="clone", show_default=True,
+    help="Clone the donor ammo definition or reference an existing one.",
+)
+@click.option(
+    "--ammo-name",
+    help="New ammo-definition identity when --ammo-mode is clone.",
+)
+def plan_weapon_clone(
+    workspace: Path,
+    donor: str,
+    weapon_name: str,
+    slot: str,
+    ammo_info: str,
+    model: str,
+    human_name_hash: str,
+    stat_name: str,
+    ammo_mode: str,
+    ammo_name: str | None,
+) -> None:
+    """Plan a complete donor-based weapon bundle without changing files."""
+    try:
+        plan = WeaponAuthoringWorkspace(workspace).plan_weapon_clone(
+            donor,
+            weapon_name=weapon_name,
+            slot=slot,
+            ammo_info=ammo_info,
+            model=model,
+            human_name_hash=human_name_hash,
+            stat_name=stat_name,
+            clone_ammo=ammo_mode.casefold() == "clone",
+            ammo_name=ammo_name,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(plan.to_dict(), indent=2))
+
+
+@main.command("clone-weapon-bundle")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("donor")
+@click.option("--weapon-name", required=True, help="New WEAPON_ identity.")
+@click.option("--slot", required=True, help="New SLOT_ identity.")
+@click.option(
+    "--ammo-info", required=True,
+    help="Ammo identity referenced by the cloned weapon.",
+)
+@click.option("--model", required=True, help="New weapon model identity.")
+@click.option(
+    "--human-name-hash", required=True,
+    help="New player-facing weapon label key.",
+)
+@click.option("--stat-name", required=True, help="New weapon stat identity.")
+@click.option(
+    "--ammo-mode", type=click.Choice(("clone", "reuse"), case_sensitive=False),
+    default="clone", show_default=True,
+    help="Clone the donor ammo definition or reference an existing one.",
+)
+@click.option(
+    "--ammo-name",
+    help="New ammo-definition identity when --ammo-mode is clone.",
+)
+@click.option(
+    "--expected-revision", required=True, type=click.IntRange(min=0),
+    help="Reject the edit if the copied workspace revision has changed.",
+)
+@click.option(
+    "--plan-sha256", required=True,
+    help="Exact digest returned by plan-weapon-clone.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def clone_weapon_bundle(
+    workspace: Path,
+    donor: str,
+    weapon_name: str,
+    slot: str,
+    ammo_info: str,
+    model: str,
+    human_name_hash: str,
+    stat_name: str,
+    ammo_mode: str,
+    ammo_name: str | None,
+    expected_revision: int,
+    plan_sha256: str,
+    acknowledge_edit: bool,
+) -> None:
+    """Apply one reviewed, revision-bound complete weapon clone plan."""
+    del acknowledge_edit
+    try:
+        authoring = WeaponAuthoringWorkspace(workspace)
+        plan = authoring.plan_weapon_clone(
+            donor,
+            weapon_name=weapon_name,
+            slot=slot,
+            ammo_info=ammo_info,
+            model=model,
+            human_name_hash=human_name_hash,
+            stat_name=stat_name,
+            clone_ammo=ammo_mode.casefold() == "clone",
+            ammo_name=ammo_name,
+        )
+        actual_digest = str(plan.to_dict().get("plan_sha256", ""))
+        if actual_digest.casefold() != plan_sha256.strip().casefold():
+            raise ValueError(
+                "weapon clone plan digest mismatch; run plan-weapon-clone "
+                "again and review the current plan"
+            )
+        result = authoring.clone_weapon_bundle(
+            plan,
+            expected_revision=expected_revision,
+            expected_plan_sha256=plan_sha256,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("set-weapon-fields")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("weapon")
+@click.option(
+    "--set", "assignments", multiple=True, required=True,
+    help="Editable weapon/ammo field as FIELD=VALUE; repeat as needed.",
+)
+@click.option(
+    "--expected-revision", type=click.IntRange(min=0),
+    help="Reject the edit if the copied workspace revision has changed.",
+)
+@click.option(
+    "--acknowledge-shared", is_flag=True,
+    help="Confirm edits to ammo used by more than one weapon.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def set_weapon_fields(
+    workspace: Path,
+    weapon: str,
+    assignments: tuple[str, ...],
+    expected_revision: int | None,
+    acknowledge_shared: bool,
+    acknowledge_edit: bool,
+) -> None:
+    """Transactionally edit an existing weapon and its linked ammo record."""
+    del acknowledge_edit
+    try:
+        updates = _field_assignments(assignments, "Weapon")
+        result = WeaponAuthoringWorkspace(workspace).update(
+            weapon,
+            updates,
+            expected_revision=expected_revision,
+            acknowledge_shared=acknowledge_shared,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("set-weapon-component")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("component")
+@click.option(
+    "--set", "assignments", multiple=True, required=True,
+    help="Editable component field as FIELD=VALUE; repeat as needed.",
+)
+@click.option(
+    "--expected-revision", type=click.IntRange(min=0),
+    help="Reject the edit if the copied workspace revision has changed.",
+)
+@click.option(
+    "--acknowledge-shared", is_flag=True,
+    help="Confirm edits to a component used by more than one weapon.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def set_weapon_component(
+    workspace: Path,
+    component: str,
+    assignments: tuple[str, ...],
+    expected_revision: int | None,
+    acknowledge_shared: bool,
+    acknowledge_edit: bool,
+) -> None:
+    """Transactionally edit one existing weapon-component definition."""
+    del acknowledge_edit
+    try:
+        updates = _field_assignments(assignments, "Weapon component")
+        result = WeaponAuthoringWorkspace(workspace).update_component(
+            component,
+            updates,
+            expected_revision=expected_revision,
+            acknowledge_shared=acknowledge_shared,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("set-weapon-attachment")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("weapon")
+@click.argument("component")
+@click.option(
+    "--set", "assignments", multiple=True, required=True,
+    help="Attachment field as FIELD=VALUE; repeat as needed.",
+)
+@click.option(
+    "--expected-revision", type=click.IntRange(min=0),
+    help="Reject the edit if the copied workspace revision has changed.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def set_weapon_attachment(
+    workspace: Path,
+    weapon: str,
+    component: str,
+    assignments: tuple[str, ...],
+    expected_revision: int | None,
+    acknowledge_edit: bool,
+) -> None:
+    """Edit one existing weapon-to-component attachment link."""
+    del acknowledge_edit
+    try:
+        updates = _field_assignments(assignments, "Weapon attachment")
+        result = WeaponAuthoringWorkspace(workspace).update_attachment(
+            weapon,
+            component,
+            updates,
+            expected_revision=expected_revision,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("inspect-weapon-animation")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("weapon")
+@click.option(
+    "--source",
+    help="Exact relative metadata member when more than one source has mappings.",
+)
+def inspect_weapon_animation(
+    workspace: Path, weapon: str, source: str | None,
+) -> None:
+    """Inspect exact animation-set coverage retained for one weapon."""
+    try:
+        authoring = WeaponAuthoringWorkspace(workspace)
+        values = authoring.animation_values(weapon, source=source)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "workspace": str(authoring.root),
+        "revision": authoring.revision,
+        "animation": values.to_dict(),
+    }, indent=2))
+
+
+@main.command("clone-weapon-animation")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("weapon")
+@click.option("--template", required=True, help="Mapped weapon to clone exactly.")
+@click.option(
+    "--source",
+    help="Exact relative metadata member when the template has multiple sources.",
+)
+@click.option(
+    "--expected-revision", type=click.IntRange(min=0),
+    help="Reject the edit if the copied workspace revision has changed.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def clone_weapon_animation(
+    workspace: Path,
+    weapon: str,
+    template: str,
+    source: str | None,
+    expected_revision: int | None,
+    acknowledge_edit: bool,
+) -> None:
+    """Clone complete native animation mappings without editing clip payloads."""
+    del acknowledge_edit
+    try:
+        result = WeaponAuthoringWorkspace(workspace).clone_animation_mappings(
+            weapon,
+            template,
+            source=source,
+            expected_revision=expected_revision,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("inspect-weapon-shop")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("weapon")
+@click.option(
+    "--source",
+    help="Exact relative metadata member when more than one shop source matches.",
+)
+def inspect_weapon_shop(
+    workspace: Path, weapon: str, source: str | None,
+) -> None:
+    """Inspect a weapon's exact existing storefront record and representations."""
+    try:
+        authoring = WeaponAuthoringWorkspace(workspace)
+        values = authoring.shop_values(weapon, source=source)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "workspace": str(authoring.root),
+        "revision": authoring.revision,
+        "shop": values.to_dict(),
+    }, indent=2))
+
+
+@main.command("set-weapon-shop-fields")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("weapon")
+@click.option(
+    "--set", "assignments", multiple=True, required=True,
+    help="Editable existing shop field as FIELD=VALUE; repeat as needed.",
+)
+@click.option(
+    "--source",
+    help="Exact relative metadata member when more than one shop source matches.",
+)
+@click.option(
+    "--expected-revision", type=click.IntRange(min=0),
+    help="Reject the edit if the copied workspace revision has changed.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def set_weapon_shop_fields(
+    workspace: Path,
+    weapon: str,
+    assignments: tuple[str, ...],
+    source: str | None,
+    expected_revision: int | None,
+    acknowledge_edit: bool,
+) -> None:
+    """Transactionally edit supported fields on an existing shop record."""
+    del acknowledge_edit
+    try:
+        updates = _field_assignments(assignments, "Weapon shop")
+        result = WeaponAuthoringWorkspace(workspace).update_shop(
+            weapon,
+            updates,
+            source=source,
+            expected_revision=expected_revision,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("undo-weapon-edit")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option(
+    "--expected-revision", type=click.IntRange(min=0),
+    help="Reject the undo if the copied workspace revision has changed.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def undo_weapon_edit(
+    workspace: Path,
+    expected_revision: int | None,
+    acknowledge_edit: bool,
+) -> None:
+    """Restore the latest weapon metadata edit from retained local history."""
+    del acknowledge_edit
+    try:
+        result = WeaponAuthoringWorkspace(workspace).undo(
+            expected_revision=expected_revision,
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(result.to_dict(), indent=2))
@@ -3354,6 +3817,18 @@ def render_native_model(
             candidate = resolved_source.with_name(texture_stem + ".ytd")
             if candidate.is_file() and not candidate.is_symlink():
                 resolved_texture = candidate.resolve(strict=True)
+            else:
+                # Package archives preserve authored filename casing.  On a
+                # case-sensitive host, MODEL_HI.YFT must still discover its
+                # same-name MODEL.YTD companion just as it does on Windows.
+                expected_name = f"{texture_stem}.ytd".casefold()
+                matches = tuple(
+                    item for item in resolved_source.parent.iterdir()
+                    if item.name.casefold() == expected_name
+                    and item.is_file() and not item.is_symlink()
+                )
+                if len(matches) == 1:
+                    resolved_texture = matches[0].resolve(strict=True)
         data = resolved_source.read_bytes()
         report = NativeAssetInspector(PROJECT_ROOT, resolved_game).inspect_bytes(
             resolved_source.name, data, edition=edition,
@@ -3789,6 +4264,12 @@ for _command in (
     inspect_vehicle_project, export_vehicle_project, build_vehicle_package,
     create_vehicle_authoring, inspect_vehicle_authoring,
     set_vehicle_fields, undo_vehicle_edit,
+    create_weapon_authoring, inspect_weapon_authoring,
+    plan_weapon_clone, clone_weapon_bundle,
+    set_weapon_fields, set_weapon_component, set_weapon_attachment,
+    inspect_weapon_animation, clone_weapon_animation,
+    inspect_weapon_shop, set_weapon_shop_fields,
+    undo_weapon_edit,
     index_rpf, catalog_rpfs,
     search_rpf_catalog, build_rpf_tree,
     create_rpf_graph, import_rpf_graph, import_package_graph,

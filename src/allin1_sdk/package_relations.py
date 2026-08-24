@@ -173,6 +173,9 @@ class PackageRelationshipAnalyzer:
                     "root": str(root),
                 })
                 continue
+            vehicle_model_names = {
+                item.model.casefold() for item in project.models
+            }
             for model in project.models:
                 entity_id = _entity_id(root, workspace, model.model)
                 edition = _root_edition(
@@ -249,9 +252,18 @@ class PackageRelationshipAnalyzer:
                         continue
                     if target_id in linked_nodes:
                         continue
+                    source_stem = source.stem.casefold()
+                    belongs_to_other_vehicle = (
+                        source_stem in vehicle_model_names
+                        or (
+                            source_stem.endswith("_hi")
+                            and source_stem[:-3] in vehicle_model_names
+                        )
+                    )
                     if (
                         source.suffix.casefold() not in {".yft", ".ytd"}
-                        or not source.stem.casefold().startswith(model_prefix)
+                        or not source_stem.startswith(model_prefix)
+                        or belongs_to_other_vehicle
                     ):
                         continue
                     linked_nodes.add(target_id)

@@ -67,9 +67,9 @@ def test_rpf_change_set_stages_reorders_verifies_and_compiles(tmp_path):
         payload.read_bytes()
     ).hexdigest()
 
-    RpfChangeSet.move(change_set, mkdir, 1)
+    RpfChangeSet.move(change_set, mkdir.upper(), 1)
     assert RpfChangeSet.describe(change_set)["actions"][0]["id"] == mkdir
-    RpfChangeSet.remove(change_set, rename)
+    RpfChangeSet.remove(change_set, rename.upper())
     assert [
         item["id"] for item in RpfChangeSet.describe(change_set)["actions"]
     ] == [mkdir, replace]
@@ -83,6 +83,28 @@ def test_rpf_change_set_stages_reorders_verifies_and_compiles(tmp_path):
     assert service.authored[1]["payload"] == str(payload.resolve())
     assert plan["change_set"]["action_ids"] == [mkdir, replace]
     assert index.source.read_bytes() == b"RPF7 source archive"
+
+
+def test_rpf_change_set_accepts_uppercase_digests_and_zero_length_payload(tmp_path):
+    index = _index(tmp_path)
+    change_set = RpfChangeSet.create(index, tmp_path / "changes.json")
+    payload = tmp_path / "empty.bin"
+    payload.write_bytes(b"")
+    RpfChangeSet.stage(change_set, "add", "common/данные/空.bin", payload=payload)
+    document = json.loads(change_set.read_text(encoding="utf-8"))
+    document["archive"]["sha256"] = document["archive"]["sha256"].upper()
+    document["actions"][0]["payload"]["sha256"] = (
+        document["actions"][0]["payload"]["sha256"].upper()
+    )
+    change_set.write_text(json.dumps(document), encoding="utf-8")
+
+    report = RpfChangeSet.describe(change_set, verify_files=True)
+
+    assert report["archive"]["sha256"] == hashlib.sha256(
+        index.source.read_bytes()
+    ).hexdigest()
+    assert report["actions"][0]["payload"]["size"] == 0
+    assert report["actions"][0]["payload"]["sha256"] == hashlib.sha256(b"").hexdigest()
 
 
 def test_rpf_change_set_rejects_drift_bad_actions_and_game_outputs(tmp_path):
@@ -212,6 +234,7 @@ def test_rpf_change_set_rejects_malformed_documents(tmp_path):
         (lambda item: item["archive"].update(path="relative.rpf"), "relative-archive", "must be absolute"),
         (lambda item: item["archive"].update(edition=""), "edition", "archive edition"),
         (lambda item: item["archive"].update(size=-1), "size", "archive size"),
+        (lambda item: item["archive"].update(size=False), "bool-size", "archive size"),
         (lambda item: item["archive"].update(sha256="z" * 64), "archive-sha", "archive SHA"),
         (lambda item: item.update(actions=[None]), "action-object", "must be an object"),
         (lambda item: item["actions"][0].update(id="bad id"), "action-id", "action id"),
@@ -222,6 +245,7 @@ def test_rpf_change_set_rejects_malformed_documents(tmp_path):
         (lambda item: item["actions"][0]["payload"].update(path=""), "payload-path", "payload path"),
         (lambda item: item["actions"][0]["payload"].update(path="relative.bin"), "relative-payload", "must be absolute"),
         (lambda item: item["actions"][0]["payload"].update(size=-1), "payload-size", "payload size"),
+        (lambda item: item["actions"][0]["payload"].update(size=False), "bool-payload-size", "payload size"),
         (lambda item: item["actions"][0]["payload"].update(sha256="no"), "payload-sha", "payload SHA"),
         (lambda item: item["actions"][0].update(action="rename", payload=None), "rename-target", "must be text"),
         (lambda item: item["actions"][0].update(action="delete", payload=None, new_entry="other"), "delete-target", "cannot have new_entry"),

@@ -242,6 +242,10 @@ class AddonSdkDialog(tk.Toplevel):
                 parent=self,
             )
             return False
+        workbench = getattr(self, "workbench_workspace", None)
+        if workbench is not None and not workbench.confirm_navigation():
+            self._select_workspace("workbench")
+            return False
         self.destroy()
         return True
 
@@ -261,7 +265,7 @@ class AddonSdkDialog(tk.Toplevel):
             workbench = getattr(self, "workbench_workspace", None)
             if (
                 workbench is not None
-                and not workbench.vehicle_workspace.confirm_navigation()
+                and not workbench.confirm_navigation()
             ):
                 return False
         if remember and previous and previous != key:

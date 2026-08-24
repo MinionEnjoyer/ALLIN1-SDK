@@ -172,6 +172,7 @@ class LatestOnlyRenderWorker(Generic[K, V]):
         self._pending: _RenderRequest[K, V] | None = None
         self._completed: RenderOutcome[K, V] | None = None
         self._generation = 0
+        self._minimum_cache_generation = 0
         self._closed = False
         self._active = False
         self._thread = threading.Thread(
@@ -230,8 +231,11 @@ class LatestOnlyRenderWorker(Generic[K, V]):
             self._pending = None
             self._completed = None
             generation = self._generation
-        if clear_cache:
-            self.cache.clear()
+            if clear_cache:
+                # Keep an already-running stale frame from repopulating the
+                # cache immediately after this explicit cache reset.
+                self._minimum_cache_generation = generation
+                self.cache.clear()
         return generation
 
     def close(self, *, wait: bool = True, timeout: float = 2.0) -> None:
@@ -284,7 +288,10 @@ class LatestOnlyRenderWorker(Generic[K, V]):
                 ):
                     request = self._pending
                     self._pending = None
-                if error is None and request.cache_result:
+                if (
+                    error is None and request.cache_result
+                    and request.generation >= self._minimum_cache_generation
+                ):
                     self.cache.put(request.key, value)
                 if request.generation == self._generation:
                     self._completed = RenderOutcome(

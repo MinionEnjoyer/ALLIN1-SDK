@@ -42,7 +42,8 @@ ASSISTANT_MANIFEST = "assistant-package.json"
 ASSISTANT_MODES = ("disabled", "managed_local", "custom_local", "compatible_api")
 MAX_PROMPT_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-CONTEXT_SAFETY_TOKENS = 384
+CONTEXT_SAFETY_TOKENS = 512
+CONTEXT_SAFETY_RATIO = 0.03
 LOCAL_RUNTIME_KEEPALIVE_SECONDS = 120.0
 MAX_ASSISTANT_RECEIPTS = 50
 MAX_ASSISTANT_RECEIPT_BYTES = 5 * 1024 * 1024
@@ -76,7 +77,9 @@ DEFAULT_SYSTEM_PROMPT = (
     "changes. Prompting is read-only and has no execution authority. Clearly distinguish "
     "verified evidence, inference, speculation, missing context, and abstention. You may "
     "propose a source-code change in advisory form, but a proposal is never authorization "
-    "or execution. Do not recommend inspecting evidence already present in selected_grounding."
+    "or execution. Do not recommend inspecting evidence already present in selected_grounding. "
+    "If grounding_preflight.explicit_symbols_preserved is false, omitted source lines are "
+    "missing context and cannot support a confirmed finding."
 )
 RESPONSE_SCHEMA_PROMPT = """Return exactly one JSON object with this schema and no prose fence:
 {
@@ -353,6 +356,42 @@ def estimate_tokens(value: str) -> int:
     return max(1, math.ceil(len(value.encode("utf-8")) / 3))
 
 
+def _context_safety_tokens(context_tokens: int) -> int:
+    """Reserve fixed and proportional headroom for provider tokenization drift."""
+    return max(
+        CONTEXT_SAFETY_TOKENS,
+        math.ceil(context_tokens * CONTEXT_SAFETY_RATIO),
+    )
+
+
+def _grounding_preflight(context: Mapping[str, object]) -> dict[str, object]:
+    requested = 0
+    compacted: list[str] = []
+    preserved = True
+    for raw in context.get("selected_grounding", []):
+        if not isinstance(raw, Mapping) or raw.get("kind") != "source":
+            continue
+        symbols = [str(item) for item in raw.get("symbols", []) if str(item)]
+        requested += len(symbols)
+        if symbols and raw.get("explicit_symbols_preserved") is False:
+            preserved = False
+        for item in raw.get("compacted_symbols", []):
+            value = str(item)
+            if value and value not in compacted:
+                compacted.append(value)
+    return {
+        "explicit_symbol_count": requested,
+        "explicit_symbols_preserved": preserved,
+        "compacted_symbols": compacted,
+        "confirmed_findings_allowed": preserved,
+        "policy": (
+            "full_requested_definitions_available"
+            if preserved else
+            "omitted_symbol_lines_are_missing_context_and_cannot_confirm_findings"
+        ),
+    }
+
+
 def _render_grounded_system(
     context: Mapping[str, object], system_prompt: str,
 ) -> str:
@@ -375,7 +414,8 @@ def plan_grounding(
     context_tokens: int, max_tokens: int,
 ) -> GroundingPlan:
     """Fit grounded evidence before inference and report every deterministic omission."""
-    input_budget = context_tokens - max_tokens - CONTEXT_SAFETY_TOKENS
+    reserved_tokens = _context_safety_tokens(context_tokens)
+    input_budget = context_tokens - max_tokens - reserved_tokens
     if input_budget < 512:
         raise AssistantContextOverflow({
             "error": "assistant_context_overflow",
@@ -384,15 +424,17 @@ def plan_grounding(
                 "Reduce --max-tokens or increase the configured model context."
             ),
             "context_tokens": context_tokens, "max_tokens": max_tokens,
-            "reserved_tokens": CONTEXT_SAFETY_TOKENS, "input_budget_tokens": input_budget,
+            "reserved_tokens": reserved_tokens, "input_budget_tokens": input_budget,
         })
     # Leave deterministic room for the context-budget record added after pruning.
-    planning_budget = max(512, input_budget - 128)
+    # Provider-tokenization drift is already covered by the larger reserve above.
+    planning_budget = max(512, input_budget - 96)
     payload = context.to_dict()
     omitted = list(context.omitted_context_summary)
     truncated = False
 
     def build() -> tuple[str, int]:
+        payload["grounding_preflight"] = _grounding_preflight(payload)
         rendered = _render_grounded_system(payload, system_prompt)
         return rendered, estimate_tokens(rendered) + estimate_tokens(question)
 
@@ -463,7 +505,7 @@ def plan_grounding(
             if isinstance(excerpt, Mapping) and excerpt.get("symbol")
         )
         if symbol_count:
-            for per_symbol in (1600, 900, 480, 240, 128):
+            for per_symbol in (1800, 1200, 800, 512, 320, 192, 128):
                 if estimated <= planning_budget:
                     break
                 for index, record in enumerate(payload.get("selected_grounding", [])):
@@ -476,20 +518,20 @@ def plan_grounding(
                     if not record_symbols:
                         continue
                     payload["selected_grounding"][index] = compact_explicit_symbols(
-                        dict(record), max_chars=max(
-                            96 * record_symbols, per_symbol * record_symbols,
-                        ),
+                        dict(record), max_chars=per_symbol * record_symbols,
+                        query=question,
                     )
                 truncated = True
                 rendered, estimated = build()
             omitted.append(
-                "One or more requested definitions were reduced to numbered beginnings and "
-                "endings only after full definitions could not fit the configured context; "
-                "every requested symbol remains represented."
+                "explicit_symbols_preserved=false: one or more requested definitions were "
+                "reduced to query-ranked numbered windows only after full definitions could "
+                "not fit; every requested symbol remains represented, but omitted lines are "
+                "missing context and cannot support confirmed findings."
             )
     payload["omitted_context_summary"] = list(dict.fromkeys(omitted))
     rendered, estimated = build()
-    if estimated > planning_budget:
+    if estimated > input_budget:
         raise AssistantContextOverflow({
             "error": "assistant_context_overflow",
             "message": (
@@ -503,12 +545,24 @@ def plan_grounding(
             "omitted_context_summary": payload["omitted_context_summary"],
         })
     payload["context_budget"] = {
-        "estimated_input_tokens": estimated, "input_budget_tokens": input_budget,
+        "estimated_input_tokens": 0, "input_budget_tokens": input_budget,
         "configured_context_tokens": context_tokens, "requested_output_tokens": max_tokens,
+        "reserved_tokens": reserved_tokens,
+        "reserve_policy": "max(512, 3% of configured context)",
         "truncated": truncated,
     }
+    # Include the budget record in its own estimate. The digit width converges
+    # immediately in normal cases, but a bounded loop avoids publishing the
+    # smaller pre-metadata estimate that was used during pruning.
+    for _attempt in range(3):
+        rendered = _render_grounded_system(payload, system_prompt)
+        estimated = estimate_tokens(rendered) + estimate_tokens(question)
+        if payload["context_budget"]["estimated_input_tokens"] == estimated:
+            break
+        payload["context_budget"]["estimated_input_tokens"] = estimated
     rendered = _render_grounded_system(payload, system_prompt)
     estimated = estimate_tokens(rendered) + estimate_tokens(question)
+    payload["context_budget"]["estimated_input_tokens"] = estimated
     if estimated > input_budget:
         raise AssistantContextOverflow({
             "error": "assistant_context_overflow",
@@ -803,9 +857,23 @@ def _ground_package_arguments(
 
 
 def validate_advisory(
-    response_text: str, context: AssistantContextBundle,
+    response_text: str, context: AssistantContextBundle, *,
+    grounding_context: Mapping[str, object] | None = None,
 ) -> tuple[dict[str, object], tuple[str, ...]]:
     """Normalize model output and reject unsupported or unsafe recommendations."""
+    planned = grounding_context or context.to_dict()
+    preflight = _grounding_preflight(planned)
+    compacted_sources: dict[str, Mapping[str, object]] = {}
+    for record in planned.get("selected_grounding", []):
+        if (
+            isinstance(record, Mapping) and record.get("kind") == "source"
+            and record.get("path") and record.get("explicit_symbols_preserved") is False
+        ):
+            try:
+                key = os.path.normcase(str(Path(str(record["path"])).resolve()))
+            except (OSError, ValueError):
+                continue
+            compacted_sources[key] = record
     try:
         payload = _json_object(response_text)
     except ValueError as exc:
@@ -847,6 +915,7 @@ def validate_advisory(
         raw_findings = []
     findings: list[dict[str, object]] = []
     flags: list[str] = []
+    confirmation_limited = False
     text_for_screening = [summary]
     for item in raw_findings[:8]:
         if not isinstance(item, dict):
@@ -867,6 +936,25 @@ def validate_advisory(
             confidence = max(0.0, min(1.0, float(item.get("confidence", 0.0))))
         except (TypeError, ValueError):
             confidence = 0.0
+        normalized_state = state if state in _EVIDENCE_STATES else "speculative"
+        source_key = ""
+        if file:
+            try:
+                source_key = os.path.normcase(str(Path(file).resolve()))
+            except (OSError, ValueError):
+                source_key = ""
+        if normalized_state == "confirmed" and (
+            source_key in compacted_sources
+            or (
+                not file
+                and preflight["explicit_symbol_count"]
+                and not preflight["explicit_symbols_preserved"]
+            )
+        ):
+            normalized_state = "inferred"
+            confidence = min(confidence, 0.75)
+            confirmation_limited = True
+            flags.append("confirmed_finding_downgraded_for_compacted_symbol")
         finding = {
             "severity_domain": severity_domain,
             "severity": severity if severity in _SEVERITIES else "medium",
@@ -874,7 +962,7 @@ def validate_advisory(
             "file": file,
             "line": line if isinstance(line, int) and line > 0 else None,
             "confidence": confidence,
-            "status": state if state in _EVIDENCE_STATES else "speculative",
+            "status": normalized_state,
         }
         findings.append(finding)
         text_for_screening.extend((finding["evidence"], finding["file"]))
@@ -999,6 +1087,20 @@ def validate_advisory(
     for item in context.missing_context:
         if item not in missing:
             missing.append(item)
+    if not preflight["explicit_symbols_preserved"]:
+        limitation = (
+            "Requested symbol definitions were compacted before inference; omitted source "
+            "lines are missing context and cannot support confirmed findings."
+        )
+        if limitation not in missing:
+            missing.append(limitation)
+    if confirmation_limited:
+        abstention = (
+            "A confirmed finding was downgraded because its requested source definition "
+            "contained omitted lines."
+        )
+        if abstention not in abstentions:
+            abstentions.append(abstention)
     text_for_screening.extend((*missing, *abstentions))
     unsafe = _unsafe_fragments(str(value) for value in text_for_screening)
     if unsafe:
@@ -1537,16 +1639,24 @@ def _usage(payload: object) -> tuple[int | None, int | None]:
 
 
 def _repair_envelope(
-    context: AssistantContextBundle, question: str, draft: str,
+    context: AssistantContextBundle, question: str, draft: str, *,
+    grounding_context: Mapping[str, object] | None = None,
 ) -> str:
     """Give a repair pass only the authority needed to structure its own draft."""
     selected = []
-    for record in context.selected_grounding:
+    planned = grounding_context or context.to_dict()
+    for record in planned.get("selected_grounding", []):
+        if not isinstance(record, Mapping):
+            continue
         selected.append({
             "kind": record.get("kind"), "path": record.get("path"),
             "symbols": record.get("symbols", []),
             "missing_symbols": record.get("missing_symbols", []),
             "patterns": record.get("patterns", []),
+            "explicit_symbols_preserved": record.get(
+                "explicit_symbols_preserved", True,
+            ),
+            "compacted_symbols": record.get("compacted_symbols", []),
         })
     constraints = {
         "operation_mode": context.operation_mode,
@@ -1556,6 +1666,7 @@ def _repair_envelope(
         ],
         "completed_operations": list(context.completed_operations),
         "selected_grounding": selected,
+        "grounding_preflight": _grounding_preflight(planned),
         "missing_context": list(context.missing_context),
         "execution_authorized": False,
     }
@@ -1697,13 +1808,15 @@ def prompt_structured_assistant(
     if len(structured_system.encode("utf-8")) > MAX_PROMPT_BYTES:
         raise ValueError("Structured assistant system prompt exceeds the 64 KiB limit")
     estimated_input = estimate_tokens(structured_system) + estimate_tokens(question)
-    if estimated_input + max_tokens + CONTEXT_SAFETY_TOKENS > settings.context_tokens:
+    reserved_tokens = _context_safety_tokens(settings.context_tokens)
+    if estimated_input + max_tokens + reserved_tokens > settings.context_tokens:
         raise AssistantContextOverflow({
             "error": "assistant_context_overflow",
             "message": "Structured assistant prompt does not fit the configured context.",
             "estimated_input_tokens": estimated_input,
             "configured_context_tokens": settings.context_tokens,
             "requested_output_tokens": max_tokens,
+            "reserved_tokens": reserved_tokens,
         })
 
     notify = progress or (lambda _state: None)
@@ -1797,9 +1910,9 @@ def prompt_structured_assistant(
             }, ensure_ascii=False, separators=(",", ":"))
             available = (
                 settings.context_tokens - estimate_tokens(structured_system)
-                - estimate_tokens(repair_user) - CONTEXT_SAFETY_TOKENS
+                - estimate_tokens(repair_user) - reserved_tokens
             )
-            repair_tokens = min(2048, max(512, max_tokens), available)
+            repair_tokens = min(max_tokens, available)
             if repair_tokens < 256:
                 raise ValueError("Structured assistant repair does not fit the context")
             notify("repairing structured response")
@@ -1814,13 +1927,17 @@ def prompt_structured_assistant(
             except ValueError as exc:
                 raise ValueError("Structured assistant repair was malformed") from exc
             repair_errors = _schema_errors(structured_payload, response_schema)
+            repair_input, repair_output = _usage(repair_api_payload)
+            if repair_output is not None and repair_output > repair_tokens:
+                raise ValueError(
+                    "Structured assistant repair exceeded the requested output budget"
+                )
             if _finish_reason(repair_api_payload) == "length" or repair_errors:
                 raise ValueError(
                     "Structured assistant response was withheld after one failed repair: "
                     + "; ".join(repair_errors[:4] or ["repair output was truncated"])
                 )
             repaired = True
-            repair_input, repair_output = _usage(repair_api_payload)
             if repair_input is not None:
                 actual_input = (actual_input or 0) + repair_input
             if repair_output is not None:
@@ -1901,6 +2018,15 @@ def prompt_assistant(
         except OSError:
             pass
         raise
+    preflight = _grounding_preflight(plan.context)
+    if (
+        preflight["explicit_symbol_count"]
+        and not preflight["explicit_symbols_preserved"]
+    ):
+        notify(
+            "warning: explicit_symbols_preserved=false; omitted source lines "
+            "cannot support confirmed findings"
+        )
     grounded_system_prompt = plan.system_prompt
     if len(grounded_system_prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
         raise AssistantContextOverflow({
@@ -2007,7 +2133,9 @@ def prompt_assistant(
         if settings.mode in {"managed_local", "custom_local"}:
             active_server.schedule_stop(LOCAL_RUNTIME_KEEPALIVE_SECONDS)
     primary_text = _response_text(payload)
-    advisory, safety_flags = validate_advisory(primary_text, context)
+    advisory, safety_flags = validate_advisory(
+        primary_text, context, grounding_context=plan.context,
+    )
     finish_reason = _finish_reason(payload)
     actual_input, actual_output = _usage(payload)
     repair_needed = finish_reason == "length" or "unstructured_response" in safety_flags
@@ -2024,15 +2152,18 @@ def prompt_assistant(
             "execute anything.\n"
             + RESPONSE_SCHEMA_PROMPT
         )
-        repair_user = _repair_envelope(context, question, primary_text)
+        repair_user = _repair_envelope(
+            context, question, primary_text, grounding_context=plan.context,
+        )
+        reserved_tokens = _context_safety_tokens(settings.context_tokens)
         available_output = max(
             0,
             settings.context_tokens
             - estimate_tokens(repair_system)
             - estimate_tokens(repair_user)
-            - CONTEXT_SAFETY_TOKENS,
+            - reserved_tokens,
         )
-        repair_tokens = min(2048, max(1024, max_tokens * 2), available_output)
+        repair_tokens = min(max_tokens, available_output)
         if repair_tokens >= 256:
             if settings.mode in {"managed_local", "custom_local"}:
                 # The primary-request cleanup schedules an idle stop. Reuse the
@@ -2065,8 +2196,14 @@ def prompt_assistant(
                         repair_payload = json.loads(
                             _read_limited(response).decode("utf-8")
                         )
+                repair_input, repair_output = _usage(repair_payload)
+                if repair_output is not None and repair_output > repair_tokens:
+                    raise ValueError(
+                        "Structured assistant repair exceeded the requested output budget"
+                    )
                 candidate, candidate_flags = validate_advisory(
                     _response_text(repair_payload), context,
+                    grounding_context=plan.context,
                 )
                 if "unstructured_response" not in candidate_flags:
                     advisory = candidate
@@ -2074,7 +2211,6 @@ def prompt_assistant(
                         *candidate_flags, *repair_reasons,
                         "structured_response_repaired",
                     )))
-                    repair_input, repair_output = _usage(repair_payload)
                     if repair_input is not None:
                         actual_input = (actual_input or 0) + repair_input
                     if repair_output is not None:

@@ -154,6 +154,26 @@ def test_unified_workbench_is_integrated_and_exposes_vehicle_viewport_controls()
     assert "VehicleWorkbenchFrame(" in unified
     assert "WeaponWorkbenchFrame(" in unified
     assert "PedWorkbenchFrame(" in unified
+    weapon = _source("weapon_workbench.py")
+    for control in (
+        'text="Create authoring workspace…"',
+        'text="Apply + validate"',
+        'text="Undo latest"',
+        'text="Apply attachment + validate"',
+        'text="Apply component + validate"',
+    ):
+        assert control in weapon
+    for operation in (
+        "WeaponAuthoringWorkspace.create(",
+        "workspace.update(",
+        "workspace.update_attachment(",
+        "workspace.update_component(",
+        "workspace.undo(",
+    ):
+        assert operation in weapon
+    assert 'expected_revision=workspace.revision' in weapon
+    assert "acknowledge_shared=acknowledge_shared" in weapon
+    assert "workbench.confirm_navigation()" in shell
     assert 'self.tabs.add(vehicle_page, text="Vehicles")' in unified
     assert 'self.tabs.add(weapon_page, text="Weapons")' in unified
     assert 'self.tabs.add(ped_page, text="Peds")' in unified

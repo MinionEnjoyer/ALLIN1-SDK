@@ -338,6 +338,7 @@ class RpfPackageGraph:
                     isinstance(origin.get("path"), str)
                     and Path(origin["path"]).is_absolute()
                     and isinstance(origin.get("edition"), str)
+                    and bool(origin["edition"].strip())
                     and isinstance(origin.get("size"), int)
                     and not isinstance(origin.get("size"), bool)
                     and origin["size"] >= 0
@@ -368,6 +369,16 @@ class RpfPackageGraph:
                 valid_origin = False
             if not valid_origin:
                 raise ValueError("RPF graph has invalid origin provenance")
+            origin = dict(origin)
+            origin["path"] = str(Path(origin["path"]).resolve())
+            if origin_type == "rpf_archive_import":
+                origin["edition"] = origin["edition"].strip()
+                origin["sha256"] = str(origin["sha256"]).casefold()
+            else:
+                origin["package_fingerprint"] = str(
+                    origin["package_fingerprint"]
+                ).casefold()
+            payload = {**payload, "origin": origin}
         authored_nodes = payload.get("nodes")
         authored_edges = payload.get("edges")
         if (
@@ -589,13 +600,16 @@ class RpfPackageGraph:
                 if key in seen_relations:
                     raise ValueError("RPF graph has a duplicate semantic relation")
                 seen_relations.add(key)
+                required = authored.get("required", False)
+                if not isinstance(required, bool):
+                    raise ValueError("RPF graph semantic relation required flag is invalid")
                 normalized_relations.append({
                     "source": source, "target": target, "type": relation_type,
                     "group": group,
                     "label": _semantic_text(
                         authored.get("label"), "relation label", maximum=256,
                     ),
-                    "required": bool(authored.get("required", False)),
+                    "required": required,
                 })
             normalized_findings: list[dict[str, Any]] = []
             for authored in authored_findings:
@@ -676,8 +690,14 @@ class RpfPackageGraph:
         cls, path: str | Path, update: Callable[[dict[str, Any]], Any],
     ) -> Any:
         graph, payload = cls._read(path)
+        graph_sha256 = _sha256_file(graph)
         cls._normalize(payload, verify_sources=False)
+        before = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         result = update(payload)
+        if _sha256_file(graph) != graph_sha256:
+            raise RuntimeError("RPF graph changed during edit")
+        if json.dumps(payload, sort_keys=True, separators=(",", ":")) == before:
+            return result
         payload["updated_utc"] = datetime.now(timezone.utc).isoformat()
         cls._normalize(payload, verify_sources=False)
         _write_json_atomic(graph, payload)

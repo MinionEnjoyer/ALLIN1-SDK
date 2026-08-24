@@ -1309,16 +1309,15 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.model_tree.selection_set(match)
         self.model_tree.focus(match)
         self.model_tree.see(match)
-        self._select_model()
-        return True
+        return self._select_model()
 
-    def _select_model(self, _event: object | None = None) -> None:
+    def _select_model(self, _event: object | None = None) -> bool:
         if self._restoring_model_selection:
-            return
+            return False
         selection = self.model_tree.selection()
         model = self.models.get(selection[0]) if selection else None
         if model is None:
-            return
+            return False
         previous = self.selected_model
         if (
             previous is not None and previous.model != model.model
@@ -1335,7 +1334,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
                     self.model_tree.focus(previous_id)
                 finally:
                     self._restoring_model_selection = False
-            return
+            return False
         self.selected_model = model
         self.model_heading.set(model.model)
         self.model_summary.set(
@@ -1390,6 +1389,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self._load_authoring_fields(model)
         self._loaded_editor_snapshot = self._editor_snapshot()
         self._load_model_preview(model)
+        return True
 
     def _clear_model(self, message: str) -> None:
         self.selected_model = None

@@ -19,6 +19,13 @@ MAX_EXPLICIT_SYMBOL_CHARS = 96_000
 MAX_SOURCE_DEPENDENCIES = 32
 MAX_SOURCE_DECLARATIONS = 32
 EVIDENCE_CACHE_ENTRIES = 48
+_COMPACTION_STOPWORDS = frozenset({
+    "about", "after", "against", "also", "before", "between", "could",
+    "diagnose", "does", "from", "have", "into", "only", "please", "review",
+    "should", "source", "symbol", "that", "their", "there", "these", "this",
+    "through", "using", "what", "when", "where", "which", "while", "with",
+    "without", "would",
+})
 TEXT_SUFFIXES = frozenset({
     ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
     ".cs", ".py", ".toml", ".json", ".jsonl", ".log", ".txt",
@@ -181,7 +188,9 @@ def _function_definition_window(
         return None
     start = occurrence
     while start > 0 and occurrence - start < 4:
-        previous = lines[start - 1].strip()
+        # Comments after a closing brace must not make an adjacent one-line
+        # function look like a continuation of the requested definition.
+        previous = _code_for_braces(lines[start - 1]).strip()
         if not previous or previous.endswith((";", "}", "{")):
             break
         start -= 1
@@ -836,16 +845,17 @@ def compact_grounding(record: dict[str, object], *, max_chars: int) -> dict[str,
 
 
 def compact_explicit_symbols(
-    record: dict[str, object], *, max_chars: int,
+    record: dict[str, object], *, max_chars: int, query: str = "",
 ) -> dict[str, object]:
     """Budget requested definitions without dropping any grounded symbol.
 
     Full brace-balanced definitions remain the normal evidence. This stricter
     compactor is only used by prompt admission control after unrelated excerpts,
     operation details, references, and dependencies have already been reduced.
-    Each requested symbol retains a numbered beginning and ending so the model
-    sees the declaration and final decision, while the host reports that the
-    middle was omitted.
+    Each requested symbol retains its numbered declaration and ending. When the
+    question contains terms found inside the definition, the highest-scoring
+    numbered middle lines are retained before generic head/tail context. The
+    host still reports that omitted lines are not confirmation evidence.
     """
     payload = json.loads(json.dumps(record))
     if payload.get("kind") != "source":
@@ -856,12 +866,15 @@ def compact_explicit_symbols(
     ]
     if not excerpts:
         return compact_grounding(payload, max_chars=max_chars)
-    if max_chars < len(excerpts) * 96:
+    if max_chars < len(excerpts) * 128:
         raise ValueError(
-            "Explicit symbol compaction requires at least 96 characters per symbol"
+            "Explicit symbol compaction requires at least 128 characters per symbol"
         )
     per_excerpt = max_chars // len(excerpts)
-    marker = "\n...[middle of requested definition omitted by context budget]...\n"
+    query_terms = {
+        item.casefold() for item in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", query)
+        if item.casefold() not in _COMPACTION_STOPWORDS
+    }
     compacted_symbols = [
         str(item) for item in payload.get("compacted_symbols", []) if str(item)
     ]
@@ -872,14 +885,96 @@ def compact_explicit_symbols(
         text = str(excerpt.get("text", ""))
         if len(text) <= per_excerpt:
             continue
-        content_limit = max(32, per_excerpt - len(marker))
-        head = max(16, (content_limit * 3) // 5)
-        tail = max(16, content_limit - head)
-        excerpt["text"] = text[:head] + marker + text[-tail:]
+        lines = text.splitlines()
+        symbol = str(excerpt.get("symbol", ""))
+        symbol_terms = {
+            item.casefold()
+            for item in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", symbol)
+        }
+        relevant_terms = query_terms - symbol_terms
+
+        def render(indices: set[int]) -> tuple[str, list[dict[str, int]]]:
+            selected = sorted(indices)
+            rendered: list[str] = []
+            retained: list[dict[str, int]] = []
+            previous = -1
+            range_start = -1
+            range_end = -1
+            for index in selected:
+                if previous >= 0 and index > previous + 1:
+                    previous_match = re.match(r"^\s*(\d+):", lines[previous])
+                    next_match = re.match(r"^\s*(\d+):", lines[index])
+                    omitted_start = (
+                        int(previous_match.group(1)) + 1
+                        if previous_match else previous + 2
+                    )
+                    omitted_end = (
+                        int(next_match.group(1)) - 1
+                        if next_match else index
+                    )
+                    rendered.append(
+                        "...[requested definition lines "
+                        f"{omitted_start}-{omitted_end} omitted by context budget; "
+                        "not confirmation evidence]..."
+                    )
+                    if range_start >= 0:
+                        retained.append({"line_start": range_start, "line_end": range_end})
+                    range_start = -1
+                match = re.match(r"^\s*(\d+):", lines[index])
+                line_number = int(match.group(1)) if match else index + 1
+                rendered.append(lines[index])
+                if range_start < 0:
+                    range_start = line_number
+                range_end = line_number
+                previous = index
+            if range_start >= 0:
+                retained.append({"line_start": range_start, "line_end": range_end})
+            return "\n".join(rendered), retained
+
+        # The declaration and final decision stay represented. Query-matching
+        # middle lines, plus one adjacent line, consume the remaining budget
+        # before generic head/tail context does.
+        selected = {0, len(lines) - 1}
+        scored: list[tuple[int, int]] = []
+        matched_terms: set[str] = set()
+        for index, line in enumerate(lines[1:-1], start=1):
+            folded = line.casefold()
+            matches = {term for term in relevant_terms if term in folded}
+            if matches:
+                matched_terms.update(matches)
+                scored.append((sum(len(term) for term in matches), index))
+        for _score, index in sorted(scored, key=lambda item: (-item[0], item[1])):
+            candidate = set(selected)
+            candidate.update(range(max(0, index - 1), min(len(lines), index + 2)))
+            candidate_text, _ranges = render(candidate)
+            if len(candidate_text) <= per_excerpt:
+                selected = candidate
+        for index in (1, len(lines) - 2):
+            if 0 <= index < len(lines):
+                candidate = {*selected, index}
+                candidate_text, _ranges = render(candidate)
+                if len(candidate_text) <= per_excerpt:
+                    selected = candidate
+        compacted_text, retained_ranges = render(selected)
+        if len(compacted_text) > per_excerpt:
+            # Extremely long individual source lines cannot be represented as
+            # complete numbered lines. Keep a bounded declaration/end signal
+            # and deliberately publish no retained ranges for confirmation.
+            marker = "\n...[requested definition omitted; not confirmation evidence]...\n"
+            content_limit = max(32, per_excerpt - len(marker))
+            head = max(16, content_limit // 2)
+            tail = max(16, content_limit - head)
+            compacted_text = text[:head] + marker + text[-tail:]
+            retained_ranges = []
+        excerpt["text"] = compacted_text[:per_excerpt]
         excerpt["truncated"] = True
         excerpt["preserve_full"] = False
-        excerpt["compaction"] = "numbered_head_and_tail"
-        symbol = str(excerpt.get("symbol", ""))
+        excerpt["compaction"] = (
+            "query_ranked_numbered_windows" if matched_terms
+            else "numbered_head_and_tail"
+        )
+        excerpt["retained_line_ranges"] = retained_ranges
+        excerpt["query_terms_retained"] = sorted(matched_terms)
         if symbol and symbol not in compacted_symbols:
             compacted_symbols.append(symbol)
     for collection in ("references", "dependencies"):
@@ -889,4 +984,5 @@ def compact_explicit_symbols(
                 item["truncated"] = True
     payload["explicit_symbols_preserved"] = not (was_compacted or compacted_symbols)
     payload["compacted_symbols"] = compacted_symbols
+    payload["confirmation_supported"] = payload["explicit_symbols_preserved"]
     return payload

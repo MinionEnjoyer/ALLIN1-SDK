@@ -14,6 +14,8 @@ from allin1_sdk.addon_sdk import (
     AddonNode,
     AddonReference,
     AddonSdkCatalog,
+    REQUIRED_FIELDS,
+    SUPPORTED_NODE_KINDS,
     field_description,
     hud_frame_label,
     joaat,
@@ -25,6 +27,7 @@ from allin1_sdk.cli import main
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "sdk" / "examples" / "colored_smokes" / "addon.json"
+SCHEMA = ROOT / "sdk" / "addon.schema.json"
 
 
 def _example_data() -> dict:
@@ -72,6 +75,17 @@ def test_rockstar_hash_and_hud_frame_helpers_match_verified_smoke_hashes():
     assert field_description("AmmoInfo").startswith("Reference to the ammo")
     assert field_description("custom") == "Manifest-defined integration field."
     assert summarize_values(["red", "blue"]) == "red, blue"
+
+
+def test_addon_schema_and_runtime_node_contracts_remain_in_parity():
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    schema_kinds = set(
+        schema["properties"]["nodes"]["items"]["properties"]["kind"]["enum"]
+    )
+
+    assert schema_kinds == set(SUPPORTED_NODE_KINDS)
+    assert set(REQUIRED_FIELDS) == set(SUPPORTED_NODE_KINDS)
+    assert {"weapon_component", "ped"} <= schema_kinds
 
 
 def test_built_in_colored_smoke_example_links_every_integration_stage():
@@ -423,6 +437,52 @@ def test_linker_handles_scalar_list_and_mapping_targets(tmp_path):
     report = AddonLinker().link(replace(manifest, nodes=(source, target), references=refs))
     assert report.valid
     assert all(item.valid for item in report.references)
+
+
+def test_linker_handles_unhashable_json_fields_as_diagnostics_not_crashes(tmp_path):
+    manifest = _minimal_manifest(tmp_path)
+    source = replace(manifest.nodes[0], fields={
+        **manifest.nodes[0].fields,
+        "ObjectList": [{"id": "a"}],
+        "BadMappingKey": [{}],
+    })
+    target = AddonNode(
+        "package.target", "package", "Target", "", None,
+        {
+            "Registration": "none", "Edition": "both", "Safety": "safe",
+            "ObjectList": [{"id": "a"}],
+            "Mapping": {"a": True},
+        },
+    )
+    references = (
+        AddonReference(
+            "ref.objects", source.node_id, "ObjectList", target.node_id,
+            "ObjectList", "test", "",
+        ),
+        AddonReference(
+            "ref.unhashable", source.node_id, "BadMappingKey", target.node_id,
+            "Mapping", "test", "",
+        ),
+    )
+    report = AddonLinker().link(replace(
+        manifest, nodes=(source, target), references=references,
+    ))
+
+    assert report.references[0].valid
+    assert not report.references[1].valid
+    assert "reference_mismatch" in {issue.code for issue in report.issues}
+
+    hud = AddonNode(
+        "hud.invalid", "hud_alias", "HUD", "", None,
+        {
+            "SourceWeaponNames": [{}], "ExpectedFrames": {},
+            "FrameTemplate": "INT0", "Archive": "hud.rpf", "Entry": "hud.gfx",
+        },
+    )
+    hud_report = AddonLinker().link(replace(
+        manifest, nodes=(hud,), references=(),
+    ))
+    assert "invalid_hud_alias" in {issue.code for issue in hud_report.issues}
 
 
 def test_linker_requires_complete_weapon_links_and_valid_steps(tmp_path):

@@ -128,13 +128,72 @@ def test_rpf_index_rejects_invalid_json_and_missing_fields(tmp_path):
     invalid.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
     with pytest.raises(ValueError, match="Malformed RPF index"):
         RpfIndex.load(invalid)
+    invalid.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="expected a JSON object"):
+        RpfIndex.load(invalid)
+
+
+def test_rpf_index_accepts_zero_length_unicode_and_boolean_flags(tmp_path):
+    source = tmp_path / "test.rpf"
+    payload = _index_payload(source, nested=False)
+    payload["entries"].append({
+        "id": "::common/данные/空.bin", "archive_path": "",
+        "path": "common/данные/空.bin", "name": "空.bin", "kind": "binary",
+        "size": 0, "stored_size": 0, "encrypted": False, "compressed": False,
+    })
+
+    index = RpfIndex.load(_write_index(tmp_path, payload))
+
+    entry = index.entry("::COMMON/ДАННЫЕ/空.BIN")
+    assert entry.size == entry.stored_size == 0
+    assert entry.encrypted is False and entry.compressed is False
+
+
+@pytest.mark.parametrize(("field", "value", "message"), [
+    ("encrypted", "false", "encrypted flag"),
+    ("compressed", 0, "compressed flag"),
+    ("size", False, "non-negative integer"),
+    ("system_size", -1, "system size"),
+    ("system_flags", "", "system flags"),
+])
+def test_rpf_index_rejects_type_confused_entry_metadata(
+    tmp_path, field, value, message,
+):
+    source = tmp_path / "test.rpf"
+    payload = _index_payload(source, nested=False)
+    payload["entries"][1][field] = value
+
+    with pytest.raises(ValueError, match=message):
+        RpfIndex.load(_write_index(tmp_path, payload))
+
+
+@pytest.mark.parametrize(("target", "value"), [
+    ("edition", False),
+    ("archive_name", None),
+    ("archive_encryption", False),
+    ("entry_name", 7),
+])
+def test_rpf_index_rejects_type_confused_text_fields(tmp_path, target, value):
+    source = tmp_path / "test.rpf"
+    payload = _index_payload(source, nested=False)
+    if target == "edition":
+        payload["edition"] = value
+    elif target == "archive_name":
+        payload["archives"][0]["name"] = value
+    elif target == "archive_encryption":
+        payload["archives"][0]["encryption"] = value
+    else:
+        payload["entries"][1]["name"] = value
+
+    with pytest.raises(ValueError, match="must be text"):
+        RpfIndex.load(_write_index(tmp_path, payload))
 
 
 @pytest.mark.parametrize("field,value,message", [
     ("id", "forged", "does not match"),
     ("archive_path", "missing.rpf", "unknown archive"),
     ("kind", "executable", "Unknown RPF entry kind"),
-    ("size", -1, "Negative RPF entry size"),
+    ("size", -1, "non-negative integer"),
 ])
 def test_rpf_index_rejects_forged_entry_contracts(tmp_path, field, value, message):
     source = tmp_path / "test.rpf"

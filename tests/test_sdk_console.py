@@ -51,6 +51,8 @@ def test_command_catalog_combines_cli_and_console_builtins():
     assert "inspect-rpf-native-entry" in catalog
     assert "analyze-package-graph" in catalog
     assert "inspect-package-graph-relations" in catalog
+    assert "plan-weapon-clone" in catalog
+    assert "clone-weapon-bundle" in catalog
 
 
 def test_progressive_command_option_and_alias_suggestions(tmp_path):
@@ -64,6 +66,8 @@ def test_progressive_command_option_and_alias_suggestions(tmp_path):
         "inspect-rpf-native-entry ",
         "inspect-rpf-program ", "inspect-source ", "inspect-vehicle-authoring ",
         "inspect-vehicle-project ", "inspect-vehicle-tuning ",
+        "inspect-weapon-animation ", "inspect-weapon-authoring ",
+        "inspect-weapon-shop ",
         "inspect-workbench ",
         "install-package ",
     ]
@@ -74,6 +78,9 @@ def test_progressive_command_option_and_alias_suggestions(tmp_path):
 
     aliases = suggestions_for("sdk ind", cwd=tmp_path)
     assert aliases[0].replacement == "sdk index-rpf "
+
+    weapon_aliases = suggestions_for("sdk plan-weapon-c", cwd=tmp_path)
+    assert weapon_aliases[0].replacement == "sdk plan-weapon-clone "
 
     help_matches = suggestions_for("help can", cwd=tmp_path)
     assert help_matches[0].replacement == "help canary-rpf-transaction"

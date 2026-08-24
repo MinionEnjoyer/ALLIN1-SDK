@@ -139,7 +139,7 @@ Workspace tools > Open YTD texture workspace switches this same window into a se
         "Review vehicle, weapon, and ped projects without reopening the package.",
         """Open a loose add-on folder or supported archive once. The Workbench scans it once, shows counts on the Vehicles, Weapons, and Peds tabs, and keeps every specialist view tied to that same package evidence.
 
-Vehicles provides the existing model viewport and guarded vehicle-authoring tools. Weapons links definitions to ammo, animations, shop registration, attachment points, component models, and streamed assets. Peds links peds.meta definitions to drawable dictionaries, texture dictionaries, props, movement clips, and expression data.
+Vehicles provides the existing model viewport and guarded vehicle-authoring tools. Weapons links definitions to ammo, animations, shop registration, attachment points, component models, and streamed assets, then enables supported fields only inside a verified copied authoring workspace. Peds links peds.meta definitions to drawable dictionaries, texture dictionaries, props, movement clips, and expression data.
 
 The Package Linker and all three content workbenches use the same slim green divider arrows around their center workspace. Use the left arrow to fold the catalog out and the right arrow to fold the inspector out; the arrows reverse when collapsed. Expanding a side restores its previous width, selection, and edit state, while the center workspace immediately uses the released room.
 
@@ -151,11 +151,24 @@ Use Open selected asset to route a project member into the SDK Asset Viewer with
     ),
     HelpTopic(
         "weapon-workbench", "Inspectors", "Weapons Workbench",
-        "Trace a weapon from its definition through attachments and package assets.",
+        "Trace and safely edit weapon, ammo, attachment, animation, and shop records.",
         """Select a weapon to review its slot, model, ammo pool, HUD and stat names, animation mapping, shop registration, and source metadata. Attachments lists every component linked at each attach bone, including the default choice and component model when the package declares it.
 
-Readiness separates required integration from optional attachment content. Asset matching is evidence-based and includes related drawable, texture, collision, and metadata files. Double-click an asset or use Open selected asset to continue in Asset Viewer. This first workbench pass is read-only; it exposes the complete structure needed for a later guarded weapon-authoring workflow without guessing component hashes or game behavior.""",
-        ("weapon", "ammo", "attachment", "component", "shop", "animation"),
+Readiness separates required integration from optional attachment content. Asset matching is evidence-based and includes related drawable, texture, collision, and metadata files. Double-click an asset or use Open selected asset to continue in Asset Viewer.
+
+Create authoring workspace copies and verifies every visible package member before it enables the Author, Component author, and Integration panels. Author edits existing slot, ammo reference, model, display/stat labels, ammo limits, explosion, and effects fields. Component author edits existing package-owned component model and labels plus an attachment's default state. Weapon, ammo, and component identities remain locked; component type and attachment bone are visible but locked.
+
+Integration retains every exact animation-set and storefront source record instead of collapsing them into a yes/no flag. A missing animation mapping can clone one complete, visible template weapon across all of its discovered sets; only the weapon key changes, while every clip and modifier remains byte-for-byte schema-equivalent. Existing shop records can edit price, ammo price, label keys, and single-player availability while preserving text, value, or ref representation. Identity, lock hash, numeric ID, component offers, animation clips, unknown fields, and node order stay locked. Ambiguous sources or partial mappings are rejected rather than guessed. Console and Agent API commands inspect-weapon-animation, clone-weapon-animation, inspect-weapon-shop, and set-weapon-shop-fields expose the same guarded operations.
+
+Create complete weapon from donor handles the new-record boundary as one reviewable bundle instead of creating disconnected fragments. It copies one complete donor weapon Item, including its attachment/component offers; reuses the existing package component definitions; copies every donor animation-set mapping and its one direct storefront Item; and either clones the linked ammo Item under a new identity or explicitly reuses an existing ammo definition. Unknown donor fields, native node order, value/ref/text representation, and raw schema remain preserved and locked rather than being regenerated from an incomplete form. Incomplete or ambiguous donors are blocked.
+
+The equivalent console and Agent API workflow is intentionally two-step. plan-weapon-clone is read-only and returns the selected sources, collisions, completeness findings, workspace revision, and plan_sha256. clone-weapon-bundle rebuilds that plan from the current workspace and requires the same field specification, exact --expected-revision, exact --plan-sha256, and --acknowledge-edit. Any changed source, revision, collision, or digest stops the operation before files are written.
+
+Apply actions include the current workspace revision, retain a complete local snapshot, reparse the result, and reject relationship regressions. Shared ammo or component definitions list every affected weapon and require a separate confirmation. Undo latest restores the last committed edit. Unapplied forms block weapon, package, and SDK workspace navigation until you explicitly discard them. These operations never write to the original package or GTA V installation.""",
+        (
+            "weapon", "ammo", "attachment", "component", "shop", "animation",
+            "clone", "bundle", "donor", "plan",
+        ),
     ),
     HelpTopic(
         "ped-workbench", "Inspectors", "Peds Workbench",

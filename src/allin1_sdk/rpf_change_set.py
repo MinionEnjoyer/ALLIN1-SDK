@@ -155,12 +155,21 @@ class RpfChangeSet:
         if not archive_path.is_absolute():
             raise ValueError("RPF change-set archive path must be absolute")
         archive_path = archive_path.resolve()
-        if not isinstance(archive.get("edition"), str) or not archive["edition"]:
+        if not isinstance(archive.get("edition"), str) or not archive["edition"].strip():
             raise ValueError("RPF change set has an invalid archive edition")
-        if not isinstance(archive.get("size"), int) or archive["size"] < 0:
+        if (
+            not isinstance(archive.get("size"), int)
+            or isinstance(archive["size"], bool)
+            or archive["size"] < 0
+        ):
             raise ValueError("RPF change set has an invalid archive size")
         if not _is_sha256(archive.get("sha256")):
             raise ValueError("RPF change set has an invalid archive SHA-256")
+        archive_sha256 = str(archive["sha256"]).casefold()
+        archive_record = {
+            **archive, "path": str(archive_path),
+            "edition": archive["edition"].strip(), "sha256": archive_sha256,
+        }
 
         normalized: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
@@ -194,19 +203,24 @@ class RpfChangeSet:
                 if not payload_path.is_absolute():
                     raise ValueError(f"RPF action {action_id} payload path must be absolute")
                 payload_path = payload_path.resolve()
-                if not isinstance(payload_record.get("size"), int) or payload_record["size"] < 0:
+                if (
+                    not isinstance(payload_record.get("size"), int)
+                    or isinstance(payload_record["size"], bool)
+                    or payload_record["size"] < 0
+                ):
                     raise ValueError(f"RPF action {action_id} has an invalid payload size")
                 if not _is_sha256(payload_record.get("sha256")):
                     raise ValueError(f"RPF action {action_id} has an invalid payload SHA-256")
+                payload_sha256 = str(payload_record["sha256"]).casefold()
                 prepared["payload"] = {
                     "path": str(payload_path), "size": payload_record["size"],
-                    "sha256": payload_record["sha256"],
+                    "sha256": payload_sha256,
                 }
                 if verify_files:
                     if not payload_path.is_file() or payload_path.is_symlink():
                         raise FileNotFoundError(f"RPF action payload not found: {payload_path}")
                     if payload_path.stat().st_size != payload_record["size"] or (
-                        _sha256_file(payload_path) != payload_record["sha256"]
+                        _sha256_file(payload_path) != payload_sha256
                     ):
                         raise ValueError(f"RPF action payload changed: {payload_path}")
             elif item.get("payload") not in (None, ""):
@@ -223,11 +237,11 @@ class RpfChangeSet:
             if not archive_path.is_file() or archive_path.is_symlink():
                 raise FileNotFoundError(f"RPF source archive not found: {archive_path}")
             if archive_path.stat().st_size != archive["size"] or (
-                _sha256_file(archive_path) != archive["sha256"]
+                _sha256_file(archive_path) != archive_sha256
             ):
                 raise ValueError("RPF source archive changed after the change set was created")
         return {
-            "archive": archive_path, "archive_record": dict(archive),
+            "archive": archive_path, "archive_record": archive_record,
             "actions": tuple(normalized),
         }
 
@@ -341,7 +355,8 @@ class RpfChangeSet:
         def update(document: dict[str, Any]) -> None:
             before = len(document["actions"])
             document["actions"] = [
-                item for item in document["actions"] if item["id"] != wanted
+                item for item in document["actions"]
+                if item["id"].casefold() != wanted.casefold()
             ]
             if len(document["actions"]) == before:
                 raise ValueError(f"RPF change-set action not found: {wanted}")
@@ -356,7 +371,10 @@ class RpfChangeSet:
 
         def update(document: dict[str, Any]) -> None:
             actions = document["actions"]
-            current = next((i for i, item in enumerate(actions) if item["id"] == wanted), None)
+            current = next((
+                i for i, item in enumerate(actions)
+                if item["id"].casefold() == wanted.casefold()
+            ), None)
             if current is None:
                 raise ValueError(f"RPF change-set action not found: {wanted}")
             item = actions.pop(current)

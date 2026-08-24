@@ -34,6 +34,16 @@ from allin1_sdk.oiv_text import (
 from allin1_sdk.native_assets import NativeAssetInspector
 
 
+def _fold_archive_chain(chain: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(part.casefold() for part in chain)
+
+
+def _archive_chain_starts_with(
+    chain: tuple[str, ...], prefix: tuple[str, ...],
+) -> bool:
+    return _fold_archive_chain(chain[:len(prefix)]) == _fold_archive_chain(prefix)
+
+
 @dataclass(frozen=True)
 class OivFinding:
     severity: str
@@ -91,7 +101,8 @@ class OivPlan:
             item for item in self.operations
             if item.kind in {"add", "delete"} and item.archives
             and not any(
-                item.archives[:len(chain)] == chain for chain in created
+                _archive_chain_starts_with(item.archives, chain)
+                for chain in created
             )
         )
 
@@ -115,7 +126,10 @@ class OivPlan:
         )
         created = self._created_archive_chains()
         structured_inside_created = all(
-            any(item.archives[:len(chain)] == chain for chain in created)
+            any(
+                _archive_chain_starts_with(item.archives, chain)
+                for chain in created
+            )
             for item in self.xml_operations + self.text_operations + self.pso_operations
         )
         return bool(actionable) and not any(
@@ -351,7 +365,8 @@ class OivWorkbench:
 
         def is_inside_created(item: OivOperation) -> bool:
             return any(
-                item.archives[:len(chain)] == chain for chain in created
+                _archive_chain_starts_with(item.archives, chain)
+                for chain in created
             )
 
         for item in operations:
@@ -415,7 +430,10 @@ class OivWorkbench:
         if kind == "archive":
             raw_path = node.attrib.get("path", "").strip()
             path = self._target_path(raw_path, mods=not archives)
-            create = node.attrib.get("createIfNotExist", "false").casefold() == "true"
+            create = (
+                node.attrib.get("createIfNotExist", "false").strip().casefold()
+                == "true"
+            )
             nested = archives + ((path or raw_path),)
             parent_is_created = any(created_archives)
             safe_archive = bool(path) and path.casefold().endswith(".rpf")
@@ -610,7 +628,8 @@ class OivWorkbench:
             parsed_edits: list[OivTextEdit] = []
             recipe_error: str | None = None
             creates_file = (
-                node.attrib.get("createIfNotExist", "false").casefold() == "true"
+                node.attrib.get("createIfNotExist", "false").strip().casefold()
+                == "true"
             )
             unknown_parent_attributes = set(node.attrib).difference({
                 "path", "createIfNotExist",
@@ -620,7 +639,9 @@ class OivWorkbench:
                     "Unknown OIV text attributes: "
                     + ", ".join(sorted(unknown_parent_attributes))
                 )
-            create_value = node.attrib.get("createIfNotExist", "false").casefold()
+            create_value = (
+                node.attrib.get("createIfNotExist", "false").strip().casefold()
+            )
             if create_value not in {"true", "false"}:
                 recipe_error = "OIV text createIfNotExist must be True or False"
             for child in node:
@@ -1197,9 +1218,13 @@ class OivWorkbench:
             operation.archives + (operation.target,): operation
             for operation in plan.created_archive_operations
         }
+        created_keys = {
+            _fold_archive_chain(chain): operation
+            for chain, operation in created.items()
+        }
         roots = tuple(
             operation for chain, operation in created.items()
-            if operation.archives not in created
+            if _fold_archive_chain(operation.archives) not in created_keys
         )
         if any(len(operation.archives) > 1 for operation in roots):
             raise ValueError(
@@ -1207,7 +1232,8 @@ class OivWorkbench:
             )
         for operation in plan.operations:
             if operation.kind in {"add", "delete", "xml", "text"} and operation.archives and not any(
-                operation.archives[:len(chain)] == chain for chain in created
+                _archive_chain_starts_with(operation.archives, chain)
+                for chain in created
             ):
                 raise ValueError(
                     "Existing-RPF changes must be exported as a separate atomic batch"
@@ -1253,17 +1279,33 @@ class OivWorkbench:
                     return current
 
                 for chain in sorted(created, key=lambda item: (len(item), item)):
-                    if chain[:len(root_chain)] != root_chain or chain == root_chain:
+                    if (
+                        not _archive_chain_starts_with(chain, root_chain)
+                        or _fold_archive_chain(chain) == _fold_archive_chain(root_chain)
+                    ):
                         continue
                     archive_source(chain).mkdir(parents=True, exist_ok=True)
 
+                materialized_outputs: dict[
+                    tuple[tuple[str, ...], str], Path
+                ] = {}
                 for authored in plan.operations:
                     if authored.kind not in {"add", "delete", "xml", "text"} or (
-                        authored.archives[:len(root_chain)] != root_chain
+                        not _archive_chain_starts_with(
+                            authored.archives, root_chain,
+                        )
                     ):
                         continue
                     target = _safe_member_path(authored.target)
-                    output = archive_source(authored.archives).joinpath(*target.parts)
+                    output_identity = (
+                        _fold_archive_chain(authored.archives),
+                        authored.target.casefold(),
+                    )
+                    output = materialized_outputs.get(output_identity)
+                    if output is None:
+                        output = archive_source(authored.archives).joinpath(
+                            *target.parts,
+                        )
                     event: dict[str, object] = {
                         "oiv_operation": authored.number,
                         "kind": authored.kind,
@@ -1278,6 +1320,7 @@ class OivWorkbench:
                             )
                         output.parent.mkdir(parents=True, exist_ok=True)
                         self._copy_member(plan.source, authored.source, output)
+                        materialized_outputs[output_identity] = output
                         event.update({
                             "source": authored.source,
                             "output_size": output.stat().st_size,
@@ -1294,6 +1337,7 @@ class OivWorkbench:
                             "deleted_sha256": self._sha256(output),
                         })
                         output.unlink()
+                        materialized_outputs.pop(output_identity, None)
                     elif authored.kind == "xml":
                         if not output.is_file() or output.is_symlink():
                             raise ValueError(
@@ -1327,6 +1371,7 @@ class OivWorkbench:
                         if not output.exists() and authored.creates_file:
                             output.parent.mkdir(parents=True, exist_ok=True)
                             output.write_bytes(b"")
+                            materialized_outputs[output_identity] = output
                         if not output.is_file() or output.is_symlink():
                             raise ValueError(
                                 "Created RPF text target is not an available file: "

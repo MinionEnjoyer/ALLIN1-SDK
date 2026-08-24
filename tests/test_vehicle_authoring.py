@@ -111,6 +111,95 @@ def test_vehicle_authoring_workspace_copies_edits_validates_and_undoes(tmp_path)
     assert restored.values["vehicle.gameName"] == "AUTHORCAR"
     assert restored.values["handling.fMass"] == "1500.0"
     assert restored.values["variation.lightSettings"] == "1"
+    assert not any(
+        path.name.endswith(".undo-recovery")
+        for path in (workspace.root / "history").iterdir()
+    )
+
+
+def test_vehicle_edit_tolerates_preexisting_malformed_unrelated_xml(tmp_path):
+    source = _source(tmp_path)
+    (source / "unrelated.meta").write_text("<Unrelated>", encoding="utf-8")
+    workspace = VehicleAuthoringWorkspace.create(
+        source, tmp_path / "workspace",
+    )
+
+    result = workspace.update(
+        "authorcar", {"vehicle.gameName": "AUTHORCAR_SAFE"},
+    )
+
+    assert result.revision == 1
+    assert workspace.values("authorcar").values["vehicle.gameName"] \
+        == "AUTHORCAR_SAFE"
+    assert (workspace.source / "unrelated.meta").read_text(encoding="utf-8") \
+        == "<Unrelated>"
+
+
+def test_vehicle_undo_refuses_external_edits_to_touched_members(tmp_path):
+    workspace = VehicleAuthoringWorkspace.create(
+        _source(tmp_path), tmp_path / "workspace",
+    )
+    result = workspace.update(
+        "authorcar", {"vehicle.gameName": "AUTHORCAR_EDITED"},
+    )
+    record = json.loads((result.history / "edit.json").read_text("utf-8"))
+    assert set(record["sha256"]) == {"vehicles.meta", "handling.meta", "carvariations.meta"}
+    assert set(record["sha256_after"]) == set(record["sha256"])
+
+    path = workspace.source / "vehicles.meta"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "AUTHORCAR_EDITED", "AUTHORCAR_EXTERNAL",
+        ),
+        encoding="utf-8",
+    )
+    current = path.read_bytes()
+
+    with pytest.raises(ValueError, match="changed after its edit: vehicles.meta"):
+        workspace.undo()
+
+    assert path.read_bytes() == current
+    assert workspace.revision == 1
+    assert result.history.is_dir()
+
+
+def test_vehicle_undo_tracks_renamed_asset_post_state(tmp_path):
+    workspace = VehicleAuthoringWorkspace.create(
+        _source(tmp_path), tmp_path / "workspace",
+    )
+    result = workspace.migrate_identity("authorcar", new_model="renamedcar")
+    record = json.loads((result.history / "edit.json").read_text("utf-8"))
+    assert record["sha256_after"]["stream/authorcar.yft"]["path"] \
+        == "stream/renamedcar.yft"
+
+    renamed = workspace.source / "stream" / "renamedcar.yft"
+    renamed.write_bytes(b"external fragment edit")
+
+    with pytest.raises(
+        ValueError, match="changed after its edit: stream/renamedcar.yft",
+    ):
+        workspace.undo()
+
+    assert renamed.read_bytes() == b"external fragment edit"
+    assert not (workspace.source / "stream" / "authorcar.yft").exists()
+    assert workspace.revision == 1
+
+
+def test_vehicle_undo_rejects_tampered_backup_before_mutating(tmp_path):
+    workspace = VehicleAuthoringWorkspace.create(
+        _source(tmp_path), tmp_path / "workspace",
+    )
+    result = workspace.update(
+        "authorcar", {"vehicle.gameName": "AUTHORCAR_EDITED"},
+    )
+    (result.history / "files" / "vehicles.meta").write_bytes(b"tampered")
+    current = (workspace.source / "vehicles.meta").read_bytes()
+
+    with pytest.raises(ValueError, match="backup hash is invalid: vehicles.meta"):
+        workspace.undo()
+
+    assert (workspace.source / "vehicles.meta").read_bytes() == current
+    assert workspace.revision == 1
 
 
 def test_vehicle_appearance_tuning_and_light_profiles_are_structured_and_undoable(

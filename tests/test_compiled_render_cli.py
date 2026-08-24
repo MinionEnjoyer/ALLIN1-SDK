@@ -112,6 +112,37 @@ def test_render_native_model_cli_routes_all_settings_and_protected_roots(
     assert received["protected_roots"] == (source_dir.resolve(), gta.resolve())
 
 
+def test_render_native_model_cli_discovers_uppercase_texture_companion(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    source_dir = tmp_path / "package"
+    output_dir = tmp_path / "renders"
+    source_dir.mkdir()
+    output_dir.mkdir()
+    source = source_dir / "VEHICLE_HI.YFT"
+    source.write_bytes(b"RSC7 model")
+    texture = source_dir / "VEHICLE.YTD"
+    texture.write_bytes(b"RSC7 textures")
+    output = output_dir / "VEHICLE.PNG"
+    _install_fake_decoder(monkeypatch, _scene())
+    received: dict[str, object] = {}
+
+    def compile_model(model, destination, **kwargs):
+        received.update(model=model, destination=destination, **kwargs)
+        output.write_bytes(b"PNG")
+        return CompiledRenderResult(
+            output.resolve(), 1920, 1080, 0.1, {"engine": "eevee"},
+        )
+
+    monkeypatch.setattr(sdk_cli, "compile_vehicle_render", compile_model)
+    result = CliRunner().invoke(sdk_cli.main, [
+        "render-native-model", str(source), "--output", str(output),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert received["texture_dictionary"] == texture.resolve()
+
+
 def test_render_native_model_agent_api_is_output_authoring_not_game_write(
     tmp_path: Path, monkeypatch,
 ) -> None:

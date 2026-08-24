@@ -353,8 +353,7 @@ def test_compiled_render_footer_remains_visible_in_compact_workbench(
                 tk_root.winfo_rooty() + tk_root.winfo_height(),
             )
             for control in (
-                panel.output_row, panel.backend_card, panel.backend_actions,
-                panel.progress, panel.actions,
+                panel.output_row, panel.backend_card, panel.progress, panel.actions,
             ):
                 assert control.winfo_ismapped()
                 control_bounds = (
@@ -370,6 +369,17 @@ def test_compiled_render_footer_remains_visible_in_compact_workbench(
                 assert control_bounds[2] <= root_bounds[2]
                 assert root_bounds[1] <= control_bounds[1] < control_bounds[3]
                 assert control_bounds[3] <= root_bounds[3]
+            # The card shows setup actions only when Blender is unavailable;
+            # an available backend replaces them with the compact refresh action.
+            backend_action = (
+                panel.backend_refresh_button
+                if panel._backend_available else panel.backend_actions
+            )
+            assert backend_action.winfo_ismapped()
+            assert not (
+                panel.backend_actions.winfo_ismapped()
+                and panel.backend_refresh_button.winfo_ismapped()
+            )
             if advanced:
                 for control in (
                     panel.width_entry, panel.height_entry, panel.samples_combo,

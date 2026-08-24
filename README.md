@@ -12,7 +12,7 @@ make weapons, vehicles, archives, and other add-ons work coherently.
 ALLIN1 SDK supports GTA V Legacy and GTA V Enhanced. Its inspection and planning
 workflows are designed for Story Mode mod development.
 
-> **Current public release:** **0.5.2**. Install it from ALLIN1 Launcher or
+> **Current public release:** **0.5.3**. Install it from ALLIN1 Launcher or
 > download the self-contained Windows package from
 > [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases).
 
@@ -327,8 +327,23 @@ commands are grouped by task:
 - **Package Tools** opens Package Recipes, DLC inventory, vehicle compiler, and structured
   META/XML tools.
 - **Workbench** opens one package across Vehicles, Weapons, and Peds. The Weapons
-  and Peds tabs expose their linked definitions, supporting metadata, assets, and
-  readiness findings. The Vehicles tab resolves a vehicle's linked model, textures,
+  tab can turn a loose package into a separate guarded authoring workspace, edit
+  existing weapon, ammo, and component fields plus an attachment's default state,
+  revalidate the
+  complete package after every change, and undo retained revisions without touching
+  the original source. Its Integration panel retains exact animation-set and shop
+  sources, can clone a complete known-good animation mapping for a missing weapon,
+  and edits existing prices, labels, and single-player availability without changing
+  native clip payloads or record structure. Complete weapon creation uses a guarded
+  donor-bundle workflow: it copies one whole weapon record and its attachment offers,
+  reuses component definitions, carries every animation-set and storefront record,
+  and clones linked ammo or explicitly reuses an existing ammo pool. A read-only plan
+  binds exact sources, revision, collisions, and a SHA-256 digest before the separate
+  acknowledged clone can write. Unknown/raw schema, ordering, and text/value/ref
+  representation stay copied and locked instead of being guessed from a partial form.
+  The Peds tab exposes
+  linked definitions, supporting metadata, assets, and readiness findings. The
+  Vehicles tab resolves a vehicle's linked model, textures,
   handling,
   variation, tuning, labels, and registration in one view. A copied authoring
   workspace can edit driving fields, spawn colors/liveries, selected light and
@@ -436,6 +451,14 @@ allin1-sdk set-vehicle-tuning-entry C:\Work\examplecar-authoring examplecar 123_
 allin1-sdk set-vehicle-light-profile C:\Work\examplecar-authoring examplecar 18 --set headLight.intensity=2.5 --acknowledge-edit
 allin1-sdk migrate-vehicle-identity C:\Work\examplecar-authoring examplecar --new-model examplecar2 --new-handling EXAMPLECAR2 --acknowledge-edit
 allin1-sdk build-vehicle-package C:\Mods\Example -o C:\Work\examplecar-package
+allin1-sdk create-weapon-authoring C:\Mods\ExampleWeapon -o C:\Work\exampleweapon-authoring
+allin1-sdk inspect-weapon-authoring C:\Work\exampleweapon-authoring --weapon WEAPON_EXAMPLE
+allin1-sdk plan-weapon-clone C:\Work\exampleweapon-authoring WEAPON_EXAMPLE --weapon-name WEAPON_EXAMPLE2 --slot SLOT_EXAMPLE2 --ammo-info AMMO_EXAMPLE2 --model w_pi_example2 --human-name-hash WT_EXAMPLE2 --stat-name EXAMPLE2 --ammo-mode clone --ammo-name AMMO_EXAMPLE2
+allin1-sdk clone-weapon-bundle C:\Work\exampleweapon-authoring WEAPON_EXAMPLE --weapon-name WEAPON_EXAMPLE2 --slot SLOT_EXAMPLE2 --ammo-info AMMO_EXAMPLE2 --model w_pi_example2 --human-name-hash WT_EXAMPLE2 --stat-name EXAMPLE2 --ammo-mode clone --ammo-name AMMO_EXAMPLE2 --expected-revision 0 --plan-sha256 <PLAN_SHA256> --acknowledge-edit
+allin1-sdk set-weapon-fields C:\Work\exampleweapon-authoring WEAPON_EXAMPLE --set ammo.ammoMax=180 --expected-revision 0 --acknowledge-edit
+allin1-sdk set-weapon-component C:\Work\exampleweapon-authoring COMPONENT_EXAMPLE_CLIP --set component.locDesc=WCD_EXAMPLE_CLIP --expected-revision 1 --acknowledge-edit
+allin1-sdk set-weapon-attachment C:\Work\exampleweapon-authoring WEAPON_EXAMPLE COMPONENT_EXAMPLE_CLIP --set attachment.default=false --expected-revision 2 --acknowledge-edit
+allin1-sdk undo-weapon-edit C:\Work\exampleweapon-authoring --expected-revision 3 --acknowledge-edit
 ```
 
 Run `allin1-sdk --help` or `allin1-sdk <command> --help` for the complete command

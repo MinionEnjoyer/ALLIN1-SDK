@@ -205,6 +205,42 @@ def test_export_interchange_preserves_uvs_and_typed_texture_bindings(
     assert exported.unresolved_texture_names == ("body_normal",)
 
 
+def test_export_interchange_ignores_invalid_optional_texture_assets_and_empty_slots(
+    tmp_path: Path,
+) -> None:
+    texture = tmp_path / "BODY_DIFFUSE.PNG"
+    Image.new("RGBA", (2, 2), (30, 80, 45, 255)).save(texture)
+    empty = tmp_path / "EMPTY.PNG"
+    empty.touch()
+    geometry = _ModelGeometry(
+        vertices=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+        triangles=((0, 1, 2),), lod="HIGH", component="BODY",
+        texture_names=("BODY_DIFFUSE", "zero_texture", ""),
+        texture_parameters=(
+            ("DiffuseSampler", "BODY_DIFFUSE"),
+            ("DetailSampler", "zero_texture"),
+            ("OptionalSampler", ""),
+        ),
+    )
+
+    exported = export_render_interchange(
+        NativeModelScene("Optional textures", (geometry,)), tmp_path,
+        texture_assets={
+            "body_diffuse": texture,
+            "zero_texture": empty,
+            "removed_unused": tmp_path / "REMOVED.PNG",
+        },
+    )
+
+    manifest = json.loads(exported.manifest_path.read_text(encoding="utf-8"))
+    bindings = manifest["materials"][0]["texture_bindings"]
+    assert [item["name"] for item in bindings] == ["BODY_DIFFUSE", "zero_texture"]
+    assert bindings[0]["path"] == "BODY_DIFFUSE.PNG"
+    assert bindings[1]["path"] is None
+    assert exported.texture_count == 1
+    assert exported.unresolved_texture_names == ("zero_texture",)
+
+
 def test_compile_vehicle_render_uses_isolated_headless_pipeline(tmp_path: Path) -> None:
     executable = _fake_blender(tmp_path / "blender.exe")
     output = tmp_path / "vehicle.png"

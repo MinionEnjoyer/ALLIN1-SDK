@@ -7,6 +7,7 @@ import hashlib
 import re
 import shutil
 import subprocess
+import sys
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -15,6 +16,11 @@ from typing import Any, Iterable
 from xml.etree import ElementTree as ET
 
 from allin1_sdk.processes import hidden_process_options
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 
 MAX_PACKAGE_FILES = 10_000
@@ -27,7 +33,9 @@ XML_SUFFIXES = frozenset({".xml", ".meta"})
 EXTERNAL_ARCHIVE_SUFFIXES = frozenset({".rar", ".7z"})
 MANIFEST_TEXT_SUFFIXES = frozenset({".lua"})
 PARSED_TEXT_SUFFIXES = XML_SUFFIXES | MANIFEST_TEXT_SUFFIXES
-INSPECTION_TEXT_SUFFIXES = PARSED_TEXT_SUFFIXES | frozenset({".txt", ".md"})
+INSPECTION_TEXT_SUFFIXES = PARSED_TEXT_SUFFIXES | frozenset({
+    ".txt", ".md", ".toml",
+})
 BINARY_PLUGIN_SUFFIXES = frozenset({".dll", ".asi", ".addon64"})
 TEXT_SUFFIXES = frozenset({
     ".xml", ".meta", ".json", ".toml", ".txt", ".ini", ".cfg",
@@ -159,6 +167,69 @@ def _slug(value: str) -> str:
 
 def _unique(values: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
+
+
+def _unique_casefold(values: Iterable[str]) -> list[str]:
+    """Keep the first spelling while comparing game identifiers by case."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        identifier = value.casefold()
+        if identifier in seen:
+            continue
+        seen.add(identifier)
+        result.append(value)
+    return result
+
+
+def _identifier_starts_with(value: str, prefix: str) -> bool:
+    """Match game-facing hash names without changing their authored spelling."""
+    return value.casefold().startswith(prefix.casefold())
+
+
+def _inspection_size_finding(suffix: str, path: str) -> PackageFinding:
+    if suffix in XML_SUFFIXES:
+        return PackageFinding(
+            "warning", "xml_too_large",
+            "XML metadata exceeds the 16 MiB parser limit.", path,
+        )
+    return PackageFinding(
+        "warning", "inspection_text_too_large",
+        "Text content exceeds the 16 MiB inspection limit.", path,
+    )
+
+
+def _documentation_supports_edition(text: str, edition: str) -> bool:
+    """Return true when at least one edition mention is not an exclusion.
+
+    Documentation commonly retains old incompatibility notes in a changelog.
+    Scope exclusions to the sentence containing each mention so an obsolete
+    ``Legacy unsupported`` line cannot cancel a later ``Legacy support added``
+    statement elsewhere in the same README.
+    """
+    aliases = (edition,) if edition != "legacy" else (
+        "legacy", "classic version", "classic/legacy version",
+    )
+    fragments = re.split(r"(?:[.!?](?:\s+|$)|[\r\n]+)", text)
+    for fragment in fragments:
+        for alias in aliases:
+            label = re.escape(alias)
+            if not re.search(rf"\b{label}\b", fragment):
+                continue
+            unsupported = (
+                rf"\b(?:does\s+not|doesn't|do\s+not|don't)\s+support\b"
+                rf".{{0,40}}\b{label}\b",
+                rf"\b(?:no|without)\s+{label}\s+(?:support|compatibility)\b",
+                rf"\b{label}\b.{{0,40}}\b(?:not\s+supported|unsupported|"
+                rf"incompatible|does\s+not\s+work|doesn't\s+work)\b",
+                rf"\b(?:not\s+supported|unsupported|incompatible)\b"
+                rf".{{0,40}}\b{label}\b",
+            )
+            if not any(re.search(pattern, fragment) for pattern in unsupported):
+                return True
+    return False
 
 
 def _binary_plugin_record(path: str, content: bytes | None) -> BinaryPluginRecord:
@@ -434,6 +505,26 @@ class WeaponComponentLink:
 
 
 @dataclass(frozen=True)
+class WeaponAnimationRecord:
+    source: str
+    weapon_name: str
+    field_name: str
+    representation: str
+    set_name: str
+    set_ordinal: int
+    ordinal: int
+
+
+@dataclass(frozen=True)
+class WeaponShopRecord:
+    source: str
+    weapon_name: str
+    field_name: str
+    representation: str
+    ordinal: int
+
+
+@dataclass(frozen=True)
 class AmmoRecord:
     source: str
     name: str
@@ -537,6 +628,8 @@ class PackageScan:
     weapon_components: tuple[WeaponComponentRecord, ...] = ()
     weapon_component_links: tuple[WeaponComponentLink, ...] = ()
     peds: tuple[PedRecord, ...] = ()
+    weapon_animation_records: tuple[WeaponAnimationRecord, ...] = ()
+    weapon_shop_records: tuple[WeaponShopRecord, ...] = ()
 
     @property
     def valid(self) -> bool:
@@ -601,12 +694,34 @@ class AddonPackageInspector:
                 "Select a DLC folder or an .oiv/.zip/.rar/.7z package"
             )
 
+        managed_manifests = [
+            entry for entry in entries
+            if PurePosixPath(entry.path).name.casefold() == "mod.toml"
+        ]
+        manifest_editions: tuple[str, ...] = ()
+        if len(managed_manifests) > 1:
+            paths = ", ".join(entry.path for entry in managed_manifests[:4])
+            if len(managed_manifests) > 4:
+                paths += f" (+{len(managed_manifests) - 4} more)"
+            findings.append(PackageFinding(
+                "warning", "managed_manifest_ambiguous",
+                "Multiple mod.toml manifests describe different possible package "
+                f"roots: {paths}. Select one package root before installation.",
+                managed_manifests[0].path,
+            ))
+        elif managed_manifests:
+            manifest = managed_manifests[0]
+            if manifest.content is not None:
+                manifest_editions = self._managed_manifest_editions(
+                    manifest, findings,
+                )
+
         weapons: list[WeaponRecord] = []
         ammo: list[AmmoRecord] = []
         weapon_components: list[WeaponComponentRecord] = []
         weapon_component_links: list[WeaponComponentLink] = []
-        animations: list[str] = []
-        shop_weapons: list[str] = []
+        weapon_animation_records: list[WeaponAnimationRecord] = []
+        weapon_shop_records: list[WeaponShopRecord] = []
         vehicles: list[VehicleRecord] = []
         handlings: list[HandlingRecord] = []
         variations: list[VehicleVariationRecord] = []
@@ -640,8 +755,12 @@ class AddonPackageInspector:
             weapon_component_links.extend(
                 self._weapon_component_links(entry.path, root)
             )
-            animations.extend(self._animation_records(root))
-            shop_weapons.extend(self._shop_records(root))
+            weapon_animation_records.extend(
+                self._animation_records(entry.path, root)
+            )
+            weapon_shop_records.extend(
+                self._shop_records(entry.path, root)
+            )
             vehicles.extend(self._vehicle_records(entry.path, root))
             handlings.extend(self._handling_records(entry.path, root))
             variations.extend(self._variation_records(entry.path, root))
@@ -672,12 +791,12 @@ class AddonPackageInspector:
                 for part in PurePosixPath(entry.path).parts
             ))
         )
-        edition_hints: list[str] = []
+        edition_hints: list[str] = list(manifest_editions)
         for entry in entries:
             lowered_parts = {part.casefold() for part in PurePosixPath(entry.path).parts}
-            if "legacy" in lowered_parts:
+            if not manifest_editions and "legacy" in lowered_parts:
                 edition_hints.append("legacy")
-            if "enhanced" in lowered_parts:
+            if not manifest_editions and "enhanced" in lowered_parts:
                 edition_hints.append("enhanced")
 
         installation_targets: list[str] = []
@@ -706,12 +825,14 @@ class AddonPackageInspector:
                 continue
             text = decode_text_preview(entry.content)
             lowered = text.casefold()
-            if re.search(
+            if not manifest_editions and re.search(
                 r"\b(?:gta\s*v\s*)?legacy\b|\bclassic(?:/legacy)?\s+version\b",
                 lowered,
-            ):
+            ) and _documentation_supports_edition(lowered, "legacy"):
                 edition_hints.append("legacy")
-            if re.search(r"\b(?:gta\s*v\s*)?enhanced\b", lowered):
+            if not manifest_editions and re.search(
+                r"\b(?:gta\s*v\s*)?enhanced\b", lowered,
+            ) and _documentation_supports_edition(lowered, "enhanced"):
                 edition_hints.append("enhanced")
             for term, label in dependency_terms.items():
                 if term in lowered:
@@ -797,20 +918,21 @@ class AddonPackageInspector:
                 "The package contains no trustworthy Legacy/Enhanced declaration. "
                 "Choose an edition only after inspecting its resources or author notes.",
             ))
-        if source_kind != "folder" and not any(
-            PurePosixPath(entry.path).name.casefold() == "mod.toml"
-            for entry in entries
-        ):
+        if source_kind != "folder" and not managed_manifests:
             findings.append(PackageFinding(
                 "warning", "managed_manifest_not_found",
                 "No reviewed mod.toml was found. This archive can be inspected, "
                 "but it is not directly installable by ALLIN1.",
             ))
 
-        weapons = self._dedupe_records(weapons, lambda item: item.name, findings)
-        ammo = self._dedupe_records(ammo, lambda item: item.name, findings)
+        weapons = self._dedupe_records(
+            weapons, lambda item: item.name.casefold(), findings,
+        )
+        ammo = self._dedupe_records(
+            ammo, lambda item: item.name.casefold(), findings,
+        )
         weapon_components = self._dedupe_records(
-            weapon_components, lambda item: item.name, findings,
+            weapon_components, lambda item: item.name.casefold(), findings,
         )
         weapon_component_links = self._dedupe_records(
             weapon_component_links,
@@ -835,8 +957,33 @@ class AddonPackageInspector:
         peds = self._dedupe_records(
             peds, lambda item: item.name.casefold(), findings,
         )
-        animation_names = tuple(_unique(animations))
-        shop_names = tuple(_unique(shop_weapons))
+        self._report_source_record_duplicates(
+            weapon_animation_records,
+            lambda item: (
+                item.source.casefold(), item.set_ordinal,
+                item.field_name.casefold(),
+                item.weapon_name.casefold(),
+            ),
+            "duplicate_weapon_animation_record",
+            "weapon animation",
+            findings,
+        )
+        self._report_source_record_duplicates(
+            weapon_shop_records,
+            lambda item: (
+                item.source.casefold(), item.field_name.casefold(),
+                item.weapon_name.casefold(),
+            ),
+            "duplicate_weapon_shop_record",
+            "weapon shop",
+            findings,
+        )
+        animation_names = tuple(_unique_casefold(
+            item.weapon_name for item in weapon_animation_records
+        ))
+        shop_names = tuple(_unique_casefold(
+            item.weapon_name for item in weapon_shop_records
+        ))
         ammo_names = {item.name.casefold() for item in ammo}
         animation_set = {item.casefold() for item in animation_names}
         shop_set = {item.casefold() for item in shop_names}
@@ -885,7 +1032,7 @@ class AddonPackageInspector:
             PurePosixPath(entry.path).stem.casefold()
             for entry in entries if entry.suffix == ".ytd"
         }
-        has_loose_vehicle_assets = bool(yft_models or ytd_models)
+        scoped_loose_vehicle_models: set[str] = set()
         for vehicle in vehicles:
             if not vehicle.handling_id:
                 findings.append(PackageFinding(
@@ -905,17 +1052,27 @@ class AddonPackageInspector:
                     f"No carvariations record was discovered for {vehicle.model_name}.",
                     vehicle.source,
                 ))
-            if has_loose_vehicle_assets:
+            txd_key = (vehicle.txd_name or vehicle.model_name).casefold()
+            model_key = vehicle.model_name.casefold()
+            has_related_loose_asset = bool(
+                model_key in yft_models
+                or f"{model_key}_hi" in yft_models
+                or txd_key in ytd_models
+            )
+            if has_related_loose_asset:
+                scoped_loose_vehicle_models.add(model_key)
+            if has_related_loose_asset:
                 if vehicle.model_name.casefold() not in yft_models:
                     findings.append(PackageFinding(
                         "warning", "vehicle_model_asset_not_found",
                         f"No streamed YFT was discovered for {vehicle.model_name}.",
                         vehicle.source,
                     ))
-                if vehicle.txd_name and vehicle.txd_name.casefold() not in ytd_models:
+                if txd_key not in ytd_models:
                     findings.append(PackageFinding(
                         "warning", "vehicle_texture_asset_not_found",
-                        f"No streamed YTD was discovered for {vehicle.txd_name}.",
+                        f"No streamed YTD was discovered for "
+                        f"{vehicle.txd_name or vehicle.model_name}.",
                         vehicle.source,
                     ))
 
@@ -927,15 +1084,27 @@ class AddonPackageInspector:
                         f"{variation.model_name} references missing tuning kit {kit}.",
                         variation.source,
                     ))
-        if has_loose_vehicle_assets:
-            for kit in kits:
-                for model_name in kit.model_names:
-                    if model_name.casefold() not in yft_models:
-                        findings.append(PackageFinding(
-                            "warning", "tuning_model_asset_not_found",
-                            f"Tuning kit {kit.name} references missing YFT "
-                            f"{model_name}.", kit.source,
-                        ))
+        scoped_kit_names = {
+            authored_kit.casefold()
+            for variation in variations
+            if variation.model_name.casefold() in scoped_loose_vehicle_models
+            for authored_kit in variation.kits
+        }
+        for kit in kits:
+            kit_is_scoped = (
+                kit.name.casefold() in scoped_kit_names
+                or kit.kit_id.casefold() in scoped_kit_names
+                or any(name.casefold() in yft_models for name in kit.model_names)
+            )
+            if not kit_is_scoped:
+                continue
+            for model_name in kit.model_names:
+                if model_name.casefold() not in yft_models:
+                    findings.append(PackageFinding(
+                        "warning", "tuning_model_asset_not_found",
+                        f"Tuning kit {kit.name} references missing YFT "
+                        f"{model_name}.", kit.source,
+                    ))
 
         ydd_models = {
             PurePosixPath(entry.path).stem.casefold()
@@ -945,10 +1114,12 @@ class AddonPackageInspector:
             PurePosixPath(entry.path).stem.casefold()
             for entry in entries if entry.suffix == ".ydr"
         }
-        has_loose_ped_assets = bool(ydd_models or ydr_models or ytd_models)
-        if has_loose_ped_assets:
-            for ped in peds:
-                model = ped.name.casefold()
+        for ped in peds:
+            model = ped.name.casefold()
+            has_related_loose_asset = (
+                model in ydd_models or model in ydr_models or model in ytd_models
+            )
+            if has_related_loose_asset:
                 if model not in ydd_models and model not in ydr_models:
                     findings.append(PackageFinding(
                         "warning", "ped_model_asset_not_found",
@@ -996,9 +1167,32 @@ class AddonPackageInspector:
                 f"{len(rpf_entries) - 20} additional RPF archives were omitted "
                 "from individual warnings.",
             ))
-        if not weapons and not vehicles and not peds:
+        nested_package_entries = [
+            entry.path for entry in entries
+            if entry.suffix in {".zip", ".oiv", ".rar", ".7z"}
+        ]
+        for nested_path in nested_package_entries[:20]:
             findings.append(PackageFinding(
-                "warning", "no_content_records",
+                "info", "nested_package_not_inspected",
+                "Nested package archives are inventoried as opaque members; inspect "
+                "the nested package separately before relying on its contents.",
+                nested_path,
+            ))
+        if len(nested_package_entries) > 20:
+            findings.append(PackageFinding(
+                "info", "nested_package_summary",
+                f"{len(nested_package_entries) - 20} additional nested package "
+                "archives were omitted from individual notices.",
+            ))
+        if not weapons and not vehicles and not peds:
+            recognized_non_content = bool(
+                binary_plugins or config_files or shader_assets
+                or replacement_assets or rpf_entries or registrations
+                or nested_package_entries
+            )
+            findings.append(PackageFinding(
+                "info" if recognized_non_content else "warning",
+                "no_content_records",
                 "No custom weapon, vehicle, or ped records were discovered. The draft "
                 "will describe the detected plug-in, replacement, shader, archive, "
                 "or generic package shape instead.",
@@ -1029,7 +1223,49 @@ class AddonPackageInspector:
             weapon_components=tuple(weapon_components),
             weapon_component_links=tuple(weapon_component_links),
             peds=tuple(peds),
+            weapon_animation_records=tuple(weapon_animation_records),
+            weapon_shop_records=tuple(weapon_shop_records),
         )
+
+    @staticmethod
+    def _managed_manifest_editions(
+        manifest: PackageEntry, findings: list[PackageFinding],
+    ) -> tuple[str, ...]:
+        """Read only the authoritative edition declaration from one mod.toml."""
+        assert manifest.content is not None
+        try:
+            payload = tomllib.loads(decode_text_preview(manifest.content))
+        except tomllib.TOMLDecodeError as exc:
+            findings.append(PackageFinding(
+                "warning", "managed_manifest_parse_failed",
+                f"Could not parse mod.toml metadata: {exc}", manifest.path,
+            ))
+            return ()
+        raw_editions = payload.get("editions")
+        if raw_editions is None:
+            return ()
+        if not isinstance(raw_editions, list) or not all(
+            isinstance(value, str) for value in raw_editions
+        ):
+            findings.append(PackageFinding(
+                "warning", "managed_manifest_editions_invalid",
+                "mod.toml editions must be an array containing Legacy and/or "
+                "Enhanced.", manifest.path,
+            ))
+            return ()
+        editions = tuple(_unique(
+            value.strip().casefold() for value in raw_editions if value.strip()
+        ))
+        if not editions or any(
+            value not in {"legacy", "enhanced"} for value in editions
+        ):
+            findings.append(PackageFinding(
+                "warning", "managed_manifest_editions_invalid",
+                "mod.toml editions must contain only Legacy and/or Enhanced.",
+                manifest.path,
+            ))
+            return ()
+        return editions
 
     def _read_external_archive(
         self, archive: Path,
@@ -1068,10 +1304,7 @@ class AddonPackageInspector:
                         ))
                         content = None
                 else:
-                    findings.append(PackageFinding(
-                        "warning", "xml_too_large",
-                        "XML metadata exceeds the 16 MiB parser limit.", relative,
-                    ))
+                    findings.append(_inspection_size_finding(suffix, relative))
             elif suffix in BINARY_PLUGIN_SUFFIXES:
                 content, _ = _read_external_archive_member(
                     archive, relative, limit=min(size, MAX_BINARY_HEADER_BYTES),
@@ -1111,9 +1344,8 @@ class AddonPackageInspector:
                 if size <= MAX_XML_BYTES:
                     pending_reads.append((len(entries), candidate, False))
                 else:
-                    findings.append(PackageFinding(
-                        "warning", "xml_too_large",
-                        "XML metadata exceeds the 16 MiB parser limit.", relative,
+                    findings.append(_inspection_size_finding(
+                        candidate.suffix.lower(), relative,
                     ))
             elif candidate.suffix.lower() in BINARY_PLUGIN_SUFFIXES:
                 pending_reads.append((len(entries), candidate, True))
@@ -1178,10 +1410,8 @@ class AddonPackageInspector:
                         if member.file_size <= MAX_XML_BYTES:
                             content = package.read(member)
                         else:
-                            findings.append(PackageFinding(
-                                "warning", "xml_too_large",
-                                "XML metadata exceeds the 16 MiB parser limit.",
-                                relative,
+                            findings.append(_inspection_size_finding(
+                                suffix, relative,
                             ))
                     elif suffix in BINARY_PLUGIN_SUFFIXES:
                         with package.open(member) as stream:
@@ -1205,10 +1435,12 @@ class AddonPackageInspector:
         for child in element:
             if _local_name(child.tag) != name:
                 continue
-            if "ref" in child.attrib:
-                return child.attrib["ref"].strip()
-            if "value" in child.attrib:
-                return child.attrib["value"].strip()
+            reference = child.attrib.get("ref", "").strip()
+            if reference:
+                return reference
+            value = child.attrib.get("value", "").strip()
+            if value:
+                return value
             return (child.text or "").strip()
         return ""
 
@@ -1222,7 +1454,7 @@ class AddonPackageInspector:
             if _local_name(item.tag) != "Item":
                 continue
             name = cls._direct_value(item, "Name")
-            if name.startswith("WEAPON_") and any(
+            if _identifier_starts_with(name, "WEAPON_") and any(
                 cls._direct_value(item, field)
                 for field in ("Slot", "AmmoInfo", "HumanNameHash")
             ):
@@ -1233,7 +1465,7 @@ class AddonPackageInspector:
                     cls._direct_value(item, "HumanNameHash"),
                     cls._direct_value(item, "StatName"),
                 ))
-            elif name.startswith("AMMO_"):
+            elif _identifier_starts_with(name, "AMMO_"):
                 ammo.append(AmmoRecord(
                     source, name, cls._direct_value(item, "Model"),
                     cls._direct_value(item, "AmmoMax"),
@@ -1254,7 +1486,7 @@ class AddonPackageInspector:
                 continue
             name = cls._direct_value(item, "Name")
             component_type = item.attrib.get("type", "").strip()
-            if not name.startswith("COMPONENT_"):
+            if not _identifier_starts_with(name, "COMPONENT_"):
                 continue
             model = cls._direct_value(item, "Model")
             loc_name = cls._direct_value(item, "LocName")
@@ -1277,7 +1509,7 @@ class AddonPackageInspector:
             if _local_name(weapon.tag) != "Item":
                 continue
             weapon_name = cls._direct_value(weapon, "Name")
-            if not weapon_name.startswith("WEAPON_"):
+            if not _identifier_starts_with(weapon_name, "WEAPON_"):
                 continue
             for attach_points in weapon:
                 if _local_name(attach_points.tag) != "AttachPoints":
@@ -1293,7 +1525,9 @@ class AddonPackageInspector:
                             if _local_name(component.tag) != "Item":
                                 continue
                             component_name = cls._direct_value(component, "Name")
-                            if not component_name.startswith("COMPONENT_"):
+                            if not _identifier_starts_with(
+                                component_name, "COMPONENT_",
+                            ):
                                 continue
                             default_text = cls._direct_value(
                                 component, "Default",
@@ -1304,25 +1538,97 @@ class AddonPackageInspector:
                             ))
         return records
 
-    @staticmethod
-    def _animation_records(root: ET.Element) -> list[str]:
-        return _unique(
-            item.attrib.get("key", "").strip()
-            for item in root.iter()
-            if _local_name(item.tag) == "Item"
-            and item.attrib.get("key", "").startswith("WEAPON_")
-        )
+    @classmethod
+    def _animation_records(
+        cls, source: str, root: ET.Element,
+    ) -> list[WeaponAnimationRecord]:
+        records: list[WeaponAnimationRecord] = []
+        parents = {
+            child: parent for parent in root.iter() for child in parent
+        }
+        groups = [
+            item for item in root.iter()
+            if _local_name(item.tag) == "WeaponAnimations"
+        ]
+        for set_ordinal, group in enumerate(groups):
+            parent = parents.get(group)
+            while parent is not None and _local_name(parent.tag) != "Item":
+                parent = parents.get(parent)
+            set_name = ""
+            if parent is not None:
+                set_name = (
+                    parent.attrib.get("key", "").strip()
+                    or cls._direct_value(parent, "Name")
+                )
+            for item in (
+                child for child in group
+                if _local_name(child.tag) == "Item"
+            ):
+                weapon_name = item.attrib.get("key", "").strip()
+                if not _identifier_starts_with(weapon_name, "WEAPON_"):
+                    continue
+                records.append(WeaponAnimationRecord(
+                    source=source,
+                    weapon_name=weapon_name,
+                    field_name="key",
+                    representation="attribute",
+                    set_name=set_name,
+                    set_ordinal=set_ordinal,
+                    ordinal=len(records),
+                ))
+        return records
 
     @staticmethod
-    def _shop_records(root: ET.Element) -> list[str]:
-        values: list[str] = []
-        for item in root.iter():
-            if _local_name(item.tag) not in {"nameHash", "weaponName"}:
-                continue
-            value = (item.text or item.attrib.get("value", "")).strip()
-            if value.startswith("WEAPON_"):
-                values.append(value)
-        return _unique(values)
+    def _shop_records(
+        source: str, root: ET.Element,
+    ) -> list[WeaponShopRecord]:
+        records: list[WeaponShopRecord] = []
+        containers = [
+            element for element in root.iter()
+            if _local_name(element.tag) == "weaponShopItems"
+        ]
+        if containers:
+            # Native shop metadata owns weapon identities only on direct Item
+            # children of weaponShopItems.  Descendant component offers can carry
+            # similarly named fields and must never be mistaken for weapons.
+            owners = [
+                item for container in containers for item in container
+                if _local_name(item.tag) == "Item"
+            ]
+        else:
+            # Retain support for small extracted/fixture fragments which omit the
+            # native wrapper, while still requiring an Item owner and a direct
+            # identity child rather than scraping arbitrary descendants.
+            owners = [
+                item for item in root.iter() if _local_name(item.tag) == "Item"
+            ]
+        for owner in owners:
+            for item in owner:
+                field_name = _local_name(item.tag)
+                if field_name not in {"nameHash", "weaponName"}:
+                    continue
+                text_value = (item.text or "").strip()
+                if text_value:
+                    weapon_name = text_value
+                    representation = "text"
+                elif item.attrib.get("value", "").strip():
+                    weapon_name = item.attrib["value"].strip()
+                    representation = "value"
+                elif item.attrib.get("ref", "").strip():
+                    weapon_name = item.attrib["ref"].strip()
+                    representation = "ref"
+                else:
+                    continue
+                if not _identifier_starts_with(weapon_name, "WEAPON_"):
+                    continue
+                records.append(WeaponShopRecord(
+                    source=source,
+                    weapon_name=weapon_name,
+                    field_name=field_name,
+                    representation=representation,
+                    ordinal=len(records),
+                ))
+        return records
 
     @classmethod
     def _vehicle_records(
@@ -1523,6 +1829,25 @@ class AddonPackageInspector:
             seen.add(identifier)
             result.append(record)
         return result
+
+    @staticmethod
+    def _report_source_record_duplicates(
+        records, key, code: str, label: str, findings,
+    ) -> None:
+        """Report ambiguous authoring targets without discarding their evidence."""
+        seen: set[object] = set()
+        for record in records:
+            identifier = key(record)
+            if identifier not in seen:
+                seen.add(identifier)
+                continue
+            findings.append(PackageFinding(
+                "warning",
+                code,
+                f"Duplicate {label} record retained for authoring review: "
+                f"{record.weapon_name}",
+                record.source,
+            ))
 
 
 class AddonDraftBuilder:
@@ -1747,10 +2072,13 @@ class AddonDraftBuilder:
                     "required": False,
                 })
         if scan.animation_weapons:
-            source = next((
-                entry.path for entry in scan.entries
-                if "weaponanimation" in entry.path.lower()
-            ), None)
+            source = (
+                scan.weapon_animation_records[0].source
+                if scan.weapon_animation_records else next((
+                    entry.path for entry in scan.entries
+                    if "weaponanimation" in entry.path.lower()
+                ), None)
+            )
             nodes.append(sourced({
                 "id": "animations.imported", "kind": "animation",
                 "label": "Discovered animation mappings",
@@ -1767,10 +2095,13 @@ class AddonDraftBuilder:
                     "Require animation coverage for every discovered weapon.",
                 ))
         if scan.shop_weapons:
-            source = next((
-                entry.path for entry in scan.entries
-                if "weapon_shop" in entry.path.lower()
-            ), None)
+            source = (
+                scan.weapon_shop_records[0].source
+                if scan.weapon_shop_records else next((
+                    entry.path for entry in scan.entries
+                    if "weapon_shop" in entry.path.lower()
+                ), None)
+            )
             nodes.append(sourced({
                 "id": "storefront.imported", "kind": "storefront",
                 "label": "Discovered weapon shop registration",

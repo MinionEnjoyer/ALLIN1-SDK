@@ -26,6 +26,26 @@ def test_workbench_help_explains_collapsible_side_panes():
     assert "restores its previous width, selection, and edit state" in topic.body
 
 
+def test_weapon_workbench_help_explains_guarded_authoring_boundaries():
+    topic = next(topic for topic in HELP_TOPICS if topic.key == "weapon-workbench")
+    body = topic.body.casefold()
+
+    assert "create authoring workspace copies and verifies" in body
+    assert "shared ammo or component definitions" in body
+    assert "require a separate confirmation" in body
+    assert "component type and attachment bone are visible but locked" in body
+    assert "every exact animation-set and storefront source record" in body
+    assert "only the weapon key changes" in body
+    assert "ambiguous sources or partial mappings are rejected" in body
+    assert "create complete weapon from donor" in body
+    assert "unknown donor fields" in body
+    assert "raw schema remain preserved and locked" in body
+    assert "plan-weapon-clone is read-only" in body
+    assert "exact --plan-sha256" in body
+    assert "undo latest" in body
+    assert "never write to the original package" in body
+
+
 def test_help_search_matches_keywords_and_ranks_title_matches():
     matches = search_help_topics("RPF")
     assert matches

@@ -511,17 +511,35 @@ def export_render_interchange(
             {"vertices": vertex_count, "triangles": triangle_count},
         )
 
-    resolved_assets = {
-        key.casefold(): value.resolve(strict=True)
-        for key, value in (texture_assets or {}).items()
-    }
+    # Texture pixels are optional render companions.  A stale catalog entry,
+    # zero-byte conversion, or removed file must leave that sampler unresolved
+    # rather than aborting an otherwise valid geometry/material preview.
+    resolved_assets: dict[str, Path] = {}
+    for key, value in (texture_assets or {}).items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        try:
+            authored = Path(value)
+            if authored.is_symlink():
+                continue
+            resolved = authored.resolve(strict=True)
+            if not resolved.is_file() or resolved.stat().st_size <= 0:
+                continue
+        except (OSError, TypeError, ValueError):
+            continue
+        resolved_assets[key.casefold()] = resolved
     material_keys: dict[tuple[Any, ...], str] = {}
     material_records: list[dict[str, Any]] = []
     geometry_materials: list[str] = []
     for geometry in selected:
         identity, semantic, color, properties = _material_properties(geometry)
-        parameters = tuple(getattr(geometry, "texture_parameters", ())) or tuple(
+        raw_parameters = tuple(getattr(geometry, "texture_parameters", ())) or tuple(
             ("", value) for value in geometry.texture_names
+        )
+        parameters = tuple(
+            (str(slot or ""), texture_name)
+            for slot, texture_name in raw_parameters
+            if isinstance(texture_name, str) and texture_name.strip()
         )
         source_key = (
             geometry.material_index, identity, semantic, tuple(geometry.texture_names),

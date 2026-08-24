@@ -81,6 +81,61 @@ def test_package_graph_persists_typed_vehicle_relationships(tmp_path):
     assert (moved["x"], moved["y"]) == (4321.0, 765.0)
 
 
+def test_vehicle_name_prefix_does_not_turn_another_vehicle_into_tuning(tmp_path):
+    package = _vehicle_package(tmp_path)
+    second_vehicle = (
+        "<Item><modelName>graphcar_police</modelName>"
+        "<txdName>graphcar_police</txdName>"
+        "<handlingId>GRAPHPOLICE</handlingId><gameName>GRAPHPOLICE</gameName>"
+        "<vehicleMakeName>GRAPH</vehicleMakeName>"
+        "<audioNameHash>POLICE</audioNameHash>"
+        "<layout>LAYOUT_STANDARD</layout><type>VEHICLE_TYPE_CAR</type>"
+        "<vehicleClass>VC_EMERGENCY</vehicleClass></Item>"
+    )
+    (package / "vehicles.meta").write_text(
+        VEHICLES.replace("</Item></InitDatas>", "</Item>" + second_vehicle + "</InitDatas>"),
+        encoding="utf-8",
+    )
+    (package / "handling.meta").write_text(
+        HANDLING.replace(
+            "</Item></HandlingData>",
+            "</Item><Item><handlingName>GRAPHPOLICE</handlingName>"
+            "</Item></HandlingData>",
+        ),
+        encoding="utf-8",
+    )
+    (package / "carvariations.meta").write_text(
+        VARIATIONS.replace(
+            "</Item></variationData>",
+            "</Item><Item><modelName>graphcar_police</modelName>"
+            "<kits/></Item></variationData>",
+        ),
+        encoding="utf-8",
+    )
+    stream = package / "stream"
+    (stream / "graphcar_police.yft").write_bytes(b"police-primary")
+    (stream / "graphcar_police.ytd").write_bytes(b"police-texture")
+
+    project = PackageGraphWorkspace(tmp_path / "projects").import_package(package)
+    state = RpfPackageGraph.validate(project.graph, verify_sources=True)
+    report = state["semantic"]
+    assert report is not None
+    graphcar = next(
+        item for item in report["entities"] if item["name"] == "graphcar"
+    )
+    node_names = {
+        node_id: node["name"] for node_id, node in state["nodes"].items()
+    }
+    graphcar_tuning = {
+        node_names[item["target"]]
+        for item in report["relations"]
+        if item["source"] == graphcar["id"] and item["type"] == "tuning_asset"
+    }
+    assert "graphcar_spoiler.yft" in graphcar_tuning
+    assert "graphcar_police.yft" not in graphcar_tuning
+    assert "graphcar_police.ytd" not in graphcar_tuning
+
+
 def test_relationship_commands_share_api_and_validate_endpoints(tmp_path):
     project = PackageGraphWorkspace(tmp_path / "projects").import_package(
         _vehicle_package(tmp_path)
