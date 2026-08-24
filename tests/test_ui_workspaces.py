@@ -19,6 +19,12 @@ def test_primary_sdk_routes_are_plain_language_and_package_selection_works():
         assert label in source
     assert 'self.example_list.bind("<<TreeviewSelect>>"' in source
     assert "<<ListboxSelect>>\", self._select_example" not in source
+    assert 'label="Show workspace sidebar", accelerator="Ctrl+B"' in source
+    assert 'self.bind("<Control-b>", self._toggle_sidebar)' in source
+    assert 'text="← Back"' not in source
+    assert 'style="Link.TButton", cursor="hand2"' in source
+    assert 'button.configure(text=f"‹ {self._workspace_label(target)}")' in source
+    assert "cancelling the workbench's unsaved-edit warning" in source
 
 
 def test_graph_binary_and_gxt2_authoring_are_embedded_with_compatibility_hosts():
@@ -114,6 +120,7 @@ def test_package_recipes_replace_the_oiv_prompt_cascade_with_one_workspace():
     assert "plan.translatable and plan.created_archive_operations" in recipes
     assert "plan.managed_exportable" in recipes
     assert "recipes.has_active_work()" in shell
+    assert 'text="Back to Package Linker"' not in recipes
 
 
 def test_asset_viewer_separates_package_browsing_from_native_authoring():
@@ -127,35 +134,58 @@ def test_asset_viewer_separates_package_browsing_from_native_authoring():
     assert "Open YTD texture workspace" not in open_menu
 
 
-def test_vehicle_workbench_is_integrated_and_exposes_viewport_controls():
+def test_rpf_large_preview_warning_formats_the_actual_cap():
+    explorer = _source("rpf_explorer.py")
+    assert 'f"are capped at {_human_size(MAX_NATIVE_PREVIEW_BYTES)}."' in explorer
+    assert '"are capped at {_human_size(MAX_NATIVE_PREVIEW_BYTES)}."' not in explorer.replace(
+        'f"are capped at {_human_size(MAX_NATIVE_PREVIEW_BYTES)}."', "",
+    )
+
+
+def test_unified_workbench_is_integrated_and_exposes_vehicle_viewport_controls():
     shell = _source("addon_sdk_ui.py")
+    unified = _source("workbench.py")
     workbench = _source("vehicle_workbench.py")
-    assert '"vehicles": vehicles_page' in shell
-    assert '("vehicles", "Vehicle Workbench")' in shell
-    assert "from allin1_sdk.vehicle_workbench import VehicleWorkbenchFrame" in shell
-    assert "self.vehicle_workspace = workspace" in shell
+    assert '"workbench": workbench_page' in shell
+    assert '("workbench", "Content Workbench", "Ctrl+3")' in shell
+    assert "from allin1_sdk.workbench import WorkbenchFrame" in shell
+    assert "self.workbench_workspace = workspace" in shell
+    assert "class WorkbenchFrame(ttk.Frame)" in unified
+    assert "VehicleWorkbenchFrame(" in unified
+    assert "WeaponWorkbenchFrame(" in unified
+    assert "PedWorkbenchFrame(" in unified
+    assert 'self.tabs.add(vehicle_page, text="Vehicles")' in unified
+    assert 'self.tabs.add(weapon_page, text="Weapons")' in unified
+    assert 'self.tabs.add(ped_page, text="Peds")' in unified
     assert 'workspace.pack(fill="both", expand=True)' in shell
-    assert 'label="Open vehicle workbench…"' in shell
+    assert 'label="Open in Workbench…"' in shell
     assert "class VehicleWorkbenchFrame(ttk.Frame)" in workbench
     assert "tk.Toplevel" not in workbench
     for control in (
-        'text="−"', 'text="100%"', 'text="+"', 'text="Fit"',
-        'text="Fragment"', 'text="LOD"', 'text="Component"',
-        'text="Reset camera"', 'text="Open texture dictionary"',
+        '"Shaded", "Materials", "Wireframe"',
+        'text="Model ▾"', 'label="Fragment"', 'label="LOD"',
+        'label="Component"', 'text="View ▾"', 'text="Fit"',
+        '("Perspective", 34.0, 24.0)', '("Front", 0.0, 0.0)',
+        '("Top", 0.0, 89.0)',
+        'label="Reset camera"', 'text="Open texture dictionary"',
         'text="Build installable package…"',
         'text="Create authoring workspace…"',
         'text="Apply + validate"', 'text="Undo latest"',
         'text="Appearance"', 'text="Apply appearance + validate"',
         'text="Apply kit"', 'text="Apply field"',
         'text="Tuning Builder"', 'text="Add + validate"',
-        'text="Duplicate"', 'text="Remove"', 'text="Apply field + validate"',
+        'text="Entry actions…"', 'label="New entry"', 'label="Copy selected"',
+        'label="Delete selected"', 'label="Move up"', 'label="Move down"',
         'text="Use for new part"', 'text="Open in Asset Viewer"',
         'text="Migrate + validate"',
         '"<MouseWheel>"', '"<ButtonPress-1>"', '"<ButtonPress-3>"',
+        '"<Double-Button-1>"', '"<KeyPress-f>"', '"<KeyPress-0>"',
     ):
         assert control in workbench
     assert "report.model_scene" in workbench
     assert "scene.render(" in workbench
+    assert "render_mode=render_mode, quality=quality" in workbench
+    assert 'quality="interactive"' in workbench
     assert "scene.components" in workbench
     assert "VehicleAddonPackageBuilder(" in workbench
     assert "VehicleAuthoringWorkspace.create(" in workbench
@@ -171,7 +201,7 @@ def test_vehicle_workbench_is_integrated_and_exposes_viewport_controls():
     assert "workspace.migrate_identity(" in workbench
     assert "workspace.undo()" in workbench
     assert 'text="Open selected in Asset Viewer"' in workbench
-    assert "on_open_asset=self._open_vehicle_asset" in shell
+    assert "on_open_asset=self._open_workbench_asset" in shell
     assert "self.asset_workspace.select_asset(path)" in shell
     assert "def select_asset(self, path: str) -> bool" in _source("asset_viewer.py")
 
@@ -180,7 +210,7 @@ def test_specialist_workspaces_are_lazy_loaded_inside_the_unified_shell():
     shell = _source("addon_sdk_ui.py")
     imports, _separator, body = shell.partition("class AddonSdkDialog")
     for module in (
-        "asset_viewer", "vehicle_workbench", "rpf_explorer",
+        "asset_viewer", "workbench", "rpf_explorer",
         "oiv_workbench_ui", "help_center",
     ):
         assert f"from allin1_sdk.{module} import" not in imports

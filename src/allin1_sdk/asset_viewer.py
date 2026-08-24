@@ -27,6 +27,7 @@ from allin1_sdk.native_assets import (
 )
 from allin1_sdk.help_center import HelpCenterDialog
 from allin1_sdk.texture_editor import TextureDictionaryEditorFrame
+from allin1_sdk.ui_foundation import place_window
 
 
 def _human_size(value: int) -> str:
@@ -84,8 +85,9 @@ class AssetViewerDialog(ttk.Frame):
         if not embedded:
             self._window = tk.Toplevel(parent)
             self._window.title("ALLIN1 Package Asset Viewer")
-            self._window.geometry("1180x780")
-            self._window.minsize(900, 620)
+            place_window(
+                self._window, preferred=(1180, 780), minimum=(900, 620),
+            )
             self._window.transient(parent.winfo_toplevel())
             host = self._window
         super().__init__(host)
@@ -211,8 +213,8 @@ class AssetViewerDialog(ttk.Frame):
         search_row.pack(fill="x", pady=(0, 8))
         ttk.Label(search_row, text="Filter").pack(side="left")
         self.search = tk.StringVar()
-        search_entry = ttk.Entry(search_row, textvariable=self.search)
-        search_entry.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        self.search_entry = ttk.Entry(search_row, textvariable=self.search)
+        self.search_entry.pack(side="left", fill="x", expand=True, padx=(8, 0))
         self.search.trace_add("write", lambda *_args: self._populate_tree())
 
         tree_row = ttk.Frame(inventory)
@@ -225,10 +227,19 @@ class AssetViewerDialog(ttk.Frame):
         self.tree.column("#0", width=300, minwidth=180)
         self.tree.column("size", width=82, anchor="e", stretch=False)
         scroll = ttk.Scrollbar(tree_row, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        self.asset_xscroll = ttk.Scrollbar(
+            tree_row, orient="horizontal", command=self.tree.xview,
+        )
+        self.tree.configure(
+            yscrollcommand=scroll.set, xscrollcommand=self.asset_xscroll.set,
+        )
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.asset_xscroll.grid(row=1, column=0, sticky="ew")
+        tree_row.rowconfigure(0, weight=1)
+        tree_row.columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", self._select_asset)
+        self.tree.bind("<Return>", self._activate_selected_asset)
 
         self.asset_title = tk.StringVar(value="Select an asset")
         self.asset_meta = tk.StringVar(value="No package loaded")
@@ -254,6 +265,29 @@ class AssetViewerDialog(ttk.Frame):
             background="#ffffff", foreground="#1e2925",
             font=("Cascadia Mono", 9), padx=10, pady=10, state="disabled",
         )
+        self._install_filter_shortcuts()
+
+    def _install_filter_shortcuts(self) -> None:
+        """Keep filter shortcuts local when the viewer is embedded in the SDK shell."""
+        tag = f"AssetViewerFilter:{id(self)}"
+        self.bind_class(tag, "<Control-f>", self._focus_search)
+        self.bind_class(tag, "<Escape>", self._clear_search)
+        pending = [self]
+        while pending:
+            widget = pending.pop()
+            tags = widget.bindtags()
+            if tag not in tags:
+                widget.bindtags((tags[0], tag, *tags[1:]))
+            pending.extend(widget.winfo_children())
+
+    def _focus_search(self, _event: object | None = None) -> str:
+        self.search_entry.focus_set()
+        self.search_entry.selection_range(0, "end")
+        return "break"
+
+    def _clear_search(self, _event: object | None = None) -> str:
+        self.search.set("")
+        return "break"
 
     def _open_menu(self, parent: tk.Misc) -> tk.Menu:
         """Return package-source choices only.
@@ -398,9 +432,11 @@ class AssetViewerDialog(ttk.Frame):
         )
 
     def _populate_tree(self) -> None:
+        selected_path = self.selected_entry.path if self.selected_entry else None
         self.tree.delete(*self.tree.get_children())
         self.entries.clear()
         if self.scan is None:
+            self._clear_asset_selection("Open a package to browse its assets.")
             return
         query = self.search.get().strip().casefold()
         grouped: dict[str, list[PackageEntry]] = {}
@@ -409,6 +445,7 @@ class AssetViewerDialog(ttk.Frame):
                 continue
             grouped.setdefault(entry.category, []).append(entry)
         counter = 0
+        restored: str | None = None
         for category in sorted(grouped):
             parent = self.tree.insert(
                 "", "end", text=category,
@@ -422,6 +459,33 @@ class AssetViewerDialog(ttk.Frame):
                     parent, "end", iid=item_id, text=entry.path,
                     values=(_human_size(entry.size),),
                 )
+                if selected_path and entry.path.casefold() == selected_path.casefold():
+                    restored = item_id
+        if restored is not None:
+            self.tree.selection_set(restored)
+            self.tree.focus(restored)
+            self.tree.see(restored)
+            return
+        if query:
+            message = (
+                f"No package assets match {self.search.get().strip()!r}."
+                if counter == 0 else
+                f"{counter:,} package asset(s) match. Select one to inspect it."
+            )
+        else:
+            message = "Select an asset on the left to inspect it."
+        self._clear_asset_selection(message)
+
+    def _clear_asset_selection(self, message: str) -> None:
+        self.selected_entry = None
+        self._set_native_action(False)
+        self.asset_title.set("No asset selected")
+        self.asset_meta.set(message)
+        self._show_text(message)
+
+    def _activate_selected_asset(self, _event: object | None = None) -> str:
+        self._select_asset()
+        return "break"
 
     def _select_asset(self, _event: object | None = None) -> None:
         selection = self.tree.selection()

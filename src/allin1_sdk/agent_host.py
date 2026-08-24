@@ -10,6 +10,9 @@ from allin1_sdk.agent_api import serve_stdio
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    from allin1_sdk.console_entry import configure_utf8_stdio
+
+    configure_utf8_stdio()
     parser = argparse.ArgumentParser(
         prog="ALLIN1-SDK-Agent",
         description="Serve the ALLIN1 SDK structured JSONL API over stdio.",

@@ -26,6 +26,10 @@ GAME_WRITE_COMMANDS = frozenset({
     "apply-rpf-plan",
     "install-package",
     "rollback-rpf-transaction",
+    # The compatibility group contains the complete legacy command surface,
+    # including game-write operations.  Classify the group conservatively;
+    # typed API callers should use the explicitly cataloged top-level command.
+    "sdk",
     "uninstall-package",
 })
 AUTHORING_COMMANDS = frozenset({
@@ -96,6 +100,8 @@ AUTHORING_COMMANDS = frozenset({
     "position-rpf-graph-node",
     "position-rpf-program-node",
     "refresh-rpf-graph-sources",
+    "recover-rpf-transaction",
+    "render-native-model",
     "render-rpf-graph-previews",
     "remove-rpf-graph-node",
     "remove-rpf-program-node",
@@ -125,6 +131,62 @@ AUTHORING_COMMANDS = frozenset({
     "validate-meta-roundtrip",
     "verify-rpf-archive",
 })
+READ_ONLY_COMMANDS = frozenset({
+    "assistant",
+    "compare-telemetry",
+    "inspect-binary-workspace",
+    "inspect-log",
+    "inspect-package-graph-relations",
+    "inspect-package-receipt",
+    "inspect-rpf",
+    "inspect-rpf-change-set",
+    "inspect-rpf-graph",
+    "inspect-rpf-program",
+    "inspect-source",
+    "inspect-vehicle-authoring",
+    "inspect-vehicle-project",
+    "inspect-vehicle-tuning",
+    "inspect-workbench",
+    "list",
+    "list-gxt2-entries",
+    "list-installed-packages",
+    "list-rpf-program-templates",
+    "list-rpf-transactions",
+    "open-rpf-graph",
+    "open-vehicle-workbench",
+    "open-workbench",
+    "propose-package-settings",
+    "search-rpf-catalog",
+    "validate",
+    "validate-package",
+    "validate-package-settings-proposal",
+    "validate-rpf-graph",
+    "verify-package-ownership",
+    "verify-rpf-transaction",
+})
+
+
+class UnclassifiedCommandError(ValueError):
+    """Raised when an API command has not received an explicit risk review."""
+
+
+_RISK_GROUPS = {
+    "read_only": READ_ONLY_COMMANDS,
+    "authoring_write": AUTHORING_COMMANDS,
+    "game_write": GAME_WRITE_COMMANDS,
+}
+_risk_members = [
+    command
+    for commands in _RISK_GROUPS.values()
+    for command in commands
+]
+if len(_risk_members) != len(set(_risk_members)):
+    raise RuntimeError("Agent API command risk groups overlap")
+COMMAND_RISKS = {
+    command: risk
+    for risk, commands in _RISK_GROUPS.items()
+    for command in commands
+}
 
 
 def _cli_group() -> click.Group:
@@ -134,12 +196,13 @@ def _cli_group() -> click.Group:
 
 
 def command_risk(command: str) -> str:
-    """Classify a command for agents and the audit trail."""
-    if command in GAME_WRITE_COMMANDS:
-        return "game_write"
-    if command in AUTHORING_COMMANDS:
-        return "authoring_write"
-    return "read_only"
+    """Return an explicitly reviewed command risk or fail closed."""
+    try:
+        return COMMAND_RISKS[command]
+    except KeyError as exc:
+        raise UnclassifiedCommandError(
+            f"command has no explicit Agent API risk classification: {command}"
+        ) from exc
 
 
 def _parameter_schema(parameter: click.Parameter) -> dict[str, Any]:
@@ -223,7 +286,13 @@ def execute_request(
             },
         )
     if action == "catalog":
-        return _response(request_id, ok=True, result=command_catalog())
+        try:
+            catalog = command_catalog()
+        except UnclassifiedCommandError as exc:
+            return _response(
+                request_id, ok=False, risk="unclassified", error=str(exc),
+            )
+        return _response(request_id, ok=True, result=catalog)
     if action != "execute":
         return _response(
             request_id, ok=False,
@@ -252,7 +321,19 @@ def execute_request(
     command = group.get_command(context, command_name)
     if command is None:
         return _response(request_id, ok=False, error=f"unknown command: {command_name}")
-    risk = command_risk(command_name)
+    try:
+        risk = command_risk(command_name)
+    except UnclassifiedCommandError as exc:
+        response = _response(
+            request_id, ok=False, risk="unclassified", error=str(exc),
+        )
+        _audit({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "request_id": request_id, "command": command_name,
+            "args": arguments, "risk": "unclassified", "allowed": False,
+            "exit_code": None,
+        }, audit_path)
+        return response
     if risk == "game_write" and not allow_game_writes:
         response = _response(
             request_id, ok=False, risk=risk,

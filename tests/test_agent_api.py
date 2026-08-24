@@ -3,7 +3,11 @@ import io
 import json
 import sys
 
+import click
+import pytest
+
 from allin1_sdk.agent_api import (
+    COMMAND_RISKS,
     command_catalog,
     command_risk,
     execute_request,
@@ -50,6 +54,8 @@ def test_catalog_is_structured_and_classifies_risk():
     ):
         assert catalog[command]["risk"] == "authoring_write"
     assert catalog["open-rpf-graph"]["risk"] == "read_only"
+    assert catalog["open-workbench"]["risk"] == "read_only"
+    assert catalog["inspect-workbench"]["risk"] == "read_only"
     assert catalog["open-vehicle-workbench"]["risk"] == "read_only"
     assert catalog["open-package-graph"]["risk"] == "authoring_write"
     assert catalog["import-package-graph"]["risk"] == "authoring_write"
@@ -69,13 +75,47 @@ def test_catalog_is_structured_and_classifies_risk():
     assert catalog["install-package"]["risk"] == "game_write"
     assert catalog["list-installed-packages"]["risk"] == "read_only"
     assert catalog["uninstall-package"]["risk"] == "game_write"
+    assert catalog["sdk"]["risk"] == "game_write"
+    assert catalog["recover-rpf-transaction"]["risk"] == "authoring_write"
     assert catalog["validate"]["parameters"][0]["kind"] == "argument"
     native_parameters = {
         item["name"]: item for item in catalog["inspect-native-asset"]["parameters"]
     }
     assert native_parameters["gta_path"]["kind"] == "option"
     assert "audio" in native_parameters["gta_path"]["help"].casefold()
-    assert command_risk("unknown-future-command") == "read_only"
+    assert set(catalog) == set(COMMAND_RISKS)
+    with pytest.raises(ValueError, match="no explicit Agent API risk"):
+        command_risk("unknown-future-command")
+
+
+def test_unclassified_new_command_fails_closed(monkeypatch, tmp_path):
+    invoked = {"value": False}
+    group = click.Group()
+
+    @group.command("future-command")
+    def future_command():
+        invoked["value"] = True
+
+    monkeypatch.setattr("allin1_sdk.agent_api._cli_group", lambda: group)
+    catalog = execute_request({"id": "catalog", "action": "catalog"})
+    assert catalog == {
+        "protocol": "1.0", "id": "catalog", "ok": False,
+        "risk": "unclassified",
+        "error": (
+            "command has no explicit Agent API risk classification: future-command"
+        ),
+    }
+    audit = tmp_path / "audit.jsonl"
+    result = execute_request({
+        "id": "execute", "action": "execute", "command": "future-command",
+        "args": [],
+    }, allow_game_writes=True, audit_path=audit)
+    assert result["ok"] is False
+    assert result["risk"] == "unclassified"
+    assert invoked["value"] is False
+    record = json.loads(audit.read_text(encoding="utf-8"))
+    assert record["allowed"] is False
+    assert record["risk"] == "unclassified"
 
 
 def test_ping_catalog_and_validation_errors(tmp_path):
@@ -156,6 +196,16 @@ def test_game_write_requires_process_opt_in_and_command_acknowledgement(tmp_path
     }, allow_game_writes=True, audit_path=audit)
     assert allowed_process["ok"] is False
     assert "--acknowledge-write" in allowed_process["result"]["output"]
+
+    # The legacy SDK compatibility group contains the same game-write command.
+    # Its conservative classification must prevent alias-based policy bypass.
+    alias_denied = execute_request({
+        "id": "sdk-alias", "action": "execute", "command": "sdk",
+        "args": ["apply-rpf-plan", str(plan)],
+    }, audit_path=audit)
+    assert alias_denied["ok"] is False
+    assert alias_denied["risk"] == "game_write"
+    assert "--allow-game-writes" in alias_denied["error"]
 
 
 def test_api_lists_and_uninstalls_receipt_owned_package(tmp_path, monkeypatch):

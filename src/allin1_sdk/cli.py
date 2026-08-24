@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import asdict
 from pathlib import Path
 
 import click
@@ -17,14 +18,27 @@ from allin1_sdk.addon_importer import (
 )
 from allin1_sdk.addon_sdk import AddonLinker, AddonManifest, AddonSdkCatalog
 from allin1_sdk.binary_workspace import BinaryPatchWorkspace
+from allin1_sdk.compiled_render import (
+    COMPILED_BACKGROUNDS,
+    COMPILED_LIGHT_RIGS,
+    COMPILED_RENDER_QUALITIES,
+    MAX_COMPILED_RESOLUTION,
+    MAX_COMPILED_SAMPLES,
+    BLENDER_DEVICES,
+    BLENDER_ENGINES,
+    CompiledRenderError,
+    CompiledRenderSettings,
+    compile_vehicle_render,
+)
 from allin1_sdk.gxt2_workspace import Gxt2Workspace
 from allin1_sdk.detector import detect_gta_path
 from allin1_sdk.dlc_inventory import DlcInventory
 from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
 from allin1_sdk.native_assets import (
-    MAX_NATIVE_PREVIEW_BYTES, NativeAssetInspector, NativeAssetReport,
+    MAX_NATIVE_PREVIEW_BYTES, MODEL_PREVIEW_SUFFIXES,
+    NativeAssetInspector, NativeAssetReport,
 )
-from allin1_sdk.mods import ModIntegrationService, ModManifest
+from allin1_sdk.mods import ModIntegrationService, open_mod_package
 from allin1_sdk.oiv_workbench import OivWorkbench
 from allin1_sdk.package_graph import PackageGraphWorkspace
 from allin1_sdk.package_relations import PackageRelationshipAnalyzer
@@ -136,11 +150,7 @@ def _open_graph_window(
 
     executable = Path(sys.executable).resolve()
     if getattr(sys, "frozen", False):
-        desktop = executable.with_name("ALLIN1-SDK.exe")
-        if executable.name.casefold() == "allin1-sdk.exe":
-            desktop = executable
-        if not desktop.is_file():
-            raise FileNotFoundError(f"SDK desktop executable was not found: {desktop}")
+        desktop = _frozen_desktop_executable(executable)
         command = [str(desktop), "--rpf-graph", str(resolved)]
     else:
         interpreter = executable
@@ -163,21 +173,48 @@ def _open_graph_window(
 def _open_vehicle_workbench_window(
     source: Path, gta_path: Path | None = None,
 ) -> tuple[int, int]:
-    """Validate a vehicle package and open it in the desktop workbench."""
+    """Compatibility wrapper for the Vehicles tab of the unified Workbench."""
+    pid, counts = _open_workbench_window(source, "vehicles", gta_path)
+    return pid, counts["vehicles"]
+
+
+def _frozen_desktop_executable(executable: Path | None = None) -> Path:
+    """Resolve the desktop sibling used by every frozen SDK entry point."""
+    current = (executable or Path(sys.executable)).resolve()
+    desktop_name = "ALLIN1-SDK-Desktop.exe"
+    if current.name.casefold() == desktop_name.casefold():
+        return current
+    desktop = current.with_name(desktop_name)
+    if not desktop.is_file():
+        raise FileNotFoundError(f"SDK desktop executable was not found: {desktop}")
+    return desktop
+
+
+def _open_workbench_window(
+    source: Path, category: str = "auto", gta_path: Path | None = None,
+) -> tuple[int, dict[str, int]]:
+    """Validate common add-on content and open it in the desktop Workbench."""
     resolved = source.expanduser().resolve(strict=True)
-    project = VehicleProjectResolver().inspect(resolved)
-    if not project.models:
-        raise ValueError("The selected package does not contain a vehicle project.")
+    scan = AddonPackageInspector().inspect(resolved)
+    counts = {
+        "vehicles": len(scan.vehicles),
+        "weapons": len(scan.weapons),
+        "peds": len(scan.peds),
+    }
+    if category not in {"auto", *counts}:
+        raise ValueError(f"Unsupported Workbench category: {category}")
+    if not any(counts.values()):
+        raise ValueError(
+            "The selected package does not contain vehicle, weapon, or ped metadata."
+        )
+    if category != "auto" and not counts[category]:
+        raise ValueError(f"The selected package does not contain {category} metadata.")
     selected_game = gta_path.expanduser().resolve(strict=True) if gta_path else None
 
     executable = Path(sys.executable).resolve()
     if getattr(sys, "frozen", False):
-        desktop = executable.with_name("ALLIN1-SDK.exe")
-        if executable.name.casefold() == "allin1-sdk.exe":
-            desktop = executable
-        if not desktop.is_file():
-            raise FileNotFoundError(f"SDK desktop executable was not found: {desktop}")
-        command = [str(desktop), "--vehicle-package", str(resolved)]
+        desktop = _frozen_desktop_executable(executable)
+        command = [str(desktop), "--workbench-package", str(resolved)]
     else:
         interpreter = executable
         if os.name == "nt":
@@ -186,17 +223,16 @@ def _open_vehicle_workbench_window(
                 interpreter = windowed
         command = [
             str(interpreter), "-m", "allin1_sdk.app",
-            "--vehicle-package", str(resolved),
+            "--workbench-package", str(resolved),
         ]
+    command.extend(("--workbench-category", category))
     if selected_game is not None:
         command.extend(("--gta-path", str(selected_game)))
-    if selected_node is not None:
-        command.extend(("--graph-node", selected_node))
     options: dict[str, object] = {}
     if os.name == "nt":
         options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     process = subprocess.Popen(command, cwd=PROJECT_ROOT, **options)
-    return process.pid, len(project.models)
+    return process.pid, counts
 
 
 def _open_package_graph_window(
@@ -270,6 +306,299 @@ def _publish_native_report(
 @click.group()
 def main() -> None:
     """Author, audit, and inspect GTA V add-on content."""
+    from allin1_sdk.console_entry import configure_utf8_stdio
+
+    configure_utf8_stdio()
+
+
+@main.command("inspect-source")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--symbol", "symbols", multiple=True, help="Symbol or exact text to retrieve; repeatable.")
+@click.option("--context-lines", type=click.IntRange(0, 200), default=16, show_default=True)
+def inspect_source_command(source: Path, symbols: tuple[str, ...], context_lines: int) -> None:
+    """Inspect bounded source snippets around selected symbols without editing."""
+    from allin1_sdk.assistant_evidence import inspect_source
+
+    try:
+        payload = inspect_source(source, symbols=symbols, context_lines=context_lines)
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+@main.command("inspect-log")
+@click.argument("log", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--pattern", "patterns", multiple=True, help="Literal telemetry text to retain; repeatable.")
+@click.option("--max-lines", type=click.IntRange(1, 1000), default=200, show_default=True)
+def inspect_log_command(log: Path, patterns: tuple[str, ...], max_lines: int) -> None:
+    """Inspect bounded matching or trailing telemetry lines without editing."""
+    from allin1_sdk.assistant_evidence import inspect_log
+
+    try:
+        payload = inspect_log(log, patterns=patterns, max_lines=max_lines)
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+@main.command("compare-telemetry")
+@click.argument("baseline", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("current", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+def compare_telemetry_command(baseline: Path, current: Path) -> None:
+    """Compare numeric key/value telemetry from two text files without editing."""
+    from allin1_sdk.assistant_evidence import compare_telemetry
+
+    try:
+        payload = compare_telemetry(baseline, current)
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+@main.command("propose-package-settings")
+@click.argument("request", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--root", type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--timeout", type=click.FloatRange(1, 600), default=180.0, show_default=True,
+)
+@click.option(
+    "--startup-timeout", type=click.FloatRange(1, 300), default=90.0,
+    show_default=True,
+)
+@click.option(
+    "--max-tokens", type=click.IntRange(1, 8192), default=1024,
+    show_default=True,
+)
+@click.option("--no-progress", is_flag=True)
+def propose_package_settings_command(
+    request: Path, root: Path | None, timeout: float, startup_timeout: float,
+    max_tokens: int, no_progress: bool,
+) -> None:
+    """Ask Qwen for a typed advisory package-settings diff; never apply it."""
+    from allin1_sdk.assistant_client import prompt_structured_assistant
+    from allin1_sdk.settings_assistant import (
+        SETTINGS_PROPOSAL_RESPONSE_FORMAT,
+        proposal_prompt,
+        validate_proposal_against_request,
+        validate_settings_request,
+    )
+
+    try:
+        host_request = validate_settings_request(request)
+        response_format = SETTINGS_PROPOSAL_RESPONSE_FORMAT["json_schema"]
+        result = prompt_structured_assistant(
+            proposal_prompt(host_request),
+            response_schema=response_format["schema"],
+            schema_name=response_format["name"],
+            root=root, timeout=timeout, startup_timeout=startup_timeout,
+            max_tokens=max_tokens,
+            progress=(None if no_progress else lambda state: click.echo(
+                f"assistant: {state}", err=True,
+            )),
+        )
+        proposal = validate_proposal_against_request(host_request, result.payload)
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(proposal, indent=2, ensure_ascii=False))
+
+
+@main.command("validate-package-settings-proposal")
+@click.argument("request", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("proposal", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+def validate_package_settings_proposal_command(request: Path, proposal: Path) -> None:
+    """Validate a typed advisory diff against its immutable host request."""
+    from allin1_sdk.settings_assistant import validate_proposal_against_request
+
+    try:
+        normalized = validate_proposal_against_request(request, proposal)
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(normalized, indent=2, ensure_ascii=False))
+
+
+@main.group("assistant")
+def assistant_group() -> None:
+    """Prompt or inspect the optional local-first SDK assistant."""
+
+
+@assistant_group.command("status")
+@click.option("--root", type=click.Path(file_okay=False, path_type=Path))
+def assistant_status_command(root: Path | None) -> None:
+    """Show the configured provider without starting a model."""
+    from allin1_sdk.assistant_client import assistant_status
+
+    try:
+        payload = assistant_status(root)
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(payload, indent=2))
+
+
+@assistant_group.command("context")
+@click.argument("question", nargs=-1, required=True)
+@click.option(
+    "--repository-root", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Repository that owns the current task; defaults to the caller's directory.",
+)
+@click.option(
+    "--workspace-root", "workspace_roots", multiple=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Additional launcher, SDK, or package workspace root.",
+)
+@click.option(
+    "--manifest", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Authoritative mod.toml or addon.json for the package under review.",
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Verified GTA V installation path; never inferred by the model.",
+)
+@click.option(
+    "--operation-mode", type=click.Choice(("advisory", "planning")),
+    default="advisory", show_default=True,
+)
+@click.option(
+    "--source", "sources", multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Explicit source file to retrieve; repeatable.",
+)
+@click.option("--symbol", "symbols", multiple=True, help="Source symbol or text to retrieve; repeatable.")
+@click.option(
+    "--telemetry", "telemetry_files", multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Explicit log or telemetry file to retrieve; repeatable.",
+)
+@click.option("--telemetry-pattern", "telemetry_patterns", multiple=True, help="Telemetry text to retain.")
+def assistant_context_command(
+    question: tuple[str, ...], repository_root: Path | None,
+    workspace_roots: tuple[Path, ...], manifest: Path | None,
+    gta_path: Path | None, operation_mode: str, sources: tuple[Path, ...],
+    symbols: tuple[str, ...], telemetry_files: tuple[Path, ...],
+    telemetry_patterns: tuple[str, ...],
+) -> None:
+    """Show the exact evidence and typed operations supplied to the model."""
+    from allin1_sdk.assistant_context import build_assistant_context
+
+    try:
+        context = build_assistant_context(
+            " ".join(question), repository_root=repository_root,
+            workspace_roots=workspace_roots, manifest=manifest, gta_path=gta_path,
+            operation_mode=operation_mode, sources=sources, symbols=symbols,
+            telemetry_files=telemetry_files, telemetry_patterns=telemetry_patterns,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(context.to_dict(), indent=2))
+
+
+@assistant_group.command("prompt")
+@click.argument("prompt", nargs=-1, required=True)
+@click.option("--root", type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--system-prompt",
+    help="Add request-specific guidance; the permanent ALLIN1 policy cannot be replaced.",
+)
+@click.option(
+    "--repository-root", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Repository that owns the current task; defaults to the caller's directory.",
+)
+@click.option(
+    "--workspace-root", "workspace_roots", multiple=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Additional launcher, SDK, or package workspace root.",
+)
+@click.option(
+    "--manifest", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Authoritative mod.toml or addon.json for the package under review.",
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Verified GTA V installation path; never inferred by the model.",
+)
+@click.option(
+    "--operation-mode", type=click.Choice(("advisory", "planning")),
+    default="advisory", show_default=True,
+)
+@click.option(
+    "--source", "sources", multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Explicit source file to retrieve; repeatable.",
+)
+@click.option("--symbol", "symbols", multiple=True, help="Source symbol or text to retrieve; repeatable.")
+@click.option(
+    "--telemetry", "telemetry_files", multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Explicit log or telemetry file to retrieve; repeatable.",
+)
+@click.option("--telemetry-pattern", "telemetry_patterns", multiple=True, help="Telemetry text to retain.")
+@click.option(
+    "--timeout", type=click.FloatRange(1, 600), default=180.0, show_default=True,
+    help="Maximum completion request time in seconds.",
+)
+@click.option(
+    "--startup-timeout", type=click.FloatRange(1, 300), default=90.0,
+    show_default=True, help="Maximum local-runtime startup time in seconds.",
+)
+@click.option(
+    "--max-tokens", type=click.IntRange(1, 8192), default=640,
+    show_default=True, help="Maximum response token budget.",
+)
+@click.option("--json-output", is_flag=True, help="Return response metadata as JSON.")
+@click.option("--no-progress", is_flag=True, help="Suppress progress states written to stderr.")
+def assistant_prompt_command(
+    prompt: tuple[str, ...], root: Path | None, system_prompt: str | None,
+    repository_root: Path | None, workspace_roots: tuple[Path, ...],
+    manifest: Path | None, gta_path: Path | None, operation_mode: str,
+    sources: tuple[Path, ...], symbols: tuple[str, ...],
+    telemetry_files: tuple[Path, ...], telemetry_patterns: tuple[str, ...],
+    timeout: float, startup_timeout: float, max_tokens: int, json_output: bool,
+    no_progress: bool,
+) -> None:
+    """Ask the configured Qwen/compatible model a read-only question."""
+    from allin1_sdk.assistant_client import (
+        AssistantContextOverflow, DEFAULT_SYSTEM_PROMPT, prompt_assistant,
+    )
+
+    try:
+        result = prompt_assistant(
+            " ".join(prompt), root=root,
+            system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
+            timeout=timeout, startup_timeout=startup_timeout,
+            max_tokens=max_tokens,
+            repository_root=repository_root, workspace_roots=workspace_roots,
+            manifest=manifest, gta_path=gta_path, operation_mode=operation_mode,
+            sources=sources, symbols=symbols, telemetry_files=telemetry_files,
+            telemetry_patterns=telemetry_patterns,
+            progress=(None if no_progress else lambda state: click.echo(
+                f"assistant: {state}", err=True,
+            )),
+        )
+    except AssistantContextOverflow as exc:
+        if json_output:
+            click.echo(json.dumps(exc.details, indent=2, ensure_ascii=False))
+            raise click.exceptions.Exit(2) from exc
+        raise click.ClickException(str(exc)) from exc
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if json_output:
+        click.echo(json.dumps(result.to_dict(), indent=2))
+    else:
+        click.echo(result.text)
+        click.echo(
+            f"\n[{result.model} | {result.mode.replace('_', ' ')} | "
+            f"{result.elapsed_seconds:.3f}s]"
+        )
+
+
+@assistant_group.command("stop")
+def assistant_stop_command() -> None:
+    """Stop the local model server retained by this SDK process."""
+    from allin1_sdk.assistant_client import stop_local_assistant
+
+    click.echo(
+        "Local assistant stopped."
+        if stop_local_assistant() else "No local assistant runtime is running."
+    )
 
 
 @main.command("agent-api")
@@ -322,7 +651,7 @@ def open_rpf_graph(
     help="Matching GTA installation for encrypted/native asset previews.",
 )
 def open_vehicle_workbench(source: Path, gta_path: Path | None) -> None:
-    """Open a vehicle add-on package in the desktop Vehicle Workbench."""
+    """Open a vehicle add-on package in the desktop Workbench's Vehicles tab."""
     try:
         pid, model_count = _open_vehicle_workbench_window(source, gta_path)
     except (OSError, ValueError) as exc:
@@ -333,6 +662,87 @@ def open_vehicle_workbench(source: Path, gta_path: Path | None) -> None:
         "vehicle_models": model_count,
         "pid": pid,
     }, indent=2))
+
+
+@main.command("open-workbench")
+@click.argument(
+    "source", type=click.Path(exists=True, path_type=Path),
+)
+@click.option(
+    "--category",
+    type=click.Choice(("auto", "vehicles", "weapons", "peds"), case_sensitive=False),
+    default="auto", show_default=True,
+    help="Select a Workbench tab after the package opens.",
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation for encrypted/native asset previews.",
+)
+def open_workbench(source: Path, category: str, gta_path: Path | None) -> None:
+    """Open vehicle, weapon, and ped add-on projects in one desktop workspace."""
+    try:
+        pid, counts = _open_workbench_window(source, category.casefold(), gta_path)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "open_workbench",
+        "source": str(source.resolve()),
+        "category": category.casefold(),
+        "content": counts,
+        "pid": pid,
+    }, indent=2))
+
+
+@main.command("inspect-workbench")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--category",
+    type=click.Choice(("all", "vehicles", "weapons", "peds"), case_sensitive=False),
+    default="all", show_default=True,
+    help="Limit the structured report to one Workbench content family.",
+)
+def inspect_workbench(source: Path, category: str) -> None:
+    """Return the Workbench's linked vehicle, weapon, and ped evidence as JSON."""
+    try:
+        resolved = source.expanduser().resolve(strict=True)
+        scan = AddonPackageInspector().inspect(resolved)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    selected = category.casefold()
+    payload: dict[str, object] = {
+        "operation": "inspect_workbench",
+        "source": str(resolved),
+        "source_kind": scan.source_kind,
+        "category": selected,
+        "summary": {
+            "vehicles": len(scan.vehicles),
+            "weapons": len(scan.weapons),
+            "weapon_components": len(scan.weapon_components),
+            "peds": len(scan.peds),
+            "errors": scan.error_count,
+            "warnings": scan.warning_count,
+        },
+        "findings": [asdict(item) for item in scan.findings],
+    }
+    if selected in {"all", "vehicles"}:
+        payload["vehicles"] = [asdict(item) for item in scan.vehicles]
+        payload["handling"] = [asdict(item) for item in scan.handlings]
+        payload["variations"] = [asdict(item) for item in scan.variations]
+        payload["tuning_kits"] = [asdict(item) for item in scan.kits]
+    if selected in {"all", "weapons"}:
+        payload["weapons"] = [asdict(item) for item in scan.weapons]
+        payload["ammo"] = [asdict(item) for item in scan.ammo]
+        payload["weapon_components"] = [
+            asdict(item) for item in scan.weapon_components
+        ]
+        payload["weapon_component_links"] = [
+            asdict(item) for item in scan.weapon_component_links
+        ]
+        payload["animation_weapons"] = list(scan.animation_weapons)
+        payload["shop_weapons"] = list(scan.shop_weapons)
+    if selected in {"all", "peds"}:
+        payload["peds"] = [asdict(item) for item in scan.peds]
+    click.echo(json.dumps(payload, indent=2))
 
 
 @main.command("open-package-graph")
@@ -402,9 +812,63 @@ def list_installed_packages(gta_path: Path | None) -> None:
         )
 
 
+@main.command("validate-package")
+@click.argument(
+    "manifest", type=click.Path(exists=True, path_type=Path),
+)
+def validate_package(manifest: Path) -> None:
+    """Validate a mod.toml, package folder, or bounded ZIP package."""
+    try:
+        with open_mod_package(manifest) as package:
+            payload = {
+                "valid": True, "manifest": str(package.manifest_path),
+                "schema_version": package.schema_version,
+                "id": package.mod_id, "name": package.name, "version": package.version,
+                "type": package.mod_type, "editions": list(package.editions),
+                "dependencies": list(package.dependencies), "files": len(package.files),
+                "rpf_entries": len(package.rpf_entries),
+                "allin1_extension": package.extension is not None,
+            }
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(payload, indent=2))
+
+
+@main.command("inspect-package-receipt")
+@click.argument("mod_id")
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="GTA V installation; auto-detected when omitted.",
+)
+def inspect_package_receipt(mod_id: str, gta_path: Path | None) -> None:
+    """Inspect one validated managed-package receipt without changing GTA V."""
+    try:
+        receipt = _mod_service(gta_path).inspect_receipt(mod_id)
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(receipt, indent=2))
+
+
+@main.command("verify-package-ownership")
+@click.argument("mod_id")
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="GTA V installation; auto-detected when omitted.",
+)
+def verify_package_ownership(mod_id: str, gta_path: Path | None) -> None:
+    """Verify receipt-owned files, backups, and RPF entries without mutation."""
+    try:
+        report = _mod_service(gta_path).verify_ownership(mod_id)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(report, indent=2))
+    if not report["healthy"]:
+        raise SystemExit(1)
+
+
 @main.command("install-package")
 @click.argument(
-    "manifest", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    "manifest", type=click.Path(exists=True, path_type=Path),
 )
 @click.option(
     "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
@@ -417,7 +881,7 @@ def list_installed_packages(gta_path: Path | None) -> None:
 def install_package(
     manifest: Path, gta_path: Path | None, acknowledge_write: bool,
 ) -> None:
-    """Install one validated package with receipts, backups, and rollback ownership."""
+    """Install a validated manifest, package folder, or bounded ZIP package."""
     if not acknowledge_write:
         raise click.ClickException(
             "Package installation requires --acknowledge-write."
@@ -427,8 +891,8 @@ def install_package(
         raise click.ClickException(
             "Close GTA V before installing a package: " + ", ".join(running)
         )
-    package = ModManifest.load(manifest)
-    status = _mod_service(gta_path).install(package)
+    with open_mod_package(manifest) as package:
+        status = _mod_service(gta_path).install(package)
     click.echo(
         f"Installed {status.name} {status.version} ({status.mod_id}); "
         "receipt and rollback ownership verified."
@@ -2772,6 +3236,174 @@ def inspect_native_asset(
             _publish_native_report(report, payload, output_dir)
         click.echo(json.dumps(payload, indent=2))
     except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@main.command("render-native-model")
+@click.argument(
+    "source", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--output", "-o", required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write one verified PNG outside the source package and GTA installation.",
+)
+@click.option(
+    "--edition", type=click.Choice(("Legacy", "Enhanced"), case_sensitive=False),
+    default="Enhanced", show_default=True,
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation for native model decoding; never written.",
+)
+@click.option(
+    "--texture-dictionary",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help=(
+        "Linked YTD for UV-textured rendering. Vehicle YFTs also discover a safe "
+        "same-name sibling automatically (including model_hi.yft → model.ytd)."
+    ),
+)
+@click.option(
+    "--blender", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Optional Blender executable; otherwise use safe runtime detection.",
+)
+@click.option("--yaw", type=float, default=34.0, show_default=True)
+@click.option(
+    "--pitch", type=click.FloatRange(-89.0, 89.0), default=18.0,
+    show_default=True,
+)
+@click.option("--lens-mm", type=click.FloatRange(18.0, 200.0), default=52.0, show_default=True)
+@click.option("--lod", help="Render one exact decoded LOD; defaults to all LODs.")
+@click.option("--component", help="Render one exact drawable component; defaults to all.")
+@click.option(
+    "--engine", type=click.Choice(tuple(sorted(BLENDER_ENGINES)), case_sensitive=False),
+    default="eevee", show_default=True,
+)
+@click.option(
+    "--device", type=click.Choice(tuple(sorted(BLENDER_DEVICES)), case_sensitive=False),
+    default="auto", show_default=True,
+)
+@click.option(
+    "--quality", type=click.Choice(
+        tuple(sorted(COMPILED_RENDER_QUALITIES)), case_sensitive=False,
+    ), default="production", show_default=True,
+)
+@click.option(
+    "--width", type=click.IntRange(256, MAX_COMPILED_RESOLUTION),
+    default=1920, show_default=True,
+)
+@click.option(
+    "--height", type=click.IntRange(256, MAX_COMPILED_RESOLUTION),
+    default=1080, show_default=True,
+)
+@click.option(
+    "--samples", type=click.IntRange(1, MAX_COMPILED_SAMPLES),
+    help="Override the quality preset's engine-specific sample count.",
+)
+@click.option(
+    "--light-rig", type=click.Choice(
+        tuple(sorted(COMPILED_LIGHT_RIGS)), case_sensitive=False,
+    ), default="studio", show_default=True,
+)
+@click.option("--light-rotation", type=float, default=0.0, show_default=True)
+@click.option(
+    "--light-strength", type=click.FloatRange(0.05, 10.0),
+    default=1.0, show_default=True,
+)
+@click.option(
+    "--background", type=click.Choice(
+        tuple(sorted(COMPILED_BACKGROUNDS)), case_sensitive=False,
+    ), default="studio_dark", show_default=True,
+)
+@click.option("--background-color", default="#111714", show_default=True)
+@click.option("--transparent/--opaque", default=False, show_default=True)
+@click.option("--ground-plane/--no-ground-plane", default=True, show_default=True)
+@click.option("--contact-shadows/--no-contact-shadows", default=True, show_default=True)
+def render_native_model(
+    source: Path, output: Path, edition: str, gta_path: Path | None,
+    texture_dictionary: Path | None, blender: Path | None,
+    yaw: float, pitch: float, lens_mm: float,
+    lod: str | None, component: str | None, engine: str, device: str,
+    quality: str, width: int, height: int, samples: int | None,
+    light_rig: str, light_rotation: float, light_strength: float,
+    background: str, background_color: str, transparent: bool,
+    ground_plane: bool, contact_shadows: bool,
+) -> None:
+    """Compile one decoded YDR, YDD, or YFT model into an external PNG."""
+
+    try:
+        if source.is_symlink():
+            raise ValueError("Native render source cannot be a symbolic link")
+        resolved_source = source.expanduser().resolve(strict=True)
+        if resolved_source.suffix.casefold() not in MODEL_PREVIEW_SUFFIXES:
+            choices = ", ".join(sorted(MODEL_PREVIEW_SUFFIXES))
+            raise ValueError(f"Native render source must be one of: {choices}")
+        size = resolved_source.stat().st_size
+        if not 0 < size <= MAX_NATIVE_PREVIEW_BYTES:
+            raise ValueError("Native render source is empty or exceeds the 128 MiB limit")
+        resolved_game = gta_path.expanduser().resolve(strict=True) if gta_path else None
+        resolved_texture: Path | None = None
+        if texture_dictionary is not None:
+            if texture_dictionary.is_symlink():
+                raise ValueError("Texture dictionary cannot be a symbolic link")
+            resolved_texture = texture_dictionary.expanduser().resolve(strict=True)
+        else:
+            stem = resolved_source.stem
+            texture_stem = stem[:-3] if stem.casefold().endswith("_hi") else stem
+            candidate = resolved_source.with_name(texture_stem + ".ytd")
+            if candidate.is_file() and not candidate.is_symlink():
+                resolved_texture = candidate.resolve(strict=True)
+        data = resolved_source.read_bytes()
+        report = NativeAssetInspector(PROJECT_ROOT, resolved_game).inspect_bytes(
+            resolved_source.name, data, edition=edition,
+        )
+        if report.model_scene is None:
+            warning = next((item for item in report.warnings if item), "")
+            detail = f": {warning}" if warning else ""
+            raise ValueError(
+                "The native model did not decode into renderable geometry" + detail
+            )
+        settings = CompiledRenderSettings(
+            width=width, height=height, quality=quality, samples=samples,
+            engine=engine, device=device, light_rig=light_rig,
+            light_rotation_deg=light_rotation, light_strength=light_strength,
+            background=background, background_color=background_color,
+            transparent=transparent, lens_mm=lens_mm,
+            ground_plane=ground_plane, contact_shadows=contact_shadows,
+        )
+        protected_roots: tuple[Path, ...] = (
+            (resolved_source.parent, resolved_game)
+            if resolved_game is not None else (resolved_source.parent,)
+        )
+        result = compile_vehicle_render(
+            report.model_scene, output, settings=settings,
+            blender_executable=blender, yaw=yaw, pitch=pitch,
+            texture_dictionary=resolved_texture, edition=edition,
+            gta_path=resolved_game,
+            lod=lod, component=component, protected_roots=protected_roots,
+        )
+        payload = {
+            "operation": "render_native_model",
+            "source": str(resolved_source),
+            "source_sha256": report.sha256,
+            "edition": edition.title(),
+            "texture_dictionary": (
+                str(resolved_texture) if resolved_texture is not None else None
+            ),
+            "output": str(result.output_path),
+            "width": result.width,
+            "height": result.height,
+            "elapsed_seconds": result.elapsed_seconds,
+            "decode_metadata": report.metadata,
+            "decode_warnings": list(report.warnings),
+            "render_metadata": result.metadata,
+        }
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+    except CompiledRenderError as exc:
+        detail = exc.as_dict()
+        raise click.ClickException(json.dumps(detail, ensure_ascii=False)) from exc
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 

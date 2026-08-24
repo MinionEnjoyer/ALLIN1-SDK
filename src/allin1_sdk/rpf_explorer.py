@@ -32,6 +32,7 @@ from allin1_sdk.rpf_graph_ui import RpfPackageGraphFrame
 from allin1_sdk.package_graph import PackageGraphWorkspace
 from allin1_sdk.rpf_tools import RpfEntryRecord, RpfExplorerService, RpfIndex
 from allin1_sdk.help_center import HelpCenterDialog
+from allin1_sdk.ui_foundation import place_window
 
 
 def _human_size(value: int) -> str:
@@ -51,7 +52,7 @@ class RpfProgressDialog(tk.Toplevel):
     ) -> None:
         super().__init__(parent)
         self.title(title)
-        self.geometry("520x150")
+        place_window(self, preferred=(520, 150), minimum=(440, 135))
         self.resizable(False, False)
         self.transient(parent.winfo_toplevel())
         self.grab_set()
@@ -119,6 +120,9 @@ class Gxt2WorkspaceFrame(ttk.Frame):
         self.workspace = Path(workspace).resolve()
         self._on_close = on_close
         self.entries: dict[int, dict[str, object]] = {}
+        self.loaded_hash: int | None = None
+        self.dirty = False
+        self._restoring_selection = False
         self.query = tk.StringVar()
         self.status = tk.StringVar(value="Loading validated GXT2 table…")
 
@@ -168,9 +172,13 @@ class Gxt2WorkspaceFrame(ttk.Frame):
         self.tree.column("hash", width=130, minwidth=110, stretch=False)
         self.tree.column("text", width=850, minwidth=320)
         scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        xscroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scroll.set, xscrollcommand=xscroll.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", self._select)
 
         editor_header = ttk.Frame(editor_frame)
@@ -194,6 +202,8 @@ class Gxt2WorkspaceFrame(ttk.Frame):
             undo=True, borderwidth=1, relief="solid",
         )
         self.text.pack(fill="both", expand=True, pady=(4, 0))
+        self.text.bind("<<Modified>>", self._text_modified)
+        self.text.bind("<Control-s>", self._save_shortcut)
         self._reload()
         self.after_idle(self._balance_split)
         self.after(120, self._balance_split)
@@ -207,6 +217,8 @@ class Gxt2WorkspaceFrame(ttk.Frame):
             split.sashpos(0, round(height * 0.58))
 
     def _close_panel(self) -> None:
+        if not self._confirm_unsaved():
+            return
         if self._on_close is not None:
             self._on_close()
         else:
@@ -217,6 +229,8 @@ class Gxt2WorkspaceFrame(ttk.Frame):
         self._reload()
 
     def _reload(self, select_hash: int | None = None) -> None:
+        if self.dirty and not self._confirm_unsaved():
+            return
         try:
             state = Gxt2Workspace.validate(self.workspace)
         except (OSError, ValueError) as exc:
@@ -243,35 +257,88 @@ class Gxt2WorkspaceFrame(ttk.Frame):
             f"{len(state['entries']):,} total entries · {shown:,} of {len(matches):,} "
             f"matches shown{suffix}"
         )
-        if select_hash is not None and self.tree.exists(str(select_hash)):
-            self.tree.selection_set(str(select_hash))
-            self.tree.see(str(select_hash))
+        target_hash = select_hash if select_hash is not None else self.loaded_hash
+        if target_hash is not None and self.tree.exists(str(target_hash)):
+            self.tree.selection_set(str(target_hash))
+            self.tree.see(str(target_hash))
             self._select()
+        elif self.loaded_hash is not None:
+            self.loaded_hash = None
+            self.dirty = False
+            self.text.delete("1.0", "end")
+            self.text.edit_modified(False)
 
     def _selected_hash(self) -> int | None:
         selected = self.tree.selection()
         return int(selected[0]) if selected else None
 
     def _select(self, _event: object | None = None) -> None:
+        if self._restoring_selection:
+            return
         label_hash = self._selected_hash()
         if label_hash is None or label_hash not in self.entries:
             return
+        if (
+            self.dirty and self.loaded_hash is not None
+            and label_hash != self.loaded_hash and not self._confirm_unsaved()
+        ):
+            self._restoring_selection = True
+            try:
+                if self.tree.exists(str(self.loaded_hash)):
+                    self.tree.selection_set(str(self.loaded_hash))
+                    self.tree.focus(str(self.loaded_hash))
+            finally:
+                self._restoring_selection = False
+            return
+        self.loaded_hash = label_hash
         self.text.delete("1.0", "end")
         self.text.insert("1.0", str(self.entries[label_hash]["text"]))
+        self.text.edit_modified(False)
+        self.dirty = False
 
-    def _save(self) -> None:
-        label_hash = self._selected_hash()
+    def _text_modified(self, _event: object | None = None) -> None:
+        if self.text.edit_modified():
+            self.dirty = True
+            if self.loaded_hash is not None:
+                self.status.set(
+                    f"Unsaved text for 0x{self.loaded_hash:08X} · Ctrl+S to apply",
+                )
+        self.text.edit_modified(False)
+
+    def _confirm_unsaved(self) -> bool:
+        if not self.dirty:
+            return True
+        choice = messagebox.askyesnocancel(
+            "Unsaved GXT2 text",
+            "Save the selected text before continuing?",
+            parent=self,
+        )
+        if choice is None:
+            return False
+        if choice:
+            return self._save()
+        self.dirty = False
+        return True
+
+    def _save(self) -> bool:
+        label_hash = self.loaded_hash
         if label_hash is None:
             messagebox.showinfo("Select an entry", "Select a text record first.", parent=self)
-            return
+            return False
         try:
             Gxt2Workspace.set_text(
                 self.workspace, label_hash, self.text.get("1.0", "end-1c"),
             )
         except (OSError, ValueError) as exc:
             messagebox.showerror("GXT2 edit failed", str(exc), parent=self)
-            return
+            return False
+        self.dirty = False
         self._reload(label_hash)
+        return True
+
+    def _save_shortcut(self, _event: object | None = None) -> str:
+        self._save()
+        return "break"
 
     def _add(self) -> None:
         label = simpledialog.askstring(
@@ -290,6 +357,8 @@ class Gxt2WorkspaceFrame(ttk.Frame):
             messagebox.showerror("Could not add GXT2 entry", str(exc), parent=self)
 
     def _remove(self) -> None:
+        if not self._confirm_unsaved():
+            return
         label_hash = self._selected_hash()
         if label_hash is None:
             return
@@ -305,9 +374,13 @@ class Gxt2WorkspaceFrame(ttk.Frame):
             messagebox.showerror("Could not remove GXT2 entry", str(exc), parent=self)
             return
         self.text.delete("1.0", "end")
+        self.loaded_hash = None
+        self.dirty = False
         self._reload()
 
     def _undo(self) -> None:
+        if not self._confirm_unsaved():
+            return
         try:
             Gxt2Workspace.undo(self.workspace)
         except (OSError, ValueError) as exc:
@@ -316,6 +389,8 @@ class Gxt2WorkspaceFrame(ttk.Frame):
         self._reload()
 
     def _build(self) -> None:
+        if not self._confirm_unsaved():
+            return
         output = filedialog.asksaveasfilename(
             parent=self, title="Build verified GXT2 dictionary",
             initialfile="rebuilt.gxt2", defaultextension=".gxt2",
@@ -342,8 +417,9 @@ class Gxt2WorkspaceDialog(tk.Toplevel):
     def __init__(self, parent: tk.Misc, workspace: str | Path) -> None:
         super().__init__(parent)
         self.title("ALLIN1 — GXT2 Text Workspace")
-        self.geometry("1180x760")
-        self.minsize(860, 600)
+        place_window(
+            self, preferred=(1180, 760), minimum=(860, 600),
+        )
         self.transient(parent.winfo_toplevel())
         self.editor = Gxt2WorkspaceFrame(
             self, workspace, on_close=self.destroy,
@@ -363,8 +439,9 @@ class RpfTransactionHistoryDialog(ttk.Frame):
         if not embedded:
             self._window = tk.Toplevel(parent)
             self._window.title("ALLIN1 — RPF Transaction History")
-            self._window.geometry("1180x560")
-            self._window.minsize(880, 420)
+            place_window(
+                self._window, preferred=(1180, 560), minimum=(880, 420),
+            )
             self._window.transient(parent.winfo_toplevel())
             host = self._window
         super().__init__(host)
@@ -558,8 +635,9 @@ class RpfExplorerDialog(ttk.Frame):
         if not embedded:
             self._window = tk.Toplevel(parent)
             self._window.title("ALLIN1 — RPF Archives")
-            self._window.geometry("1320x840")
-            self._window.minsize(980, 650)
+            place_window(
+                self._window, preferred=(1320, 840), minimum=(980, 650),
+            )
             self._window.transient(parent.winfo_toplevel())
             host = self._window
         super().__init__(host)
@@ -707,6 +785,7 @@ class RpfExplorerDialog(ttk.Frame):
         self.workspace_tabs.add(self.binary_tab, text="Binary Workspace")
         self.workspace_tabs.add(self.gxt2_tab, text="GXT2 Text")
         self.browser_tab = browser_tab
+        self.changes_tab = changes_tab
 
         panes = ttk.Panedwindow(browser_tab, orient="horizontal")
         panes.pack(fill="both", expand=True)
@@ -739,6 +818,7 @@ class RpfExplorerDialog(ttk.Frame):
         tree_frame.columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", self._select_entry)
         self.tree.bind("<Double-1>", self._activate_tree_item)
+        self.tree.bind("<Return>", self._activate_tree_item)
 
         self.asset_title = tk.StringVar(value="Select an entry")
         self.asset_meta = tk.StringVar(value="No archive loaded")
@@ -797,6 +877,7 @@ class RpfExplorerDialog(ttk.Frame):
             get_index=lambda: self.index,
             get_service=lambda: self.service,
             get_selected=self._selected,
+            on_choose_target=self._choose_change_set_target,
         )
         self.change_set_frame.pack(fill="both", expand=True)
         self.graph_host = ttk.Frame(self.graph_tab)
@@ -830,6 +911,15 @@ class RpfExplorerDialog(ttk.Frame):
                 )
         elif self.browser_filter_row.winfo_manager():
             self.browser_filter_row.pack_forget()
+        if self.workspace_tabs.select() == str(self.changes_tab):
+            self.change_set_frame.capture_target()
+
+    def _choose_change_set_target(self) -> None:
+        self.workspace_tabs.select(self.browser_tab)
+        self.tree.focus_set()
+        self.status.set(
+            "Select an archive entry, then return to Visual Change Set to capture it.",
+        )
 
     @staticmethod
     def _clear_workspace_host(host: ttk.Frame) -> None:
@@ -903,6 +993,7 @@ class RpfExplorerDialog(ttk.Frame):
                 "No retained package projects yet", "—", "Import a package above",
             ))
         tree.bind("<Double-1>", lambda _event: self._open_recent_package_graph(tree))
+        tree.bind("<Return>", lambda _event: self._open_recent_package_graph(tree))
 
     def _show_binary_home(self) -> None:
         current = getattr(self, "_binary_editor", None)
@@ -1709,7 +1800,7 @@ class RpfExplorerDialog(ttk.Frame):
             messagebox.showwarning(
                 "Asset too large for interactive preview",
                 f"This asset is {_human_size(entry.size)}. Extract it instead; deep previews "
-                "are capped at {_human_size(MAX_NATIVE_PREVIEW_BYTES)}.", parent=self,
+                f"are capped at {_human_size(MAX_NATIVE_PREVIEW_BYTES)}.", parent=self,
             )
             return
         destination = Path(self._preview_temp.name) / (

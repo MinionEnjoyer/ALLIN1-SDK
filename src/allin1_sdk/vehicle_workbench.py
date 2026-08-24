@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import io
+import json
+import os
+import queue
+import tempfile
+import threading
 import tkinter as tk
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -13,6 +19,17 @@ from allin1_sdk.addon_importer import (
     AddonPackageInspector,
     PackageAssetReader,
     PackageScan,
+)
+from allin1_sdk.collapsible_panes import CollapsibleSidePanes
+from allin1_sdk.compiled_render_ui import CompiledRenderPanel, RenderSettings
+from allin1_sdk.compiled_render import (
+    BlenderInstallation,
+    CompiledRenderError,
+    CompiledRenderProgress,
+    CompiledRenderResult,
+    CompiledRenderSettings,
+    compile_vehicle_render,
+    detect_blender,
 )
 from allin1_sdk.native_assets import (
     NativeAssetInspector,
@@ -25,6 +42,13 @@ from allin1_sdk.vehicle_project import (
     VehicleProjectResolver,
 )
 from allin1_sdk.vehicle_package import VehicleAddonPackageBuilder
+from allin1_sdk.viewport_rendering import (
+    LatestOnlyRenderWorker,
+    ViewportRenderKey,
+    WeightedLruCache,
+    encoded_image_weight,
+)
+from allin1_sdk.paths import user_data_root
 from allin1_sdk.vehicle_authoring import (
     TUNING_COLLECTIONS,
     TUNING_FIELDS,
@@ -44,6 +68,164 @@ TUNING_COLLECTION_LABELS = {
 TUNING_COLLECTION_NAMES = {
     collection: label for label, collection in TUNING_COLLECTION_LABELS.items()
 }
+INTERACTIVE_ORBIT_TRIANGLE_BUDGET = 4_000
+ORBIT_FINAL_SETTLE_MS = 60
+
+
+@dataclass(frozen=True)
+class _DecodedNativeModel:
+    reader: PackageAssetReader
+    scene: NativeModelScene
+
+
+@dataclass(frozen=True)
+class _PreparedViewportFrame:
+    """Fully decoded viewport pixels safe to hand from a worker to Tk.
+
+    ``display_image`` is an optional, interaction-only resize prepared off the
+    UI thread.  Static/final frames retain ``source_image`` so zooming still
+    has the complete renderer output available.
+    """
+
+    source_image: Image.Image
+    metadata: dict[str, object]
+    display_image: Image.Image | None = None
+    display_zoom: float | None = None
+
+
+def _model_render_view_box(
+    image: Image.Image, metadata: dict[str, object],
+) -> tuple[int, int, int, int] | None:
+    """Return the renderer's validated chrome-free view box, when present."""
+    box = metadata.get("model_render_view_box")
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return None
+    if not all(isinstance(value, int) and not isinstance(value, bool) for value in box):
+        return None
+    left, top, right, bottom = box
+    if not (0 <= left < right <= image.width and 0 <= top < bottom <= image.height):
+        return None
+    return left, top, right, bottom
+
+
+def _decode_native_model_scene(
+    reader: PackageAssetReader | None, source: Path, path: str, entry_size: int, *,
+    project_root: Path, game_path: Path | None, edition: str,
+) -> _DecodedNativeModel:
+    """Read and decode one package model without depending on Tk state."""
+    loaded_reader = reader or PackageAssetReader(source)
+    content = loaded_reader.read(
+        path, limit=native_preview_limit(path, entry_size),
+    )
+    report = NativeAssetInspector(project_root, game_path).inspect_bytes(
+        path, content.data, edition=edition, truncated=content.truncated,
+    )
+    if report.model_scene is None:
+        warning = "; ".join(report.warnings) or "No renderable geometry was found."
+        raise ValueError(warning)
+    return _DecodedNativeModel(loaded_reader, report.model_scene)
+
+
+def _crop_model_render(
+    image: Image.Image, metadata: dict[str, object],
+) -> Image.Image:
+    """Crop a renderer's baked chrome when it supplies a validated view box."""
+    box = _model_render_view_box(image, metadata)
+    return image.crop(box) if box is not None else image
+
+
+def _prepare_viewport_frame(
+    encoded: bytes, metadata: dict[str, object], *,
+    quality: str, zoom: float,
+) -> _PreparedViewportFrame:
+    """Decode/crop and optionally resize one frame away from the Tk thread."""
+    if not isinstance(metadata, dict):
+        raise TypeError("model renderer returned invalid metadata")
+    with Image.open(io.BytesIO(encoded)) as opened:
+        # Crop before RGB conversion. Renderer chrome is not shown in the
+        # workbench, so converting those pixels just burns CPU and memory.
+        box = _model_render_view_box(opened, metadata)
+        visible = opened.crop(box) if box is not None else opened
+        source = visible.convert("RGB")
+    return _prepare_viewport_image(
+        source, metadata, quality=quality, zoom=zoom, already_cropped=True,
+    )
+
+
+def _prepare_viewport_image(
+    image: Image.Image, metadata: dict[str, object], *,
+    quality: str, zoom: float, already_cropped: bool = False,
+) -> _PreparedViewportFrame:
+    """Prepare a renderer-owned PIL image without an encode/decode round trip."""
+    if not isinstance(metadata, dict):
+        raise TypeError("model renderer returned invalid metadata")
+    visible = image if already_cropped else _crop_model_render(image, metadata)
+    source = visible if visible.mode == "RGB" else visible.convert("RGB")
+    display: Image.Image | None = None
+    display_zoom: float | None = None
+    if quality == "interactive":
+        target = (
+            max(1, round(source.width * zoom)),
+            max(1, round(source.height * zoom)),
+        )
+        display = (
+            source if target == source.size
+            else source.resize(target, Image.Resampling.BILINEAR)
+        )
+        display_zoom = zoom
+    return _PreparedViewportFrame(source, metadata, display, display_zoom)
+
+
+def _viewport_frame_weight(frame: _PreparedViewportFrame) -> int:
+    """Bound cached decoded frames by their approximate resident pixel size."""
+    def weight(image: Image.Image | None) -> int:
+        return 0 if image is None else image.width * image.height * len(image.getbands())
+
+    return weight(frame.source_image) + weight(frame.display_image)
+
+
+def _viewport_render_weight(value: object) -> int:
+    if isinstance(value, _PreparedViewportFrame):
+        return _viewport_frame_weight(value)
+    return encoded_image_weight(value)
+
+
+class _PageStack(ttk.Frame):
+    """Tabless page host used where nested notebook headers consume the editor."""
+
+    def __init__(self, parent: tk.Misc) -> None:
+        super().__init__(parent)
+        self._pages: list[tk.Misc] = []
+        self._labels: dict[str, str] = {}
+        self._selected = ""
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        # A hidden page can have a much larger requested size than the host.
+        # Keep that request from expanding the complete workbench; the active
+        # page is laid out in the stack's actual, resizable grid cell instead.
+        self.grid_propagate(False)
+
+    def add(self, page: tk.Misc, *, text: str) -> None:
+        page.grid(row=0, column=0, sticky="nsew")
+        key = str(page)
+        self._pages.append(page)
+        self._labels[key] = text
+        if not self._selected:
+            self.select(page)
+
+    def select(self, page: tk.Misc | str | None = None) -> str:
+        if page is None:
+            return self._selected
+        key = str(page)
+        if key not in self._labels:
+            return self._selected
+        page_widget = next(item for item in self._pages if str(item) == key)
+        page_widget.tkraise()
+        self._selected = key
+        return key
+
+    def tab(self, page: tk.Misc | str, option: str) -> str:
+        return self._labels[str(page)] if option == "text" else ""
 
 
 class VehicleWorkbenchFrame(ttk.Frame):
@@ -58,8 +240,15 @@ class VehicleWorkbenchFrame(ttk.Frame):
         on_help=None,
         on_close=None,
         on_open_asset=None,
+        show_context_header: bool = True,
+        show_open_control: bool = True,
     ) -> None:
         super().__init__(parent)
+        # The unified workbench embeds this frame beside its category rail.
+        # Keep large child requests from expanding the page beyond that host;
+        # fill/expand still grows the frame on larger windows.
+        self.configure(width=720, height=400)
+        self.pack_propagate(False)
         self.project_root = Path(project_root).resolve()
         self.installation_roots = tuple(
             Path(root).expanduser().resolve() for root in installation_roots
@@ -67,6 +256,8 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self._on_help = on_help
         self._on_close = on_close
         self._on_open_asset = on_open_asset
+        self._show_context_header = show_context_header
+        self._show_open_control = show_open_control
         self.source: Path | None = None
         self.scan: PackageScan | None = None
         self.project: VehicleProject | None = None
@@ -89,8 +280,12 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self._source_image: Image.Image | None = None
         self._model_scene: NativeModelScene | None = None
         self._scene_cache: dict[str, NativeModelScene] = {}
+        self._scene_revision = 0
+        self._active_scene_key: tuple[int, str] = (0, "")
         self._viewport_photo: ImageTk.PhotoImage | None = None
         self._viewport_photo_zoom: float | None = None
+        self._viewport_canvas_size: tuple[int, int] = (0, 0)
+        self._viewport_canvas_items: dict[str, int] = {}
         self._zoom = 1.0
         self._pan_x = 0.0
         self._pan_y = 0.0
@@ -98,41 +293,76 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self._drag_pan: tuple[float, float] | None = None
         self._orbit_origin: tuple[int, int] | None = None
         self._orbit_camera: tuple[float, float] | None = None
+        self._orbit_render_dirty = False
         self._camera_yaw = 34.0
         self._camera_pitch = 24.0
         self._fragment_paths: dict[str, str] = {}
         self._render_job: str | None = None
+        self._final_render_job: str | None = None
+        self._render_poll_job: str | None = None
+        self._render_generation = 0
+        self._render_fit_generation: int | None = None
+        self._scene_load_poll_job: str | None = None
+        self._scene_load_generation = 0
+        self._scene_load_key: tuple[int, str] | None = None
+        self._scene_load_path: str | None = None
+        self._compiled_render_executable = self._load_compiled_render_executable()
+        self._compiled_render_installation: BlenderInstallation | None = None
+        self._compiled_render_path_error = ""
+        self._compiled_render_cancel_event: threading.Event | None = None
+        self._compiled_render_thread: threading.Thread | None = None
+        self._compiled_render_events: queue.SimpleQueue[tuple[str, object]] = (
+            queue.SimpleQueue()
+        )
+        self._compiled_render_poll_job: str | None = None
+        self._viewport_scene_worker = LatestOnlyRenderWorker(
+            thread_name="allin1-viewport-scene-loader",
+        )
+        self._viewport_render_worker = LatestOnlyRenderWorker(
+            cache=WeightedLruCache(
+                maximum_entries=12, maximum_weight=24 * 1024 * 1024,
+                weigh=_viewport_render_weight,
+            ),
+        )
+        self._primary_pane_balance_job: str | None = None
+        self._tuning_pane_balance_job: str | None = None
+        self._loaded_editor_snapshot: tuple[object, ...] | None = None
+        self._restoring_model_selection = False
         self._build()
+        self.bind("<Destroy>", self._destroy_viewport_renderer, add="+")
 
     def _build(self) -> None:
-        outer = ttk.Frame(self, padding=16)
+        outer = ttk.Frame(self, padding=(10, 7, 10, 9))
         outer.pack(fill="both", expand=True)
 
-        title_row = ttk.Frame(outer)
-        title_row.pack(fill="x")
-        ttk.Label(
-            title_row, text="Vehicle asset workbench", style="DialogTitle.TLabel",
-        ).pack(side="left")
-        if self._on_close is not None:
-            ttk.Button(
-                title_row, text="Back to Package Linker", command=self._on_close,
-            ).pack(side="right")
-        ttk.Label(
-            outer,
-            text=(
-                "Work with a vehicle as one project: model fragments, textures, "
-                "handling, variations, tuning kits, labels, and DLC registration. "
-                "The viewport is diagnostic and never executes package code."
-            ),
-            wraplength=980, justify="left", foreground="#52635c",
-        ).pack(anchor="w", pady=(3, 10))
+        if self._show_context_header:
+            title_row = ttk.Frame(outer)
+            title_row.pack(fill="x")
+            ttk.Label(
+                title_row, text="Vehicle asset workbench", style="DialogTitle.TLabel",
+            ).pack(side="left")
+            if self._on_close is not None:
+                ttk.Button(
+                    title_row, text="Back to Package Linker", command=self._on_close,
+                ).pack(side="right")
+            ttk.Label(
+                outer,
+                text=(
+                    "Work with a vehicle as one project: model fragments, textures, "
+                    "handling, variations, tuning kits, labels, and DLC registration. "
+                    "The viewport is diagnostic and never executes package code."
+                ),
+                wraplength=980, justify="left", foreground="#52635c",
+            ).pack(anchor="w", pady=(3, 10))
 
         toolbar = ttk.Frame(outer)
+        self.vehicle_toolbar = toolbar
         toolbar.pack(fill="x", pady=(0, 10))
-        ttk.Menubutton(
-            toolbar, text="Open package", style="Accent.TButton",
-            menu=self._open_menu(toolbar),
-        ).pack(side="left")
+        if self._show_open_control:
+            ttk.Menubutton(
+                toolbar, text="Open package", style="Accent.TButton",
+                menu=self._open_menu(toolbar),
+            ).pack(side="left")
         self.export_button = ttk.Button(
             toolbar, text="Export vehicle project…", state="disabled",
             command=self._export_project,
@@ -154,18 +384,41 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.status = tk.StringVar(
             value="Open a package folder or archive to resolve its vehicle projects."
         )
-        ttk.Label(
-            toolbar, textvariable=self.status, foreground="#52635c",
-        ).pack(side="right")
+        self.vehicle_status_label = ttk.Label(
+            outer, textvariable=self.status, foreground="#52635c",
+            anchor="w", justify="left",
+        )
+        self.vehicle_status_label.pack(fill="x", pady=(0, 6))
 
-        panes = ttk.Panedwindow(outer, orient="horizontal")
+        panes = ttk.Panedwindow(outer, orient="horizontal", width=720)
+        self.primary_panes = panes
         panes.pack(fill="both", expand=True)
-        model_panel = ttk.LabelFrame(panes, text="Vehicles", padding=9)
-        viewport_panel = ttk.LabelFrame(panes, text="Model viewport", padding=9)
-        inspector_panel = ttk.LabelFrame(panes, text="Resolved project", padding=9)
-        panes.add(model_panel, weight=2)
-        panes.add(viewport_panel, weight=5)
-        panes.add(inspector_panel, weight=3)
+        side_panes = CollapsibleSidePanes(
+            panes, left_width=150, center_width=330, right_width=320,
+            left_weight=2, center_weight=5, right_weight=3,
+            left_label="Vehicles", right_label="Resolved project",
+        )
+        self.primary_side_panes = side_panes
+        model_panel = ttk.LabelFrame(
+            side_panes.left_host, text="Vehicles", padding=9,
+        )
+        viewport_panel = ttk.LabelFrame(
+            side_panes.center_host, text="Model viewport", padding=9,
+        )
+        inspector_panel = ttk.LabelFrame(
+            side_panes.right_host, text="Resolved project", padding=9,
+        )
+        self.catalog_panel = model_panel
+        self.work_panel = viewport_panel
+        self.integration_panel = inspector_panel
+        # Panedwindow otherwise treats the full requested widths of every
+        # nested toolbar and editor as hard pane minima. Explicit responsive
+        # requests let the panes fit the host while their packed children
+        # continue to fill the actual allocated size.
+        for panel in (model_panel, viewport_panel, inspector_panel):
+            panel.pack_propagate(False)
+        side_panes.set_contents(model_panel, viewport_panel, inspector_panel)
+        panes.bind("<Configure>", self._balance_primary_panes)
 
         self.model_tree = ttk.Treeview(
             model_panel, columns=("state",), show="tree headings", selectmode="browse",
@@ -182,91 +435,152 @@ class VehicleWorkbenchFrame(ttk.Frame):
         model_scroll.pack(side="right", fill="y")
         self.model_tree.bind("<<TreeviewSelect>>", self._select_model)
 
-        viewport_toolbar = ttk.Frame(viewport_panel)
-        viewport_toolbar.pack(fill="x", pady=(0, 7))
-        ttk.Label(
-            viewport_toolbar, text="VIEW", style="FieldLabel.TLabel",
-        ).pack(side="left", padx=(0, 7))
-        ttk.Button(
-            viewport_toolbar, text="−", width=3,
-            command=lambda: self._zoom_by(0.8),
-        ).pack(side="left")
-        self.zoom_label = ttk.Button(
-            viewport_toolbar, text="100%", width=7, command=self._reset_zoom,
+        # Treat the preview like a real viewport: one compact dark command
+        # strip owns rendering, model isolation, camera, and framing.  The
+        # previous four rows of ordinary form controls consumed more vertical
+        # space than the model at compact window sizes.
+        viewport_surface = tk.Frame(
+            viewport_panel, background="#101714", borderwidth=0,
+            highlightthickness=0,
         )
-        self.zoom_label.pack(side="left", padx=4)
-        ttk.Button(
-            viewport_toolbar, text="+", width=3,
-            command=lambda: self._zoom_by(1.25),
-        ).pack(side="left")
-        ttk.Button(
-            viewport_toolbar, text="Fit", command=self._fit_viewport,
-        ).pack(side="left", padx=(7, 0))
-        ttk.Label(
-            viewport_toolbar, text="Wheel: zoom · left drag: pan · right drag: orbit",
-            foreground="#52635c",
-        ).pack(side="right")
+        viewport_surface.pack(fill="both", expand=True)
+        viewport_toolbar = tk.Frame(
+            viewport_surface, background="#141f1a", borderwidth=0,
+            highlightthickness=0,
+        )
+        viewport_toolbar.pack(fill="x")
 
-        model_toolbar = ttk.Frame(viewport_panel)
-        model_toolbar.pack(fill="x", pady=(0, 7))
-        ttk.Label(
-            model_toolbar, text="MODEL", style="FieldLabel.TLabel",
-        ).pack(side="left", padx=(0, 7))
-        ttk.Label(model_toolbar, text="Fragment").pack(side="left")
+        menu_options = {
+            "tearoff": False,
+            "background": "#18231e",
+            "foreground": "#dce8e1",
+            "activebackground": "#1f7f42",
+            "activeforeground": "#ffffff",
+            "selectcolor": "#1f7f42",
+            "borderwidth": 0,
+            "relief": "flat",
+            "font": ("Segoe UI", 9),
+        }
+
+        def dark_menu(parent: tk.Misc) -> tk.Menu:
+            return tk.Menu(parent, **menu_options)
+
+        def strip_menu_button(
+            *, text: str | None = None, textvariable: tk.StringVar | None = None,
+            menu: tk.Menu, width: int = 0,
+        ) -> tk.Menubutton:
+            button = tk.Menubutton(
+                viewport_toolbar, text=text, textvariable=textvariable,
+                menu=menu, width=width, anchor="w", indicatoron=False,
+                background="#141f1a", foreground="#dce8e1",
+                activebackground="#234b34", activeforeground="#ffffff",
+                relief="flat", borderwidth=0, highlightthickness=0,
+                padx=7, pady=3, cursor="hand2", takefocus=True,
+                font=("Segoe UI Semibold", 9),
+            )
+            button.pack(side="left", fill="y")
+            return button
+
+        self.render_mode = tk.StringVar(value="Shaded")
+        self.render_mode_label = tk.StringVar(value="Shaded ▾")
+        self.render_mode_menu = dark_menu(viewport_toolbar)
+        for mode in ("Shaded", "Materials", "Wireframe"):
+            self.render_mode_menu.add_radiobutton(
+                label=mode, variable=self.render_mode, value=mode,
+                command=self._select_render_mode,
+            )
+        self.render_mode_menu.add_separator()
+        self.render_mode_menu.add_command(
+            label="Render full-quality frame",
+            command=self._render_full_quality,
+        )
+        self.render_mode_menu.add_separator()
+        self.render_mode_menu.add_command(
+            label="Compiled render…",
+            command=self._show_compiled_render,
+        )
+        self.render_mode_button = strip_menu_button(
+            textvariable=self.render_mode_label, menu=self.render_mode_menu, width=9,
+        )
+
         self.fragment = tk.StringVar(value="Primary")
-        self.fragment_combo = ttk.Combobox(
-            model_toolbar, textvariable=self.fragment, state="readonly",
-            width=12, values=(),
-        )
-        self.fragment_combo.pack(side="left", padx=(5, 10))
-        self.fragment_combo.bind(
-            "<<ComboboxSelected>>", self._select_fragment,
-        )
-        ttk.Label(model_toolbar, text="LOD").pack(side="left")
         self.lod = tk.StringVar(value="All")
-        self.lod_combo = ttk.Combobox(
-            model_toolbar, textvariable=self.lod, state="readonly",
-            width=9, values=("All",),
-        )
-        self.lod_combo.pack(side="left", padx=(5, 10))
-        self.lod_combo.bind("<<ComboboxSelected>>", self._select_lod)
-        ttk.Label(model_toolbar, text="Component").pack(side="left")
         self.component = tk.StringVar(value="All")
-        self.component_combo = ttk.Combobox(
-            model_toolbar, textvariable=self.component, state="readonly",
-            width=20, values=("All",),
+        self.model_filter_menu = dark_menu(viewport_toolbar)
+        self.fragment_menu = dark_menu(self.model_filter_menu)
+        self.lod_menu = dark_menu(self.model_filter_menu)
+        self.component_menu = dark_menu(self.model_filter_menu)
+        self.model_filter_menu.add_cascade(label="Fragment", menu=self.fragment_menu)
+        self.model_filter_menu.add_cascade(label="LOD", menu=self.lod_menu)
+        self.model_filter_menu.add_cascade(label="Component", menu=self.component_menu)
+        self.model_filter_button = strip_menu_button(
+            text="Model ▾", menu=self.model_filter_menu, width=7,
         )
-        self.component_combo.pack(side="left", padx=(5, 10))
-        self.component_combo.bind(
-            "<<ComboboxSelected>>", self._select_component,
+        self._populate_viewport_menu(
+            self.fragment_menu, self.fragment, (), self._select_fragment,
         )
-        camera_toolbar = ttk.Frame(viewport_panel)
-        camera_toolbar.pack(fill="x", pady=(0, 7))
-        ttk.Label(
-            camera_toolbar, text="CAMERA", style="FieldLabel.TLabel",
-        ).pack(side="left", padx=(0, 7))
+        self._populate_viewport_menu(
+            self.lod_menu, self.lod, ("All",), self._select_lod,
+        )
+        self._populate_viewport_menu(
+            self.component_menu, self.component, ("All",), self._select_component,
+        )
+
+        camera_menu = dark_menu(viewport_toolbar)
         for label, yaw, pitch in (
-            ("↶", -15.0, 0.0), ("↷", 15.0, 0.0),
-            ("Tilt +", 0.0, 10.0), ("Tilt −", 0.0, -10.0),
+            ("Perspective", 34.0, 24.0), ("Front", 0.0, 0.0),
+            ("Rear", 180.0, 0.0), ("Left", 270.0, 0.0),
+            ("Right", 90.0, 0.0), ("Top", 0.0, 89.0),
         ):
-            ttk.Button(
-                camera_toolbar, text=label, width=6,
+            camera_menu.add_command(
+                label=label,
+                command=lambda y=yaw, p=pitch: self._set_camera_pose(y, p),
+            )
+        camera_menu.add_separator()
+        for label, yaw, pitch in (
+            ("Rotate left", -15.0, 0.0), ("Rotate right", 15.0, 0.0),
+            ("Tilt up", 0.0, 10.0), ("Tilt down", 0.0, -10.0),
+        ):
+            camera_menu.add_command(
+                label=label,
                 command=lambda y=yaw, p=pitch: self._rotate_camera(y, p),
-            ).pack(side="left", padx=(0, 4))
-        ttk.Button(
-            camera_toolbar, text="Reset camera", command=self._reset_camera,
-        ).pack(side="left", padx=(3, 0))
+            )
+        camera_menu.add_separator()
+        camera_menu.add_command(label="Reset camera", command=self._reset_camera)
+        self.camera_menu = camera_menu
+        self.camera_menu_button = strip_menu_button(
+            text="View ▾", menu=camera_menu, width=6,
+        )
+
+        tk.Frame(viewport_toolbar, background="#26362f", width=1).pack(
+            side="left", fill="y", pady=5,
+        )
+        self.fit_button = tk.Button(
+            viewport_toolbar, text="Fit", command=self._fit_viewport,
+            background="#141f1a", foreground="#dce8e1",
+            activebackground="#234b34", activeforeground="#ffffff",
+            relief="flat", borderwidth=0, highlightthickness=0,
+            padx=7, pady=3, cursor="hand2", takefocus=True,
+            font=("Segoe UI Semibold", 9),
+        )
+        self.fit_button.pack(side="left", fill="y")
+        self.zoom_label = tk.Button(
+            viewport_toolbar, text="100%", width=5, command=self._reset_zoom,
+            background="#141f1a", foreground="#8fb9a2",
+            activebackground="#234b34", activeforeground="#ffffff",
+            relief="flat", borderwidth=0, highlightthickness=0,
+            padx=4, pady=3, cursor="hand2", takefocus=True,
+            font=("Segoe UI", 8),
+        )
+        self.zoom_label.pack(side="right", fill="y")
+
         self.component_summary = tk.StringVar(
             value="Select a rendered component to inspect its material and texture links."
         )
-        ttk.Label(
-            viewport_panel, textvariable=self.component_summary,
-            foreground="#7fae94", wraplength=700, justify="left",
-        ).pack(fill="x", pady=(0, 7))
 
         self.viewport = tk.Canvas(
-            viewport_panel, background="#101714", highlightthickness=0,
-            cursor="fleur",
+            viewport_surface, background="#101714", highlightthickness=0,
+            cursor="fleur", takefocus=True,
         )
         self.viewport.pack(fill="both", expand=True)
         self.viewport.bind("<Configure>", lambda _event: self._render_viewport())
@@ -278,22 +592,40 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.viewport.bind("<ButtonPress-3>", self._begin_orbit)
         self.viewport.bind("<B3-Motion>", self._continue_orbit)
         self.viewport.bind("<ButtonRelease-3>", self._end_orbit)
+        self.viewport.bind("<Double-Button-1>", self._fit_viewport_event)
+        self.viewport.bind("<Double-Button-3>", self._reset_camera_event)
+        self.viewport.bind("<KeyPress-f>", self._fit_viewport_event)
+        self.viewport.bind("<KeyPress-F>", self._fit_viewport_event)
+        self.viewport.bind("<KeyPress-0>", self._reset_zoom_event)
+        self.viewport.bind("<KeyPress-plus>", self._zoom_in_event)
+        self.viewport.bind("<KeyPress-equal>", self._zoom_in_event)
+        self.viewport.bind("<KeyPress-minus>", self._zoom_out_event)
+        self.viewport.bind("<KeyPress-r>", self._reset_camera_event)
+        self.viewport.bind("<KeyPress-R>", self._reset_camera_event)
         self.viewport_message = tk.StringVar(
             value="Select a vehicle to load its native model preview."
         )
+        # The production-render drawer is intentionally lazy. Most authoring
+        # sessions never use Blender, so its richer control surface should not
+        # add dozens of hidden widgets to every workbench instance.
+        self._compiled_render_parent = viewport_surface
+        self.compiled_render_panel: CompiledRenderPanel | None = None
 
         self.model_heading = tk.StringVar(value="No vehicle selected")
         self.model_summary = tk.StringVar(value="No package loaded")
-        ttk.Label(
+        self.model_heading_label = ttk.Label(
             inspector_panel, textvariable=self.model_heading,
             font=("Segoe UI Semibold", 13), foreground="#1f7f42",
-        ).pack(anchor="w")
-        ttk.Label(
+        )
+        self.model_heading_label.pack(anchor="w")
+        self.model_summary_label = ttk.Label(
             inspector_panel, textvariable=self.model_summary,
             foreground="#52635c", wraplength=330, justify="left",
-        ).pack(fill="x", anchor="w", pady=(3, 9))
+        )
+        self.model_summary_label.pack(fill="x", anchor="w", pady=(3, 9))
 
         inspector_tabs = ttk.Notebook(inspector_panel)
+        self.inspector_tabs = inspector_tabs
         inspector_tabs.pack(fill="both", expand=True)
         overview_tab = ttk.Frame(inspector_tabs, padding=7)
         author_tab = ttk.Frame(inspector_tabs, padding=7)
@@ -305,6 +637,8 @@ class VehicleWorkbenchFrame(ttk.Frame):
         inspector_tabs.add(appearance_tab, text="Appearance")
         inspector_tabs.add(tuning_builder_tab, text="Tuning Builder")
         inspector_tabs.add(assets_tab, text="Assets")
+        self.tuning_builder_tab = tuning_builder_tab
+        inspector_tabs.bind("<<NotebookTabChanged>>", self._inspector_tab_changed)
 
         self.details = tk.Text(
             overview_tab, wrap="word", relief="flat",
@@ -557,6 +891,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
         asset_scroll.pack(side="right", fill="y")
         self.asset_tree.bind("<<TreeviewSelect>>", self._select_project_asset)
         self.asset_tree.bind("<Double-1>", self._open_selected_asset)
+        self.asset_tree.bind("<Return>", self._open_selected_asset)
 
         self._render_viewport()
 
@@ -566,33 +901,44 @@ class VehicleWorkbenchFrame(ttk.Frame):
         ttk.Label(chooser, text="Kit").grid(row=0, column=0, sticky="w")
         self.builder_kit = tk.StringVar()
         self.builder_kit_combo = ttk.Combobox(
-            chooser, textvariable=self.builder_kit, state="readonly", width=18,
+            chooser, textvariable=self.builder_kit, state="readonly", width=7,
         )
-        self.builder_kit_combo.grid(row=0, column=1, sticky="ew", padx=(5, 8))
+        self.builder_kit_combo.grid(
+            row=1, column=0, sticky="ew", padx=(0, 5), pady=(2, 0),
+        )
         self.builder_kit_combo.bind(
             "<<ComboboxSelected>>", self._change_tuning_builder_kit,
         )
-        ttk.Label(chooser, text="Group").grid(row=0, column=2, sticky="w")
+        ttk.Label(chooser, text="Group").grid(row=0, column=1, sticky="w")
         self.builder_collection = tk.StringVar(value="Visible parts")
         self.builder_collection_combo = ttk.Combobox(
             chooser, textvariable=self.builder_collection, state="readonly",
-            values=tuple(TUNING_COLLECTION_LABELS), width=16,
+            values=tuple(TUNING_COLLECTION_LABELS), width=8,
         )
-        self.builder_collection_combo.grid(row=0, column=3, sticky="ew", padx=(5, 0))
+        self.builder_collection_combo.grid(
+            row=1, column=1, sticky="ew", padx=(0, 5), pady=(2, 0),
+        )
         self.builder_collection_combo.bind(
             "<<ComboboxSelected>>", self._change_tuning_collection,
         )
-        chooser.columnconfigure(1, weight=1)
-        chooser.columnconfigure(3, weight=1)
+        ttk.Label(chooser, text="View").grid(row=0, column=2, sticky="w")
+        self.tuning_view = tk.StringVar(value="Parts and fields")
+        self.tuning_view_combo = ttk.Combobox(
+            chooser, textvariable=self.tuning_view, state="readonly", width=8,
+            values=("Parts and fields", "Assets and checks"),
+        )
+        self.tuning_view_combo.grid(
+            row=1, column=2, sticky="ew", pady=(2, 0),
+        )
+        self.tuning_view_combo.bind(
+            "<<ComboboxSelected>>", self._change_tuning_view,
+        )
+        for column in range(3):
+            chooser.columnconfigure(column, weight=1)
         self.tuning_builder_summary = tk.StringVar(
             value="Create an authoring workspace to build tuning parts."
         )
-        ttk.Label(
-            parent, textvariable=self.tuning_builder_summary,
-            foreground="#52635c", wraplength=350, justify="left",
-        ).pack(fill="x", pady=(0, 6))
-
-        pages = ttk.Notebook(parent)
+        pages = _PageStack(parent)
         pages.pack(fill="both", expand=True)
         self.tuning_pages = pages
         parts_page = ttk.Frame(pages, padding=5)
@@ -602,10 +948,24 @@ class VehicleWorkbenchFrame(ttk.Frame):
         pages.add(parts_page, text="Parts and fields")
         pages.add(validation_page, text="Assets and checks")
 
-        list_frame = ttk.Frame(parts_page)
-        list_frame.pack(fill="both", expand=True)
+        parts_split = ttk.Panedwindow(parts_page, orient="horizontal")
+        self.tuning_parts_split = parts_split
+        parts_split.pack(fill="both", expand=True)
+        list_frame = ttk.LabelFrame(
+            parts_split, text="Kit entries", padding=5, width=135,
+        )
+        editor_host = ttk.Frame(parts_split, width=180)
+        list_frame.pack_propagate(False)
+        editor_host.pack_propagate(False)
+        parts_split.add(list_frame, weight=2)
+        parts_split.add(editor_host, weight=3)
+        parts_split.bind("<Configure>", self._balance_tuning_parts)
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+        list_tree_host = ttk.Frame(list_frame)
+        list_tree_host.grid(row=0, column=0, sticky="nsew")
         self.tuning_part_tree = ttk.Treeview(
-            list_frame, columns=("type",), show="tree headings", height=6,
+            list_tree_host, columns=("type",), show="tree headings", height=6,
             selectmode="browse",
         )
         self.tuning_part_tree.heading("#0", text="Entry")
@@ -613,7 +973,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.tuning_part_tree.column("#0", width=155, minwidth=100)
         self.tuning_part_tree.column("type", width=125, minwidth=80)
         part_scroll = ttk.Scrollbar(
-            list_frame, orient="vertical", command=self.tuning_part_tree.yview,
+            list_tree_host, orient="vertical", command=self.tuning_part_tree.yview,
         )
         self.tuning_part_tree.configure(yscrollcommand=part_scroll.set)
         self.tuning_part_tree.pack(side="left", fill="both", expand=True)
@@ -622,70 +982,84 @@ class VehicleWorkbenchFrame(ttk.Frame):
             "<<TreeviewSelect>>", self._select_tuning_builder_entry,
         )
 
-        actions = ttk.Frame(parts_page)
-        actions.pack(fill="x", pady=(5, 0))
-        self.tuning_duplicate_button = ttk.Button(
-            actions, text="Duplicate", state="disabled",
-            command=self._duplicate_tuning_builder_entry,
+        actions = ttk.Frame(list_frame)
+        actions.grid(row=1, column=0, sticky="ew", pady=(5, 0))
+        actions.columnconfigure(0, weight=1)
+        self.tuning_entry_action_menu = tk.Menu(actions, tearoff=False)
+        self.tuning_entry_action_menu.add_command(
+            label="New entry", command=self._show_tuning_create,
         )
-        self.tuning_duplicate_button.pack(side="left")
-        self.tuning_remove_button = ttk.Button(
-            actions, text="Remove", state="disabled",
-            command=self._remove_tuning_builder_entry,
+        self.tuning_entry_action_menu.add_separator()
+        self.tuning_entry_action_menu.add_command(
+            label="Copy selected", command=self._duplicate_tuning_builder_entry,
         )
-        self.tuning_remove_button.pack(side="left", padx=(5, 0))
-        self.tuning_up_button = ttk.Button(
-            actions, text="↑", width=3, state="disabled",
-            command=lambda: self._move_tuning_builder_entry(-1),
+        self.tuning_entry_action_menu.add_command(
+            label="Delete selected", command=self._remove_tuning_builder_entry,
         )
-        self.tuning_up_button.pack(side="right")
-        self.tuning_down_button = ttk.Button(
-            actions, text="↓", width=3, state="disabled",
-            command=lambda: self._move_tuning_builder_entry(1),
+        self.tuning_entry_action_menu.add_separator()
+        self.tuning_entry_action_menu.add_command(
+            label="Move up", command=lambda: self._move_tuning_builder_entry(-1),
         )
-        self.tuning_down_button.pack(side="right", padx=(0, 4))
+        self.tuning_entry_action_menu.add_command(
+            label="Move down", command=lambda: self._move_tuning_builder_entry(1),
+        )
+        self.tuning_entry_actions_button = ttk.Menubutton(
+            actions, text="Entry actions…", state="disabled",
+            menu=self.tuning_entry_action_menu,
+        )
+        self.tuning_entry_actions_button.grid(row=0, column=0, sticky="ew")
 
-        create = ttk.LabelFrame(parts_page, text="Add entry", padding=5)
-        create.pack(fill="x", pady=(7, 0))
+        self.tuning_editor_tabs = _PageStack(editor_host)
+        self.tuning_editor_tabs.pack(fill="both", expand=True)
+        create_page = ttk.Frame(self.tuning_editor_tabs, padding=1)
+        fields_page = ttk.Frame(self.tuning_editor_tabs, padding=1)
+        self.tuning_create_page = create_page
+        self.tuning_fields_page = fields_page
+        self.tuning_editor_tabs.add(create_page, text="Add entry")
+        self.tuning_editor_tabs.add(fields_page, text="Edit fields")
+        create = ttk.Frame(create_page)
+        create.pack(fill="both", expand=True)
         self.tuning_primary_label = ttk.Label(create, text="Model asset")
         self.tuning_primary_label.grid(row=0, column=0, sticky="w")
         self.tuning_new_primary = tk.StringVar()
         self.tuning_primary_entry = ttk.Entry(
-            create, textvariable=self.tuning_new_primary, state="disabled",
+            create, textvariable=self.tuning_new_primary, state="disabled", width=8,
         )
         self.tuning_primary_entry.grid(
-            row=0, column=1, sticky="ew", padx=(5, 0),
+            row=0, column=1, columnspan=2, sticky="ew", padx=(5, 0),
         )
         self.tuning_secondary_label = ttk.Label(create, text="Shop label")
-        self.tuning_secondary_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.tuning_secondary_label.grid(row=1, column=0, sticky="w")
         self.tuning_new_secondary = tk.StringVar()
         self.tuning_secondary_entry = ttk.Entry(
-            create, textvariable=self.tuning_new_secondary, state="disabled",
+            create, textvariable=self.tuning_new_secondary, state="disabled", width=8,
         )
         self.tuning_secondary_entry.grid(
-            row=1, column=1, sticky="ew", padx=(5, 0), pady=(4, 0),
+            row=1, column=1, columnspan=2, sticky="ew", padx=(5, 0),
         )
         self.tuning_type_label = ttk.Label(create, text="Type")
-        self.tuning_type_label.grid(row=2, column=0, sticky="w", pady=(4, 0))
+        self.tuning_type_label.grid(row=2, column=0, sticky="w")
         self.tuning_new_type = tk.StringVar(value="VMT_SPOILER")
         self.tuning_new_type_combo = ttk.Combobox(
             create, textvariable=self.tuning_new_type, state="disabled",
-            values=VMT_TYPES,
+            values=VMT_TYPES, width=6,
         )
         self.tuning_new_type_combo.grid(
-            row=2, column=1, sticky="ew", padx=(5, 0), pady=(4, 0),
+            row=2, column=1, columnspan=2, sticky="ew", padx=(5, 0),
         )
         self.tuning_add_button = ttk.Button(
             create, text="Add + validate", state="disabled",
             command=self._add_tuning_builder_entry,
         )
-        self.tuning_add_button.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.tuning_add_button.grid(
+            row=3, column=0, columnspan=3, sticky="ew", pady=(4, 0),
+        )
         create.columnconfigure(1, weight=1)
 
-        fields = ttk.LabelFrame(parts_page, text="Selected entry fields", padding=5)
-        fields.pack(fill="both", expand=True, pady=(7, 0))
+        fields = ttk.Frame(fields_page)
+        fields.pack(fill="both", expand=True)
         self.tuning_field_tree = ttk.Treeview(
-            fields, columns=("value",), show="tree headings", height=6,
+            fields, columns=("value",), show="tree headings", height=1,
             selectmode="browse",
         )
         self.tuning_field_tree.heading("#0", text="Field")
@@ -700,25 +1074,27 @@ class VehicleWorkbenchFrame(ttk.Frame):
         editor.pack(fill="x", pady=(5, 0))
         self.tuning_field = tk.StringVar()
         self.tuning_field_combo = ttk.Combobox(
-            editor, textvariable=self.tuning_field, state="readonly", width=18,
+            editor, textvariable=self.tuning_field, state="readonly", width=8,
         )
-        self.tuning_field_combo.pack(side="left", fill="x", expand=True)
         self.tuning_field_combo.bind(
             "<<ComboboxSelected>>", self._change_tuning_builder_field,
         )
         self.tuning_field_value = tk.StringVar()
         self.tuning_field_value_entry = ttk.Entry(
-            editor, textvariable=self.tuning_field_value, width=18,
+            editor, textvariable=self.tuning_field_value, width=8,
             state="disabled",
         )
+        self.tuning_field_button = ttk.Button(
+            editor, text="Apply field", state="disabled",
+            command=self._apply_tuning_builder_field,
+        )
+        # Pack the fixed action first so it remains reachable when the
+        # inspector pane is narrowed; the two editors share what remains.
+        self.tuning_field_button.pack(side="right", padx=(5, 0))
+        self.tuning_field_combo.pack(side="left", fill="x", expand=True)
         self.tuning_field_value_entry.pack(
             side="left", fill="x", expand=True, padx=(5, 0),
         )
-        self.tuning_field_button = ttk.Button(
-            fields, text="Apply field + validate", state="disabled",
-            command=self._apply_tuning_builder_field,
-        )
-        self.tuning_field_button.pack(fill="x", pady=(5, 0))
 
         asset_frame = ttk.LabelFrame(validation_page, text="Candidate assets", padding=5)
         asset_frame.pack(fill="both", expand=True)
@@ -737,6 +1113,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
             "<<TreeviewSelect>>", self._select_tuning_asset,
         )
         self.tuning_asset_tree.bind("<Double-1>", self._open_tuning_asset)
+        self.tuning_asset_tree.bind("<Return>", self._open_tuning_asset)
         asset_actions = ttk.Frame(asset_frame)
         asset_actions.pack(fill="x", pady=(5, 0))
         self.tuning_use_asset_button = ttk.Button(
@@ -763,11 +1140,84 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.tuning_finding_tree.bind(
             "<Double-1>", self._open_tuning_finding,
         )
+        self.tuning_finding_tree.bind("<Return>", self._open_tuning_finding)
         self._change_tuning_collection()
 
     def _show_help(self) -> None:
         if self._on_help is not None:
             self._on_help("vehicle-workbench")
+
+    def _balance_primary_panes(self, _event: tk.Event | None = None) -> None:
+        """Keep all three primary panes inside the resized workbench."""
+
+        if self._primary_pane_balance_job is not None:
+            self.after_cancel(self._primary_pane_balance_job)
+        self._primary_pane_balance_job = self.after_idle(
+            self._apply_primary_pane_balance,
+        )
+
+    def _apply_primary_pane_balance(self) -> None:
+        self._primary_pane_balance_job = None
+        width = self.primary_panes.winfo_width()
+        if width <= 480:
+            return
+        if self.primary_side_panes.has_collapsed_side:
+            self.primary_side_panes.enforce_layout()
+            return
+        # Use the live width rather than the Configure event width. Multiple
+        # resize events can be queued while Tk is still resolving requested
+        # pane sizes, and applying an older width pushes the inspector outside
+        # the application window.
+        model_end = max(125, min(round(width * 0.18), width - 560))
+        inspector_start = max(
+            model_end + 280,
+            min(round(width * 0.62), width - 300),
+        )
+        try:
+            self.primary_panes.sashpos(0, model_end)
+            self.primary_panes.sashpos(1, inspector_start)
+        except tk.TclError:
+            return
+        self.primary_side_panes.remember_expanded_widths()
+
+    def _balance_tuning_parts(self, _event: tk.Event | None = None) -> None:
+        if self._tuning_pane_balance_job is not None:
+            self.after_cancel(self._tuning_pane_balance_job)
+        self._tuning_pane_balance_job = self.after_idle(
+            self._apply_tuning_pane_balance,
+        )
+
+    def _apply_tuning_pane_balance(self) -> None:
+        self._tuning_pane_balance_job = None
+        width = self.tuning_parts_split.winfo_width()
+        if width <= 180:
+            return
+        try:
+            self.tuning_parts_split.sashpos(
+                0, max(86, min(round(width * 0.40), width - 110)),
+            )
+        except tk.TclError:
+            return
+
+    def _inspector_tab_changed(self, _event: object | None = None) -> None:
+        compact = self.inspector_tabs.select() == str(self.tuning_builder_tab)
+        if compact:
+            self.model_heading_label.pack_forget()
+            self.model_summary_label.pack_forget()
+            self.vehicle_status_label.pack_forget()
+            return
+        if not self.vehicle_status_label.winfo_manager():
+            self.vehicle_status_label.pack(
+                fill="x", pady=(0, 6), before=self.primary_panes,
+            )
+        if not self.model_heading_label.winfo_manager():
+            self.model_heading_label.pack(
+                anchor="w", before=self.inspector_tabs,
+            )
+        if not self.model_summary_label.winfo_manager():
+            self.model_summary_label.pack(
+                fill="x", anchor="w", pady=(3, 9), before=self.inspector_tabs,
+            )
 
     def _open_menu(self, parent: tk.Misc) -> tk.Menu:
         menu = tk.Menu(parent, tearoff=False)
@@ -795,13 +1245,13 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self, source: str | Path, scan: PackageScan | None = None,
         *, authoring_workspace: VehicleAuthoringWorkspace | None = None,
     ) -> None:
+        self._cancel_scene_load()
         self._cancel_scene_render()
         self.status.set("Resolving vehicle project…")
         self.update_idletasks()
         try:
             loaded_scan = scan or AddonPackageInspector().inspect(source)
             project = VehicleProjectResolver.inspect_scan(loaded_scan)
-            reader = PackageAssetReader(source)
         except (OSError, ValueError) as exc:
             messagebox.showerror("Could not open vehicle package", str(exc), parent=self)
             self.status.set("Vehicle package could not be opened.")
@@ -809,10 +1259,18 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.source = Path(source).expanduser().resolve()
         self.scan = loaded_scan
         self.project = project
-        self.reader = reader
+        # PackageAssetReader may enumerate external archives at construction.
+        # Create it with the first scene request on the loader thread instead.
+        self.reader = None
         self.authoring_workspace = authoring_workspace
         self._scene_cache.clear()
+        self._scene_revision += 1
+        self._active_scene_key = (self._scene_revision, "")
+        self._render_generation = self._viewport_render_worker.invalidate(
+            clear_cache=True,
+        )
         self._model_scene = None
+        self._set_compiled_render_scene_available(False)
         self.models.clear()
         self.model_tree.delete(*self.model_tree.get_children())
         for index, model in enumerate(project.models):
@@ -855,9 +1313,28 @@ class VehicleWorkbenchFrame(ttk.Frame):
         return True
 
     def _select_model(self, _event: object | None = None) -> None:
+        if self._restoring_model_selection:
+            return
         selection = self.model_tree.selection()
         model = self.models.get(selection[0]) if selection else None
         if model is None:
+            return
+        previous = self.selected_model
+        if (
+            previous is not None and previous.model != model.model
+            and not self.confirm_navigation()
+        ):
+            previous_id = next((
+                item_id for item_id, candidate in self.models.items()
+                if candidate.model == previous.model
+            ), None)
+            if previous_id is not None:
+                self._restoring_model_selection = True
+                try:
+                    self.model_tree.selection_set(previous_id)
+                    self.model_tree.focus(previous_id)
+                finally:
+                    self._restoring_model_selection = False
             return
         self.selected_model = model
         self.model_heading.set(model.model)
@@ -905,24 +1382,43 @@ class VehicleWorkbenchFrame(ttk.Frame):
         if model.high_detail_model:
             self._fragment_paths["High detail"] = model.high_detail_model
         fragment_values = tuple(self._fragment_paths)
-        self.fragment_combo.configure(values=fragment_values)
+        self._populate_viewport_menu(
+            self.fragment_menu, self.fragment, fragment_values, self._select_fragment,
+        )
         if fragment_values:
             self.fragment.set(fragment_values[0])
         self._load_authoring_fields(model)
+        self._loaded_editor_snapshot = self._editor_snapshot()
         self._load_model_preview(model)
 
     def _clear_model(self, message: str) -> None:
         self.selected_model = None
+        self._cancel_scene_load()
         self._cancel_scene_render()
         self.model_heading.set("No vehicle selected")
         self.model_summary.set(message)
+        self.details.configure(state="normal")
+        self.details.delete("1.0", "end")
+        self.details.insert("1.0", message)
+        self.details.configure(state="disabled")
+        self.asset_tree.delete(*self.asset_tree.get_children())
+        self.project_assets.clear()
+        self.open_asset_button.configure(state="disabled")
         self._source_image = None
         self._model_scene = None
+        self._set_compiled_render_scene_available(False)
+        self._active_scene_key = (self._scene_revision, "")
         self._fragment_paths = {}
-        self.fragment_combo.configure(values=())
-        self.lod_combo.configure(values=("All",))
+        self._populate_viewport_menu(
+            self.fragment_menu, self.fragment, (), self._select_fragment,
+        )
+        self._populate_viewport_menu(
+            self.lod_menu, self.lod, ("All",), self._select_lod,
+        )
         self.lod.set("All")
-        self.component_combo.configure(values=("All",))
+        self._populate_viewport_menu(
+            self.component_menu, self.component, ("All",), self._select_component,
+        )
         self.component.set("All")
         self.component_summary.set(
             "Select a rendered component to inspect its material and texture links."
@@ -937,19 +1433,54 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.identity_handling_entry.configure(state="disabled")
         self.identity_button.configure(state="disabled")
         self._clear_appearance()
+        self.authoring_status.set("Select a vehicle before editing package metadata.")
         self.save_author_button.configure(state="disabled")
         self.undo_author_button.configure(state="disabled")
         self._viewport_photo = None
         self._viewport_photo_zoom = None
         self.viewport_message.set(message)
         self._render_viewport()
+        self._loaded_editor_snapshot = None
+
+    def _editor_snapshot(self) -> tuple[object, ...]:
+        colors = tuple(
+            (
+                tuple(self._appearance_colors[item].get("indices", ())),
+                tuple(self._appearance_colors[item].get("liveries", ())),
+            )
+            for item in self.color_tree.get_children()
+            if item in self._appearance_colors
+        )
+        return (
+            tuple((key, variable.get()) for key, variable in self.authoring_values.items()),
+            self.identity_model.get(), self.identity_handling.get(),
+            self.appearance_kits.get(), self.appearance_light.get(),
+            self.appearance_siren.get(), colors,
+        )
+
+    def confirm_navigation(self) -> bool:
+        """Prevent model/package navigation from silently discarding form edits."""
+        if (
+            self.authoring_workspace is None
+            or self._loaded_editor_snapshot is None
+            or self._editor_snapshot() == self._loaded_editor_snapshot
+        ):
+            return True
+        return messagebox.askyesno(
+            "Discard unsaved vehicle edits?",
+            "This vehicle has changes that have not been applied.\n\n"
+            "Choose No to return and apply them, or Yes to discard them.",
+            parent=self, icon="warning",
+        )
 
     def _load_model_preview(self, model: VehicleProjectModel) -> None:
+        self._cancel_scene_load()
         self._cancel_scene_render()
+        self._set_compiled_render_scene_available(False)
         path = self._fragment_paths.get(
             self.fragment.get(), model.primary_model or model.high_detail_model or "",
         )
-        if not path or self.reader is None or self.scan is None:
+        if not path or self.source is None or self.scan is None:
             self._source_image = None
             self._model_scene = None
             self._viewport_photo = None
@@ -979,24 +1510,22 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self._viewport_photo = None
         self._viewport_photo_zoom = None
         self._render_viewport()
-        self.update_idletasks()
         try:
-            content = self.reader.read(
-                path, limit=native_preview_limit(path, entry.size),
+            key = (self._scene_revision, path.casefold())
+            reader = self.reader
+            source = self.source
+            project_root = self.project_root
+            game_path = self._native_game_path()
+            edition = self._native_edition()
+            generation = self._viewport_scene_worker.submit(
+                key,
+                lambda: _decode_native_model_scene(
+                    reader, source, path, entry.size, project_root=project_root,
+                    game_path=game_path, edition=edition,
+                ),
+                cache_result=False,
             )
-            report = NativeAssetInspector(
-                self.project_root, self._native_game_path(),
-            ).inspect_bytes(
-                path, content.data, edition=self._native_edition(),
-                truncated=content.truncated,
-            )
-            if report.model_scene is None:
-                warning = "; ".join(report.warnings) or "No renderable geometry was found."
-                raise ValueError(warning)
-            self._scene_cache[path.casefold()] = report.model_scene
-            while len(self._scene_cache) > 2:
-                self._scene_cache.pop(next(iter(self._scene_cache)))
-        except (OSError, ValueError, UnidentifiedImageError) as exc:
+        except (RuntimeError, ValueError) as exc:
             self._source_image = None
             self._model_scene = None
             self._viewport_photo = None
@@ -1004,50 +1533,202 @@ class VehicleWorkbenchFrame(ttk.Frame):
             self.viewport_message.set(f"Native preview unavailable: {exc}")
             self._render_viewport()
             return
-        self._activate_scene(path, report.model_scene)
+        self._scene_load_key = key
+        self._scene_load_path = path
+        self._scene_load_generation = generation
+        self._ensure_scene_load_poll()
+
+    def _ensure_scene_load_poll(self) -> None:
+        if self._scene_load_poll_job is None:
+            self._scene_load_poll_job = self.after(16, self._poll_scene_load)
+
+    def _poll_scene_load(self) -> None:
+        self._scene_load_poll_job = None
+        outcome = self._viewport_scene_worker.poll()
+        if (
+            outcome is not None
+            and outcome.generation == self._scene_load_generation
+            and outcome.key == self._scene_load_key
+        ):
+            path = self._scene_load_path or outcome.key[1]
+            if outcome.error is not None:
+                self._source_image = None
+                self._model_scene = None
+                self._viewport_photo = None
+                self._viewport_photo_zoom = None
+                self.viewport_message.set(
+                    f"Native preview unavailable: {outcome.error}"
+                )
+                self._render_viewport()
+            elif not isinstance(outcome.value, _DecodedNativeModel):
+                self._source_image = None
+                self._model_scene = None
+                self.viewport_message.set(
+                    "Native preview unavailable: decoder returned an invalid scene"
+                )
+                self._render_viewport()
+            else:
+                self.reader = outcome.value.reader
+                self._scene_cache[path.casefold()] = outcome.value.scene
+                while len(self._scene_cache) > 2:
+                    self._scene_cache.pop(next(iter(self._scene_cache)))
+                self._activate_scene(path, outcome.value.scene)
+        if self._viewport_scene_worker.busy:
+            self._ensure_scene_load_poll()
 
     def _activate_scene(self, path: str, scene: NativeModelScene) -> None:
         self._model_scene = scene
+        self._set_compiled_render_scene_available(True)
+        self._active_scene_key = (self._scene_revision, path.casefold())
         self._camera_yaw = 34.0
         self._camera_pitch = 24.0
-        self.lod_combo.configure(values=("All", *scene.lods))
+        self._populate_viewport_menu(
+            self.lod_menu, self.lod, ("All", *scene.lods), self._select_lod,
+        )
         self.lod.set("All")
         component_names = tuple(dict.fromkeys(
             item.name for item in scene.components
         ))
-        self.component_combo.configure(values=("All", *component_names))
+        self._populate_viewport_menu(
+            self.component_menu, self.component, ("All", *component_names),
+            self._select_component,
+        )
         self.component.set("All")
         self._update_component_summary()
         self.viewport_message.set(path)
         self._render_model_scene(fit=True)
 
-    def _render_model_scene(self, *, fit: bool = False) -> None:
+    def _render_model_scene(
+        self, *, fit: bool = False, quality: str = "final",
+    ) -> None:
         scene = self._model_scene
         if scene is None:
             return
-        try:
-            image_png, metadata = scene.render(
-                yaw=self._camera_yaw, pitch=self._camera_pitch,
-                lod=self.lod.get(), component=self.component.get(),
+        yaw = self._camera_yaw
+        pitch = self._camera_pitch
+        lod = self.lod.get()
+        component = self.component.get()
+        render_mode = self.render_mode.get().casefold()
+        zoom = self._zoom
+
+        def render_frame() -> object:
+            if quality == "interactive":
+                image, metadata = scene.render_image(
+                    yaw=yaw, pitch=pitch, lod=lod, component=component,
+                    render_mode=render_mode, quality=quality,
+                    triangle_budget=INTERACTIVE_ORBIT_TRIANGLE_BUDGET,
+                )
+                return _prepare_viewport_image(
+                    image, metadata, quality=quality, zoom=zoom,
+                )
+            encoded, metadata = scene.render(
+                yaw=yaw, pitch=pitch, lod=lod, component=component,
+                render_mode=render_mode, quality=quality,
             )
-            with Image.open(io.BytesIO(image_png)) as opened:
-                self._source_image = opened.convert("RGBA").copy()
-        except (OSError, ValueError, UnidentifiedImageError) as exc:
+            # Keep final/full cache entries encoded. They are revisited less
+            # often and PNG storage leaves substantially more room in the
+            # bounded camera-view cache than resident RGB images would.
+            return encoded, metadata
+
+        try:
+            key = ViewportRenderKey.create(
+                self._active_scene_key, yaw=yaw, pitch=pitch,
+                lod=lod, component=component, render_mode=render_mode,
+                quality=quality,
+            )
+            generation = self._viewport_render_worker.submit(
+                key,
+                render_frame,
+                cache_result=(quality in {"final", "full"}),
+            )
+        except (RuntimeError, ValueError) as exc:
             self._source_image = None
             self.viewport_message.set(f"Model view unavailable: {exc}")
             self._render_viewport()
             return
+        self._render_generation = generation
+        self._render_fit_generation = generation if fit else None
+        self._ensure_render_poll()
+
+    def _ensure_render_poll(self) -> None:
+        if self._render_poll_job is None:
+            # Four milliseconds bounds worker-to-Tk hand-off to a small part
+            # of one display interval. Polling is non-blocking and only stays
+            # active while the latest-only worker has useful work.
+            self._render_poll_job = self.after(4, self._poll_viewport_render)
+
+    def _poll_viewport_render(self) -> None:
+        self._render_poll_job = None
+        outcome = self._viewport_render_worker.poll()
+        if outcome is not None and outcome.generation == self._render_generation:
+            if outcome.error is not None:
+                self._source_image = None
+                self.viewport_message.set(
+                    f"Model view unavailable: {outcome.error}"
+                )
+                self._render_viewport()
+            else:
+                try:
+                    value = outcome.value
+                    if isinstance(value, _PreparedViewportFrame):
+                        frame = value
+                    elif (
+                        isinstance(value, tuple) and len(value) == 2
+                        and isinstance(value[0], bytes)
+                        and isinstance(value[1], dict)
+                    ):
+                        frame = _prepare_viewport_frame(
+                            value[0], value[1], quality=outcome.key.quality,
+                            zoom=self._zoom,
+                        )
+                    else:
+                        raise TypeError("model renderer returned an invalid frame")
+                    self._source_image = frame.source_image
+                    metadata = frame.metadata
+                except (OSError, TypeError, ValueError, UnidentifiedImageError) as exc:
+                    self._source_image = None
+                    self.viewport_message.set(f"Model view unavailable: {exc}")
+                    self._render_viewport()
+                else:
+                    self._apply_rendered_scene(
+                        metadata, fit=(outcome.generation == self._render_fit_generation),
+                        display_image=frame.display_image,
+                        display_zoom=frame.display_zoom,
+                    )
+        if self._viewport_render_worker.busy:
+            self._ensure_render_poll()
+        elif self._orbit_origin is not None and self._orbit_render_dirty:
+            # Render at the renderer's actual throughput instead of submitting
+            # every pointer event.  Each completed frame becomes visible, then
+            # the newest camera pose starts immediately; intermediate poses are
+            # coalesced rather than invalidating every frame before Tk sees it.
+            self._schedule_scene_render(immediate=True)
+
+    def _apply_rendered_scene(
+        self, metadata: dict[str, object], *, fit: bool,
+        display_image: Image.Image | None = None,
+        display_zoom: float | None = None,
+    ) -> None:
         self._viewport_photo = None
         self._viewport_photo_zoom = None
+        scene = self._model_scene
+        if scene is None:
+            return
         self.viewport_message.set(
-            f"{scene.name} · yaw {metadata['model_camera_yaw']}° · "
-            f"pitch {metadata['model_camera_pitch']}° · "
+            f"{scene.name} · {metadata['model_camera_yaw']}°/"
+            f"{metadata['model_camera_pitch']}° · "
             f"LOD {metadata['model_camera_lod']} · "
-            f"component {metadata['model_camera_component']}"
+            f"{metadata['model_camera_component']} · "
+            f"{self.render_mode.get()}"
         )
         if fit:
             self._fit_viewport()
         else:
+            # Interactive frames arrive already resized by the worker. Only
+            # ImageTk's main-thread-only handle creation remains on this path.
+            if display_image is not None and display_zoom == self._zoom:
+                self._viewport_photo = ImageTk.PhotoImage(display_image)
+                self._viewport_photo_zoom = display_zoom
             self._render_viewport()
 
     def _native_edition(self) -> str:
@@ -1273,12 +1954,11 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.tuning_new_type_combo.configure(state="disabled")
         self.tuning_field_value_entry.configure(state="disabled")
         for button in (
-            self.tuning_add_button, self.tuning_duplicate_button,
-            self.tuning_remove_button, self.tuning_up_button,
-            self.tuning_down_button, self.tuning_field_button,
+            self.tuning_add_button, self.tuning_field_button,
             self.tuning_use_asset_button, self.tuning_open_asset_button,
         ):
             button.configure(state="disabled")
+        self._set_tuning_entry_action_states()
         self.tuning_builder_summary.set(
             "Create an authoring workspace to build tuning parts."
         )
@@ -1353,6 +2033,19 @@ class VehicleWorkbenchFrame(ttk.Frame):
             model.model, self.builder_kit.get(), editable=self._tuning_editable,
         )
 
+    def _change_tuning_view(self, _event: object | None = None) -> None:
+        page = (
+            self.tuning_validation_page
+            if self.tuning_view.get() == "Assets and checks"
+            else self.tuning_parts_page
+        )
+        self.tuning_pages.select(page)
+
+    def _show_tuning_create(self) -> None:
+        self.tuning_view.set("Parts and fields")
+        self.tuning_pages.select(self.tuning_parts_page)
+        self.tuning_editor_tabs.select(self.tuning_create_page)
+
     def _change_tuning_collection(
         self, _event: object | None = None, *, select_key: str = "",
     ) -> None:
@@ -1371,10 +2064,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
             values=TUNING_FIELDS[collection], state="disabled",
         )
         self.tuning_field_value_entry.configure(state="disabled")
-        self.tuning_duplicate_button.configure(state="disabled")
-        self.tuning_remove_button.configure(state="disabled")
-        self.tuning_up_button.configure(state="disabled")
-        self.tuning_down_button.configure(state="disabled")
+        self._set_tuning_entry_action_states()
         self.tuning_field_button.configure(state="disabled")
         self.tuning_new_primary.set("")
         self.tuning_new_secondary.set("")
@@ -1429,11 +2119,33 @@ class VehicleWorkbenchFrame(ttk.Frame):
         selection = self.tuning_part_tree.selection()
         return self._tuning_entries.get(selection[0]) if selection else None
 
+    def _set_tuning_entry_action_states(
+        self, *, selected: bool = False,
+        can_move_up: bool = False, can_move_down: bool = False,
+    ) -> None:
+        active = self._tuning_editable and selected
+        state = "normal" if active else "disabled"
+        editable_state = "normal" if self._tuning_editable else "disabled"
+        self.tuning_entry_actions_button.configure(state=editable_state)
+        self.tuning_entry_action_menu.entryconfigure(
+            "New entry", state=editable_state,
+        )
+        self.tuning_entry_action_menu.entryconfigure("Copy selected", state=state)
+        self.tuning_entry_action_menu.entryconfigure("Delete selected", state=state)
+        self.tuning_entry_action_menu.entryconfigure(
+            "Move up", state="normal" if active and can_move_up else "disabled",
+        )
+        self.tuning_entry_action_menu.entryconfigure(
+            "Move down", state="normal" if active and can_move_down else "disabled",
+        )
+
     def _select_tuning_builder_entry(self, _event: object | None = None) -> None:
         entry = self._selected_tuning_entry()
         self.tuning_field_tree.delete(*self.tuning_field_tree.get_children())
         if entry is None:
+            self._set_tuning_entry_action_states()
             return
+        self.tuning_editor_tabs.select(self.tuning_fields_page)
         all_fields = tuple(dict.fromkeys((
             *TUNING_FIELDS[entry.collection], *entry.fields,
         )))
@@ -1446,18 +2158,14 @@ class VehicleWorkbenchFrame(ttk.Frame):
                 "", "end", iid=f"tuning-field:{index}", text=field,
                 values=(value or "—",),
             )
-        state = "normal" if self._tuning_editable else "disabled"
-        self.tuning_duplicate_button.configure(state=state)
-        self.tuning_remove_button.configure(state=state)
         siblings = [
             item for item in self._tuning_entries.values()
             if item.collection == entry.collection
         ]
-        self.tuning_up_button.configure(
-            state=state if entry.index > 0 else "disabled",
-        )
-        self.tuning_down_button.configure(
-            state=state if entry.index < len(siblings) - 1 else "disabled",
+        self._set_tuning_entry_action_states(
+            selected=True,
+            can_move_up=entry.index > 0,
+            can_move_down=entry.index < len(siblings) - 1,
         )
         if all_fields:
             self.tuning_field.set(all_fields[0])
@@ -1655,7 +2363,9 @@ class VehicleWorkbenchFrame(ttk.Frame):
             self.builder_collection.set("Visible parts")
             self._change_tuning_collection()
         self.tuning_new_primary.set(asset.name)
+        self.tuning_view.set("Parts and fields")
         self.tuning_pages.select(self.tuning_parts_page)
+        self.tuning_editor_tabs.select(self.tuning_create_page)
 
     def _open_tuning_finding(self, _event: object | None = None) -> None:
         selection = self.tuning_finding_tree.selection()
@@ -1668,6 +2378,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
             return
         self.builder_collection.set(label)
         self._change_tuning_collection(select_key=entry_key)
+        self.tuning_view.set("Parts and fields")
         self.tuning_pages.select(self.tuning_parts_page)
 
     def _open_tuning_asset(self, _event: object | None = None) -> None:
@@ -1930,6 +2641,25 @@ class VehicleWorkbenchFrame(ttk.Frame):
             f"Validated package {result.mod_id}: {result.manifest}"
         )
 
+    @staticmethod
+    def _populate_viewport_menu(
+        menu: tk.Menu, variable: tk.StringVar, values: tuple[str, ...], command,
+    ) -> None:
+        """Replace one compact viewport selector without creating hidden controls."""
+        menu.delete(0, "end")
+        if not values:
+            menu.add_command(label="Unavailable", state="disabled")
+            return
+        for value in values:
+            menu.add_radiobutton(
+                label=value, variable=variable, value=value, command=command,
+            )
+
+    def _select_render_mode(self) -> None:
+        mode = self.render_mode.get()
+        self.render_mode_label.set(f"{mode} ▾")
+        self._render_model_scene(quality="final")
+
     def _select_fragment(self, _event: object | None = None) -> None:
         if self.selected_model is not None:
             self._load_model_preview(self.selected_model)
@@ -2019,28 +2749,342 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self._camera_pitch = min(89.0, max(-89.0, self._camera_pitch + pitch))
         self._render_model_scene()
 
+    def _set_camera_pose(self, yaw: float, pitch: float) -> None:
+        if self._model_scene is None:
+            return
+        self._camera_yaw = yaw % 360.0
+        self._camera_pitch = min(89.0, max(-89.0, pitch))
+        self._render_model_scene(fit=True)
+
     def _reset_camera(self) -> None:
         if self._model_scene is None:
             return
         self._camera_yaw = 34.0
         self._camera_pitch = 24.0
-        self.lod.set("All")
-        self.component.set("All")
-        self._update_component_summary()
         self._render_model_scene(fit=True)
 
-    def _schedule_scene_render(self) -> None:
-        self._cancel_scene_render()
-        self._render_job = self.after(40, self._run_scheduled_scene_render)
+    def _render_full_quality(self) -> None:
+        if self._model_scene is None:
+            return
+        self.viewport_message.set("Rendering full-quality frame in background…")
+        self._render_viewport()
+        self._render_model_scene(quality="full")
+
+    def _show_compiled_render(self) -> None:
+        """Open the focused render drawer without adding permanent viewport chrome."""
+        if self.compiled_render_panel is None:
+            self.compiled_render_panel = CompiledRenderPanel(
+                self._compiled_render_parent,
+                backend_status=self._compiled_render_backend_status,
+                on_render=self._start_compiled_render,
+                on_cancel=self._cancel_compiled_render,
+                on_locate_backend=self._locate_compiled_render_backend,
+            )
+        model_name = (
+            self.selected_model.model
+            if self.selected_model is not None else "vehicle"
+        )
+        safe_name = "".join(
+            character if character.isalnum() or character in "-_" else "-"
+            for character in model_name
+        ).strip("-") or "vehicle"
+        pictures = Path.home() / "Pictures"
+        output_root = pictures if pictures.is_dir() else Path.home()
+        suggested = output_root / f"{safe_name}.png"
+        self.compiled_render_panel.set_scene_available(self._model_scene is not None)
+        self.compiled_render_panel.show(suggested_output=suggested)
+
+    def _set_compiled_render_scene_available(self, available: bool) -> None:
+        panel = self.compiled_render_panel
+        if panel is not None:
+            panel.set_scene_available(available)
+
+    def _compiled_render_backend_status(self) -> dict[str, object]:
+        """Detect and validate the optional renderer without assuming it exists."""
+        installation = detect_blender(self._compiled_render_executable)
+        self._compiled_render_installation = installation
+        if installation is not None:
+            self._compiled_render_path_error = ""
+            return {
+                "available": True,
+                "name": f"Blender {installation.version}",
+                "detail": f"Detected from {installation.source}; headless render ready.",
+                "device": "Eevee + Cycles",
+            }
+        selected = self._compiled_render_executable
+        return {
+            "available": False,
+            "name": (
+                "Invalid Blender executable"
+                if selected is not None else "Blender not detected"
+            ),
+            "detail": (
+                self._compiled_render_path_error or "Choose another blender.exe."
+                if selected is not None
+                else "Locate Blender or get the official installer."
+            ),
+        }
+
+    def _locate_compiled_render_backend(self, executable: Path) -> None:
+        """Validate and atomically retain a user-selected Blender executable."""
+        try:
+            selected = executable.expanduser().resolve(strict=True)
+        except OSError as exc:
+            self._compiled_render_executable = executable.expanduser()
+            self._compiled_render_installation = None
+            self._compiled_render_path_error = str(exc)
+            return
+        self._compiled_render_executable = selected
+        installation = detect_blender(selected)
+        self._compiled_render_installation = installation
+        if installation is None:
+            self._compiled_render_path_error = (
+                "The selected program did not report a valid Blender version."
+            )
+            return
+        self._compiled_render_path_error = ""
+        try:
+            self._persist_compiled_render_executable(installation.executable)
+        except OSError as exc:
+            # The validated executable remains usable for this SDK session.
+            self._compiled_render_path_error = f"Could not save renderer setting: {exc}"
+
+    @staticmethod
+    def _compiled_render_config_path() -> Path:
+        return user_data_root() / "compiled-render.json"
+
+    @classmethod
+    def _load_compiled_render_executable(cls) -> Path | None:
+        path = cls._compiled_render_config_path()
+        try:
+            if not path.is_file() or path.stat().st_size > 16_384:
+                return None
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        executable = payload.get("blender_executable") if isinstance(payload, dict) else None
+        return Path(executable).expanduser() if isinstance(executable, str) else None
+
+    @classmethod
+    def _persist_compiled_render_executable(cls, executable: Path) -> None:
+        destination = cls._compiled_render_config_path()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", newline="\n", delete=False,
+                dir=destination.parent, prefix=f".{destination.stem}-", suffix=".tmp",
+            ) as stream:
+                temporary = Path(stream.name)
+                json.dump(
+                    {"schema": 1, "blender_executable": str(executable)},
+                    stream, indent=2, sort_keys=True,
+                )
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(destination)
+        finally:
+            if temporary is not None and temporary.exists():
+                temporary.unlink(missing_ok=True)
+
+    def _start_compiled_render(self, settings: RenderSettings) -> bool:
+        """Snapshot the active view and compile it away from the Tk thread."""
+        panel = self.compiled_render_panel
+        if panel is None:
+            return False
+        if self._compiled_render_thread is not None and self._compiled_render_thread.is_alive():
+            panel.set_running(
+                True, message="A compiled render is already running.",
+            )
+            return False
+        scene = self._model_scene
+        if scene is None:
+            panel.set_running(
+                False, message="Load a decoded vehicle model before rendering.",
+            )
+            return False
+        installation = self._compiled_render_installation
+        if installation is None:
+            status = self._compiled_render_backend_status()
+            installation = self._compiled_render_installation
+            if installation is None:
+                panel.set_running(
+                    False, message=str(status.get("detail") or status.get("name")),
+                )
+                return False
+        raw_settings = dict(settings)
+        output_value = raw_settings.pop("output_path", None)
+        try:
+            output = Path(output_value).expanduser()  # type: ignore[arg-type]
+            configured = CompiledRenderSettings(**raw_settings)
+        except (TypeError, ValueError) as exc:
+            panel.set_running(False, message=str(exc))
+            return False
+
+        protected_roots: list[Path] = list(self.installation_roots)
+        source = self.source
+        if source is not None:
+            protected_roots.append(source if source.is_dir() else source.parent)
+        yaw = self._camera_yaw
+        pitch = self._camera_pitch
+        lod = None if self.lod.get().casefold() == "all" else self.lod.get()
+        component = (
+            None if self.component.get().casefold() == "all" else self.component.get()
+        )
+        texture_dictionary: Path | None = None
+        selected_model = self.selected_model
+        if (
+            selected_model is not None and selected_model.texture_asset
+            and self.source is not None and self.source.is_dir()
+        ):
+            candidate = (self.source / selected_model.texture_asset).resolve()
+            try:
+                candidate.relative_to(self.source)
+            except ValueError:
+                candidate = Path()
+            if candidate.is_file() and not candidate.is_symlink():
+                texture_dictionary = candidate
+        edition = self.project.edition if self.project is not None else "Enhanced"
+        game_path = self._native_game_path()
+        cancel_event = threading.Event()
+        self._compiled_render_cancel_event = cancel_event
+        self._compiled_render_events = queue.SimpleQueue()
+
+        def report(progress: CompiledRenderProgress) -> None:
+            self._compiled_render_events.put(("progress", progress))
+
+        def worker() -> None:
+            try:
+                result = compile_vehicle_render(
+                    scene, output, settings=configured,
+                    blender_executable=installation.executable,
+                    texture_dictionary=texture_dictionary,
+                    edition=edition, gta_path=game_path,
+                    yaw=yaw, pitch=pitch, lod=lod, component=component,
+                    protected_roots=tuple(protected_roots),
+                    cancel_event=cancel_event, progress=report,
+                )
+            except CompiledRenderError as exc:
+                self._compiled_render_events.put(("error", exc))
+            except (OSError, RuntimeError, ValueError) as exc:
+                self._compiled_render_events.put(("error", exc))
+            else:
+                self._compiled_render_events.put(("complete", result))
+
+        panel.set_progress(0.0, "Preparing compiled render…")
+        panel.set_running(True)
+        self._compiled_render_thread = threading.Thread(
+            target=worker, name="allin1-compiled-render", daemon=True,
+        )
+        self._compiled_render_thread.start()
+        self._ensure_compiled_render_poll()
+        return True
+
+    def _cancel_compiled_render(self) -> None:
+        """Request cooperative cancellation; the worker owns process cleanup."""
+        if self._compiled_render_cancel_event is not None:
+            self._compiled_render_cancel_event.set()
+
+    def _ensure_compiled_render_poll(self) -> None:
+        if self._compiled_render_poll_job is None:
+            self._compiled_render_poll_job = self.after(40, self._poll_compiled_render)
+
+    def _poll_compiled_render(self) -> None:
+        self._compiled_render_poll_job = None
+        panel = self.compiled_render_panel
+        if panel is None:
+            self._cancel_compiled_render()
+            return
+        terminal = False
+        while True:
+            try:
+                kind, value = self._compiled_render_events.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "progress" and isinstance(value, CompiledRenderProgress):
+                panel.set_progress(value.fraction, value.message)
+            elif kind == "complete" and isinstance(value, CompiledRenderResult):
+                panel.set_output(
+                    value.output_path,
+                    message=f"Render complete in {value.elapsed_seconds:.1f} seconds.",
+                )
+                terminal = True
+            elif kind == "error":
+                message = (
+                    value.message if isinstance(value, CompiledRenderError) else str(value)
+                )
+                panel.set_output(None, message=message)
+                terminal = True
+        thread = self._compiled_render_thread
+        if terminal or thread is None or not thread.is_alive():
+            self._compiled_render_thread = None
+            self._compiled_render_cancel_event = None
+        else:
+            self._ensure_compiled_render_poll()
+
+    def _schedule_scene_render(self, *, immediate: bool = False) -> None:
+        # Pointer motion updates one desired camera pose.  A new interactive
+        # frame is only submitted when the preceding frame has been consumed;
+        # otherwise continuous 60+ Hz events can invalidate every 10-30 Hz
+        # renderer result and make the model appear frozen until drag release.
+        if immediate and self._render_job is not None:
+            self.after_cancel(self._render_job)
+            self._render_job = None
+        if self._render_job is None:
+            # Submission only places one callable on the render thread; it is
+            # cheap enough to run at the next Tk turn.  An arbitrary 8 ms
+            # debounce added latency without reducing work because the worker
+            # already coalesces to one in-flight frame plus the newest pose.
+            self._render_job = self.after(0, self._run_scheduled_scene_render)
 
     def _run_scheduled_scene_render(self) -> None:
         self._render_job = None
-        self._render_model_scene()
+        if self._orbit_origin is None or not self._orbit_render_dirty:
+            return
+        if self._viewport_render_worker.busy:
+            self._ensure_render_poll()
+            return
+        self._orbit_render_dirty = False
+        self._render_model_scene(quality="interactive")
 
     def _cancel_scene_render(self) -> None:
         if self._render_job is not None:
             self.after_cancel(self._render_job)
             self._render_job = None
+        self._cancel_final_scene_render()
+        self._render_generation = self._viewport_render_worker.invalidate()
+        self._render_fit_generation = None
+        self._orbit_render_dirty = False
+
+    def _cancel_scene_load(self) -> None:
+        if self._scene_load_poll_job is not None:
+            self.after_cancel(self._scene_load_poll_job)
+            self._scene_load_poll_job = None
+        self._scene_load_generation = self._viewport_scene_worker.invalidate()
+        self._scene_load_key = None
+        self._scene_load_path = None
+
+    def _destroy_viewport_renderer(self, event: tk.Event) -> None:
+        if event.widget is not self:
+            return
+        if self._render_job is not None:
+            self.after_cancel(self._render_job)
+            self._render_job = None
+        self._cancel_final_scene_render()
+        if self._render_poll_job is not None:
+            self.after_cancel(self._render_poll_job)
+            self._render_poll_job = None
+        if self._scene_load_poll_job is not None:
+            self.after_cancel(self._scene_load_poll_job)
+            self._scene_load_poll_job = None
+        if self._compiled_render_poll_job is not None:
+            self.after_cancel(self._compiled_render_poll_job)
+            self._compiled_render_poll_job = None
+        if self._compiled_render_cancel_event is not None:
+            self._compiled_render_cancel_event.set()
+        self._viewport_scene_worker.close(wait=False)
+        self._viewport_render_worker.close(wait=False)
 
     def _wheel_zoom(self, event: tk.Event) -> str:
         self._zoom_by(1.12 if event.delta > 0 else 1 / 1.12)
@@ -2063,12 +3107,16 @@ class VehicleWorkbenchFrame(ttk.Frame):
             return
         width = max(1, self.viewport.winfo_width() - 28)
         height = max(1, self.viewport.winfo_height() - 28)
-        self._zoom = min(width / image.width, height / image.height)
+        # The renderer's clean view box still includes a restrained framing
+        # margin.  A small overscan makes the vehicle the focus of the panel
+        # while retaining enough room for its extremities and the viewport HUD.
+        self._zoom = min(width / image.width, height / image.height) * 1.22
         self._zoom = min(4.0, max(0.08, self._zoom))
         self._pan_x = self._pan_y = 0.0
         self._render_viewport()
 
     def _begin_pan(self, event: tk.Event) -> None:
+        self.viewport.focus_set()
         self._drag_origin = (event.x, event.y)
         self._drag_pan = (self._pan_x, self._pan_y)
 
@@ -2084,10 +3132,15 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self._drag_pan = None
 
     def _begin_orbit(self, event: tk.Event) -> None:
+        self.viewport.focus_set()
         if self._model_scene is None:
             return
+        # A rapid re-grab should stay interactive rather than beginning the
+        # expensive release frame and blocking behind it on the single worker.
+        self._cancel_final_scene_render()
         self._orbit_origin = (event.x, event.y)
         self._orbit_camera = (self._camera_yaw, self._camera_pitch)
+        self._orbit_render_dirty = False
 
     def _continue_orbit(self, event: tk.Event) -> None:
         if self._orbit_origin is None or self._orbit_camera is None:
@@ -2098,6 +3151,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self._camera_pitch = min(
             89.0, max(-89.0, self._orbit_camera[1] - delta_y * 0.3),
         )
+        self._orbit_render_dirty = True
         self._schedule_scene_render()
 
     def _end_orbit(self, _event: tk.Event) -> None:
@@ -2106,40 +3160,155 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self._orbit_origin = None
         self._orbit_camera = None
         self._cancel_scene_render()
-        self._render_model_scene()
+        # Let a short pointer-settle window expire before the detailed frame.
+        # This prevents click-release-click orbit gestures from repeatedly
+        # queueing 45k-triangle renders, while still replacing the interactive
+        # frame immediately after an ordinary release.
+        self._final_render_job = self.after(
+            ORBIT_FINAL_SETTLE_MS, self._render_final_after_orbit,
+        )
+
+    def _render_final_after_orbit(self) -> None:
+        self._final_render_job = None
+        if self._orbit_origin is None and self._model_scene is not None:
+            self._render_model_scene(quality="final")
+
+    def _cancel_final_scene_render(self) -> None:
+        if self._final_render_job is not None:
+            self.after_cancel(self._final_render_job)
+            self._final_render_job = None
+
+    def _fit_viewport_event(self, _event: tk.Event | None = None) -> str:
+        self._fit_viewport()
+        return "break"
+
+    def _reset_zoom_event(self, _event: tk.Event | None = None) -> str:
+        self._reset_zoom()
+        return "break"
+
+    def _reset_camera_event(self, _event: tk.Event | None = None) -> str:
+        self._reset_camera()
+        return "break"
+
+    def _zoom_in_event(self, _event: tk.Event | None = None) -> str:
+        self._zoom_by(1.25)
+        return "break"
+
+    def _zoom_out_event(self, _event: tk.Event | None = None) -> str:
+        self._zoom_by(0.8)
+        return "break"
 
     def _render_viewport(self) -> None:
-        self.viewport.delete("all")
         width = max(1, self.viewport.winfo_width())
         height = max(1, self.viewport.winfo_height())
-        for x in range(0, width, 48):
-            self.viewport.create_line(x, 0, x, height, fill="#18231e")
-        for y in range(0, height, 48):
-            self.viewport.create_line(0, y, width, y, fill="#18231e")
+        self._ensure_viewport_canvas(width, height)
+        items = self._viewport_canvas_items
         if self._source_image is None:
             self._viewport_photo = None
             self._viewport_photo_zoom = None
-            self.viewport.create_text(
-                width / 2, height / 2, text=self.viewport_message.get(),
-                fill="#afc5b9", width=max(200, width - 80), justify="center",
-                font=("Segoe UI", 10),
+            self.viewport.itemconfigure(items["image"], state="hidden", image="")
+            self.viewport.itemconfigure(
+                items["empty"], state="normal", text=self.viewport_message.get(),
             )
+            for name in ("top", "summary", "help", "bottom", "status"):
+                self.viewport.itemconfigure(items[name], state="hidden")
             self.zoom_label.configure(text="100%")
             return
         if self._viewport_photo is None or self._viewport_photo_zoom != self._zoom:
             scaled_width = max(1, round(self._source_image.width * self._zoom))
             scaled_height = max(1, round(self._source_image.height * self._zoom))
-            rendered = self._source_image.resize(
-                (scaled_width, scaled_height), Image.Resampling.LANCZOS,
-            )
+            target_size = (scaled_width, scaled_height)
+            if target_size == self._source_image.size:
+                rendered = self._source_image
+            else:
+                # Bilinear filtering is materially cheaper while the camera is
+                # moving and is immediately replaced by a Lanczos final frame
+                # on release.  Static and full-quality views retain Lanczos.
+                resampling = (
+                    Image.Resampling.BILINEAR
+                    if self._orbit_origin is not None
+                    else Image.Resampling.LANCZOS
+                )
+                rendered = self._source_image.resize(target_size, resampling)
             self._viewport_photo = ImageTk.PhotoImage(rendered)
             self._viewport_photo_zoom = self._zoom
-        self.viewport.create_image(
-            width / 2 + self._pan_x, height / 2 + self._pan_y,
-            image=self._viewport_photo, anchor="center",
+        self.viewport.itemconfigure(items["empty"], state="hidden")
+        self.viewport.itemconfigure(
+            items["image"], state="normal", image=self._viewport_photo,
         )
-        self.viewport.create_text(
-            12, height - 12, text=self.viewport_message.get(), anchor="sw",
-            fill="#afc5b9", font=("Segoe UI", 9),
+        self.viewport.coords(
+            items["image"], width / 2 + self._pan_x, height / 2 + self._pan_y,
         )
+        # Information belongs on the viewport, not in another permanent row.
+        # These restrained overlays preserve canvas area and remain readable
+        # against both wireframe and shaded output.
+        for name in ("top", "summary", "bottom", "status"):
+            self.viewport.itemconfigure(items[name], state="normal")
+        self.viewport.itemconfigure(
+            items["summary"], text=self.component_summary.get(),
+        )
+        self.viewport.itemconfigure(
+            items["status"], text=self.viewport_message.get(),
+        )
+        if width >= 700:
+            self.viewport.itemconfigure(items["help"], state="normal")
+        else:
+            self.viewport.itemconfigure(items["help"], state="hidden")
         self.zoom_label.configure(text=f"{self._zoom * 100:.0f}%")
+
+    def _ensure_viewport_canvas(self, width: int, height: int) -> None:
+        """Create viewport chrome once and only relayout it when size changes."""
+        items = self._viewport_canvas_items
+        if not items:
+            items.update({
+                "image": self.viewport.create_image(
+                    width / 2, height / 2, anchor="center", state="hidden",
+                ),
+                "empty": self.viewport.create_text(
+                    width / 2, height / 2, fill="#afc5b9",
+                    width=max(200, width - 80), justify="center",
+                    font=("Segoe UI", 10),
+                ),
+                "top": self.viewport.create_rectangle(
+                    0, 0, width, 25, fill="#0c120f", outline="", state="hidden",
+                ),
+                "summary": self.viewport.create_text(
+                    9, 13, anchor="w", width=max(100, width - 18),
+                    fill="#8fb9a2", font=("Segoe UI", 8), state="hidden",
+                ),
+                "help": self.viewport.create_text(
+                    width - 9, 13,
+                    text="L-drag pan · R-drag orbit · wheel zoom", anchor="e",
+                    fill="#667d71", font=("Segoe UI", 8), state="hidden",
+                ),
+                "bottom": self.viewport.create_rectangle(
+                    0, max(0, height - 25), width, height,
+                    fill="#0c120f", outline="", state="hidden",
+                ),
+                "status": self.viewport.create_text(
+                    9, height - 12, anchor="w", width=max(100, width - 18),
+                    fill="#afc5b9", font=("Segoe UI", 8), state="hidden",
+                ),
+            })
+        if self._viewport_canvas_size == (width, height):
+            return
+        self._viewport_canvas_size = (width, height)
+        self.viewport.delete("viewport-grid")
+        for x in range(0, width, 48):
+            self.viewport.create_line(
+                x, 0, x, height, fill="#18231e", tags="viewport-grid",
+            )
+        for y in range(0, height, 48):
+            self.viewport.create_line(
+                0, y, width, y, fill="#18231e", tags="viewport-grid",
+            )
+        self.viewport.tag_lower("viewport-grid")
+        self.viewport.coords(items["empty"], width / 2, height / 2)
+        self.viewport.itemconfigure(items["empty"], width=max(200, width - 80))
+        self.viewport.coords(items["top"], 0, 0, width, 25)
+        self.viewport.coords(items["summary"], 9, 13)
+        self.viewport.itemconfigure(items["summary"], width=max(100, width - 18))
+        self.viewport.coords(items["help"], width - 9, 13)
+        self.viewport.coords(items["bottom"], 0, max(0, height - 25), width, height)
+        self.viewport.coords(items["status"], 9, height - 12)
+        self.viewport.itemconfigure(items["status"], width=max(100, width - 18))

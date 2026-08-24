@@ -6,11 +6,15 @@ import hashlib
 import json
 import re
 import shutil
+import stat
 import sys
+import tempfile
+import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from allin1_sdk.processes import run_hidden
 
@@ -25,6 +29,14 @@ SUPPORTED_DEPENDENCIES = frozenset({"scripthookv", "shvdn", "openrpf"})
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _DLC_PACK_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_PACKAGE_REQUIREMENT_PATTERN = re.compile(
+    r"^([a-z0-9][a-z0-9._-]{1,63})(?:(==|>=)([0-9]+(?:\.[0-9]+){0,3}))?$"
+)
+_EXTENSION_API_VERSION = 1
+_EXTENSION_MANIFEST_FIELDS = frozenset({
+    "schema_version", "api_version", "id", "name", "version",
+    "description", "capabilities", "systems", "gbay", "runtime",
+})
 _RESERVED_DESTINATIONS = frozenset({
     "dinput8.dll",
     "openiv.asi",
@@ -37,17 +49,36 @@ _RESERVED_DESTINATIONS = frozenset({
     "scripts/allin1.dll",
     "scripts/allin1.toml",
 })
+MAX_PACKAGE_ARCHIVE_MEMBERS = 4096
+MAX_PACKAGE_ARCHIVE_MEMBER_BYTES = 4 * 1024 * 1024 * 1024
+MAX_PACKAGE_ARCHIVE_BYTES = 8 * 1024 * 1024 * 1024
+MAX_PACKAGE_COMPRESSION_RATIO = 1000
+_WINDOWS_INVALID_PATH_CHARS = frozenset('<>:"|?*')
+_WINDOWS_RESERVED_STEMS = frozenset({
+    "con", "prn", "aux", "nul",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
+})
 
 
 def _relative_path(value: object, label: str) -> PurePosixPath:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must be a non-empty relative path")
     normalized = value.strip().replace("\\", "/")
+    raw_parts = normalized.split("/")
     path = PurePosixPath(normalized)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in raw_parts):
         raise ValueError(f"{label} must not be absolute or contain traversal segments")
-    if ":" in path.parts[0]:
-        raise ValueError(f"{label} must not contain a drive letter")
+    for part in raw_parts:
+        if (
+            any(character in _WINDOWS_INVALID_PATH_CHARS for character in part)
+            or any(ord(character) < 32 for character in part)
+            or part.endswith((" ", "."))
+            or part.split(".", 1)[0].casefold() in _WINDOWS_RESERVED_STEMS
+        ):
+            raise ValueError(
+                f"{label} contains a Windows-invalid or reserved path component"
+            )
     return path
 
 
@@ -80,10 +111,27 @@ def _dlc_pack_list(value: object) -> tuple[str, ...]:
 
 
 def _contained_path(root: Path, relative: str | PurePosixPath) -> Path:
+    """Return a lexical contained path after rejecting reparse aliases."""
     base = root.resolve()
-    candidate = (base / Path(*PurePosixPath(relative).parts)).resolve(strict=False)
-    if not candidate.is_relative_to(base):
+    safe_relative = _relative_path(str(relative), "managed path")
+    candidate = base / Path(*safe_relative.parts)
+    canonical = candidate.resolve(strict=False)
+    if not canonical.is_relative_to(base):
         raise ValueError(f"Path escapes the allowed root: {relative}")
+    current = base
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    for part in safe_relative.parts:
+        current = current / part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            continue
+        if current.is_symlink() or (
+            getattr(metadata, "st_file_attributes", 0) & reparse_flag
+        ):
+            raise ValueError(
+                f"Managed paths may not traverse a symlink or junction: {relative}"
+            )
     return candidate
 
 
@@ -111,6 +159,169 @@ class RpfEntryPatch:
 
 
 @dataclass(frozen=True)
+class ExtensionReference:
+    """Validated schema-v2 reference to declarative ALLIN1 package content."""
+
+    manifest_path: Path
+    api_version: int
+    requirements: tuple[str, ...]
+
+
+def _extension_reference(
+    data: dict[str, Any], manifest_path: Path, *, schema_version: int,
+    mod_id: str, version: str, files: Iterable[ModFile],
+) -> ExtensionReference | None:
+    """Validate the schema-v2 envelope and its declared content ownership.
+
+    The launcher remains the runtime authority for extension registration.  The
+    SDK nevertheless validates the same versioned package envelope so a valid
+    launcher package is not incorrectly rejected during read-only diagnostics.
+    """
+    raw_allin1 = data.get("allin1")
+    if schema_version == 1:
+        if raw_allin1 is not None:
+            raise ValueError(
+                "ALLIN1 extension declarations require mod.toml schema_version = 2"
+            )
+        return None
+    if raw_allin1 is None:
+        raise ValueError(
+            "mod.toml schema_version 2 requires an [allin1] extension table"
+        )
+    if not isinstance(raw_allin1, dict):
+        raise ValueError("[allin1] must be a table")
+    unknown = set(raw_allin1) - {"api_version", "content", "requires"}
+    if unknown:
+        raise ValueError(
+            "Unsupported [allin1] field(s): " + ", ".join(sorted(unknown))
+        )
+    if raw_allin1.get("api_version") != _EXTENSION_API_VERSION:
+        raise ValueError(f"[allin1].api_version must be {_EXTENSION_API_VERSION}")
+    content_path = _relative_path(raw_allin1.get("content"), "[allin1].content")
+    content_file = _contained_path(manifest_path.parent, content_path)
+    if not content_file.is_file():
+        raise FileNotFoundError(f"ALLIN1 content manifest not found: {content_file}")
+    try:
+        content = json.loads(content_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Invalid ALLIN1 content manifest: {exc}") from exc
+    if not isinstance(content, dict):
+        raise ValueError("ALLIN1 content manifest must be a JSON object")
+    unknown_content = set(content) - _EXTENSION_MANIFEST_FIELDS
+    if unknown_content:
+        raise ValueError(
+            "Unsupported content manifest field(s): "
+            + ", ".join(sorted(unknown_content))
+        )
+    if content.get("schema_version") != 1:
+        raise ValueError("content schema_version must be 1")
+    if content.get("api_version") != _EXTENSION_API_VERSION:
+        raise ValueError(f"content api_version must be {_EXTENSION_API_VERSION}")
+    if str(content.get("id", "")).strip().casefold() != mod_id:
+        raise ValueError("Content manifest id must match the mod.toml id")
+    if str(content.get("version", "")).strip() != version:
+        raise ValueError("Content manifest version must match the mod.toml version")
+    if not isinstance(content.get("name"), str) or not content["name"].strip():
+        raise ValueError("content.name must be a non-empty string")
+
+    capabilities = _string_list(content.get("capabilities"), "capabilities")
+    raw_systems = content.get("systems", [])
+    if not isinstance(raw_systems, list) or not all(
+        isinstance(item, dict) for item in raw_systems
+    ):
+        raise ValueError("content systems must be an array of objects")
+    settings_present = False
+    for index, system in enumerate(raw_systems, start=1):
+        settings = system.get("settings", [])
+        if not isinstance(settings, list) or not all(
+            isinstance(item, dict) for item in settings
+        ):
+            raise ValueError(f"systems[{index}].settings must be an array of objects")
+        settings_present = settings_present or bool(settings)
+        if any(setting.get("config_key") is not None for setting in settings):
+            raise ValueError(
+                "Packaged content settings may not bind launcher core config fields; "
+                "use package-namespaced settings"
+            )
+
+    gbay = content.get("gbay", {})
+    if not isinstance(gbay, dict) or set(gbay) - {"sections", "catalogs"}:
+        raise ValueError("content gbay must contain only sections and catalogs")
+    raw_sections = gbay.get("sections", [])
+    raw_catalogs = gbay.get("catalogs", [])
+    if not isinstance(raw_sections, list) or not isinstance(raw_catalogs, list):
+        raise ValueError("gbay sections and catalogs must be arrays")
+    if not all(isinstance(item, dict) for item in (*raw_sections, *raw_catalogs)):
+        raise ValueError("gbay sections and catalogs must contain objects")
+
+    runtime = content.get("runtime", {})
+    if not isinstance(runtime, dict) or set(runtime) - {"assemblies"}:
+        raise ValueError("content runtime must contain only assemblies")
+    raw_assemblies = runtime.get("assemblies", [])
+    if not isinstance(raw_assemblies, list) or not all(
+        isinstance(item, dict) for item in raw_assemblies
+    ):
+        raise ValueError("runtime assemblies must be an array of objects")
+
+    capability_set = set(capabilities)
+    if raw_sections and "gbay.sections" not in capability_set:
+        raise ValueError("GBAY sections require the gbay.sections capability")
+    if raw_catalogs and "gbay.catalogs" not in capability_set:
+        raise ValueError("GBAY catalogs require the gbay.catalogs capability")
+    if settings_present and "launcher.settings" not in capability_set:
+        raise ValueError("Typed system settings require the launcher.settings capability")
+    if not raw_systems and not raw_sections and not raw_catalogs and not raw_assemblies:
+        raise ValueError(
+            "content manifest must contribute at least one system or runtime item"
+        )
+
+    owned = {item.destination.as_posix().casefold() for item in files}
+    for index, assembly in enumerate(raw_assemblies, start=1):
+        assembly_path = _relative_path(
+            assembly.get("path"), f"runtime.assemblies[{index}].path"
+        )
+        lowered = tuple(part.casefold() for part in assembly_path.parts)
+        if not lowered or lowered[0] != "scripts" or assembly_path.suffix.casefold() != ".dll":
+            raise ValueError(
+                f"runtime.assemblies[{index}].path must be a DLL below scripts/"
+            )
+        if assembly_path.as_posix().casefold() not in owned:
+            raise ValueError(
+                f"Runtime assembly is not owned by this package: {assembly_path}"
+            )
+    for index, catalog in enumerate(raw_catalogs, start=1):
+        catalog_path = _relative_path(
+            catalog.get("source"), f"gbay.catalogs[{index}].source"
+        )
+        if catalog_path.suffix.casefold() != ".json":
+            raise ValueError(f"gbay.catalogs[{index}].source must be a JSON file")
+        if catalog_path.as_posix().casefold() not in owned:
+            raise ValueError(f"GBAY catalog is not owned by this package: {catalog_path}")
+
+    requirements = _string_list(raw_allin1.get("requires"), "[allin1].requires")
+    requirement_ids: list[str] = []
+    for requirement in requirements:
+        match = _PACKAGE_REQUIREMENT_PATTERN.fullmatch(
+            requirement.replace(" ", "")
+        )
+        if not match:
+            raise ValueError(
+                "ALLIN1 package requirements use 'package.id', "
+                "'package.id>=1.2', or 'package.id==1.2.3'"
+            )
+        requirement_ids.append(match.group(1))
+    if len(requirement_ids) != len(set(requirement_ids)):
+        raise ValueError("[allin1].requires contains duplicate package ids")
+    if mod_id in requirement_ids:
+        raise ValueError("A content package may not depend on itself")
+    return ExtensionReference(
+        manifest_path=content_file,
+        api_version=_EXTENSION_API_VERSION,
+        requirements=requirements,
+    )
+
+
+@dataclass(frozen=True)
 class ModManifest:
     """A validated local mod package manifest."""
 
@@ -126,6 +337,8 @@ class ModManifest:
     dlc_packs: tuple[str, ...]
     files: tuple[ModFile, ...]
     rpf_entries: tuple[RpfEntryPatch, ...]
+    schema_version: int = 1
+    extension: ExtensionReference | None = None
 
     @property
     def package_root(self) -> Path:
@@ -151,11 +364,16 @@ class ModManifest:
         except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
             raise ValueError(f"Invalid mod.toml manifest: {exc}") from exc
 
-        if data.get("schema_version") != 1:
-            raise ValueError("mod.toml schema_version must be 1")
+        schema_version = data.get("schema_version")
+        if schema_version not in {1, 2}:
+            raise ValueError("mod.toml schema_version must be 1 or 2")
         mod_id = str(data.get("id", "")).strip().lower()
         if not _ID_PATTERN.fullmatch(mod_id):
             raise ValueError("Mod id must be 2-64 lowercase letters, numbers, dots, dashes, or underscores")
+        if mod_id.startswith("allin1."):
+            raise ValueError(
+                "The allin1.* package namespace is reserved for launcher-bundled content"
+            )
         name = str(data.get("name", "")).strip()
         version = str(data.get("version", "")).strip()
         mod_type = str(data.get("type", "")).strip().lower()
@@ -249,6 +467,11 @@ class ModManifest:
         if rpf_entries and "openrpf" not in dependencies:
             raise ValueError("RPF entry patches require the openrpf dependency")
 
+        extension = _extension_reference(
+            data, path, schema_version=schema_version, mod_id=mod_id,
+            version=version, files=files,
+        )
+
         cls._validate_destinations(mod_type, files)
         if dlc_packs:
             actual_destinations = {
@@ -276,6 +499,8 @@ class ModManifest:
             dlc_packs,
             tuple(files),
             tuple(rpf_entries),
+            schema_version,
+            extension,
         )
         if validate_payload:
             manifest.validate_payload()
@@ -331,6 +556,132 @@ class ModManifest:
                 raise FileNotFoundError(f"Package payload is missing: {item.source}")
             if item.sha256 and _sha256(source) != item.sha256:
                 raise ValueError(f"SHA-256 mismatch for {item.source}")
+
+
+def _archive_member_path(info: zipfile.ZipInfo) -> PurePosixPath | None:
+    """Validate one ZIP member without trusting the host ZIP extractor."""
+    if info.flag_bits & 0x1:
+        raise ValueError(f"Encrypted ZIP members are not supported: {info.filename}")
+    normalized = info.filename.replace("\\", "/")
+    is_directory = info.is_dir() or normalized.endswith("/")
+    normalized = normalized.rstrip("/") if is_directory else normalized
+    if not normalized:
+        return None
+    relative = _relative_path(normalized, "ZIP member path")
+    unix_mode = (info.external_attr >> 16) & 0xFFFF
+    file_kind = stat.S_IFMT(unix_mode)
+    if stat.S_ISLNK(unix_mode) or file_kind not in {0, stat.S_IFREG, stat.S_IFDIR}:
+        raise ValueError(
+            f"ZIP members may not be links or special files: {info.filename}"
+        )
+    dos_attributes = info.external_attr & 0xFFFF
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if dos_attributes & reparse_flag:
+        raise ValueError(f"ZIP members may not be reparse points: {info.filename}")
+    return relative
+
+
+@contextmanager
+def open_mod_package(
+    source: str | Path, *, validate_payload: bool = True,
+) -> Iterator[ModManifest]:
+    """Open a folder/manifest or safely stage one unambiguous ZIP package."""
+    selected = Path(source).expanduser()
+    if selected.is_dir() or (
+        selected.is_file() and selected.name.casefold() == "mod.toml"
+    ):
+        yield ModManifest.load(selected, validate_payload=validate_payload)
+        return
+    if not selected.is_file() or selected.suffix.casefold() != ".zip":
+        raise ValueError("Select a package folder, mod.toml, or .zip archive")
+    metadata = selected.lstat()
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if selected.is_symlink() or (
+        getattr(metadata, "st_file_attributes", 0) & reparse_flag
+    ):
+        raise ValueError("Package archives may not be symbolic links or reparse points")
+
+    try:
+        with zipfile.ZipFile(selected) as package:
+            infos = package.infolist()
+            if len(infos) > MAX_PACKAGE_ARCHIVE_MEMBERS:
+                raise ValueError(
+                    f"ZIP contains too many members (maximum {MAX_PACKAGE_ARCHIVE_MEMBERS})"
+                )
+            members: list[tuple[zipfile.ZipInfo, PurePosixPath]] = []
+            seen: set[str] = set()
+            candidates: list[PurePosixPath] = []
+            for info in infos:
+                relative = _archive_member_path(info)
+                if relative is None:
+                    continue
+                key = relative.as_posix().casefold()
+                if key in seen:
+                    raise ValueError(f"ZIP contains a duplicate member path: {relative}")
+                seen.add(key)
+                members.append((info, relative))
+                if not info.is_dir() and relative.name.casefold() == "mod.toml":
+                    candidates.append(relative)
+            if not candidates:
+                raise ValueError("ZIP package does not contain a mod.toml manifest")
+            if len(candidates) != 1:
+                names = ", ".join(path.as_posix() for path in candidates)
+                raise ValueError(
+                    "ZIP package contains multiple mod.toml manifests; "
+                    f"select an unambiguous package archive ({names})"
+                )
+
+            manifest_member = candidates[0]
+            package_prefix = manifest_member.parent
+            extracted = [
+                (info, relative) for info, relative in members
+                if package_prefix == PurePosixPath(".")
+                or relative == package_prefix
+                or package_prefix in relative.parents
+            ]
+            declared_total = 0
+            for info, relative in extracted:
+                if info.is_dir():
+                    continue
+                if info.file_size < 0 or info.file_size > MAX_PACKAGE_ARCHIVE_MEMBER_BYTES:
+                    raise ValueError(f"ZIP member is too large: {relative}")
+                declared_total += info.file_size
+                if declared_total > MAX_PACKAGE_ARCHIVE_BYTES:
+                    raise ValueError("ZIP package expands beyond the allowed size limit")
+                if info.file_size and (
+                    info.compress_size == 0
+                    or info.file_size / info.compress_size
+                    > MAX_PACKAGE_COMPRESSION_RATIO
+                ):
+                    raise ValueError(f"ZIP member has an unsafe compression ratio: {relative}")
+
+            with tempfile.TemporaryDirectory(prefix="allin1-mod-") as temporary:
+                staging_root = Path(temporary).resolve()
+                observed_total = 0
+                for info, relative in extracted:
+                    target = _contained_path(staging_root, relative)
+                    if info.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    member_total = 0
+                    with package.open(info, "r") as input_stream, target.open("xb") as output:
+                        for chunk in iter(lambda: input_stream.read(1024 * 1024), b""):
+                            member_total += len(chunk)
+                            observed_total += len(chunk)
+                            if member_total > min(
+                                info.file_size, MAX_PACKAGE_ARCHIVE_MEMBER_BYTES
+                            ) or observed_total > MAX_PACKAGE_ARCHIVE_BYTES:
+                                raise ValueError("ZIP package exceeded its declared size limit")
+                            output.write(chunk)
+                    if member_total != info.file_size:
+                        raise ValueError(f"ZIP member size changed while reading: {relative}")
+                yield ModManifest.load(
+                    staging_root / Path(*manifest_member.parts),
+                    validate_payload=validate_payload,
+                )
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"Invalid ZIP package: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -563,6 +914,75 @@ class ModIntegrationService:
             ))
         return statuses
 
+    def inspect_receipt(self, mod_id: str) -> dict[str, Any]:
+        """Return one validated receipt without exposing a mutable internal object."""
+        package_id = mod_id.strip().casefold()
+        receipt = self._read_receipt(package_id)
+        return json.loads(json.dumps(receipt))
+
+    def verify_ownership(self, mod_id: str) -> dict[str, Any]:
+        """Verify receipt-owned files, backups, and RPF entries without mutation."""
+        package_id = mod_id.strip().casefold()
+        receipt = self._read_receipt(package_id)
+        enabled = bool(receipt.get("enabled", True))
+        checks: list[dict[str, Any]] = []
+        issues: list[str] = []
+        for item in receipt["files"]:
+            destination = str(item["destination"])
+            target = _contained_path(self.gta_path, destination)
+            active = target if enabled else target.with_name(target.name + ".disabled")
+            exists = active.is_file() and not active.is_symlink()
+            expected_hash = str(item.get("sha256") or "")
+            hash_matches = _sha256(active) == expected_hash if exists and expected_hash else None
+            backup_value = item.get("backup")
+            backup_present = (
+                _contained_path(self.gta_path, str(backup_value)).is_file()
+                if backup_value else None
+            )
+            if not exists:
+                issues.append(f"Managed file is missing: {destination}")
+            elif hash_matches is False:
+                issues.append(f"Managed file was externally changed: {destination}")
+            if backup_present is False:
+                issues.append(f"Managed backup is missing: {backup_value}")
+            checks.append({
+                "kind": "file", "destination": destination, "exists": exists,
+                "hash_recorded": bool(expected_hash), "hash_matches": hash_matches,
+                "backup_present": backup_present,
+            })
+        for item in receipt.get("rpf_entries", []):
+            expected_value = item.get("applied") if enabled else item.get("backup")
+            expected = (
+                _contained_path(self.gta_path, str(expected_value))
+                if expected_value else None
+            )
+            try:
+                matches = self._rpf_entry_matches(item, expected)
+            except (OSError, RuntimeError, ValueError) as exc:
+                matches = False
+                issues.append(
+                    f"Could not verify RPF entry {item.get('archive')}/{item.get('entry')}: {exc}"
+                )
+            if not matches and not any(
+                f"{item.get('archive')}/{item.get('entry')}" in issue for issue in issues
+            ):
+                issues.append(
+                    f"Managed RPF entry does not match its receipt: "
+                    f"{item.get('archive')}/{item.get('entry')}"
+                )
+            checks.append({
+                "kind": "rpf_entry", "archive": item.get("archive"),
+                "entry": item.get("entry"), "matches_receipt": matches,
+            })
+        return {
+            "package_id": package_id, "version": str(receipt.get("version", "")),
+            "enabled": enabled, "healthy": not issues,
+            "ownership_verified": not issues and all(
+                check.get("hash_recorded", True) for check in checks
+            ),
+            "checks": checks, "issues": issues,
+        }
+
     def _check_dependencies(self, manifest: ModManifest) -> None:
         checks = {
             "scripthookv": self.gta_path / "ScriptHookV.dll",
@@ -685,6 +1105,7 @@ class ModIntegrationService:
                     "destination": item.destination.as_posix(),
                     "backup": str(backup.relative_to(self.gta_path)).replace("\\", "/")
                     if backup else None,
+                    "sha256": _sha256(target),
                 })
 
             for index, item in enumerate(manifest.rpf_entries, start=1):

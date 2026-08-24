@@ -16,6 +16,7 @@ import click
 from click.testing import CliRunner
 
 from allin1_sdk.paths import user_data_root
+from allin1_sdk.ui_foundation import place_window
 
 
 BUILTINS = {
@@ -161,7 +162,7 @@ def _path_suggestions(
 
 
 def suggestions_for(
-    command_line: str, *, cwd: Path, history: Iterable[str] = (), limit: int = 16,
+    command_line: str, *, cwd: Path, history: Iterable[str] = (), limit: int = 24,
 ) -> tuple[ConsoleSuggestion, ...]:
     """Return progressively filtered command, option, history, and path matches."""
     text = command_line.lstrip()
@@ -283,8 +284,9 @@ class SdkConsoleDialog(ttk.Frame):
         if not embedded:
             self._window = tk.Toplevel(parent)
             self._window.title("ALLIN1 SDK Console")
-            self._window.geometry("1040x680")
-            self._window.minsize(760, 500)
+            place_window(
+                self._window, preferred=(1040, 680), minimum=(760, 500),
+            )
             self._window.transient(parent.winfo_toplevel())
             host = self._window
         super().__init__(host)
@@ -295,6 +297,7 @@ class SdkConsoleDialog(ttk.Frame):
         self.history_index = len(self.history)
         self.matches: tuple[ConsoleSuggestion, ...] = ()
         self.running = False
+        self._return_focus: tk.Misc | None = None
         self._build()
         self._append(
             "ALLIN1 SDK Console\n"
@@ -302,22 +305,68 @@ class SdkConsoleDialog(ttk.Frame):
             "matches or history. Type help for the command catalog.\n\n",
             "system",
         )
-        self.entry.focus_set()
+        # The dock is part of every SDK workspace, but it should not take the
+        # user's keyboard focus until they explicitly activate it. Standalone
+        # console windows still behave like ordinary command windows.
+        if not self.docked:
+            self.after_idle(self.entry.focus_set)
+
+    def _contains_widget(self, widget: tk.Misc | None) -> bool:
+        current = widget
+        while current is not None:
+            if current is self:
+                return True
+            current = getattr(current, "master", None)
+        return False
+
+    def _remember_current_focus(self, _event: object | None = None) -> None:
+        try:
+            current = self.winfo_toplevel().focus_get()
+        except tk.TclError:
+            current = None
+        if current is not None and not self._contains_widget(current):
+            self._return_focus = current
+
+    def _restore_focus(self) -> None:
+        target = self._return_focus
+        self._return_focus = None
+        if target is None:
+            return
+        try:
+            if target.winfo_exists():
+                self.after_idle(target.focus_set)
+        except (AttributeError, RuntimeError, tk.TclError):
+            return
 
     def activate(self) -> None:
         """Move keyboard focus into the persistent command line."""
+        self._remember_current_focus()
         self.after_idle(self.entry.focus_set)
+
+    def expand_and_focus(self) -> None:
+        """Idempotently expose the console and focus its command line."""
+        if self.docked and not self.expanded:
+            self._set_expanded(True)
+        self.activate()
+
+    def has_active_work(self) -> bool:
+        """Report whether closing the shell would orphan a console command."""
+        return self.running
 
     def toggle(self) -> None:
         """Expand or collapse the dock while leaving its prompt available."""
         if self.docked:
-            self._set_expanded(not self.expanded)
+            if self.expanded:
+                self._set_expanded(False)
+                self._restore_focus()
+                return
+            self._set_expanded(True)
         self.activate()
 
     def _leave_console(self) -> None:
         if self.docked:
             self._set_expanded(False)
-            self.activate()
+            self._restore_focus()
         elif self._on_close is not None:
             self._on_close()
         elif self._window is not None:
@@ -328,11 +377,14 @@ class SdkConsoleDialog(ttk.Frame):
     def _build(self) -> None:
         outer = tk.Frame(
             self, bg="#111614", padx=10 if self.docked else 12,
-            pady=8 if self.docked else 12,
+            pady=4 if self.docked else 12,
         )
         outer.pack(fill="both", expand=True)
-        api_bar = tk.Frame(outer, bg="#17201c", padx=12, pady=9)
-        api_bar.pack(fill="x", pady=(0, 9))
+        api_bar = tk.Frame(
+            outer, bg="#17201c", padx=9 if self.docked else 12,
+            pady=5 if self.docked else 9,
+        )
+        api_bar.pack(fill="x", pady=(0, 4 if self.docked else 9))
         tk.Label(
             api_bar, text="SDK CONSOLE", bg="#17201c", fg="#8cff65",
             font=("Segoe UI Semibold", 9),
@@ -347,6 +399,9 @@ class SdkConsoleDialog(ttk.Frame):
                 api_bar, text="Expand", command=self.toggle, width=10,
             )
             self.toggle_button.pack(side="right")
+            self.toggle_button.bind(
+                "<ButtonPress-1>", self._remember_current_focus, add="+",
+            )
         else:
             tk.Label(
                 api_bar, text="local · audited · writes off by default",
@@ -383,7 +438,12 @@ class SdkConsoleDialog(ttk.Frame):
         self.suggestions.column("#0", width=360, stretch=True)
         self.suggestions.column("kind", width=80, stretch=False)
         self.suggestions.column("description", width=470, stretch=True)
-        self.suggestions.pack(fill="x")
+        self.suggestion_scroll = ttk.Scrollbar(
+            suggestion_frame, orient="vertical", command=self.suggestions.yview,
+        )
+        self.suggestions.configure(yscrollcommand=self.suggestion_scroll.set)
+        self.suggestions.pack(side="left", fill="x", expand=True)
+        self.suggestion_scroll.pack(side="right", fill="y")
         self.suggestions.bind("<Double-1>", self._accept_suggestion)
 
         self.command_row = tk.Frame(outer, bg="#111614")
@@ -398,12 +458,19 @@ class SdkConsoleDialog(ttk.Frame):
             insertbackground="#8cff65", relief="flat", bd=0,
             font=("Cascadia Mono", 11),
         )
-        self.entry.pack(side="left", fill="x", expand=True, ipady=8, ipadx=8)
+        self.entry.pack(
+            side="left", fill="x", expand=True,
+            ipady=5 if self.docked else 8, ipadx=8,
+        )
+        self.entry.bind(
+            "<ButtonPress-1>", self._remember_current_focus, add="+",
+        )
         self.hint = tk.StringVar(value="Start typing to filter commands")
-        tk.Label(
+        self.hint_label = tk.Label(
             outer, textvariable=self.hint, anchor="w", bg="#111614", fg="#7f9b8e",
             font=("Segoe UI", 9),
-        ).pack(fill="x", pady=(5, 0))
+        )
+        self.hint_label.pack(fill="x", pady=(5, 0))
         self.command.trace_add("write", self._refresh_suggestions)
         self.entry.bind("<Return>", self._execute)
         self.entry.bind("<Tab>", self._accept_suggestion)
@@ -411,9 +478,9 @@ class SdkConsoleDialog(ttk.Frame):
         self.entry.bind("<Down>", lambda event: self._move(1, event))
         self.entry.bind("<Control-Up>", lambda event: self._history_move(-1, event))
         self.entry.bind("<Control-Down>", lambda event: self._history_move(1, event))
+        self.entry.bind("<Control-space>", self._accept_suggestion)
         self.entry.bind("<Control-l>", self._clear)
         self.entry.bind("<Escape>", self._escape)
-        self.bind("<Control-Key-space>", self._accept_suggestion)
         self._refresh_suggestions()
         if self.docked:
             self._set_expanded(False)
@@ -426,8 +493,11 @@ class SdkConsoleDialog(ttk.Frame):
             self.console_body.pack(
                 fill="both", expand=True, before=self.command_row, pady=(0, 7),
             )
+            if not self.hint_label.winfo_manager():
+                self.hint_label.pack(fill="x", pady=(5, 0))
         else:
             self.console_body.pack_forget()
+            self.hint_label.pack_forget()
         self.toggle_button.configure(text="Collapse" if value else "Expand")
 
     def _load_history(self) -> list[str]:
@@ -516,7 +586,13 @@ class SdkConsoleDialog(ttk.Frame):
         self.hint.set("Running command…")
 
         def worker() -> None:
-            result = execute_console_command(value, self.history)
+            try:
+                result = execute_console_command(value, self.history)
+            except Exception as exc:  # Keep the command dock recoverable.
+                detail = str(exc).strip() or exc.__class__.__name__
+                result = ConsoleResult(
+                    f"ERROR: Console command failed unexpectedly: {detail}\n", 1,
+                )
             try:
                 self.after(0, lambda: self._finish(result))
             except (RuntimeError, tk.TclError):
@@ -528,20 +604,26 @@ class SdkConsoleDialog(ttk.Frame):
     def _finish(self, result: ConsoleResult) -> None:
         if not self.winfo_exists():
             return
-        if result.action == "clear":
-            self._clear_output()
-        elif result.action == "exit":
+        try:
+            if result.action == "clear":
+                self._clear_output()
+            elif result.action != "exit":
+                if result.output:
+                    self._append(result.output, "error" if result.exit_code else "")
+                    if not result.output.endswith("\n"):
+                        self._append("\n")
+                self._append(f"[exit {result.exit_code}]\n\n", "system")
+        finally:
+            # Every result path, including exit and unexpected rendering
+            # failures, must leave the persistent command line usable.
+            self.running = False
+            self.entry.configure(state="normal")
+            self._refresh_suggestions()
+
+        if result.action == "exit":
             self._leave_console()
-            return
-        elif result.output:
-            self._append(result.output, "error" if result.exit_code else "")
-            if not result.output.endswith("\n"):
-                self._append("\n")
-        self._append(f"[exit {result.exit_code}]\n\n", "system")
-        self.running = False
-        self.entry.configure(state="normal")
-        self.entry.focus_set()
-        self._refresh_suggestions()
+        elif not self.docked or self.expanded:
+            self.entry.focus_set()
 
     def _clear_output(self) -> None:
         self.output.configure(state="normal")

@@ -1,0 +1,10 @@
+schema_version = 1
+id = "contract.schema-v1"
+name = "Cross-repository schema v1 contract"
+version = "1.0.0"
+type = "script"
+editions = ["legacy", "enhanced"]
+
+[[files]]
+source = "payload/ContractV1.bin"
+destination = "scripts/ContractV1.dll"

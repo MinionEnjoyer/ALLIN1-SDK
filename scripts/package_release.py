@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import zipfile
@@ -15,6 +16,13 @@ def _version(value: str) -> str:
     normalized = value.lstrip("vV")
     if not re.fullmatch(r"\d+(?:\.\d+){1,3}", normalized):
         raise argparse.ArgumentTypeError(f"invalid release version: {value}")
+    return normalized
+
+
+def _build_id(value: str) -> str:
+    normalized = value.strip()
+    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._:+/-]{0,127}", normalized):
+        raise argparse.ArgumentTypeError(f"invalid release build ID: {value}")
     return normalized
 
 
@@ -55,7 +63,9 @@ def _validate_example_sources(root: Path) -> None:
 
 
 def _copy_runtime(root: Path, app_dir: Path, rpf_dir: Path) -> None:
-    for name in ("ALLIN1-SDK.exe", "ALLIN1-SDK-Agent.exe"):
+    for name in (
+        "ALLIN1-SDK-Desktop.exe", "allin1-sdk.exe", "ALLIN1-SDK-Agent.exe",
+    ):
         executable = app_dir / name
         signature = b""
         if executable.is_file():
@@ -78,14 +88,19 @@ def _iter_payload(app_dir: Path):
             yield path.relative_to(app_dir).as_posix(), path
 
 
-def package_release(root: Path, app_dir: Path, rpf_dir: Path, output: Path, version: str) -> tuple[Path, Path]:
+def package_release(
+    root: Path, app_dir: Path, rpf_dir: Path, output: Path, version: str,
+    build_id: str,
+) -> tuple[Path, Path]:
     _validate_example_sources(root)
     _copy_runtime(root, app_dir, rpf_dir)
     metadata = {
         "product": "ALLIN1-SDK",
         "version": version,
+        "build_id": _build_id(build_id),
         "platform": "win-x64",
-        "entrypoint": "ALLIN1-SDK.exe",
+        "entrypoint": "ALLIN1-SDK-Desktop.exe",
+        "cli_entrypoint": "allin1-sdk.exe",
         "agent_entrypoint": "ALLIN1-SDK-Agent.exe",
     }
     (app_dir / "release.json").write_text(
@@ -122,10 +137,18 @@ def main() -> None:
     parser.add_argument("--rpf-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--version", type=_version, required=True)
+    parser.add_argument("--build-id", type=_build_id)
     args = parser.parse_args()
+    build_id = args.build_id
+    if build_id is None:
+        try:
+            build_id = _build_id(os.environ.get("GITHUB_SHA", ""))
+        except argparse.ArgumentTypeError as exc:
+            parser.error("--build-id is required when GITHUB_SHA is unavailable or invalid")
     root = Path(__file__).resolve().parents[1]
     archive, checksum = package_release(
-        root, args.app_dir.resolve(), args.rpf_dir.resolve(), args.output.resolve(), args.version,
+        root, args.app_dir.resolve(), args.rpf_dir.resolve(), args.output.resolve(),
+        args.version, build_id,
     )
     print(archive)
     print(checksum)

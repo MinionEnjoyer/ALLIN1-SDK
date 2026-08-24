@@ -237,9 +237,18 @@ class BinaryWorkspaceFrame(ttk.Frame):
         history_scroll = ttk.Scrollbar(
             history, orient="vertical", command=self.history_tree.yview,
         )
-        self.history_tree.configure(yscrollcommand=history_scroll.set)
-        self.history_tree.pack(side="left", fill="both", expand=True)
-        history_scroll.pack(side="right", fill="y")
+        self.history_xscroll = ttk.Scrollbar(
+            history, orient="horizontal", command=self.history_tree.xview,
+        )
+        self.history_tree.configure(
+            yscrollcommand=history_scroll.set,
+            xscrollcommand=self.history_xscroll.set,
+        )
+        self.history_tree.grid(row=0, column=0, sticky="nsew")
+        history_scroll.grid(row=0, column=1, sticky="ns")
+        self.history_xscroll.grid(row=1, column=0, sticky="ew")
+        history.rowconfigure(0, weight=1)
+        history.columnconfigure(0, weight=1)
         self.history_tree.bind("<<TreeviewSelect>>", self._history_selected)
 
     def has_active_work(self) -> bool:

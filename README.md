@@ -12,7 +12,7 @@ make weapons, vehicles, archives, and other add-ons work coherently.
 ALLIN1 SDK supports GTA V Legacy and GTA V Enhanced. Its inspection and planning
 workflows are designed for Story Mode mod development.
 
-> **Current public release:** **0.5.1**. Install it from ALLIN1 Launcher or
+> **Current public release:** **0.5.2**. Install it from ALLIN1 Launcher or
 > download the self-contained Windows package from
 > [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases).
 
@@ -75,9 +75,15 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   through the SDK Console or structured Agent API.
   The embedded YTD editor catalogs and previews every DDS, imports common raster formats,
   synchronizes dimensions/mips/formats, supports add/replace/remove, and retains undo history.
-- **Vehicle Asset Workbench** — open a loose DLC folder or package archive and work
-  with each vehicle as one resolved project instead of unrelated files. The workbench
-  links primary and high-detail YFT fragments, YTD textures, handling, variations,
+- **Content Workbench** — open a loose DLC folder or package archive once, then move
+  between **Vehicles**, **Weapons**, and **Peds** without losing package context.
+  Weapons link definitions, ammo pools, animations, shop registration, attachment
+  bones, default components, component models, and streamed assets. Peds link
+  `peds.meta` definitions to drawables, textures, props, movement clips, and
+  expression sets. Shared readiness and finding panels keep missing evidence visible,
+  and selected assets route into Asset Viewer inside the same application window.
+  The mature Vehicles tab works with each vehicle as one resolved project instead
+  of unrelated files. It links primary and high-detail YFT fragments, YTD textures, handling, variations,
   tuning kits, labels, and DLC registration evidence; unresolved relationships stay
   visible beside the selected model. Its embedded diagnostic viewport decodes each
   fragment once, then supports orbit, tilt, zoom, pan, fit, primary/high-detail fragment
@@ -227,6 +233,16 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   command schemas and submit structured JSON requests over stdio without shell
   evaluation. Game/archive writes are off by default, retain every existing
   safety check, and every execution request is audit-logged.
+- **Optional local assistant** — prompt a launcher-configured Qwen/GGUF model or
+  compatible model API directly from the bottom SDK Console. Managed and custom
+  local modes start a loopback-only llama.cpp server on demand and retain it for
+  a short, bounded idle period for later prompts. Every question receives a focused
+  host-built evidence bundle:
+  repository roles and dirty state, available workspace roots, validated package
+  metadata, the verified GTA path, and exact relevant SDK command contracts.
+  Responses must follow a structured advisory schema. Unsupported operations and
+  manual-copy or destructive guidance are rejected deterministically. Prompting is
+  read-only and grants no install or archive authority to the model.
 
 ## How it fits together
 
@@ -238,10 +254,11 @@ ALLIN1 Launcher
                      v
 ALLIN1 SDK
   Package Linker + Package Tools
-  Asset Viewer + Vehicle Workbench
+  Asset Viewer + Content Workbench (Vehicles / Weapons / Peds)
   RPF Archives + Package Recipes
   OIV Workbench + DLC Inventory
   Vehicle Data Compiler
+  Optional Qwen assistant (disabled by default)
                      |
                      v
 Reviewable manifests, reports, safe plans, and receipt-owned RPF transactions
@@ -259,6 +276,11 @@ submodule, and RPF helper.
 - ALLIN1 Launcher 0.5.0 or newer for managed install, update, repair, and removal.
 - Python 3.10 or newer only when running the SDK from source.
 - .NET 8 SDK only when rebuilding `RpfPatcher` from source.
+
+The optional assistant is configured and installed from the ALLIN1 Launcher's
+**SDK Manager → Optional assistant** tab. It is not required for any SDK feature.
+Managed packs perform an x64 Windows, RAM, disk, and CPU preflight before download;
+a dedicated GPU is not required.
 
 A GTA V installation is not required for package-only manifest linking, archive
 audits, or vehicle metadata compilation.
@@ -280,12 +302,12 @@ offline installation and applies the same validation rules.
 Download `ALLIN1-SDK-<version>-win-x64.zip` and its matching `.sha256` file from
 [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases). Verify
 the checksum, extract the archive to a fresh directory, and run
-`ALLIN1-SDK.exe`.
+`ALLIN1-SDK-Desktop.exe`.
 
 ## Desktop SDK
 
 The desktop application is one persistent developer window. Its sidebar moves
-between **Package Linker**, **Asset Viewer**, **Vehicle Workbench**, **RPF Archives**,
+between **Package Linker**, **Asset Viewer**, **Workbench**, **RPF Archives**,
 **Package Recipes**, and **Help Center**.
 Pass `--rpf-graph <graph.json>` to the desktop executable to open a validated
 package graph directly; add `--gta-path <installation>` when its asset nodes need
@@ -304,7 +326,10 @@ commands are grouped by task:
   batch, new-archive, or managed-package output in the main SDK window.
 - **Package Tools** opens Package Recipes, DLC inventory, vehicle compiler, and structured
   META/XML tools.
-- **Vehicle Workbench** resolves a vehicle's linked model, textures, handling,
+- **Workbench** opens one package across Vehicles, Weapons, and Peds. The Weapons
+  and Peds tabs expose their linked definitions, supporting metadata, assets, and
+  readiness findings. The Vehicles tab resolves a vehicle's linked model, textures,
+  handling,
   variation, tuning, labels, and registration in one view. A copied authoring
   workspace can edit driving fields, spawn colors/liveries, selected light and
   siren profiles, tuning-kit metadata, local light definitions, and complete structured
@@ -329,11 +354,19 @@ application under `%LOCALAPPDATA%\ALLIN1-SDK`.
 
 ## Command line
 
-Source installations also expose `allin1-sdk`. The packaged desktop app exposes
-the same commands through the bottom **SDK Console** dock, so a separate Python terminal
-is not required:
+Source installations expose `allin1-sdk`. Official Windows packages also include a
+standalone `allin1-sdk.exe` and register its managed install directory for the current
+user, so a newly opened PowerShell can run the commands without Python. The desktop
+app exposes the same commands through the bottom **SDK Console** dock:
 
 ```powershell
+allin1-sdk assistant status
+allin1-sdk assistant prompt What type of mod package is this?
+allin1-sdk assistant prompt --source C:\Mods\Example\src\main.cpp --symbol InitializeMod --telemetry C:\Mods\Example\logs\latest.log Diagnose the failed initialization
+allin1-sdk assistant stop
+allin1-sdk inspect-source C:\Mods\Example\src\main.cpp --symbol InitializeMod
+allin1-sdk inspect-log C:\Mods\Example\logs\latest.log --pattern error
+allin1-sdk compare-telemetry C:\Mods\Example\logs\baseline.txt C:\Mods\Example\logs\current.txt
 allin1-sdk list
 allin1-sdk validate sdk/examples/colored_smokes/addon.json
 allin1-sdk link sdk/examples/colored_smokes/addon.json -o integration.md
@@ -410,6 +443,69 @@ surface and options.
 
 ### AI and tool integration
 
+The bottom console accepts `assistant prompt <question>` without requiring quotes
+around a normal multi-word question. The assistant can use a verified managed Qwen
+install downloaded separately from its official upstream source, an existing
+llama.cpp-compatible Windows runtime plus GGUF model, or a
+compatible HTTP API. `assistant status` reports the active provider without
+starting it, and `assistant stop` shuts down the local server retained by the SDK
+process. A long-lived SDK Console or Agent process keeps the model warm for 120 idle
+seconds, reuses compatible prompt prefixes, and caches unchanged source/log grounding.
+A standalone command still releases the runtime when its process exits. The server
+binds only to `127.0.0.1`; its runtime log is stored beside the assistant configuration
+under `%LOCALAPPDATA%\ALLIN1\Assistant`.
+
+`assistant context <question>` prints the exact evidence bundle without starting a
+model. `--repository-root`, repeatable `--workspace-root`, `--manifest`, and
+`--gta-path` can bind explicit evidence. Repeatable `--source`, `--symbol`,
+`--telemetry`, and `--telemetry-pattern` options opt specific source definitions or
+log sessions into the request. Explicitly named functions are brace-balanced and
+preserved through their closing line. Counter reads in those definitions retrieve
+bounded writer and reset evidence automatically. Telemetry patterns are aggregated
+across the entire selected file (samples, first/last/min/max/sample sum, non-zero
+samples, resets, observed cumulative-counter activity, and peak line) even when only
+the newest matching lines fit in the excerpt.
+Omitted facts remain listed as missing instead of being guessed. These readers are
+bounded, reject binary and oversized inputs, and never write the selected files.
+
+Before model startup, the host calculates a conservative input budget. It preserves
+the permanent safety policy and selected evidence identities, then prunes low-ranked
+command contracts or excerpt text when necessary. Every omission is reported. A
+request that still cannot fit returns a structured context-overflow result instead
+of silently truncating a large or dirty repository.
+
+Interactive prompts print startup, prefill, generation, and periodic heartbeat
+progress to stderr. A compact UTF-8 JSON receipt is written under
+`%LOCALAPPDATA%\ALLIN1\Assistant\receipts`; it records hashes, selected evidence
+ranges, omissions, token/timing data, safety flags, and the structured result without
+copying prompt text or full source excerpts. Receipts are count- and size-bounded.
+
+Prompting always retains the permanent ALLIN1 policy even when request-specific
+system guidance is supplied. The model must return Summary, evidence-calibrated
+Findings with separate engineering or security severity, exact Recommended operations,
+advisory Proposed code changes, Missing context, and Abstentions. The host
+corrects operation risk from the Agent API catalog, marks all recommendations as
+not executed, requires acknowledgement for game writes, rejects invented commands,
+and withholds manual-copy or destructive guidance. A proposal may describe a change
+to an explicitly grounded file and symbol, but it is always marked advisory-only,
+unauthorized, and unexecuted. Engineering defects cannot be labeled security-critical.
+It cannot approve an install or turn a response into a write. The grouped `assistant`
+command is available through the Agent API and remains classified `read_only`.
+
+Source and telemetry recommendations are limited to the read-only
+`inspect-source`, `inspect-log`, and `compare-telemetry` operations. A recommended
+operation must exist in the live catalog, fit the request, include grounded
+arguments and a rationale, or the host replaces it with an abstention. Every
+recommendation is returned with `executed: false`. Source/log inspection commands
+are removed after their evidence has already been grounded, and unrelated package,
+RPF, or authoring operations are omitted from focused renderer diagnoses.
+
+Package evidence is available through `validate-package`,
+`inspect-package-receipt`, and `verify-package-ownership`. These read-only commands
+let people and assistants validate payload hashes and inspect receipt ownership
+before recommending the separately acknowledged `install-package` or
+`uninstall-package` lifecycle.
+
 `allin1-sdk agent-api` (source install) or `ALLIN1-SDK-Agent.exe` (self-contained
 Windows release) exposes the same command registry as the embedded SDK Console
 using newline-delimited JSON on standard input and output. It is local,
@@ -421,6 +517,8 @@ editor, build system, or custom mod manager.
 {"id":"commands","action":"catalog"}
 {"id":"validate-1","action":"execute","command":"validate","args":["C:\\Mods\\Example\\addon.json"]}
 {"id":"packages","action":"execute","command":"list-installed-packages","args":["--gta-path","D:\\Games\\GTA V Enhanced"]}
+{"id":"validate-package","action":"execute","command":"validate-package","args":["C:\\Mods\\Example\\mod.toml"]}
+{"id":"verify-package","action":"execute","command":"verify-package-ownership","args":["example.mod","--gta-path","D:\\Games\\GTA V Enhanced"]}
 {"id":"install","action":"execute","command":"install-package","args":["C:\\Mods\\Example\\mod.toml","--gta-path","D:\\Games\\GTA V Enhanced","--acknowledge-write"]}
 {"id":"remove","action":"execute","command":"uninstall-package","args":["example.mod","--gta-path","D:\\Games\\GTA V Enhanced","--acknowledge-write"]}
 ```
@@ -636,8 +734,8 @@ release assets automatically.
 
 ## Documentation
 
-The in-app Help Center documents the Package Linker, package tools, asset previews,
-RPF Archives, replacement-plan boundary, and recovery paths.
+The in-app Help Center documents the Package Linker, Content Workbench, package tools,
+asset previews, RPF Archives, replacement-plan boundary, and recovery paths.
 The schema and complete colored-smoke example are maintained under [`sdk/`](sdk/).
 
 ALLIN1 SDK is licensed under the [GNU General Public License v3.0 or later](LICENSE).

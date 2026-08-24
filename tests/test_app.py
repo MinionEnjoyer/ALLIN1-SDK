@@ -1,6 +1,71 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from allin1_sdk.app import _launch_arguments
+
+
+def test_frozen_graph_launcher_targets_packaged_desktop_sibling(tmp_path, monkeypatch):
+    import allin1_sdk.cli as cli
+
+    console = tmp_path / "allin1-sdk.exe"
+    desktop = tmp_path / "ALLIN1-SDK-Desktop.exe"
+    graph = tmp_path / "package-graph.json"
+    console.write_bytes(b"MZconsole")
+    desktop.write_bytes(b"MZdesktop")
+    graph.write_text("{}", encoding="utf-8")
+    launched = []
+
+    monkeypatch.setattr(cli.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(cli.sys, "executable", str(console))
+    monkeypatch.setattr(
+        cli.RpfPackageGraph, "validate",
+        lambda *_args, **_kwargs: {"nodes": {}},
+    )
+    monkeypatch.setattr(
+        cli.subprocess, "Popen",
+        lambda command, **options: (
+            launched.append((command, options)) or SimpleNamespace(pid=4101)
+        ),
+    )
+
+    assert cli._open_graph_window(graph) == 4101
+    assert Path(launched[0][0][0]) == desktop.resolve()
+    assert launched[0][0][1:] == ["--rpf-graph", str(graph.resolve())]
+
+
+def test_frozen_workbench_launcher_targets_packaged_desktop_sibling(tmp_path, monkeypatch):
+    import allin1_sdk.cli as cli
+
+    agent = tmp_path / "ALLIN1-SDK-Agent.exe"
+    desktop = tmp_path / "ALLIN1-SDK-Desktop.exe"
+    package = tmp_path / "vehicle-package"
+    agent.write_bytes(b"MZagent")
+    desktop.write_bytes(b"MZdesktop")
+    package.mkdir()
+    launched = []
+    scan = SimpleNamespace(vehicles=(object(),), weapons=(), peds=())
+
+    monkeypatch.setattr(cli.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(cli.sys, "executable", str(agent))
+    monkeypatch.setattr(
+        cli, "AddonPackageInspector",
+        lambda: SimpleNamespace(inspect=lambda _source: scan),
+    )
+    monkeypatch.setattr(
+        cli.subprocess, "Popen",
+        lambda command, **options: (
+            launched.append((command, options)) or SimpleNamespace(pid=4102)
+        ),
+    )
+
+    pid, counts = cli._open_workbench_window(package, "vehicles")
+    assert pid == 4102
+    assert counts == {"vehicles": 1, "weapons": 0, "peds": 0}
+    assert Path(launched[0][0][0]) == desktop.resolve()
+    assert launched[0][0][1:] == [
+        "--workbench-package", str(package.resolve()),
+        "--workbench-category", "vehicles",
+    ]
 
 
 def test_open_graph_cli_launches_desktop_through_shared_arguments(tmp_path, monkeypatch):
@@ -84,6 +149,66 @@ def test_desktop_accepts_direct_vehicle_workbench_launch_arguments(tmp_path):
     assert parsed.gta_path == Path(game)
 
 
+def test_open_unified_workbench_cli_routes_category_and_counts(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from allin1_sdk.cli import main
+
+    package = tmp_path / "mixed-package"
+    package.mkdir()
+    launched = []
+    monkeypatch.setattr(
+        "allin1_sdk.cli._open_workbench_window",
+        lambda selected, category, game: (
+            launched.append((selected, category, game))
+            or (8452, {"vehicles": 1, "weapons": 3, "peds": 2})
+        ),
+    )
+    result = CliRunner().invoke(main, [
+        "open-workbench", str(package), "--category", "weapons",
+    ])
+    assert result.exit_code == 0
+    assert '"operation": "open_workbench"' in result.output
+    assert '"weapons": 3' in result.output
+    assert '"pid": 8452' in result.output
+    assert launched == [(package, "weapons", None)]
+
+
+def test_desktop_accepts_direct_unified_workbench_arguments(tmp_path):
+    package = tmp_path / "mixed.zip"
+    parsed = _launch_arguments([
+        "--workbench-package", str(package),
+        "--workbench-category", "peds",
+    ])
+    assert parsed.workbench_package == package
+    assert parsed.workbench_category == "peds"
+    assert parsed.rpf_graph is None
+
+
+def test_inspect_workbench_exposes_ped_evidence_as_json(tmp_path):
+    from click.testing import CliRunner
+
+    from allin1_sdk.cli import main
+
+    package = tmp_path / "ped-package"
+    package.mkdir()
+    (package / "peds.meta").write_text(
+        "<CPedModelInfo__InitDataList><InitDatas><Item>"
+        "<Name>ig_api_test</Name><Pedtype>CIVMALE</Pedtype>"
+        "<ModelType>STANDARD</ModelType><PropsName>ig_api_test_p</PropsName>"
+        "</Item></InitDatas></CPedModelInfo__InitDataList>",
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(main, [
+        "inspect-workbench", str(package), "--category", "peds",
+    ])
+    assert result.exit_code == 0
+    assert '"operation": "inspect_workbench"' in result.output
+    assert '"vehicles": 0' in result.output
+    assert '"name": "ig_api_test"' in result.output
+    assert '"weapons": [' not in result.output
+
+
 def test_open_package_graph_cli_routes_to_guarded_viewer(tmp_path, monkeypatch):
     from click.testing import CliRunner
 
@@ -112,4 +237,6 @@ def test_desktop_launch_arguments_default_to_workspace():
     parsed = _launch_arguments([])
     assert parsed.rpf_graph is None
     assert parsed.vehicle_package is None
+    assert parsed.workbench_package is None
+    assert parsed.workbench_category == "auto"
     assert parsed.gta_path is None

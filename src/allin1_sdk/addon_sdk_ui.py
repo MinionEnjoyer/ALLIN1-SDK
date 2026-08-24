@@ -16,10 +16,12 @@ from PIL import Image, ImageTk
 from allin1_sdk import __version__
 from allin1_sdk.addon_importer import AddonDraftBuilder, AddonPackageInspector, PackageScan
 from allin1_sdk.branding import apply_sdk_window_icon
+from allin1_sdk.collapsible_panes import CollapsibleSidePanes
 from allin1_sdk.sdk_console import SdkConsoleDialog
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.paths import user_data_root
 from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
+from allin1_sdk.ui_foundation import place_window
 from allin1_sdk.addon_sdk import (
     AddonInstallStep,
     AddonLinkReport,
@@ -45,6 +47,15 @@ def _display_value(value: Any) -> str:
 class AddonSdkDialog(tk.Toplevel):
     """Inspect add-on fields, resolved references, and a safe install plan."""
 
+    NAVIGATION = (
+        ("linker", "Package Linker", "Ctrl+1"),
+        ("assets", "Asset Viewer", "Ctrl+2"),
+        ("workbench", "Content Workbench", "Ctrl+3"),
+        ("rpf", "RPF Archives", "Ctrl+4"),
+        ("recipes", "Package Recipes", "Ctrl+5"),
+        ("help", "Help Center", "Ctrl+6"),
+    )
+
     def __init__(
         self, parent: tk.Misc, project_root: str | Path,
         installation_roots: tuple[Path, ...] = (),
@@ -62,9 +73,10 @@ class AddonSdkDialog(tk.Toplevel):
         self._selection: dict[str, object] = {}
         self.review_menus: list[tk.Menu] = []
         self._logo_photo: ImageTk.PhotoImage | None = None
+        self._navigation_history: list[str] = []
+        self.sidebar_visible = tk.BooleanVar(self, value=True)
         self.title("ALLIN1 SDK — Developer Workspace")
-        self.geometry("1320x840")
-        self.minsize(1020, 680)
+        place_window(self, preferred=(1320, 840), minimum=(980, 640))
         if not standalone:
             self.transient(parent)
         apply_sdk_window_icon(self, self.project_root)
@@ -80,15 +92,23 @@ class AddonSdkDialog(tk.Toplevel):
         intelligence = self._make_intelligence_menu(menu)
         menu.add_cascade(label="Package Tools", menu=intelligence)
         view = tk.Menu(menu, tearoff=False)
-        for index, (key, label) in enumerate((
-            ("linker", "Package Linker"), ("assets", "Asset Viewer"),
-            ("vehicles", "Vehicle Workbench"), ("rpf", "RPF Archives"),
-            ("recipes", "Package Recipes"), ("help", "Help Center"),
-        ), start=1):
+        for key, label, shortcut in self.NAVIGATION:
             view.add_command(
-                label=label, accelerator=f"Ctrl+{index}",
+                label=label, accelerator=shortcut,
                 command=lambda selected=key: self._select_workspace(selected),
             )
+        view.add_separator()
+        view.add_checkbutton(
+            label="Show workspace sidebar", accelerator="Ctrl+B",
+            variable=self.sidebar_visible, onvalue=True, offvalue=False,
+            command=lambda: self._set_sidebar_visible(
+                self.sidebar_visible.get(),
+            ),
+        )
+        # Some Tk builds initialize a checkbutton's variable while installing
+        # the menu entry. Reassert the declared default after registration so
+        # the first window is deterministic across themes/platform builds.
+        self.sidebar_visible.set(True)
         menu.add_cascade(label="View", menu=view)
         tools = tk.Menu(menu, tearoff=False)
         tools.add_command(
@@ -129,7 +149,7 @@ class AddonSdkDialog(tk.Toplevel):
             state="disabled",
         )
         menu.add_command(
-            label="Open vehicle workbench…", command=self._open_vehicle_workbench,
+            label="Open in Workbench…", command=self._open_workbench,
             state="disabled",
         )
         menu.add_command(
@@ -153,7 +173,7 @@ class AddonSdkDialog(tk.Toplevel):
         return menu
 
     def _set_package_actions(
-        self, *, assets: bool, rpfs: bool, vehicles: bool = False,
+        self, *, assets: bool, rpfs: bool, workbench: bool = False,
     ) -> None:
         for menu in self.review_menus:
             menu.entryconfigure(
@@ -163,21 +183,30 @@ class AddonSdkDialog(tk.Toplevel):
                 "Inspect package RPFs…", state="normal" if rpfs else "disabled",
             )
             menu.entryconfigure(
-                "Open vehicle workbench…",
-                state="normal" if vehicles else "disabled",
+                "Open in Workbench…",
+                state="normal" if workbench else "disabled",
             )
 
     def _open_console(self) -> None:
-        self.console_workspace.toggle()
+        self.console_workspace.expand_and_focus()
 
     def _open_help(self, topic: str = "sdk") -> None:
         self._select_workspace("help")
         self.help_workspace.show_topic(topic)
 
     def _open_context_help(self) -> None:
+        workbench_topic = "workbench"
+        workbench = getattr(self, "workbench_workspace", None)
+        if workbench is not None:
+            category = workbench.current_category()
+            workbench_topic = {
+                "vehicles": "vehicle-workbench",
+                "weapons": "weapon-workbench",
+                "peds": "ped-workbench",
+            }.get(category, "workbench")
         topic = {
             "linker": "sdk", "assets": "asset-viewer",
-            "vehicles": "vehicle-workbench", "rpf": "rpf-explorer",
+            "workbench": workbench_topic, "rpf": "rpf-explorer",
             "recipes": "package-recipes", "help": "input",
         }.get(getattr(self, "current_workspace", "linker"), "sdk")
         self._open_help(topic)
@@ -204,13 +233,40 @@ class AddonSdkDialog(tk.Toplevel):
                 parent=self,
             )
             return False
+        console = getattr(self, "console_workspace", None)
+        if console is not None and console.has_active_work():
+            console.expand_and_focus()
+            messagebox.showinfo(
+                "SDK Console command still running",
+                "Wait for the current command to finish before closing the SDK.",
+                parent=self,
+            )
+            return False
         self.destroy()
         return True
 
-    def _select_workspace(self, key: str) -> None:
+    @classmethod
+    def _workspace_label(cls, key: str) -> str:
+        return next(
+            (label for name, label, _shortcut in cls.NAVIGATION if name == key),
+            key.replace("_", " ").title(),
+        )
+
+    def _select_workspace(self, key: str, *, remember: bool = True) -> bool:
         pages = getattr(self, "workspace_pages", {})
         if key not in pages:
-            return
+            return False
+        previous = getattr(self, "current_workspace", None)
+        if previous == "workbench" and key != previous:
+            workbench = getattr(self, "workbench_workspace", None)
+            if (
+                workbench is not None
+                and not workbench.vehicle_workspace.confirm_navigation()
+            ):
+                return False
+        if remember and previous and previous != key:
+            self._navigation_history.append(previous)
+            self._navigation_history = self._navigation_history[-20:]
         self._ensure_workspace(key)
         pages[key].tkraise()
         self.current_workspace = key
@@ -218,6 +274,111 @@ class AddonSdkDialog(tk.Toplevel):
             button.configure(
                 style="NavSelected.TButton" if name == key else "Nav.TButton",
             )
+        self._update_context_navigation()
+        self.after_idle(lambda selected=key: self._focus_workspace(selected))
+        return True
+
+    def _return_target(self) -> str | None:
+        current = getattr(self, "current_workspace", "linker")
+        for target in reversed(self._navigation_history):
+            if target in self.workspace_pages and target != current:
+                return target
+        return "linker" if current != "linker" else None
+
+    def _update_context_navigation(self) -> None:
+        """Expose history as one compact header link, not a sidebar row."""
+        button = getattr(self, "context_back_button", None)
+        if button is None:
+            return
+        target = self._return_target()
+        if target is None:
+            button.pack_forget()
+            return
+        button.configure(text=f"‹ {self._workspace_label(target)}")
+        if not button.winfo_manager():
+            button.pack(side="right", padx=(10, 0))
+
+    def _go_back(self) -> str:
+        while self._navigation_history:
+            target = self._navigation_history[-1]
+            if target not in self.workspace_pages or target == self.current_workspace:
+                self._navigation_history.pop()
+                continue
+            # Keep the history entry until navigation succeeds. In particular,
+            # cancelling the workbench's unsaved-edit warning must leave both
+            # the current page and its return route intact.
+            if self._select_workspace(target, remember=False):
+                self._navigation_history.pop()
+                self._update_context_navigation()
+                return "break"
+            self._update_context_navigation()
+            return "break"
+        if getattr(self, "current_workspace", "linker") != "linker":
+            self._select_workspace("linker", remember=False)
+            self._update_context_navigation()
+            return "break"
+        self._update_context_navigation()
+        return "break"
+
+    @staticmethod
+    def _focusable_descendants(widget: tk.Misc):
+        for child in widget.winfo_children():
+            yield child
+            yield from AddonSdkDialog._focusable_descendants(child)
+
+    def _focus_workspace(self, key: str) -> None:
+        """Never leave keyboard focus trapped in a page that was just hidden."""
+        page = self.workspace_pages.get(key)
+        if page is None or not page.winfo_ismapped():
+            return
+        candidates = []
+        if key == "linker":
+            candidates.append(self.example_list)
+        candidates.extend(self._focusable_descendants(page))
+        for widget in candidates:
+            if not widget.winfo_ismapped():
+                continue
+            try:
+                if str(widget.cget("state")) == "disabled":
+                    continue
+            except tk.TclError:
+                pass
+            if isinstance(widget, (
+                ttk.Entry, ttk.Treeview, ttk.Combobox, ttk.Button,
+                tk.Entry, tk.Text, tk.Listbox,
+            )):
+                widget.focus_set()
+                return
+
+    def _cycle_workspace(self, _event: object | None = None, delta: int = 1) -> str:
+        keys = [item[0] for item in self.NAVIGATION]
+        current = keys.index(self.current_workspace) if self.current_workspace in keys else 0
+        self._select_workspace(keys[(current + delta) % len(keys)])
+        return "break"
+
+    def _set_sidebar_visible(self, visible: bool) -> str:
+        """Collapse the navigation rail without changing the active workspace."""
+        visible = bool(visible)
+        self.sidebar_visible.set(visible)
+        if visible:
+            if not self.workspace_sidebar.winfo_manager():
+                self.workspace_sidebar.pack(
+                    side="left", fill="y", before=self.sidebar_toggle_rail,
+                )
+            self.sidebar_toggle_button.configure(
+                text="<",
+                command=lambda: self._set_sidebar_visible(False),
+            )
+        else:
+            self.workspace_sidebar.pack_forget()
+            self.sidebar_toggle_button.configure(
+                text=">",
+                command=lambda: self._set_sidebar_visible(True),
+            )
+        return "break"
+
+    def _toggle_sidebar(self, _event: object | None = None) -> str:
+        return self._set_sidebar_visible(not self.sidebar_visible.get())
 
     def _ensure_workspace(self, key: str) -> ttk.Frame | None:
         """Construct a specialist workspace only when the user first opens it."""
@@ -232,27 +393,32 @@ class AddonSdkDialog(tk.Toplevel):
             workspace = AssetViewerDialog(
                 page, installation_roots=self.installation_roots,
                 embedded=True, on_help=self._open_help,
-                on_close=lambda: self._select_workspace("linker"),
+                on_close=self._go_back,
             )
             self.asset_workspace = workspace
-        elif key == "vehicles":
-            from allin1_sdk.vehicle_workbench import VehicleWorkbenchFrame
-            workspace = VehicleWorkbenchFrame(
+        elif key == "workbench":
+            from allin1_sdk.workbench import WorkbenchFrame
+            workspace = WorkbenchFrame(
                 page, self.project_root,
                 installation_roots=self.installation_roots,
                 on_help=self._open_help,
-                on_close=lambda: self._select_workspace("linker"),
-                on_open_asset=self._open_vehicle_asset,
+                on_close=self._go_back,
+                on_open_asset=self._open_workbench_asset,
             )
             workspace.pack(fill="both", expand=True)
-            self.vehicle_workspace = workspace
+            self.workbench_workspace = workspace
+            # Compatibility aliases keep existing graph routes and integrations
+            # working while the visible navigation uses one unified workspace.
+            self.vehicle_workspace = workspace.vehicle_workspace
+            self.weapon_workspace = workspace.weapon_workspace
+            self.ped_workspace = workspace.ped_workspace
         elif key == "rpf":
             from allin1_sdk.rpf_explorer import RpfExplorerDialog
             workspace = RpfExplorerDialog(
                 page, self.project_root,
                 installation_roots=self.installation_roots,
                 embedded=True, on_help=self._open_help,
-                on_close=lambda: self._select_workspace("linker"),
+                on_close=self._go_back,
                 on_open_asset=self._open_graph_asset,
                 on_open_vehicle=self._open_graph_vehicle,
             )
@@ -263,7 +429,7 @@ class AddonSdkDialog(tk.Toplevel):
                 page, self.project_root,
                 installation_roots=self.installation_roots,
                 on_help=self._open_help,
-                on_close=lambda: self._select_workspace("linker"),
+                on_close=self._go_back,
             )
             self.recipe_workspace = workspace
         elif key == "help":
@@ -281,7 +447,13 @@ class AddonSdkDialog(tk.Toplevel):
 
     def _build(self) -> None:
         self._build_menu()
-        outer = ttk.Frame(self, padding=14)
+        outer = ttk.Frame(
+            self, padding=(12, 9, 12, 10), width=1, height=1,
+        )
+        # The header and hidden workspaces have intentionally generous
+        # preferred widths. Do not let those requests keep the client at its
+        # previous large geometry when the user shrinks the top-level window.
+        outer.pack_propagate(False)
         outer.pack(fill="both", expand=True)
         header = ttk.Frame(outer)
         header.pack(fill="x", pady=(0, 10))
@@ -293,19 +465,43 @@ class AddonSdkDialog(tk.Toplevel):
             try:
                 with Image.open(logo) as opened:
                     image = opened.convert("RGBA")
-                    image.thumbnail((220, 112), Image.Resampling.LANCZOS)
+                    image.thumbnail((180, 88), Image.Resampling.LANCZOS)
                     self._logo_photo = ImageTk.PhotoImage(image.copy())
                 ttk.Label(header, image=self._logo_photo).pack(
                     side="left", padx=(0, 14), anchor="center",
                 )
             except (OSError, tk.TclError):
                 self._logo_photo = None
+        # Reserve the fixed actions before packing the expanding heading.
+        # Otherwise a long localized description can push version/support
+        # controls outside the window even though the top-level itself fits.
+        header_actions = ttk.Frame(header)
+        header_actions.pack(side="right", padx=(18, 4), fill="y")
+        self.version_badge = tk.Label(
+            header_actions, text=f"v{__version__}",
+            background="#176b36", foreground="white",
+            font=("Segoe UI Semibold", 10), padx=12, pady=5,
+        )
+        self.version_badge.pack(anchor="e")
+        self.support_button = ttk.Button(
+            header_actions, text="Support ALLIN1 ↗", style="Link.TButton",
+            cursor="hand2", command=lambda: webbrowser.open(
+                "https://buymeacoffee.com/minionenjoyer"
+            ),
+        )
+        self.support_button.pack(anchor="e", pady=(10, 0))
         header_text = ttk.Frame(header)
         header_text.pack(side="left", fill="x", expand=True, anchor="center")
+        header_title = ttk.Frame(header_text)
+        header_title.pack(fill="x")
+        self.context_back_button = ttk.Button(
+            header_title, text="", style="Link.TButton", cursor="hand2",
+            command=self._go_back,
+        )
         ttk.Label(
-            header_text, text="Developer Workspace",
-            font=("Segoe UI Semibold", 19), foreground="#173d32",
-        ).pack(anchor="w")
+            header_title, text="Developer Workspace",
+            font=("Segoe UI Semibold", 18), foreground="#173d32",
+        ).pack(side="left", anchor="w")
         ttk.Label(
             header_text,
             text=(
@@ -314,38 +510,60 @@ class AddonSdkDialog(tk.Toplevel):
             ),
             wraplength=760, justify="left",
         ).pack(anchor="w", pady=(3, 0))
-        header_actions = ttk.Frame(header)
-        header_actions.pack(side="right", padx=(18, 4), fill="y")
-        tk.Label(
-            header_actions, text=f"v{__version__}",
-            background="#176b36", foreground="white",
-            font=("Segoe UI Semibold", 10), padx=12, pady=5,
-        ).pack(anchor="e")
-        support = ttk.Label(
-            header_actions, text="Support ALLIN1 ↗", foreground="#176b36",
-            cursor="hand2", font=("Segoe UI Semibold", 9, "underline"),
-        )
-        support.pack(anchor="e", pady=(10, 0))
-        support.bind(
-            "<Button-1>",
-            lambda _event: webbrowser.open(
-                "https://buymeacoffee.com/minionenjoyer"
-            ),
-        )
 
         shell = ttk.Frame(outer)
         shell.pack(fill="both", expand=True)
+        self.status = tk.StringVar(value="Loading SDK packages…")
         console_host = ttk.Frame(shell, style="Surface.TFrame")
-        console_host.pack(side="bottom", fill="x", pady=(10, 0))
+        console_host.pack(side="bottom", fill="x", pady=(5, 0))
+        activity = ttk.Frame(shell, style="Surface.TFrame", padding=(9, 4))
+        activity.pack(side="bottom", fill="x")
+        ttk.Label(
+            activity, text="ACTIVITY", style="FieldLabel.TLabel",
+            background="#ffffff",
+        ).pack(side="left", padx=(0, 8))
+        ttk.Label(
+            activity, textvariable=self.status, style="Muted.TLabel",
+            background="#ffffff", anchor="w", width=1,
+        ).pack(side="left", fill="x", expand=True)
         content_shell = ttk.Frame(shell)
         content_shell.pack(fill="both", expand=True)
-        sidebar = ttk.Frame(content_shell, style="Surface.TFrame", padding=(8, 12))
-        sidebar.pack(side="left", fill="y", padx=(0, 12))
+        self.navigation_shell = ttk.Frame(
+            content_shell, padding=0,
+        )
+        self.navigation_shell.pack(side="left", fill="y")
+        sidebar = ttk.Frame(
+            self.navigation_shell, style="Surface.TFrame", padding=(8, 12),
+        )
+        self.workspace_sidebar = sidebar
+        sidebar.pack(side="left", fill="y")
+        self.sidebar_toggle_rail = tk.Frame(
+            self.navigation_shell, width=16, background="#d5ded9",
+            highlightthickness=0, borderwidth=0,
+        )
+        self.sidebar_toggle_rail.pack(side="left", fill="y")
+        self.sidebar_toggle_rail.pack_propagate(False)
+        tk.Frame(
+            self.sidebar_toggle_rail, width=1, background="#aebdb5",
+            highlightthickness=0, borderwidth=0,
+        ).place(relx=0.5, y=0, relheight=1, anchor="n")
+        self.sidebar_toggle_button = tk.Button(
+            self.sidebar_toggle_rail, text="<",
+            background="#1f7f42", foreground="#ffffff",
+            activebackground="#176b36", activeforeground="#ffffff",
+            relief="flat", borderwidth=0, highlightthickness=0,
+            padx=0, pady=0, font=("Segoe UI Semibold", 9), cursor="hand2",
+            command=lambda: self._set_sidebar_visible(False),
+        )
+        self.sidebar_toggle_button.place(
+            relx=0.5, rely=0.5, anchor="center", width=16, height=30,
+        )
         ttk.Label(
             sidebar, text="DEVELOPER WORKSPACES", style="FieldLabel.TLabel",
             background="#ffffff",
         ).pack(anchor="w", padx=10, pady=(0, 7))
         workspace = ttk.Frame(content_shell)
+        self.workspace_host = workspace
         workspace.pack(side="left", fill="both", expand=True)
         workspace.rowconfigure(0, weight=1)
         workspace.columnconfigure(0, weight=1)
@@ -355,27 +573,20 @@ class AddonSdkDialog(tk.Toplevel):
 
         linker_page = ttk.Frame(workspace)
         assets_page = ttk.Frame(workspace)
-        vehicles_page = ttk.Frame(workspace)
+        workbench_page = ttk.Frame(workspace)
         rpf_page = ttk.Frame(workspace)
         recipes_page = ttk.Frame(workspace)
         help_page = ttk.Frame(workspace)
         self.workspace_pages = {
             "linker": linker_page,
             "assets": assets_page,
-            "vehicles": vehicles_page,
+            "workbench": workbench_page,
             "rpf": rpf_page,
             "recipes": recipes_page,
             "help": help_page,
         }
         self.workspace_buttons: dict[str, ttk.Button] = {}
-        for index, (key, label) in enumerate((
-            ("linker", "Package Linker"),
-            ("assets", "Asset Viewer"),
-            ("vehicles", "Vehicle Workbench"),
-            ("rpf", "RPF Archives"),
-            ("recipes", "Package Recipes"),
-            ("help", "Help Center"),
-        ), start=1):
+        for index, (key, label, _shortcut) in enumerate(self.NAVIGATION, start=1):
             self.workspace_pages[key].grid(row=0, column=0, sticky="nsew")
             button = ttk.Button(
                 sidebar, text=label, style="Nav.TButton", width=19,
@@ -385,8 +596,17 @@ class AddonSdkDialog(tk.Toplevel):
             self.workspace_buttons[key] = button
             self.bind(
                 f"<Control-Key-{index}>",
-                lambda _event, selected=key: self._select_workspace(selected),
+                lambda _event, selected=key: (
+                    self._select_workspace(selected), "break"
+                )[1],
             )
+        self.bind("<Alt-Left>", lambda _event: self._go_back())
+        self.bind("<Control-b>", self._toggle_sidebar)
+        self.bind("<Control-Tab>", self._cycle_workspace)
+        self.bind(
+            "<Control-Shift-Tab>",
+            lambda event: self._cycle_workspace(event, -1),
+        )
 
         toolbar = ttk.Frame(linker_page)
         toolbar.pack(fill="x", pady=(0, 10))
@@ -403,35 +623,78 @@ class AddonSdkDialog(tk.Toplevel):
         ttk.Menubutton(
             toolbar, text="Package tools", menu=intelligence_menu,
         ).pack(side="left", padx=(7, 0))
-        self.status = tk.StringVar(value="Loading SDK examples…")
-        ttk.Label(toolbar, textvariable=self.status).pack(side="right")
-
         panes = ttk.Panedwindow(linker_page, orient="horizontal")
+        self.linker_panes = panes
         panes.pack(fill="both", expand=True)
 
-        examples = ttk.LabelFrame(panes, text="Packages", padding=8, width=250)
-        graph = ttk.LabelFrame(panes, text="Package links", padding=8)
-        inspector = ttk.LabelFrame(panes, text="Field inspector", padding=8)
+        side_panes = CollapsibleSidePanes(
+            panes, left_width=250, center_width=430, right_width=440,
+            left_weight=2, center_weight=4, right_weight=5,
+            left_label="Packages", right_label="Field inspector",
+        )
+        self.linker_side_panes = side_panes
+        examples = ttk.LabelFrame(
+            side_panes.left_host, text="Packages", padding=8,
+        )
+        graph = ttk.LabelFrame(
+            side_panes.center_host, text="Package links", padding=8,
+        )
+        inspector = ttk.LabelFrame(
+            side_panes.right_host, text="Field inspector", padding=8,
+        )
+        self.linker_sections = (examples, graph, inspector)
         # Package names and compatibility tags need enough width to scan without
         # forcing users to resize the first pane every session.
-        panes.add(examples, weight=2)
-        panes.add(graph, weight=4)
-        panes.add(inspector, weight=5)
+        side_panes.set_contents(examples, graph, inspector)
 
+        package_filter_row = ttk.Frame(examples)
+        package_filter_row.pack(fill="x", pady=(0, 7))
+        ttk.Label(package_filter_row, text="Filter").pack(side="left")
+        self.manifest_filter = tk.StringVar()
+        self.manifest_filter_entry = ttk.Entry(
+            package_filter_row, textvariable=self.manifest_filter,
+        )
+        self.manifest_filter_entry.pack(
+            side="left", fill="x", expand=True, padx=(6, 4),
+        )
+        ttk.Button(
+            package_filter_row, text="Clear",
+            command=lambda: self.manifest_filter.set(""),
+        ).pack(side="left")
+        self.manifest_filter.trace_add(
+            "write", lambda *_args: self._populate_manifest_list(),
+        )
+        package_tree_host = ttk.Frame(examples)
+        package_tree_host.pack(fill="both", expand=True)
         self.example_list = ttk.Treeview(
-            examples, columns=("package",), show="tree headings",
+            package_tree_host, columns=("package", "edition", "nodes"),
+            show="tree headings",
             selectmode="browse", height=16,
         )
         self.example_list.heading("#0", text="Status")
         self.example_list.heading("package", text="Package")
+        self.example_list.heading("edition", text="Edition")
+        self.example_list.heading("nodes", text="Nodes")
         self.example_list.column("#0", width=78, minwidth=68, stretch=False)
         self.example_list.column("package", width=205, minwidth=140, stretch=True)
-        example_scroll = ttk.Scrollbar(
-            examples, orient="vertical", command=self.example_list.yview,
+        self.example_list.column("edition", width=90, minwidth=72, stretch=False)
+        self.example_list.column(
+            "nodes", width=58, minwidth=50, stretch=False, anchor="e",
         )
-        self.example_list.configure(yscrollcommand=example_scroll.set)
-        self.example_list.pack(side="left", fill="both", expand=True)
-        example_scroll.pack(side="right", fill="y")
+        example_scroll = ttk.Scrollbar(
+            package_tree_host, orient="vertical", command=self.example_list.yview,
+        )
+        example_xscroll = ttk.Scrollbar(
+            package_tree_host, orient="horizontal", command=self.example_list.xview,
+        )
+        self.example_list.configure(
+            yscrollcommand=example_scroll.set, xscrollcommand=example_xscroll.set,
+        )
+        self.example_list.grid(row=0, column=0, sticky="nsew")
+        example_scroll.grid(row=0, column=1, sticky="ns")
+        example_xscroll.grid(row=1, column=0, sticky="ew")
+        package_tree_host.rowconfigure(0, weight=1)
+        package_tree_host.columnconfigure(0, weight=1)
         self.example_list.bind("<<TreeviewSelect>>", self._select_example)
 
         self.graph = ttk.Treeview(
@@ -443,10 +706,20 @@ class AddonSdkDialog(tk.Toplevel):
         self.graph.column("#0", width=300, stretch=True)
         self.graph.column("type", width=115, stretch=False)
         self.graph.column("status", width=95, stretch=False)
-        graph_scroll = ttk.Scrollbar(graph, orient="vertical", command=self.graph.yview)
-        self.graph.configure(yscrollcommand=graph_scroll.set)
-        self.graph.pack(side="left", fill="both", expand=True)
-        graph_scroll.pack(side="right", fill="y")
+        graph_scroll = ttk.Scrollbar(
+            graph, orient="vertical", command=self.graph.yview,
+        )
+        graph_xscroll = ttk.Scrollbar(
+            graph, orient="horizontal", command=self.graph.xview,
+        )
+        self.graph.configure(
+            yscrollcommand=graph_scroll.set, xscrollcommand=graph_xscroll.set,
+        )
+        self.graph.grid(row=0, column=0, sticky="nsew")
+        graph_scroll.grid(row=0, column=1, sticky="ns")
+        graph_xscroll.grid(row=1, column=0, sticky="ew")
+        graph.rowconfigure(0, weight=1)
+        graph.columnconfigure(0, weight=1)
         self.graph.bind("<<TreeviewSelect>>", self._inspect_selection)
 
         self.heading = tk.StringVar(value="Select an integration node")
@@ -454,11 +727,18 @@ class AddonSdkDialog(tk.Toplevel):
             inspector, textvariable=self.heading,
             font=("Segoe UI Semibold", 12), foreground="#1f7f42",
         ).pack(anchor="w")
+        detail_row = ttk.Frame(inspector)
+        detail_row.pack(fill="x", pady=(6, 8))
         self.details = tk.Text(
-            inspector, height=6, wrap="word", relief="flat",
+            detail_row, height=6, wrap="word", relief="flat",
             background="#f4f7f5", foreground="#26332e", padx=7, pady=7,
         )
-        self.details.pack(fill="x", pady=(6, 8))
+        detail_scroll = ttk.Scrollbar(
+            detail_row, orient="vertical", command=self.details.yview,
+        )
+        self.details.configure(yscrollcommand=detail_scroll.set)
+        self.details.pack(side="left", fill="both", expand=True)
+        detail_scroll.pack(side="right", fill="y")
         self.details.configure(state="disabled")
 
         self.fields = ttk.Treeview(
@@ -468,12 +748,22 @@ class AddonSdkDialog(tk.Toplevel):
         self.fields.heading("value", text="Linked value")
         self.fields.column("#0", width=140, stretch=False)
         self.fields.column("value", width=350, stretch=True)
-        field_scroll = ttk.Scrollbar(inspector, orient="vertical", command=self.fields.yview)
-        self.fields.configure(yscrollcommand=field_scroll.set)
         field_row = ttk.Frame(inspector)
         field_row.pack(fill="both", expand=True)
-        self.fields.pack(in_=field_row, side="left", fill="both", expand=True)
-        field_scroll.pack(in_=field_row, side="right", fill="y")
+        field_scroll = ttk.Scrollbar(
+            field_row, orient="vertical", command=self.fields.yview,
+        )
+        field_xscroll = ttk.Scrollbar(
+            field_row, orient="horizontal", command=self.fields.xview,
+        )
+        self.fields.configure(
+            yscrollcommand=field_scroll.set, xscrollcommand=field_xscroll.set,
+        )
+        self.fields.grid(in_=field_row, row=0, column=0, sticky="nsew")
+        field_scroll.grid(row=0, column=1, sticky="ns")
+        field_xscroll.grid(row=1, column=0, sticky="ew")
+        field_row.rowconfigure(0, weight=1)
+        field_row.columnconfigure(0, weight=1)
         self.fields.bind("<<TreeviewSelect>>", self._explain_field)
 
         self.field_help = tk.StringVar(
@@ -483,6 +773,15 @@ class AddonSdkDialog(tk.Toplevel):
             inspector, textvariable=self.field_help, wraplength=440,
             justify="left", foreground="#52635c",
         ).pack(fill="x", pady=(8, 0))
+        inspector_actions = ttk.Frame(inspector)
+        inspector_actions.pack(fill="x", pady=(6, 0))
+        ttk.Button(
+            inspector_actions, text="Copy selected value",
+            command=self._copy_selected_field,
+        ).pack(side="left")
+        ttk.Button(
+            inspector_actions, text="Open source", command=self._open_source,
+        ).pack(side="left", padx=(6, 0))
 
         self._workspace_instances: dict[str, ttk.Frame] = {}
         self.console_workspace = SdkConsoleDialog(
@@ -500,18 +799,47 @@ class AddonSdkDialog(tk.Toplevel):
             messagebox.showerror("SDK example error", str(exc), parent=self)
             self.status.set("Could not load built-in examples")
             return
-        self.example_list.delete(*self.example_list.get_children())
-        for index, manifest in enumerate(self.manifests):
-            self.example_list.insert(
-                "", "end", iid=str(index),
-                text=self._catalog_state_label(manifest.catalog_state),
-                values=(manifest.name,),
-            )
-        if self.manifests:
-            self.example_list.selection_set("0")
-            self._show_manifest(self.manifests[0])
-        else:
+        self._populate_manifest_list(select_first=True)
+        if not self.manifests:
             self.status.set("No SDK examples, imports, packages, or receipts found")
+
+    def _populate_manifest_list(self, *, select_first: bool = False) -> None:
+        if not hasattr(self, "example_list"):
+            return
+        previous = self.example_list.selection()
+        previous_id = previous[0] if previous else None
+        query = (
+            self.manifest_filter.get().strip().casefold()
+            if hasattr(self, "manifest_filter") else ""
+        )
+        self.example_list.delete(*self.example_list.get_children())
+        visible: list[str] = []
+        for index, manifest in enumerate(self.manifests):
+            searchable = " ".join((
+                manifest.name, manifest.addon_id, manifest.catalog_state,
+                manifest.catalog_origin, *manifest.editions,
+            )).casefold()
+            if query and query not in searchable:
+                continue
+            iid = str(index)
+            visible.append(iid)
+            self.example_list.insert(
+                "", "end", iid=iid,
+                text=self._catalog_state_label(manifest.catalog_state),
+                values=(
+                    manifest.name,
+                    " / ".join(value.title() for value in manifest.editions),
+                    len(manifest.nodes),
+                ),
+            )
+        target = previous_id if previous_id in visible else (visible[0] if visible else None)
+        if target is not None and (select_first or previous_id is not None):
+            self.example_list.selection_set(target)
+            self.example_list.focus(target)
+            self.example_list.see(target)
+            self._show_manifest(self.manifests[int(target)])
+        elif query and not visible:
+            self.status.set(f'No packages match “{self.manifest_filter.get().strip()}”')
 
     def _select_example(self, _event: object | None = None) -> None:
         selection = self.example_list.selection()
@@ -551,14 +879,26 @@ class AddonSdkDialog(tk.Toplevel):
         self._append_manifest(manifest)
 
     def _append_manifest(self, manifest: AddonManifest) -> None:
-        self.manifests.append(manifest)
-        index = len(self.manifests) - 1
-        self.example_list.insert(
-            "", "end", iid=str(index),
-            text=self._catalog_state_label(manifest.catalog_state),
-            values=(manifest.name,),
+        identity = (
+            manifest.addon_id.casefold(), manifest.catalog_origin.casefold(),
+            str(manifest.package_source or manifest.manifest_path).casefold(),
         )
+        index = next((
+            number for number, existing in enumerate(self.manifests)
+            if (
+                existing.addon_id.casefold(), existing.catalog_origin.casefold(),
+                str(existing.package_source or existing.manifest_path).casefold(),
+            ) == identity
+        ), -1)
+        if index >= 0:
+            self.manifests[index] = manifest
+        else:
+            self.manifests.append(manifest)
+            index = len(self.manifests) - 1
+        self.manifest_filter.set("")
+        self._populate_manifest_list()
         self.example_list.selection_set(str(index))
+        self.example_list.focus(str(index))
         self.example_list.see(str(index))
         self._show_manifest(manifest)
 
@@ -674,7 +1014,7 @@ class AddonSdkDialog(tk.Toplevel):
         self._set_package_actions(
             assets=True,
             rpfs=any(entry.suffix == ".rpf" for entry in scan.entries),
-            vehicles=bool(scan.vehicles),
+            workbench=bool(scan.vehicles or scan.weapons or scan.peds),
         )
 
     def _open_asset_viewer(self) -> None:
@@ -684,27 +1024,55 @@ class AddonSdkDialog(tk.Toplevel):
                 self.package_source, self.package_scan,
             )
 
-    def _open_vehicle_workbench(self) -> None:
-        self._select_workspace("vehicles")
+    def _open_workbench(self, category: str = "auto") -> None:
+        self._select_workspace("workbench")
         if self.package_source is not None:
-            self.vehicle_workspace.open_source(
-                self.package_source, self.package_scan,
+            opened = self.workbench_workspace.open_source(
+                self.package_source, self.package_scan, category=category,
             )
+            if opened:
+                self.status.set(
+                    f"Content Workbench · {self.package_source.name}",
+                )
 
-    def open_vehicle_package(self, source: str | Path) -> bool:
-        """Load a package directly into the embedded Vehicle Workbench."""
+    def _open_vehicle_workbench(self) -> None:
+        """Compatibility route for existing vehicle-focused integrations."""
+        self._open_workbench("vehicles")
+
+    def open_workbench_package(
+        self, source: str | Path, category: str = "auto",
+    ) -> bool:
+        """Load a package directly into the unified content Workbench."""
         try:
             resolved = Path(source).expanduser().resolve(strict=True)
             scan = AddonPackageInspector().inspect(resolved)
         except (OSError, ValueError) as exc:
             messagebox.showerror(
-                "Could not open vehicle package", str(exc), parent=self,
+                "Could not open package in Workbench", str(exc), parent=self,
             )
             return False
-        if not scan.vehicles:
+        available = {
+            "vehicles": bool(scan.vehicles),
+            "weapons": bool(scan.weapons),
+            "peds": bool(scan.peds),
+        }
+        if category not in {"auto", *available}:
             messagebox.showerror(
-                "No vehicle content found",
-                "The selected package does not contain any linked vehicle metadata.",
+                "Unknown Workbench category", f"Unsupported category: {category}",
+                parent=self,
+            )
+            return False
+        if not any(available.values()):
+            messagebox.showerror(
+                "No Workbench content found",
+                "The selected package does not contain vehicle, weapon, or ped metadata.",
+                parent=self,
+            )
+            return False
+        if category != "auto" and not available[category]:
+            messagebox.showerror(
+                f"No {category} found",
+                f"The selected package does not contain linked {category} metadata.",
                 parent=self,
             )
             return False
@@ -713,13 +1081,21 @@ class AddonSdkDialog(tk.Toplevel):
         self._set_package_actions(
             assets=True,
             rpfs=any(entry.suffix == ".rpf" for entry in scan.entries),
-            vehicles=True,
+            workbench=True,
         )
-        self._select_workspace("vehicles")
-        self.vehicle_workspace.open_source(resolved, scan)
-        return True
+        self._select_workspace("workbench")
+        opened = self.workbench_workspace.open_source(
+            resolved, scan, category=category,
+        )
+        if opened:
+            self.status.set(f"Content Workbench · {resolved.name}")
+        return opened
 
-    def _open_vehicle_asset(self, path: str) -> None:
+    def open_vehicle_package(self, source: str | Path) -> bool:
+        """Compatibility alias for direct vehicle Workbench launches."""
+        return self.open_workbench_package(source, "vehicles")
+
+    def _open_workbench_asset(self, path: str) -> None:
         if self.package_source is None:
             return
         self._select_workspace("assets")
@@ -728,6 +1104,10 @@ class AddonSdkDialog(tk.Toplevel):
                 self.package_source, self.package_scan,
             )
         self.asset_workspace.select_asset(path)
+
+    def _open_vehicle_asset(self, path: str) -> None:
+        """Compatibility alias retained for external vehicle routes."""
+        self._open_workbench_asset(path)
 
     def _open_graph_asset(self, source: str, root: str) -> None:
         source_path = Path(source).expanduser().resolve()
@@ -758,9 +1138,9 @@ class AddonSdkDialog(tk.Toplevel):
                 "Could not route vehicle system", str(exc), parent=self,
             )
             return
-        self._select_workspace("vehicles")
-        self.vehicle_workspace.open_source(root_path, scan)
-        self.vehicle_workspace.select_model(model)
+        self._select_workspace("workbench")
+        self.workbench_workspace.open_source(root_path, scan, category="vehicles")
+        self.workbench_workspace.select_vehicle(model)
 
     def _open_rpf_explorer(self) -> None:
         self._select_workspace("rpf")
@@ -929,11 +1309,14 @@ class AddonSdkDialog(tk.Toplevel):
         lines = [
             f"Scanned {len(scan.entries):,} files ({scan.total_bytes:,} bytes).",
             f"Discovered {len(scan.weapons)} weapons, {len(scan.ammo)} ammo records, "
+            f"{len(scan.weapon_components)} components, "
             f"{len(scan.animation_weapons)} animation mappings, and "
             f"{len(scan.shop_weapons)} shop mappings.",
             f"Discovered {len(scan.vehicles)} vehicles, {len(scan.handlings)} handling "
             f"records, {len(scan.variations)} variation records, and "
             f"{len(scan.kits)} tuning kits.",
+            f"Discovered {len(scan.peds)} ped definitions and their visible streamed "
+            "asset relationships.",
             f"Package shapes: {', '.join(scan.package_kinds)}; "
             f"{len(scan.binary_plugins)} compiled plug-ins, "
             f"{len(scan.replacement_assets)} replacement assets, and "
@@ -956,7 +1339,7 @@ class AddonSdkDialog(tk.Toplevel):
         self.package_scan = None
         self._set_package_actions(
             assets=self.package_source is not None, rpfs=False,
-            vehicles=self.package_source is not None,
+            workbench=self.package_source is not None,
         )
         self.report = self.linker.link(manifest)
         self._selection.clear()
@@ -1064,6 +1447,18 @@ class AddonSdkDialog(tk.Toplevel):
             return
         field = self.fields.item(selection[0], "text")
         self.field_help.set(field_description(field))
+
+    def _copy_selected_field(self) -> None:
+        selection = self.fields.selection()
+        if not selection:
+            self.status.set("Select a field before copying its value.")
+            return
+        item = self.fields.item(selection[0])
+        values = item.get("values", ())
+        value = str(values[0]) if values else str(item.get("text", ""))
+        self.clipboard_clear()
+        self.clipboard_append(value)
+        self.status.set(f"Copied {item.get('text', 'field')} to the clipboard")
 
     def _selected_source(self) -> Path | None:
         if not self.report:

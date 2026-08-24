@@ -79,7 +79,7 @@ def tk_root():
             root.destroy()
 
 
-def test_sdk_shell_mounts_vehicle_workspace_at_supported_sizes(
+def test_sdk_shell_mounts_unified_workbench_at_supported_sizes(
     tmp_path, monkeypatch, tk_root,
 ):
     monkeypatch.setattr(sdk_ui, "user_data_root", lambda: tmp_path / "state")
@@ -88,20 +88,117 @@ def test_sdk_shell_mounts_vehicle_workspace_at_supported_sizes(
     )
     try:
         assert dialog._workspace_instances == {}
-        assert not hasattr(dialog, "vehicle_workspace")
-        dialog._select_workspace("vehicles")
-        frame = dialog.vehicle_workspace
-        assert frame.winfo_manager() == "pack"
-        assert dialog._workspace_instances == {"vehicles": frame}
-        dialog._select_workspace("linker")
-        dialog._select_workspace("vehicles")
-        assert dialog.vehicle_workspace is frame
+        assert not hasattr(dialog, "workbench_workspace")
         for width, height in ((1320, 840), (1020, 680)):
             dialog.geometry(f"{width}x{height}+0+0")
-            dialog.update_idletasks()
-            page = dialog.workspace_pages["vehicles"]
+            dialog.update()
+            left = dialog.winfo_rootx()
+            top = dialog.winfo_rooty()
+            right = left + dialog.winfo_width()
+            bottom = top + dialog.winfo_height()
+            for control in (
+                dialog.version_badge, dialog.support_button,
+                *dialog.linker_sections,
+            ):
+                assert control.winfo_ismapped()
+                assert left <= control.winfo_rootx()
+                assert control.winfo_rootx() + control.winfo_width() <= right
+                assert top <= control.winfo_rooty()
+                assert control.winfo_rooty() + control.winfo_height() <= bottom
+        dialog._select_workspace("workbench")
+        frame = dialog.workbench_workspace
+        assert frame.winfo_manager() == "pack"
+        assert dialog._workspace_instances == {"workbench": frame}
+        dialog._select_workspace("linker")
+        dialog._select_workspace("workbench")
+        assert dialog.workbench_workspace is frame
+        assert dialog.vehicle_workspace is frame.vehicle_workspace
+        for width, height in ((1320, 840), (1020, 680)):
+            dialog.geometry(f"{width}x{height}+0+0")
+            dialog.update()
+            page = dialog.workspace_pages["workbench"]
             assert frame.winfo_width() == page.winfo_width()
             assert frame.winfo_height() == page.winfo_height()
+    finally:
+        dialog.destroy()
+
+
+def test_workspace_sidebar_toggle_preserves_context_and_expands_workspace(
+    tmp_path, monkeypatch, tk_root,
+):
+    monkeypatch.setattr(sdk_ui, "user_data_root", lambda: tmp_path / "state")
+    dialog = sdk_ui.AddonSdkDialog(
+        tk_root, Path(__file__).resolve().parents[1], standalone=True,
+    )
+    try:
+        dialog.geometry("1100x720+0+0")
+        dialog._select_workspace("workbench")
+        dialog.update()
+        expanded_width = dialog.workspace_host.winfo_width()
+
+        assert dialog.sidebar_visible.get() is True
+        assert dialog.workspace_sidebar.winfo_ismapped()
+        assert dialog.sidebar_toggle_button.winfo_rootx() >= (
+            dialog.workspace_sidebar.winfo_rootx()
+            + dialog.workspace_sidebar.winfo_width()
+        )
+        assert dialog.current_workspace == "workbench"
+
+        assert dialog._toggle_sidebar() == "break"
+        dialog.update()
+        assert dialog.sidebar_visible.get() is False
+        assert not dialog.workspace_sidebar.winfo_ismapped()
+        assert dialog.sidebar_toggle_button.winfo_ismapped()
+        assert dialog.sidebar_toggle_button.cget("text") == ">"
+        assert dialog.workspace_host.winfo_width() > expanded_width
+        assert dialog.current_workspace == "workbench"
+
+        assert dialog._toggle_sidebar() == "break"
+        dialog.update()
+        assert dialog.sidebar_visible.get() is True
+        assert dialog.workspace_sidebar.winfo_ismapped()
+        assert dialog.sidebar_toggle_button.cget("text") == "<"
+        assert dialog.current_workspace == "workbench"
+    finally:
+        dialog.destroy()
+
+
+def test_context_return_link_survives_sidebar_collapse_and_cancelled_guard(
+    tmp_path, monkeypatch, tk_root,
+):
+    monkeypatch.setattr(sdk_ui, "user_data_root", lambda: tmp_path / "state")
+    dialog = sdk_ui.AddonSdkDialog(
+        tk_root, Path(__file__).resolve().parents[1], standalone=True,
+    )
+    try:
+        dialog._select_workspace("workbench")
+        dialog.update()
+        assert dialog.context_back_button.winfo_ismapped()
+        assert dialog.context_back_button.cget("text") == "‹ Package Linker"
+
+        dialog._set_sidebar_visible(False)
+        dialog.update()
+        assert not dialog.workspace_sidebar.winfo_ismapped()
+        assert dialog.context_back_button.winfo_ismapped()
+
+        history = list(dialog._navigation_history)
+        monkeypatch.setattr(
+            dialog.workbench_workspace.vehicle_workspace,
+            "confirm_navigation", lambda: False,
+        )
+        assert dialog._go_back() == "break"
+        assert dialog.current_workspace == "workbench"
+        assert dialog._navigation_history == history
+        assert dialog.context_back_button.cget("text") == "‹ Package Linker"
+
+        monkeypatch.setattr(
+            dialog.workbench_workspace.vehicle_workspace,
+            "confirm_navigation", lambda: True,
+        )
+        assert dialog._go_back() == "break"
+        dialog.update()
+        assert dialog.current_workspace == "linker"
+        assert not dialog.context_back_button.winfo_ismapped()
     finally:
         dialog.destroy()
 
@@ -112,13 +209,6 @@ def _widgets(widget):
         yield from _widgets(child)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "UI audit: toolbar, inspector tabs, and lower tuning controls still clip "
-        "at the supported default/minimum window sizes"
-    ),
-)
 def test_vehicle_workbench_primary_controls_fit_supported_window_sizes(
     tmp_path, monkeypatch, tk_root,
 ):
@@ -129,9 +219,10 @@ def test_vehicle_workbench_primary_controls_fit_supported_window_sizes(
         tk_root, Path(__file__).resolve().parents[1], standalone=True,
     )
     try:
+        dialog._select_workspace("workbench")
         frame = dialog.vehicle_workspace
         frame.open_source(workspace.source, authoring_workspace=workspace)
-        dialog._select_workspace("vehicles")
+        dialog.workbench_workspace.select_category("vehicles")
         inspector = next(
             widget for widget in _widgets(frame)
             if isinstance(widget, ttk.Notebook)
@@ -142,21 +233,113 @@ def test_vehicle_workbench_primary_controls_fit_supported_window_sizes(
         labels = [inspector.tab(tab, "text") for tab in inspector.tabs()]
         inspector.select(labels.index("Tuning Builder"))
         frame.tuning_pages.select(frame.tuning_parts_page)
+        selected_entry = frame.tuning_part_tree.get_children()[0]
+        frame.tuning_part_tree.selection_set(selected_entry)
+        frame._select_tuning_builder_entry()
+        assert [
+            frame.render_mode_menu.entrycget(index, "label")
+            for index in range(3)
+        ] == ["Shaded", "Materials", "Wireframe"]
+        assert frame.render_mode.get() == "Shaded"
+        assert [
+            frame.model_filter_menu.entrycget(index, "label")
+            for index in range(frame.model_filter_menu.index("end") + 1)
+        ] == ["Fragment", "LOD", "Component"]
+        assert frame.render_mode_menu.entrycget(
+            "Render full-quality frame", "label",
+        ) == "Render full-quality frame"
+        assert str(frame.tuning_entry_actions_button.cget("state")) == "normal"
+        assert frame.tuning_entry_action_menu.entrycget(
+            "New entry", "state",
+        ) == "normal"
+        assert frame.tuning_entry_action_menu.entrycget(
+            "Copy selected", "state",
+        ) == "normal"
+        assert frame.tuning_entry_action_menu.entrycget(
+            "Delete selected", "state",
+        ) == "normal"
+        assert frame.tuning_entry_action_menu.entrycget("Move up", "state") == "disabled"
+        assert frame.tuning_entry_action_menu.entrycget("Move down", "state") == "disabled"
         for width, height in ((1320, 840), (1020, 680)):
             dialog.geometry(f"{width}x{height}+0+0")
-            dialog.update_idletasks()
+            # A real window resize delivers Configure events before child
+            # geometry settles; process those events rather than inspecting
+            # the previous 1320px layout after only idle callbacks.
+            dialog.update()
             left = dialog.winfo_rootx()
             top = dialog.winfo_rooty()
             right = left + dialog.winfo_width()
             bottom = top + dialog.winfo_height()
             for control in (
-                frame.package_button, frame.zoom_label,
-                frame.tuning_add_button, frame.tuning_field_button,
+                frame.package_button, frame.render_mode_button,
+                frame.model_filter_button, frame.camera_menu_button,
+                frame.fit_button, frame.zoom_label,
+                frame.tuning_entry_actions_button,
             ):
                 control_right = control.winfo_rootx() + control.winfo_width()
                 control_bottom = control.winfo_rooty() + control.winfo_height()
-                assert control.winfo_ismapped()
+                assert control.winfo_ismapped(), f"Primary control clipped: {control}"
                 assert left <= control.winfo_rootx() < control_right <= right
+                assert top <= control.winfo_rooty() < control_bottom <= bottom
+            for page, control in (
+                (frame.tuning_create_page, frame.tuning_add_button),
+                (frame.tuning_fields_page, frame.tuning_field_button),
+            ):
+                frame.tuning_editor_tabs.select(page)
+                dialog.update_idletasks()
+                control_right = control.winfo_rootx() + control.winfo_width()
+                control_bottom = control.winfo_rooty() + control.winfo_height()
+                assert control.winfo_ismapped(), (
+                    f"{frame.tuning_editor_tabs.tab(page, 'text')} editor is clipped "
+                    f"at {width}x{height}: {control}; tabs="
+                    f"{frame.tuning_editor_tabs.winfo_width()}x"
+                    f"{frame.tuning_editor_tabs.winfo_height()}, page="
+                    f"{page.winfo_width()}x{page.winfo_height()}, "
+                    f"requested={page.winfo_reqwidth()}x{page.winfo_reqheight()}"
+                    f", selected={frame.tuning_editor_tabs.select()}, control="
+                    f"{control.winfo_geometry()}, parent="
+                    f"{control.master.winfo_geometry()}/mapped"
+                    f"{control.master.winfo_ismapped()}, page-mapped="
+                    f"{page.winfo_ismapped()}, tabs-mapped="
+                    f"{frame.tuning_editor_tabs.winfo_ismapped()}, split-mapped="
+                    f"{frame.tuning_parts_split.winfo_ismapped()}, inspector="
+                    f"{inspector.select()}/{inspector.winfo_geometry()}/"
+                    f"mapped{inspector.winfo_ismapped()}, builder="
+                    f"{frame.tuning_builder_tab.winfo_geometry()}/mapped"
+                    f"{frame.tuning_builder_tab.winfo_ismapped()}, pages="
+                    f"{frame.tuning_pages.winfo_geometry()}/mapped"
+                    f"{frame.tuning_pages.winfo_ismapped()}, primary="
+                    f"{frame.primary_panes.winfo_geometry()}, frame="
+                    f"{frame.winfo_geometry()}, workbench="
+                    f"{dialog.workbench_workspace.winfo_geometry()}"
+                )
+                assert left <= control.winfo_rootx() < control_right <= right, (
+                    f"{frame.tuning_editor_tabs.tab(page, 'text')} is outside "
+                    f"{width}x{height}: {control.winfo_rootx()}..{control_right}, "
+                    f"window={left}..{right}; primary="
+                    f"{frame.primary_panes.winfo_geometry()}@"
+                    f"{frame.primary_panes.winfo_rootx()}, outer="
+                    f"{frame.primary_panes.master.winfo_geometry()}@"
+                    f"{frame.primary_panes.master.winfo_rootx()}, frame="
+                    f"{frame.winfo_geometry()}@{frame.winfo_rootx()}, page="
+                    f"{frame.master.winfo_geometry()}@{frame.master.winfo_rootx()}, "
+                    f"notebook={frame.master.master.winfo_geometry()}@"
+                    f"{frame.master.master.winfo_rootx()}/req"
+                    f"{frame.master.master.winfo_reqwidth()}, workbench="
+                    f"{frame.master.master.master.master.winfo_geometry()}@"
+                    f"{frame.master.master.master.master.winfo_rootx()}/req"
+                    f"{frame.master.master.master.master.winfo_reqwidth()}, host="
+                    f"{frame.master.master.master.master.master.master.winfo_geometry()}@"
+                    f"{frame.master.master.master.master.master.master.winfo_rootx()}, "
+                    f"content={frame.master.master.master.master.master.master.master.winfo_geometry()}@"
+                    f"{frame.master.master.master.master.master.master.master.winfo_rootx()}, "
+                    f"outer={frame.master.master.master.master.master.master.master.master.master.winfo_geometry()}@"
+                    f"{frame.master.master.master.master.master.master.master.master.master.winfo_rootx()}, tuning="
+                    f"{frame.tuning_parts_split.winfo_geometry()}@"
+                    f"{frame.tuning_parts_split.winfo_rootx()}, editor="
+                    f"{frame.tuning_editor_tabs.winfo_geometry()}@"
+                    f"{frame.tuning_editor_tabs.winfo_rootx()}"
+                )
                 assert top <= control.winfo_rooty() < control_bottom <= bottom
     finally:
         dialog.destroy()
@@ -203,4 +386,60 @@ def test_vehicle_authoring_controls_follow_workspace_state_and_route_findings(
     frame._open_tuning_finding()
     assert frame.tuning_pages.select() == str(frame.tuning_parts_page)
     assert frame.tuning_part_tree.selection() == ("visibleMods:0",)
+    frame.destroy()
+
+
+def test_vehicle_workbench_warns_before_discarding_unapplied_form_edits(
+    tmp_path, monkeypatch, tk_root,
+):
+    source = _source(tmp_path)
+    workspace = VehicleAuthoringWorkspace.create(source, tmp_path / "workspace")
+    frame = VehicleWorkbenchFrame(
+        tk_root, Path(__file__).resolve().parents[1],
+    )
+    frame.pack(fill="both", expand=True)
+    frame.open_source(workspace.source, authoring_workspace=workspace)
+    frame.authoring_values["vehicle.gameName"].set("UNAPPLIED_LABEL")
+
+    prompts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "allin1_sdk.vehicle_workbench.messagebox.askyesno",
+        lambda title, message, **_kwargs: prompts.append((title, message)) or False,
+    )
+    assert not frame.confirm_navigation()
+    assert prompts and prompts[0][0] == "Discard unsaved vehicle edits?"
+    frame.destroy()
+
+
+def test_vehicle_empty_package_clears_prior_inspector_and_asset_actions(
+    tmp_path, tk_root,
+):
+    source = _source(tmp_path)
+    empty = tmp_path / "empty-vehicle-package"
+    empty.mkdir()
+    frame = VehicleWorkbenchFrame(
+        tk_root, Path(__file__).resolve().parents[1],
+        on_open_asset=lambda _path: None,
+    )
+    frame.pack(fill="both", expand=True)
+    frame.open_source(source)
+    assert frame.selected_model is not None
+    assert frame.project_assets
+    assert frame.asset_tree.get_children()
+
+    frame.open_source(empty)
+
+    assert frame.selected_model is None
+    assert not frame.project_assets
+    assert not frame.asset_tree.get_children()
+    assert str(frame.open_asset_button.cget("state")) == "disabled"
+    assert str(frame.open_texture_button.cget("state")) == "disabled"
+    assert frame.details.get("1.0", "end-1c") == (
+        "No vehicles.meta records were found in this package."
+    )
+    assert frame.authoring_status.get() == (
+        "Select a vehicle before editing package metadata."
+    )
+    assert frame.asset_tree.bind("<Return>")
+    assert frame.tuning_asset_tree.bind("<Return>")
     frame.destroy()

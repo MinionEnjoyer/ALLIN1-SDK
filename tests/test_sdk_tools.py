@@ -44,6 +44,101 @@ def _oiv_archive(root: Path) -> Path:
     return archive
 
 
+def _schema_v2_package(root: Path) -> Path:
+    package = root / "schema-v2-package"
+    payload = package / "payload"
+    payload.mkdir(parents=True)
+    (payload / "Example.dll").write_bytes(b"managed extension")
+    (package / "allin1.content.json").write_text(json.dumps({
+        "schema_version": 1,
+        "api_version": 1,
+        "id": "test.schema-v2",
+        "name": "Schema V2 Test",
+        "version": "2.0.0",
+        "capabilities": ["launcher.settings"],
+        "systems": [{
+            "id": "schema-v2-test",
+            "name": "Schema V2 Test",
+            "settings": [{
+                "key": "enabled", "label": "Enabled", "type": "boolean",
+                "default": True,
+            }],
+        }],
+        "gbay": {"sections": [], "catalogs": []},
+        "runtime": {"assemblies": [{
+            "path": "scripts/SchemaV2/Example.dll",
+            "entry_point": "SchemaV2.Example",
+        }]},
+    }), encoding="utf-8")
+    manifest = package / "mod.toml"
+    manifest.write_text('''schema_version = 2
+id = "test.schema-v2"
+name = "Schema V2 Test"
+version = "2.0.0"
+type = "script"
+editions = ["legacy", "enhanced"]
+dependencies = ["shvdn"]
+conflicts = []
+
+[allin1]
+api_version = 1
+content = "allin1.content.json"
+requires = ["test.foundation>=1.2"]
+
+[[files]]
+source = "payload/Example.dll"
+destination = "scripts/SchemaV2/Example.dll"
+
+[[files]]
+source = "allin1.content.json"
+destination = "scripts/SchemaV2/allin1.content.json"
+''', encoding="utf-8")
+    return manifest
+
+
+def test_mod_package_schema_v2_matches_launcher_contract(tmp_path):
+    manifest_path = _schema_v2_package(tmp_path)
+    manifest = ModManifest.load(manifest_path)
+    assert manifest.schema_version == 2
+    assert manifest.extension is not None
+    assert manifest.extension.api_version == 1
+    assert manifest.extension.requirements == ("test.foundation>=1.2",)
+
+    validated = CliRunner().invoke(main, ["validate-package", str(manifest_path)])
+    assert validated.exit_code == 0, validated.output
+    payload = json.loads(validated.output)
+    assert payload["schema_version"] == 2
+    assert payload["allin1_extension"] is True
+
+
+def test_mod_package_schema_versions_remain_bounded(tmp_path):
+    manifest_path = _schema_v2_package(tmp_path)
+    original = manifest_path.read_text(encoding="utf-8")
+    manifest_path.write_text(
+        original.replace("schema_version = 2", "schema_version = 3", 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="schema_version must be 1 or 2"):
+        ModManifest.load(manifest_path)
+
+    manifest_path.write_text(
+        original.replace("schema_version = 2", "schema_version = 1", 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="require mod.toml schema_version = 2"):
+        ModManifest.load(manifest_path)
+
+    without_extension = original.split("\n[allin1]\n", 1)[0] + '''
+
+[[files]]
+source = "payload/Example.dll"
+destination = "scripts/SchemaV2/Example.dll"
+'''
+    manifest_path.write_text(without_extension, encoding="utf-8")
+    with pytest.raises(ValueError, match=r"requires an \[allin1\] extension table"):
+        ModManifest.load(manifest_path)
+
+
 def test_oiv_plan_and_managed_export_cover_files_and_exact_rpf_entries(tmp_path):
     source = _oiv_folder(tmp_path)
     workbench = OivWorkbench()

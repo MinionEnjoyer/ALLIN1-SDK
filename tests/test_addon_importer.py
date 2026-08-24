@@ -83,6 +83,34 @@ CONTENT_XML = """<CDataFileMgr__ContentsOfDataFileXml><dataFiles>
   <Item><filename>dlc_devcar:/common/data/handling.meta</filename></Item>
 </dataFiles></CDataFileMgr__ContentsOfDataFileXml>"""
 
+WEAPON_WITH_COMPONENT_META = """<CWeaponInfoBlob><Infos><Item>
+  <Name>WEAPON_TEST_COMPONENT</Name><Slot>SLOT_TEST_COMPONENT</Slot>
+  <AmmoInfo ref="AMMO_TEST_COMPONENT"/><Model>w_pi_test_component</Model>
+  <HumanNameHash>WT_TESTCMP</HumanNameHash><StatName>TESTCMP</StatName>
+  <AttachPoints><Item><AttachBone>WAPClip</AttachBone><Components><Item>
+    <Name>COMPONENT_TEST_CLIP_01</Name><Default value="true"/>
+  </Item></Components></Item></AttachPoints>
+</Item><Item><Name>AMMO_TEST_COMPONENT</Name><Model>w_pi_test_component</Model>
+  <AmmoMax value="120"/><AmmoMax50 value="60"/><Explosion>NONE</Explosion>
+  <TrailFx/><PrimedFx/>
+</Item></Infos></CWeaponInfoBlob>"""
+
+WEAPON_COMPONENT_META = """<CWeaponComponentInfoBlob><Infos>
+  <Item type="CWeaponComponentClipInfo"><Name>COMPONENT_TEST_CLIP_01</Name>
+    <Model>w_at_test_clip</Model><LocName>WCT_CLIP1</LocName>
+    <LocDesc>WCD_CLIP1</LocDesc><AttachBone>WAPClip</AttachBone>
+  </Item>
+</Infos></CWeaponComponentInfoBlob>"""
+
+PEDS_META = """<CPedModelInfo__InitDataList><InitDatas><Item>
+  <Name>ig_testdeveloper</Name><Pedtype>CIVMALE</Pedtype>
+  <ModelType>STANDARD</ModelType><PropsName>ig_testdeveloper_p</PropsName>
+  <ClipDictionaryName>move_m@generic</ClipDictionaryName>
+  <ExpressionSetName>expr_set_ambient_male</ExpressionSetName>
+  <MovementClipSet>move_m@business@a</MovementClipSet>
+  <CreatureMetadataName>MALE</CreatureMetadataName>
+</Item></InitDatas></CPedModelInfo__InitDataList>"""
+
 
 def _write_loose_package(root: Path) -> Path:
     package = root / "test_smoke"
@@ -127,6 +155,37 @@ def _write_vehicle_package(root: Path) -> Path:
     return package
 
 
+def _write_weapon_component_package(root: Path) -> Path:
+    package = root / "component_weapon"
+    package.mkdir()
+    (package / "weapons.meta").write_text(
+        WEAPON_WITH_COMPONENT_META, encoding="utf-8",
+    )
+    (package / "weaponcomponents.meta").write_text(
+        WEAPON_COMPONENT_META, encoding="utf-8",
+    )
+    (package / "weaponanimations.meta").write_text(
+        "<WeaponAnimations><Item key=\"WEAPON_TEST_COMPONENT\"/></WeaponAnimations>",
+        encoding="utf-8",
+    )
+    (package / "weapon_shop.meta").write_text(
+        "<Shop><Item><nameHash>WEAPON_TEST_COMPONENT</nameHash></Item></Shop>",
+        encoding="utf-8",
+    )
+    return package
+
+
+def _write_ped_package(root: Path) -> Path:
+    package = root / "developer_ped"
+    package.mkdir()
+    (package / "peds.meta").write_text(PEDS_META, encoding="utf-8")
+    stream = package / "stream"
+    stream.mkdir()
+    (stream / "ig_testdeveloper.ydd").write_bytes(b"drawable")
+    (stream / "ig_testdeveloper.ytd").write_bytes(b"textures")
+    return package
+
+
 def test_loose_package_scan_generates_a_linkable_review_draft(tmp_path):
     package = _write_loose_package(tmp_path)
     scan = AddonPackageInspector().inspect(package)
@@ -162,6 +221,52 @@ def test_loose_package_scan_generates_a_linkable_review_draft(tmp_path):
     assert len(incomplete) == 1
     assert "uses_label" in incomplete[0].message
     assert json.loads(destination.read_text(encoding="utf-8"))["schema_version"] == 1
+
+
+def test_weapon_component_links_are_retained_for_workbench_and_draft(tmp_path):
+    scan = AddonPackageInspector().inspect(_write_weapon_component_package(tmp_path))
+
+    assert [item.name for item in scan.weapon_components] == [
+        "COMPONENT_TEST_CLIP_01"
+    ]
+    assert len(scan.weapon_component_links) == 1
+    link = scan.weapon_component_links[0]
+    assert link.weapon_name == "WEAPON_TEST_COMPONENT"
+    assert link.component_name == "COMPONENT_TEST_CLIP_01"
+    assert link.attach_bone == "WAPClip"
+    assert link.default
+
+    draft = AddonDraftBuilder().build(scan).manifest
+    nodes = {item["id"]: item for item in draft["nodes"]}
+    assert nodes["weapon-components.imported"]["fields"]["WeaponNames"] == [
+        "WEAPON_TEST_COMPONENT"
+    ]
+    assert any(
+        item["relationship"] == "offers_components"
+        for item in draft["references"]
+    )
+
+
+def test_ped_packages_are_discovered_and_linked_into_imported_drafts(tmp_path):
+    scan = AddonPackageInspector().inspect(_write_ped_package(tmp_path))
+
+    assert scan.package_kinds == ("ped_addon",)
+    assert [item.name for item in scan.peds] == ["ig_testdeveloper"]
+    ped = scan.peds[0]
+    assert ped.ped_type == "CIVMALE"
+    assert ped.props_name == "ig_testdeveloper_p"
+    assert not any(
+        item.code in {"ped_model_asset_not_found", "ped_texture_asset_not_found"}
+        for item in scan.findings
+    )
+
+    draft = AddonDraftBuilder().build(scan).manifest
+    nodes = {item["id"]: item for item in draft["nodes"]}
+    assert nodes["peds.imported"]["fields"]["Names"] == ["ig_testdeveloper"]
+    assert any(
+        item["relationship"] == "streams_ped_assets"
+        for item in draft["references"]
+    )
 
 
 def test_oiv_scan_requires_assembly_and_never_assigns_archive_member_sources(tmp_path):

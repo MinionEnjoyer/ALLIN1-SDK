@@ -1,0 +1,15 @@
+schema_version = 2
+id = "contract.schema-v2"
+name = "Cross-repository schema v2 contract"
+version = "2.0.0"
+type = "script"
+editions = ["legacy", "enhanced"]
+
+[allin1]
+api_version = 1
+content = "allin1.content.json"
+requires = ["contract.schema-v1>=1.0"]
+
+[[files]]
+source = "payload/ContractV2.bin"
+destination = "scripts/ContractV2.dll"

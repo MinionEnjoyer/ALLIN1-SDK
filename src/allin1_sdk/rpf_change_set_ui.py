@@ -19,11 +19,16 @@ class RpfChangeSetFrame(ttk.Frame):
         get_index: Callable[[], RpfIndex | None],
         get_service: Callable[[], RpfExplorerService | None],
         get_selected: Callable[[], RpfEntryRecord | None],
+        on_choose_target: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent, padding=12)
         self.get_index = get_index
         self.get_service = get_service
         self.get_selected = get_selected
+        self.on_choose_target = on_choose_target
+        self.target: RpfEntryRecord | None = None
+        self.target_actions: list[ttk.Button] = []
+        self.target_text = tk.StringVar(value="No archive entry captured")
         self.change_set: Path | None = None
         self.authorized_root: Path | None = None
         self.status = tk.StringVar(
@@ -52,6 +57,20 @@ class RpfChangeSetFrame(ttk.Frame):
                 side="right", padx=(5, 0),
             )
 
+        target_row = ttk.Frame(self)
+        target_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            target_row, text="TARGET", style="FieldLabel.TLabel",
+        ).pack(side="left", padx=(0, 7))
+        ttk.Label(
+            target_row, textvariable=self.target_text, foreground="#52635c",
+        ).pack(side="left", fill="x", expand=True)
+        if self.on_choose_target is not None:
+            ttk.Button(
+                target_row, text="Choose in Archive Browser",
+                command=self.on_choose_target,
+            ).pack(side="right")
+
         actions = ttk.Frame(self)
         actions.pack(fill="x", pady=(0, 8))
         for text, command in (
@@ -61,9 +80,13 @@ class RpfChangeSetFrame(ttk.Frame):
             ("Rename selected…", self._stage_rename),
             ("New directory…", self._stage_directory),
         ):
-            ttk.Button(actions, text=text, command=command).pack(
+            button = ttk.Button(actions, text=text, command=command)
+            button.pack(
                 side="left", padx=(0, 5),
             )
+            if "selected" in text.casefold():
+                button.configure(state="disabled")
+                self.target_actions.append(button)
         ttk.Button(actions, text="Remove staged", command=self._remove).pack(
             side="right",
         )
@@ -111,6 +134,7 @@ class RpfChangeSetFrame(ttk.Frame):
 
     def archive_changed(self) -> None:
         self.authorized_root = None
+        self._set_target(None)
         index = self.get_index()
         if self.change_set is None or index is None:
             return
@@ -125,6 +149,25 @@ class RpfChangeSetFrame(ttk.Frame):
             self.tree.delete(*self.tree.get_children())
             self.status.set(
                 "The opened archive changed; create or open its matching change set.",
+            )
+
+    def _set_target(self, entry: RpfEntryRecord | None) -> None:
+        self.target = entry
+        if entry is None:
+            self.target_text.set("No archive entry captured")
+        else:
+            archive = entry.archive_path or "root"
+            self.target_text.set(f"{archive}  /  {entry.path}  ·  {entry.kind}")
+        state = "normal" if entry is not None else "disabled"
+        for button in self.target_actions:
+            button.configure(state=state)
+
+    def capture_target(self) -> None:
+        """Snapshot the visible Archive Browser selection for staged actions."""
+        self._set_target(self.get_selected())
+        if self.target is None:
+            self.status.set(
+                "Choose an archive entry before using replace, delete, or rename.",
             )
 
     def _authorize_root(self) -> None:
@@ -240,7 +283,7 @@ class RpfChangeSetFrame(ttk.Frame):
             messagebox.showerror("Could not stage RPF action", str(exc), parent=self)
 
     def _stage_replace(self) -> None:
-        entry = self.get_selected()
+        entry = self.target
         if entry is None or entry.kind == "directory":
             messagebox.showerror(
                 "File entry required", "Select a file or resource entry to replace.",
@@ -260,7 +303,7 @@ class RpfChangeSetFrame(ttk.Frame):
         payload = filedialog.askopenfilename(parent=self, title="Payload for new RPF entry")
         if not payload:
             return
-        selected = self.get_selected()
+        selected = self.target
         archive_path = selected.archive_path if selected else ""
         parent = ""
         if selected:
@@ -277,7 +320,7 @@ class RpfChangeSetFrame(ttk.Frame):
             self._stage("add", entry, archive_path=archive_path, payload=payload)
 
     def _stage_delete(self) -> None:
-        entry = self.get_selected()
+        entry = self.target
         if entry is None:
             messagebox.showerror("Entry required", "Select an entry to delete.", parent=self)
             return
@@ -285,7 +328,7 @@ class RpfChangeSetFrame(ttk.Frame):
         self._stage(action, entry.path, archive_path=entry.archive_path)
 
     def _stage_rename(self) -> None:
-        entry = self.get_selected()
+        entry = self.target
         if entry is None:
             messagebox.showerror("Entry required", "Select an entry to rename.", parent=self)
             return
@@ -310,7 +353,7 @@ class RpfChangeSetFrame(ttk.Frame):
         )
 
     def _stage_directory(self) -> None:
-        selected = self.get_selected()
+        selected = self.target
         archive_path = selected.archive_path if selected else ""
         parent = selected.path if selected and selected.kind == "directory" else ""
         initial = f"{parent}/new_folder".strip("/")

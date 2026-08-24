@@ -1,11 +1,32 @@
+import tkinter as tk
 from pathlib import Path
+from unittest.mock import Mock
 
+import pytest
+
+import allin1_sdk.sdk_console as sdk_console
 from allin1_sdk.sdk_console import (
+    ConsoleResult,
+    SdkConsoleDialog,
     command_catalog,
     execute_console_command,
     split_command_line,
     suggestions_for,
 )
+
+
+@pytest.fixture
+def tk_root():
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"Tk display is unavailable: {exc}")
+    root.withdraw()
+    try:
+        yield root
+    finally:
+        if root.winfo_exists():
+            root.destroy()
 
 
 def test_command_catalog_combines_cli_and_console_builtins():
@@ -35,13 +56,15 @@ def test_command_catalog_combines_cli_and_console_builtins():
 def test_progressive_command_option_and_alias_suggestions(tmp_path):
     commands = suggestions_for("ins", cwd=tmp_path)
     assert [item.replacement for item in commands] == [
-        "inspect-binary-workspace ", "inspect-native-asset ",
+        "inspect-binary-workspace ", "inspect-log ", "inspect-native-asset ",
         "inspect-package-graph-relations ",
+        "inspect-package-receipt ",
         "inspect-package-rpfs ",
         "inspect-rpf ", "inspect-rpf-change-set ", "inspect-rpf-graph ",
         "inspect-rpf-native-entry ",
-        "inspect-rpf-program ", "inspect-vehicle-authoring ",
+        "inspect-rpf-program ", "inspect-source ", "inspect-vehicle-authoring ",
         "inspect-vehicle-project ", "inspect-vehicle-tuning ",
+        "inspect-workbench ",
         "install-package ",
     ]
 
@@ -93,3 +116,96 @@ def test_command_line_split_handles_quoted_windows_paths():
     assert split_command_line('validate "C:\\Mods\\Example Mod\\addon.json"') == [
         "validate", "C:\\Mods\\Example Mod\\addon.json",
     ]
+
+
+def test_collapsed_console_does_not_steal_focus_and_has_keyboard_completion(
+    tmp_path, monkeypatch, tk_root,
+):
+    monkeypatch.setattr(sdk_console, "user_data_root", lambda: tmp_path / "state")
+    focus_calls = []
+    monkeypatch.setattr(
+        tk.Entry, "focus_set", lambda widget: focus_calls.append(widget),
+    )
+
+    console = SdkConsoleDialog(
+        tk_root, tmp_path, embedded=True, docked=True,
+    )
+
+    assert console.entry not in focus_calls
+    assert console.entry.bind("<Control-space>")
+    assert console.suggestions.cget("yscrollcommand")
+    assert console.suggestion_scroll.winfo_manager() == "pack"
+
+
+def test_exit_recovers_entry_collapses_and_restores_previous_focus(
+    tmp_path, monkeypatch, tk_root,
+):
+    monkeypatch.setattr(sdk_console, "user_data_root", lambda: tmp_path / "state")
+    console = SdkConsoleDialog(
+        tk_root, tmp_path, embedded=True, docked=True,
+    )
+    previous = Mock()
+    previous.winfo_exists.return_value = True
+    console._return_focus = previous
+    console._set_expanded(True)
+    console.running = True
+    console.entry.configure(state="disabled")
+
+    console._finish(ConsoleResult(action="exit"))
+    tk_root.update_idletasks()
+
+    assert console.running is False
+    assert str(console.entry.cget("state")) == "normal"
+    assert console.expanded is False
+    previous.focus_set.assert_called_once_with()
+
+
+def test_worker_exception_is_rendered_and_console_recovers(
+    tmp_path, monkeypatch, tk_root,
+):
+    monkeypatch.setattr(sdk_console, "user_data_root", lambda: tmp_path / "state")
+    monkeypatch.setattr(
+        sdk_console, "execute_console_command",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    class ImmediateThread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(sdk_console.threading, "Thread", ImmediateThread)
+    console = SdkConsoleDialog(
+        tk_root, tmp_path, embedded=True, docked=True,
+    )
+    console.command.set("list")
+
+    console._execute()
+    tk_root.update()
+
+    assert console.running is False
+    assert str(console.entry.cget("state")) == "normal"
+    assert "Console command failed unexpectedly: boom" in console.output.get("1.0", "end")
+
+
+def test_finish_restores_command_state_when_output_rendering_fails(
+    tmp_path, monkeypatch, tk_root,
+):
+    monkeypatch.setattr(sdk_console, "user_data_root", lambda: tmp_path / "state")
+    console = SdkConsoleDialog(
+        tk_root, tmp_path, embedded=True, docked=True,
+    )
+    console.running = True
+    console.entry.configure(state="disabled")
+    monkeypatch.setattr(
+        console, "_append", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("render")),
+    )
+
+    with pytest.raises(RuntimeError, match="render"):
+        console._finish(ConsoleResult(output="result"))
+
+    assert console.running is False
+    assert str(console.entry.cget("state")) == "normal"

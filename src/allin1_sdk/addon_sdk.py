@@ -11,14 +11,17 @@ from typing import Any, Iterable, Mapping
 
 SCHEMA_VERSION = 1
 SUPPORTED_NODE_KINDS = frozenset({
-    "weapon", "ammo", "animation", "text_label", "hud_alias",
+    "weapon", "weapon_component", "ammo", "animation", "text_label", "hud_alias",
     "runtime", "storefront", "archive", "package", "vehicle",
-    "handling", "vehicle_variation", "tuning", "streaming",
+    "handling", "vehicle_variation", "tuning", "ped", "streaming",
     "dlc_registration", "script_plugin", "asi_plugin", "reshade_addon",
     "replacement",
 })
 REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "weapon": ("Name", "Slot", "AmmoInfo", "Model", "HumanNameHash", "StatName"),
+    "weapon_component": (
+        "Names", "Models", "AttachBones", "ComponentTypes",
+    ),
     "ammo": ("Name", "Model", "AmmoMax", "AmmoMax50", "Explosion", "TrailFx", "PrimedFx"),
     "animation": ("WeaponNames", "Template", "Sets"),
     "text_label": ("Labels", "Archive", "Entry"),
@@ -34,6 +37,10 @@ REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "handling": ("HandlingNames",),
     "vehicle_variation": ("ModelNames", "Kits", "LightSettings"),
     "tuning": ("VehicleModels", "KitNames", "ModelNames", "KitIds"),
+    "ped": (
+        "Names", "PedTypes", "ModelTypes", "PropsNames",
+        "ClipDictionaries", "ExpressionSets", "MovementClipSets",
+    ),
     "streaming": ("ModelNames", "TextureNames", "Assets"),
     "dlc_registration": (
         "VehicleModels", "PackageNames", "MetadataFiles", "Registration",
@@ -66,6 +73,10 @@ FIELD_HELP: dict[str, str] = {
     "Model": "The streamed prop/model used when the item is held or thrown.",
     "HumanNameHash": "GXT label key used for the native weapon-wheel name.",
     "StatName": "Stats/UI lookup key. It does not choose weapon-wheel artwork.",
+    "Names": "Game-facing identifiers covered by this component or ped definition group.",
+    "Models": "Streamed model identifiers referenced by these definitions.",
+    "AttachBones": "Skeleton attachment points used by weapon components.",
+    "ComponentTypes": "Native weapon-component record types represented by the package.",
     "AmmoMax": "Maximum ammo count used by the native inventory.",
     "AmmoMax50": "Alternate maximum used by the 50-percent ammo-cap profile.",
     "Explosion": "Native explosion tag. Leave empty when a runtime controller owns deployment.",
@@ -108,6 +119,12 @@ FIELD_HELP: dict[str, str] = {
     "Assets": "Package-relative streamed model and texture files.",
     "VehicleModels": "Vehicle models covered by this tuning or package-registration stage.",
     "TuningModels": "Vehicle models that declare one or more package-defined tuning kits.",
+    "PedTypes": "Native population/behavior category declared by peds.meta.",
+    "ModelTypes": "Native ped model classification declared by peds.meta.",
+    "PropsNames": "Prop-definition identifier paired with the ped model.",
+    "ClipDictionaries": "Animation clip dictionaries referenced by ped definitions.",
+    "ExpressionSets": "Facial expression sets referenced by ped definitions.",
+    "MovementClipSets": "Movement animation sets referenced by ped definitions.",
     "PackageNames": "DLC device/folder names used by content.xml, setup2.xml, dlclist, or a resource manifest.",
     "MetadataFiles": "Metadata files declared by the package registration layer.",
     "Binaries": "Compiled plug-ins inventoried without loading or executing them.",

@@ -55,10 +55,6 @@ class OivWorkbenchFrame(ttk.Frame):
             heading, text="Package recipes", font=("Segoe UI Semibold", 17),
             foreground="#1f7f42",
         ).pack(side="left")
-        if self._on_close is not None:
-            back = ttk.Button(heading, text="Back to Package Linker", command=self._on_close)
-            back.pack(side="right")
-            self._controls.append(back)
         if self._on_help is not None:
             ttk.Button(
                 heading, text="Help", command=lambda: self._on_help("package-recipes"),
@@ -134,16 +130,16 @@ class OivWorkbenchFrame(ttk.Frame):
         operation_scroll = ttk.Scrollbar(
             operation_page, orient="vertical", command=self.operations.yview,
         )
-        operation_horizontal = ttk.Scrollbar(
+        self.operation_xscroll = ttk.Scrollbar(
             operation_page, orient="horizontal", command=self.operations.xview,
         )
         self.operations.configure(
             yscrollcommand=operation_scroll.set,
-            xscrollcommand=operation_horizontal.set,
+            xscrollcommand=self.operation_xscroll.set,
         )
         self.operations.grid(row=0, column=0, sticky="nsew")
         operation_scroll.grid(row=0, column=1, sticky="ns")
-        operation_horizontal.grid(row=1, column=0, sticky="ew")
+        self.operation_xscroll.grid(row=1, column=0, sticky="ew")
         operation_page.rowconfigure(0, weight=1)
         operation_page.columnconfigure(0, weight=1)
         self.operations.bind("<<TreeviewSelect>>", self._operation_selected)
@@ -166,9 +162,18 @@ class OivWorkbenchFrame(ttk.Frame):
         finding_scroll = ttk.Scrollbar(
             finding_page, orient="vertical", command=self.findings.yview,
         )
-        self.findings.configure(yscrollcommand=finding_scroll.set)
-        self.findings.pack(side="left", fill="both", expand=True)
-        finding_scroll.pack(side="right", fill="y")
+        self.finding_xscroll = ttk.Scrollbar(
+            finding_page, orient="horizontal", command=self.findings.xview,
+        )
+        self.findings.configure(
+            yscrollcommand=finding_scroll.set,
+            xscrollcommand=self.finding_xscroll.set,
+        )
+        self.findings.grid(row=0, column=0, sticky="nsew")
+        finding_scroll.grid(row=0, column=1, sticky="ns")
+        self.finding_xscroll.grid(row=1, column=0, sticky="ew")
+        finding_page.rowconfigure(0, weight=1)
+        finding_page.columnconfigure(0, weight=1)
         self.findings.bind("<<TreeviewSelect>>", self._finding_selected)
 
         detail = ttk.LabelFrame(review, text="Selection details", padding=7)

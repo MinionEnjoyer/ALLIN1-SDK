@@ -96,4 +96,4 @@ def test_sdk_workspace_banner_uses_sdk_specific_artwork():
         encoding="utf-8"
     )
     assert 'logo = self.project_root / "assets" / "ALLIN1_SDK.png"' in source
-    assert 'header_text, text="Developer Workspace"' in source
+    assert 'header_title, text="Developer Workspace"' in source

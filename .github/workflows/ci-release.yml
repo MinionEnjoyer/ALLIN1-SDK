@@ -64,13 +64,24 @@ jobs:
         shell: pwsh
         run: |
           dotnet publish tools/RpfPatcher/RpfPatcher.csproj -c Release --nologo --self-contained true -r win-x64 -o build/rpf
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name ALLIN1-SDK --icon "${{ github.workspace }}/assets/favicon.ico" --add-data "${{ github.workspace }}/assets;assets" --distpath build/app --workpath build/pyinstaller --specpath build src/allin1_sdk/app.py
-          python -m PyInstaller --noconfirm --clean --console --onefile --name ALLIN1-SDK-Agent --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK --workpath build/pyinstaller-agent --specpath build src/allin1_sdk/agent_host.py
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name ALLIN1-SDK-Desktop --icon "${{ github.workspace }}/assets/favicon.ico" --add-data "${{ github.workspace }}/assets;assets" --distpath build/app --workpath build/pyinstaller --specpath build src/allin1_sdk/app.py
+          python -m PyInstaller --noconfirm --clean --console --onefile --name allin1-sdk --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK-Desktop --workpath build/pyinstaller-cli --specpath build src/allin1_sdk/console_entry.py
+          python -m PyInstaller --noconfirm --clean --console --onefile --name ALLIN1-SDK-Agent --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK-Desktop --workpath build/pyinstaller-agent --specpath build src/allin1_sdk/agent_host.py
+
+      - name: Smoke test frozen console entry point
+        shell: pwsh
+        run: |
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'allin1-sdk-smoke'
+          New-Item -ItemType Directory -Force (Join-Path $env:LOCALAPPDATA 'ALLIN1\Assistant') | Out-Null
+          '{"schema":1,"mode":"disabled","workflow":"installer","profile":"disabled","endpoint":"","model_name":"","api_key_env":"","runtime_path":"","model_path":"","context_tokens":8192,"temperature":0.1}' | Set-Content (Join-Path $env:LOCALAPPDATA 'ALLIN1\Assistant\config.json') -Encoding utf8
+          & build/app/ALLIN1-SDK-Desktop/allin1-sdk.exe assistant status | Out-File -FilePath build/frozen-cli-status.json -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen allin1-sdk console smoke test failed.' }
+          Get-Content build/frozen-cli-status.json | ConvertFrom-Json | Out-Null
 
       - name: Package checksum-verifiable unsigned build
         shell: pwsh
         run: |
-          python scripts/package_release.py --app-dir build/app/ALLIN1-SDK --rpf-dir build/rpf --output build/releases --version "$env:SDK_VERSION"
+          python scripts/package_release.py --app-dir build/app/ALLIN1-SDK-Desktop --rpf-dir build/rpf --output build/releases --version "$env:SDK_VERSION" --build-id "$env:GITHUB_SHA"
           "This GitHub Actions artifact is an unsigned test build from commit $env:GITHUB_SHA. It is not an official signed release." |
             Set-Content build/releases/UNSIGNED_BUILD.txt -Encoding utf8
 
@@ -114,14 +125,15 @@ jobs:
         shell: pwsh
         run: |
           dotnet publish tools/RpfPatcher/RpfPatcher.csproj -c Release --nologo --self-contained true -r win-x64 -o build/rpf
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name ALLIN1-SDK --icon "${{ github.workspace }}/assets/favicon.ico" --add-data "${{ github.workspace }}/assets;assets" --distpath build/app --workpath build/pyinstaller --specpath build src/allin1_sdk/app.py
-          python -m PyInstaller --noconfirm --clean --console --onefile --name ALLIN1-SDK-Agent --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK --workpath build/pyinstaller-agent --specpath build src/allin1_sdk/agent_host.py
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name ALLIN1-SDK-Desktop --icon "${{ github.workspace }}/assets/favicon.ico" --add-data "${{ github.workspace }}/assets;assets" --distpath build/app --workpath build/pyinstaller --specpath build src/allin1_sdk/app.py
+          python -m PyInstaller --noconfirm --clean --console --onefile --name allin1-sdk --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK-Desktop --workpath build/pyinstaller-cli --specpath build src/allin1_sdk/console_entry.py
+          python -m PyInstaller --noconfirm --clean --console --onefile --name ALLIN1-SDK-Agent --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK-Desktop --workpath build/pyinstaller-agent --specpath build src/allin1_sdk/agent_host.py
 
       - name: Build unsigned PE signing catalog
         shell: pwsh
         run: |
           $buildRoot = (Resolve-Path build).Path
-          $targets = Get-ChildItem build/app/ALLIN1-SDK,build/rpf -Recurse -File |
+          $targets = Get-ChildItem build/app/ALLIN1-SDK-Desktop,build/rpf -Recurse -File |
             Where-Object { $_.Extension -in '.exe', '.dll', '.pyd' } |
             Where-Object { (Get-AuthenticodeSignature -LiteralPath $_.FullName).Status -ne 'Valid' } |
             ForEach-Object { [IO.Path]::GetRelativePath($buildRoot, $_.FullName) }
@@ -153,7 +165,7 @@ jobs:
       - name: Verify release signatures and package SDK
         shell: pwsh
         run: |
-          $failures = Get-ChildItem build/app/ALLIN1-SDK,build/rpf -Recurse -File |
+          $failures = Get-ChildItem build/app/ALLIN1-SDK-Desktop,build/rpf -Recurse -File |
             Where-Object { $_.Extension -in '.exe', '.dll', '.pyd' } |
             Where-Object { (Get-AuthenticodeSignature -LiteralPath $_.FullName).Status -ne 'Valid' } |
             Select-Object -ExpandProperty FullName
@@ -161,7 +173,7 @@ jobs:
             $failures | ForEach-Object { Write-Error "Unsigned or invalid executable payload: $_" }
             throw 'Release packaging refused because executable payload signatures are incomplete.'
           }
-          python scripts/package_release.py --app-dir build/app/ALLIN1-SDK --rpf-dir build/rpf --output build/releases --version "${{ github.ref_name }}"
+          python scripts/package_release.py --app-dir build/app/ALLIN1-SDK-Desktop --rpf-dir build/rpf --output build/releases --version "${{ github.ref_name }}" --build-id "$env:GITHUB_SHA"
 
       - name: Publish tagged SDK release
         shell: pwsh

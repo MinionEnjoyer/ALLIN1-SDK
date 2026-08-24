@@ -10,6 +10,7 @@ only after the result successfully reparses through CodeWalker.
 
 from __future__ import annotations
 
+import colorsys
 import hashlib
 import io
 import json
@@ -19,6 +20,7 @@ import struct
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -58,6 +60,14 @@ MAX_MODEL_XML_BYTES = 192 * 1024 * 1024
 MAX_MODEL_VERTICES = 1_000_000
 MAX_MODEL_TRIANGLES = 1_000_000
 MAX_RENDERED_TRIANGLES = 45_000
+INTERACTIVE_RENDERED_TRIANGLES = 6_000
+INTERACTIVE_SILHOUETTE_POINTS = 2_048
+MODEL_RENDER_MODES = frozenset({"materials", "shaded", "wireframe"})
+MODEL_RENDER_QUALITIES = {
+    "interactive": INTERACTIVE_RENDERED_TRIANGLES,
+    "final": MAX_RENDERED_TRIANGLES,
+    "full": MAX_MODEL_TRIANGLES,
+}
 MAX_MAP_ENTITIES = 250_000
 MAX_RENDERED_MAP_ENTITIES = 80_000
 MAX_NAV_POLYGONS = 300_000
@@ -93,6 +103,38 @@ class _ModelGeometry:
     material_index: int | None = None
     material_name: str = ""
     texture_names: tuple[str, ...] = ()
+    texcoords: tuple[tuple[float, float], ...] = ()
+    texture_parameters: tuple[tuple[str, str], ...] = ()
+
+
+_ModelRenderBounds = tuple[
+    tuple[float, float, float], tuple[float, float, float], int,
+]
+_PreparedInteractiveTriangle = tuple[
+    int, int, tuple[int, int, int],
+    tuple[float, float, float], tuple[float, float, float],
+    tuple[float, float, float], float,
+]
+
+
+def _model_geometry_bounds(
+    geometries: tuple[_ModelGeometry, ...] | list[_ModelGeometry],
+) -> _ModelRenderBounds:
+    vertex_count = sum(len(geometry.vertices) for geometry in geometries)
+    if not vertex_count:
+        raise ValueError("Model scene does not contain any vertices")
+    minima = [math.inf, math.inf, math.inf]
+    maxima = [-math.inf, -math.inf, -math.inf]
+    for geometry in geometries:
+        for point in geometry.vertices:
+            for axis in range(3):
+                minima[axis] = min(minima[axis], point[axis])
+                maxima[axis] = max(maxima[axis], point[axis])
+    return (
+        (minima[0], minima[1], minima[2]),
+        (maxima[0], maxima[1], maxima[2]),
+        vertex_count,
+    )
 
 
 @dataclass(frozen=True)
@@ -102,6 +144,7 @@ class NativeModelMaterial:
     index: int
     name: str
     texture_names: tuple[str, ...]
+    texture_parameters: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -125,6 +168,31 @@ class NativeModelScene:
     geometries: tuple[_ModelGeometry, ...]
     metadata: dict[str, Any] = field(default_factory=dict)
     materials: tuple[NativeModelMaterial, ...] = ()
+    _render_bounds_cache: dict[tuple[str, str], _ModelRenderBounds] = field(
+        default_factory=dict, init=False, repr=False, compare=False,
+    )
+    _render_material_cache: tuple[
+        tuple[str, str, tuple[int, int, int]], ...
+    ] = field(default=(), init=False, repr=False, compare=False)
+    _interactive_triangle_cache: dict[
+        tuple[str, str, int], tuple[_PreparedInteractiveTriangle, ...]
+    ] = field(default_factory=dict, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # Frame calculations are invariant across camera angles. Computing the
+        # full-scene bounds once keeps orbit renders from walking hundreds of
+        # thousands of vertices before drawing their bounded triangle sample.
+        if self.geometries:
+            self._render_bounds_cache[("all", "all")] = _model_geometry_bounds(
+                self.geometries
+            )
+        # Material classification depends only on decoded geometry. Cache it on
+        # the immutable scene so orbit frames do not repeatedly scan shader and
+        # texture names or hash unknown material identities.
+        object.__setattr__(
+            self, "_render_material_cache",
+            tuple(_model_material_identity(item) for item in self.geometries),
+        )
 
     @property
     def lods(self) -> tuple[str, ...]:
@@ -159,33 +227,96 @@ class NativeModelScene:
     def render(
         self, *, yaw: float = 34.0, pitch: float = 24.0,
         lod: str | None = None, component: str | None = None,
+        render_mode: str = "shaded", quality: str = "final",
+        triangle_budget: int | None = None,
     ) -> tuple[bytes, dict[str, Any]]:
+        """Render a PNG while preserving the established public contract."""
+        image, metadata = self.render_image(
+            yaw=yaw, pitch=pitch, lod=lod, component=component,
+            render_mode=render_mode, quality=quality,
+            triangle_budget=triangle_budget,
+        )
+        return _encode_model_render(
+            image, str(metadata["model_render_quality"]),
+        ), metadata
+
+    def render_image(
+        self, *, yaw: float = 34.0, pitch: float = 24.0,
+        lod: str | None = None, component: str | None = None,
+        render_mode: str = "shaded", quality: str = "final",
+        triangle_budget: int | None = None,
+    ) -> tuple[Image.Image, dict[str, Any]]:
+        """Render a fresh RGB image for in-process interactive viewports."""
         if not math.isfinite(yaw) or not math.isfinite(pitch):
             raise ValueError("Model camera angles must be finite")
+        if not isinstance(render_mode, str):
+            raise ValueError("Model render mode must be a string")
+        normalized_mode = render_mode.strip().casefold()
+        if normalized_mode not in MODEL_RENDER_MODES:
+            choices = ", ".join(sorted(MODEL_RENDER_MODES))
+            raise ValueError(f"Model render mode must be one of: {choices}")
+        if not isinstance(quality, str):
+            raise ValueError("Model render quality must be a string")
+        normalized_quality = quality.strip().casefold()
+        if normalized_quality not in MODEL_RENDER_QUALITIES:
+            choices = ", ".join(MODEL_RENDER_QUALITIES)
+            raise ValueError(f"Model render quality must be one of: {choices}")
+        maximum_budget = (
+            MAX_MODEL_TRIANGLES
+            if normalized_quality == "full"
+            else MAX_RENDERED_TRIANGLES
+        )
+        if triangle_budget is not None and (
+            isinstance(triangle_budget, bool)
+            or not isinstance(triangle_budget, int)
+            or not 1 <= triangle_budget <= maximum_budget
+        ):
+            raise ValueError(
+                "Model triangle budget must be an integer between 1 and "
+                f"{maximum_budget:,} for {normalized_quality} quality"
+            )
         normalized_yaw = yaw % 360.0
         normalized_pitch = min(89.0, max(-89.0, pitch))
-        selected = self.geometries
+        selected_pairs = tuple(enumerate(self.geometries))
         selected_lod = "All"
         if lod and lod.casefold() != "all":
-            selected = tuple(
-                item for item in self.geometries
+            selected_pairs = tuple(
+                (index, item) for index, item in selected_pairs
                 if item.lod.casefold() == lod.casefold()
             )
-            if not selected:
+            if not selected_pairs:
                 raise ValueError(f"Model LOD was not found: {lod}")
-            selected_lod = selected[0].lod
+            selected_lod = selected_pairs[0][1].lod
         selected_component = "All"
         if component and component.casefold() != "all":
-            selected = tuple(
-                item for item in selected
+            selected_pairs = tuple(
+                (index, item) for index, item in selected_pairs
                 if item.component.casefold() == component.casefold()
             )
-            if not selected:
+            if not selected_pairs:
                 raise ValueError(f"Model component was not found in the selected LOD: {component}")
-            selected_component = selected[0].component
-        image, rendered = _render_model_wireframe(
+            selected_component = selected_pairs[0][1].component
+        selected = tuple(item for _index, item in selected_pairs)
+        selected_materials = tuple(
+            self._render_material_cache[index] for index, _item in selected_pairs
+        )
+        bounds_key = (selected_lod.casefold(), selected_component.casefold())
+        render_bounds = self._render_bounds_cache.get(bounds_key)
+        if render_bounds is None:
+            render_bounds = _model_geometry_bounds(selected)
+            self._render_bounds_cache[bounds_key] = render_bounds
+        image, rendered = _render_model_image(
             list(selected), self.name, camera_yaw=normalized_yaw,
             camera_pitch=normalized_pitch,
+            render_mode=normalized_mode, quality=normalized_quality,
+            triangle_budget=triangle_budget,
+            model_bounds=render_bounds,
+            model_materials=selected_materials,
+            interactive_triangle_cache=self._interactive_triangle_cache,
+            interactive_cache_key=(
+                bounds_key[0], bounds_key[1],
+                triangle_budget or MODEL_RENDER_QUALITIES[normalized_quality],
+            ),
         )
         metadata = dict(self.metadata)
         metadata.update(rendered)
@@ -452,6 +583,33 @@ def _model_position_offset(layout: etree._Element | None) -> int | None:
     return None
 
 
+def _model_texcoord_offset(layout: etree._Element | None) -> int | None:
+    """Return the first UV-set offset for a fully understood vertex layout."""
+    if layout is None:
+        return None
+    offset = 0
+    for semantic in layout:
+        if not isinstance(semantic.tag, str):
+            continue
+        folded = _local_name(semantic).casefold()
+        if folded == "texcoord0" or folded == "texcoord":
+            return offset
+        if folded.startswith("position") or folded.startswith("normal") \
+                or folded.startswith("binormal"):
+            width = 3
+        elif folded.startswith("texcoord"):
+            width = 2
+        elif folded.startswith("colour") or folded.startswith("color") \
+                or folded.startswith("blendweights") \
+                or folded.startswith("blendindices") \
+                or folded.startswith("tangent"):
+            width = 4
+        else:
+            return None
+        offset += width
+    return None
+
+
 def _model_lod(vertex_buffer: etree._Element) -> str:
     parent = vertex_buffer.getparent()
     while parent is not None:
@@ -469,6 +627,262 @@ def _direct_model_text(parent: etree._Element, name: str) -> str:
     return ""
 
 
+_ModelMatrix = tuple[
+    tuple[float, float, float, float],
+    tuple[float, float, float, float],
+    tuple[float, float, float, float],
+    tuple[float, float, float, float],
+]
+_IDENTITY_MODEL_MATRIX: _ModelMatrix = (
+    (1.0, 0.0, 0.0, 0.0),
+    (0.0, 1.0, 0.0, 0.0),
+    (0.0, 0.0, 1.0, 0.0),
+    (0.0, 0.0, 0.0, 1.0),
+)
+_RIGHT_WHEEL_MODEL_MATRIX: _ModelMatrix = (
+    (-1.0, 0.0, 0.0, 0.0),
+    (0.0, 1.0, 0.0, 0.0),
+    (0.0, 0.0, -1.0, 0.0),
+    (0.0, 0.0, 0.0, 1.0),
+)
+
+
+def _multiply_model_matrices(
+    left: _ModelMatrix, right: _ModelMatrix,
+) -> _ModelMatrix:
+    return tuple(
+        tuple(sum(left[row][slot] * right[slot][column] for slot in range(4))
+              for column in range(4))
+        for row in range(4)
+    )  # type: ignore[return-value]
+
+
+def _model_trs_matrix(bone: etree._Element) -> _ModelMatrix:
+    """Return one CodeWalker skeleton bone's local column-vector transform."""
+    translation = next((
+        item for item in bone
+        if isinstance(item.tag, str) and _local_name(item) == "Translation"
+    ), None)
+    rotation = next((
+        item for item in bone
+        if isinstance(item.tag, str) and _local_name(item) == "Rotation"
+    ), None)
+    scale = next((
+        item for item in bone
+        if isinstance(item.tag, str) and _local_name(item) == "Scale"
+    ), None)
+    try:
+        tx, ty, tz = tuple(
+            float(translation.get(axis, "0")) if translation is not None else 0.0
+            for axis in ("x", "y", "z")
+        )
+        qx, qy, qz, qw = tuple(
+            float(rotation.get(axis, "0" if axis != "w" else "1"))
+            if rotation is not None else (1.0 if axis == "w" else 0.0)
+            for axis in ("x", "y", "z", "w")
+        )
+        sx, sy, sz = tuple(
+            float(scale.get(axis, "1")) if scale is not None else 1.0
+            for axis in ("x", "y", "z")
+        )
+    except ValueError as exc:
+        raise ValueError("A fragment skeleton bone has a non-numeric transform") from exc
+    values = (tx, ty, tz, qx, qy, qz, qw, sx, sy, sz)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("A fragment skeleton bone has a non-finite transform")
+    magnitude = math.sqrt((qx * qx) + (qy * qy) + (qz * qz) + (qw * qw))
+    if magnitude <= 1e-12:
+        raise ValueError("A fragment skeleton bone has a zero quaternion")
+    qx, qy, qz, qw = (
+        qx / magnitude, qy / magnitude, qz / magnitude, qw / magnitude,
+    )
+    xx, yy, zz = qx * qx, qy * qy, qz * qz
+    xy, xz, yz = qx * qy, qx * qz, qy * qz
+    xw, yw, zw = qx * qw, qy * qw, qz * qw
+    return (
+        ((1.0 - (2.0 * (yy + zz))) * sx, (2.0 * (xy - zw)) * sy,
+         (2.0 * (xz + yw)) * sz, tx),
+        ((2.0 * (xy + zw)) * sx, (1.0 - (2.0 * (xx + zz))) * sy,
+         (2.0 * (yz - xw)) * sz, ty),
+        ((2.0 * (xz - yw)) * sx, (2.0 * (yz + xw)) * sy,
+         (1.0 - (2.0 * (xx + yy))) * sz, tz),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+
+
+def _model_drawable_matrix(drawable: etree._Element) -> _ModelMatrix:
+    """Convert CodeWalker's four row-vector 3D rows into a 4x4 matrix."""
+    matrix = next((
+        item for item in drawable
+        if isinstance(item.tag, str) and _local_name(item) == "Matrix"
+    ), None)
+    if matrix is None or not (matrix.text or "").strip():
+        return _IDENTITY_MODEL_MATRIX
+    try:
+        rows = tuple(
+            tuple(float(value) for value in line.split())
+            for line in (matrix.text or "").splitlines() if line.split()
+        )
+    except ValueError as exc:
+        raise ValueError("A fragment child drawable has a non-numeric matrix") from exc
+    if len(rows) != 4 or any(len(row) != 3 for row in rows):
+        raise ValueError("A fragment child drawable matrix must contain four 3D rows")
+    if not all(math.isfinite(value) for row in rows for value in row):
+        raise ValueError("A fragment child drawable has a non-finite matrix")
+    return (
+        (rows[0][0], rows[1][0], rows[2][0], rows[3][0]),
+        (rows[0][1], rows[1][1], rows[2][1], rows[3][1]),
+        (rows[0][2], rows[1][2], rows[2][2], rows[3][2]),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+
+
+def _transform_model_geometry(
+    geometry: _ModelGeometry, matrix: _ModelMatrix, component: str, *,
+    reverse_winding: bool = False,
+) -> _ModelGeometry:
+    vertices = tuple(
+        (
+            (matrix[0][0] * x) + (matrix[0][1] * y)
+            + (matrix[0][2] * z) + matrix[0][3],
+            (matrix[1][0] * x) + (matrix[1][1] * y)
+            + (matrix[1][2] * z) + matrix[1][3],
+            (matrix[2][0] * x) + (matrix[2][1] * y)
+            + (matrix[2][2] * z) + matrix[2][3],
+        )
+        for x, y, z in geometry.vertices
+    )
+    triangles = (
+        tuple((first, third, second) for first, second, third in geometry.triangles)
+        if reverse_winding else geometry.triangles
+    )
+    return _ModelGeometry(
+        vertices=vertices, triangles=triangles, lod=geometry.lod,
+        component=component, material_index=geometry.material_index,
+        material_name=geometry.material_name, texture_names=geometry.texture_names,
+        texcoords=geometry.texcoords,
+        texture_parameters=geometry.texture_parameters,
+    )
+
+
+@dataclass(frozen=True)
+class _FragmentGeometryPlacement:
+    matrix: _ModelMatrix
+    component: str
+    mirrored_matrix: _ModelMatrix | None = None
+    mirrored_component: str = ""
+
+
+def _fragment_child_geometry_placements(
+    root: etree._Element,
+) -> dict[etree._Element, _FragmentGeometryPlacement]:
+    """Resolve local fragment-child drawables into the skeleton bind pose.
+
+    Vehicle fragments commonly store only their left front/rear wheel drawables;
+    the game mirrors those templates onto the right-side wheel bones. The XML
+    vertex rows remain local to the child, so a geometry-only renderer must do
+    both assembly steps explicitly.
+    """
+    if _local_name(root) != "Fragment":
+        return {}
+    bone_nodes = root.xpath(
+        "./*[local-name()='Drawable']/*[local-name()='Skeleton']"
+        "/*[local-name()='Bones']/*[local-name()='Item']"
+    )
+    if not bone_nodes:
+        return {}
+    by_index: dict[int, etree._Element] = {}
+    by_tag: dict[int, etree._Element] = {}
+    by_name: dict[str, etree._Element] = {}
+    parents: dict[int, int] = {}
+    for bone in bone_nodes:
+        try:
+            index = int(_direct_model_text(bone, "Index"), 10)
+            tag = int(_direct_model_text(bone, "Tag"), 10)
+            parent = int(_direct_model_text(bone, "ParentIndex"), 10)
+        except ValueError as exc:
+            raise ValueError("A fragment skeleton bone index is invalid") from exc
+        name = _direct_model_text(bone, "Name")
+        by_index[index] = bone
+        by_tag[tag] = bone
+        parents[index] = parent
+        if name:
+            by_name[name.casefold()] = bone
+
+    world_cache: dict[int, _ModelMatrix] = {}
+    resolving: set[int] = set()
+
+    def world_matrix(bone: etree._Element) -> _ModelMatrix:
+        index = int(_direct_model_text(bone, "Index"), 10)
+        cached = world_cache.get(index)
+        if cached is not None:
+            return cached
+        if index in resolving:
+            raise ValueError("A fragment skeleton contains a bone-parent cycle")
+        resolving.add(index)
+        local = _model_trs_matrix(bone)
+        parent_index = parents[index]
+        result = (
+            _multiply_model_matrices(world_matrix(by_index[parent_index]), local)
+            if parent_index >= 0 and parent_index in by_index else local
+        )
+        resolving.remove(index)
+        world_cache[index] = result
+        return result
+
+    child_drawables = root.xpath(
+        "./*[local-name()='Physics']/*[local-name()='LOD1']"
+        "/*[local-name()='Children']/*[local-name()='Item']"
+        "/*[local-name()='Drawable']"
+    )
+    attached_tags = {
+        int(_direct_model_text(drawable.getparent(), "BoneTag"), 10)
+        for drawable in child_drawables
+        if drawable.xpath(".//*[local-name()='VertexBuffer']")
+        and _direct_model_text(drawable.getparent(), "BoneTag")
+    }
+    placements: dict[etree._Element, _FragmentGeometryPlacement] = {}
+    wheel_pairs = {"wheel_lf": "wheel_rf", "wheel_lr": "wheel_rr"}
+    for drawable in child_drawables:
+        owner = drawable.getparent()
+        raw_tag = "" if owner is None else _direct_model_text(owner, "BoneTag")
+        if not raw_tag:
+            continue
+        try:
+            tag = int(raw_tag, 10)
+        except ValueError as exc:
+            raise ValueError("A fragment child has an invalid BoneTag") from exc
+        bone = by_tag.get(tag)
+        if bone is None:
+            continue
+        bone_name = _direct_model_text(bone, "Name") or f"Bone {tag}"
+        folded_bone_name = bone_name.casefold()
+        if folded_bone_name not in {*wheel_pairs, *wheel_pairs.values()}:
+            continue
+        drawable_matrix = _model_drawable_matrix(drawable)
+        matrix = _multiply_model_matrices(world_matrix(bone), drawable_matrix)
+        mirrored_matrix: _ModelMatrix | None = None
+        mirrored_component = ""
+        target_name = wheel_pairs.get(folded_bone_name)
+        target_bone = by_name.get(target_name or "")
+        if target_bone is not None:
+            target_tag = int(_direct_model_text(target_bone, "Tag"), 10)
+            if target_tag not in attached_tags:
+                mirrored_matrix = _multiply_model_matrices(
+                    world_matrix(target_bone),
+                    _multiply_model_matrices(
+                        _RIGHT_WHEEL_MODEL_MATRIX, drawable_matrix,
+                    ),
+                )
+                mirrored_component = _direct_model_text(target_bone, "Name")
+        placement = _FragmentGeometryPlacement(
+            matrix, bone_name, mirrored_matrix, mirrored_component,
+        )
+        for vertex_buffer in drawable.xpath(".//*[local-name()='VertexBuffer']"):
+            placements[vertex_buffer] = placement
+    return placements
+
+
 def _model_materials(root: etree._Element) -> tuple[NativeModelMaterial, ...]:
     materials: list[NativeModelMaterial] = []
     shaders = root.xpath(
@@ -482,19 +896,21 @@ def _model_materials(root: etree._Element) -> tuple[NativeModelMaterial, ...]:
 def _model_material_record(
     shader: etree._Element, index: int,
 ) -> NativeModelMaterial:
-    textures = tuple(dict.fromkeys(
-        texture_name
+    parameters = tuple(
+        (parameter.get("name", "").strip(), texture_name)
         for parameter in shader.xpath(
             "./*[local-name()='Parameters']/*[local-name()='Item']"
         )
         if parameter.get("type", "").casefold() == "texture"
         for texture_name in (_direct_model_text(parameter, "Name"),)
         if texture_name
-    ))
+    )
+    textures = tuple(dict.fromkeys(value for _slot, value in parameters))
     return NativeModelMaterial(
         index=index,
         name=_direct_model_text(shader, "Name") or f"Shader {index}",
         texture_names=textures,
+        texture_parameters=parameters,
     )
 
 
@@ -518,7 +934,7 @@ def _model_component_name(vertex_buffer: etree._Element, ordinal: int) -> str:
 
 def _model_geometry_material(
     vertex_buffer: etree._Element,
-    _materials: tuple[NativeModelMaterial, ...],
+    materials: tuple[NativeModelMaterial, ...],
 ) -> NativeModelMaterial | None:
     geometry = vertex_buffer.getparent()
     if geometry is None:
@@ -531,7 +947,9 @@ def _model_geometry_material(
     except ValueError as exc:
         raise ValueError("A model geometry has a non-integer ShaderIndex") from exc
     ancestor = geometry
+    root = geometry
     while ancestor is not None:
+        root = ancestor
         shaders = ancestor.xpath(
             "./*[local-name()='ShaderGroup']/*[local-name()='Shaders']/*[local-name()='Item']"
         )
@@ -540,6 +958,11 @@ def _model_geometry_material(
                 return None
             return _model_material_record(shaders[index], index)
         ancestor = ancestor.getparent()
+    # Fragment physics children share the primary Drawable's ShaderGroup, but
+    # that drawable is a sibling rather than an XML ancestor. The root material
+    # catalog is therefore the authoritative index table for those children.
+    if _local_name(root) == "Fragment" and 0 <= index < len(materials):
+        return materials[index]
     return None
 
 
@@ -550,9 +973,11 @@ def _read_model_geometry(
     layout = vertex_buffer.find("./Layout")
     data = vertex_buffer.find("./Data")
     offset = _model_position_offset(layout)
+    texcoord_offset = _model_texcoord_offset(layout)
     if data is None or not data.text or offset is None:
         return None
     vertices: list[tuple[float, float, float]] = []
+    texcoords: list[tuple[float, float]] = []
     for line in data.text.splitlines():
         fields = line.split()
         if not fields:
@@ -566,6 +991,16 @@ def _read_model_geometry(
         if not all(math.isfinite(value) for value in point):
             raise ValueError("A model vertex contains a non-finite position")
         vertices.append((point[0], point[1], point[2]))
+        if texcoord_offset is not None:
+            if len(fields) < texcoord_offset + 2:
+                raise ValueError("A model vertex row is shorter than its UV layout")
+            try:
+                uv = tuple(float(value) for value in fields[texcoord_offset:texcoord_offset + 2])
+            except ValueError as exc:
+                raise ValueError("A model UV contains a non-numeric value") from exc
+            if not all(math.isfinite(value) for value in uv):
+                raise ValueError("A model UV contains a non-finite value")
+            texcoords.append((uv[0], uv[1]))
         if len(vertices) > MAX_MODEL_VERTICES:
             raise ValueError("Model preview exceeds the guarded vertex limit")
     if not vertices:
@@ -579,6 +1014,10 @@ def _read_model_geometry(
         "material_index": material.index if material is not None else None,
         "material_name": material.name if material is not None else "",
         "texture_names": material.texture_names if material is not None else (),
+        "texcoords": tuple(texcoords),
+        "texture_parameters": (
+            material.texture_parameters if material is not None else ()
+        ),
     }
     index_data = None if geometry is None else geometry.find("./IndexBuffer/Data")
     if index_data is None or not index_data.text:
@@ -698,25 +1137,271 @@ def _project_model_point(
     return rotated_x, screen_y, depth
 
 
-def _render_model_wireframe(
+_SEMANTIC_MODEL_COLORS: tuple[
+    tuple[str, tuple[str, ...], tuple[int, int, int]], ...
+] = (
+    ("glass", ("glass", "window", "windscreen", "windshield"), (78, 114, 134)),
+    ("light", ("emissive", "headlight", "taillight", "lamp", "light"), (188, 170, 102)),
+    ("tyre", ("tyre", "tire", "rubber"), (45, 48, 48)),
+    ("chrome", ("chrome", "mirror"), (165, 168, 168)),
+    ("brake", ("brake", "caliper"), (138, 58, 50)),
+    ("interior", (
+        "interior", "dashboard", "dash", "seat", "leather", "carpet",
+        "speaker", "stitch", "dial", "screen",
+    ), (62, 59, 56)),
+    ("paint", ("paint", "carpaint", "bodywork", "body"), (45, 132, 77)),
+    ("wheel", ("wheel", "alloy", "rim"), (100, 105, 107)),
+    ("plastic", ("plastic", "trim", "carbon"), (73, 78, 76)),
+    ("metal", (
+        "metal", "steel", "aluminium", "aluminum", "engine", "undercarriage",
+    ), (126, 130, 131)),
+    ("decal", ("decal", "badge", "sign", "label"), (145, 143, 134)),
+)
+
+# CodeWalker may preserve a shader as its Jenkins hash when an authored package
+# does not carry a readable name. These common vehicle hashes are stable GTA
+# shader identities, not package-specific guesses. Texture semantics are checked
+# first because some authors reuse a shader for a materially different surface.
+_HASHED_VEHICLE_SHADER_SEMANTICS = {
+    "hash_f9fb7331": "paint",      # vehicle_paint1
+    "hash_1d5f09ce": "tyre",       # vehicle_tire
+    "hash_ffe6fbea": "decal",      # vehicle_badges
+    "hash_8a7a2bef": "decal",      # vehicle_licenseplate
+    "hash_2a92aee4": "interior",   # vehicle_interior2
+    "hash_7c98d207": "glass",      # vehicle_vehglass
+    "hash_c9866cc2": "glass",      # vehicle_vehglass_inner
+    "hash_e515a6e7": "light",      # vehicle_lightsemissive
+    "hash_0f8bd089": "light",      # vehicle_dash_emissive
+}
+
+
+def _semantic_model_color(
+    semantic: str,
+) -> tuple[int, int, int] | None:
+    return next((
+        color for name, _tokens, color in _SEMANTIC_MODEL_COLORS
+        if name == semantic
+    ), None)
+
+
+def _model_material_identity(
+    geometry: _ModelGeometry,
+) -> tuple[str, str, tuple[int, int, int]]:
+    """Return a stable label, semantic class, and diagnostic base colour."""
+    if geometry.material_name:
+        identity = geometry.material_name
+    elif geometry.material_index is not None:
+        identity = f"Material {geometry.material_index}"
+    else:
+        identity = f"Unbound · {geometry.component}"
+    # `vehicle_generic_glassdirt` is a common auxiliary texture on lights and
+    # must not turn every emissive surface blue.
+    texture_searchable = " ".join(geometry.texture_names).casefold().replace(
+        "glassdirt", ""
+    )
+    for semantic, tokens, color in _SEMANTIC_MODEL_COLORS:
+        if any(token in texture_searchable for token in tokens):
+            return identity, semantic, color
+    shader_semantic = _HASHED_VEHICLE_SHADER_SEMANTICS.get(identity.casefold())
+    if shader_semantic:
+        shader_color = _semantic_model_color(shader_semantic)
+        if shader_color is not None:
+            return identity, shader_semantic, shader_color
+    identity_searchable = identity.casefold()
+    for semantic, tokens, color in _SEMANTIC_MODEL_COLORS:
+        if any(token in identity_searchable for token in tokens):
+            return identity, semantic, color
+
+    # Unknown shaders should still read as parts of one object in Shaded mode.
+    # Keep them in a narrow graphite/slate range; the tiny deterministic shift
+    # separates overlapping pieces without producing a material-ID heatmap.
+    digest = hashlib.sha256(identity.casefold().encode("utf-8")).digest()
+    level = 96 + (digest[4] % 16)
+    warm_shift = (digest[5] % 7) - 3
+    cool_shift = (digest[6] % 9) - 4
+    return identity, "neutral fallback", (
+        level + warm_shift,
+        level + 2,
+        level + cool_shift,
+    )
+
+
+def _material_mode_color(
+    color: tuple[int, int, int], identity: str = "",
+) -> tuple[int, int, int]:
+    """Return a repeatable high-contrast colour for a material-ID pass."""
+    if identity:
+        digest = hashlib.sha256(identity.casefold().encode("utf-8")).digest()
+        hue = int.from_bytes(digest[:4], "big") / 0xFFFFFFFF
+        saturation = 0.66 + (digest[4] / 255.0) * 0.18
+        value = 0.80 + (digest[5] / 255.0) * 0.15
+    else:
+        red, green, blue = (value / 255.0 for value in color)
+        hue, saturation, value = colorsys.rgb_to_hsv(red, green, blue)
+        saturation = max(0.68, saturation)
+        value = max(0.82, value)
+    converted = colorsys.hsv_to_rgb(hue, saturation, value)
+    return tuple(round(channel * 255) for channel in converted)
+
+
+def _shade_color(
+    color: tuple[int, int, int], intensity: float,
+) -> tuple[int, int, int]:
+    # This runs once per shaded triangle. Spell out the fixed RGB channels to
+    # avoid allocating a generator and dispatching min/max for every channel.
+    return (
+        min(255, max(0, round(color[0] * intensity))),
+        min(255, max(0, round(color[1] * intensity))),
+        min(255, max(0, round(color[2] * intensity))),
+    )
+
+
+def _uniform_sample_indices(total: int, budget: int) -> tuple[int, ...] | None:
+    """Select an ordered, deterministic, globally distributed bounded sample."""
+    if total <= budget:
+        return None
+    # `total > budget` makes the integer sequence strictly increasing, so a
+    # tuple is both smaller than a set and can be consumed without walking every
+    # omitted source item. That distinction is substantial for 500k-face models.
+    return tuple((slot * total) // budget for slot in range(budget))
+
+
+def _uniform_triangle_indices(total: int, budget: int) -> tuple[int, ...] | None:
+    """Select a deterministic, globally distributed bounded triangle sample."""
+    return _uniform_sample_indices(total, budget)
+
+
+@lru_cache(maxsize=1)
+def _model_render_background() -> Image.Image:
+    """Build the immutable diagnostic viewport chrome shared by model frames."""
+    width, height = 960, 680
+    view_left, view_top, view_right, view_bottom = 38, 76, width - 38, height - 56
+    image = Image.new("RGB", (width, height), "#101714")
+    draw = ImageDraw.Draw(image)
+    vertical_span = max(1, view_bottom - view_top)
+    for y in range(view_top, view_bottom + 1):
+        ratio = (y - view_top) / vertical_span
+        color = tuple(round(start + ((end - start) * ratio)) for start, end in zip(
+            (19, 29, 24), (10, 15, 13),
+        ))
+        draw.line((view_left, y, view_right, y), fill=color)
+    for y in range(view_top, view_bottom + 1, 48):
+        draw.line((view_left, y, view_right, y), fill="#18231e", width=1)
+    for x in range(view_left, view_right + 1, 48):
+        draw.line((x, view_top, x, view_bottom), fill="#18231e", width=1)
+    draw.rectangle((view_left, view_top, view_right, view_bottom), outline="#2d4036")
+    return image
+
+
+def _convex_hull(
+    points: list[tuple[float, float]],
+) -> tuple[tuple[float, float], ...]:
+    """Return a deterministic monotonic-chain hull for a preview underlay."""
+    ordered = sorted(set(points))
+    if len(ordered) <= 2:
+        return tuple(ordered)
+
+    def cross(
+        origin: tuple[float, float], first: tuple[float, float],
+        second: tuple[float, float],
+    ) -> float:
+        return (
+            (first[0] - origin[0]) * (second[1] - origin[1])
+            - (first[1] - origin[1]) * (second[0] - origin[0])
+        )
+
+    lower: list[tuple[float, float]] = []
+    for point in ordered:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper: list[tuple[float, float]] = []
+    for point in reversed(ordered):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    return tuple(lower[:-1] + upper[:-1])
+
+
+def _render_model_image(
     geometries: list[_ModelGeometry], name: str, *,
     title: str = "MODEL PREVIEW", geometry_label: str = "geometries",
     camera_yaw: float = 34.0, camera_pitch: float = 24.0,
-) -> tuple[bytes, dict[str, Any]]:
-    vertices = [point for geometry in geometries for point in geometry.vertices]
-    minima = tuple(min(point[axis] for point in vertices) for axis in range(3))
-    maxima = tuple(max(point[axis] for point in vertices) for axis in range(3))
-    center = tuple((minima[axis] + maxima[axis]) / 2.0 for axis in range(3))
-    projected = [
-        _project_model_point(
-            point, center, yaw_degrees=camera_yaw, pitch_degrees=camera_pitch,
+    render_mode: str = "shaded", quality: str = "final",
+    triangle_budget: int | None = None,
+    model_bounds: _ModelRenderBounds | None = None,
+    model_materials: tuple[
+        tuple[str, str, tuple[int, int, int]], ...
+    ] | None = None,
+    interactive_triangle_cache: dict[
+        tuple[str, str, int], tuple[_PreparedInteractiveTriangle, ...]
+    ] | None = None,
+    interactive_cache_key: tuple[str, str, int] | None = None,
+) -> tuple[Image.Image, dict[str, Any]]:
+    normalized_mode = render_mode.strip().casefold()
+    if normalized_mode not in MODEL_RENDER_MODES:
+        choices = ", ".join(sorted(MODEL_RENDER_MODES))
+        raise ValueError(f"Model render mode must be one of: {choices}")
+    normalized_quality = quality.strip().casefold()
+    if normalized_quality not in MODEL_RENDER_QUALITIES:
+        choices = ", ".join(MODEL_RENDER_QUALITIES)
+        raise ValueError(f"Model render quality must be one of: {choices}")
+    maximum_budget = (
+        MAX_MODEL_TRIANGLES
+        if normalized_quality == "full"
+        else MAX_RENDERED_TRIANGLES
+    )
+    if triangle_budget is not None and (
+        isinstance(triangle_budget, bool)
+        or not isinstance(triangle_budget, int)
+        or not 1 <= triangle_budget <= maximum_budget
+    ):
+        raise ValueError(
+            "Model triangle budget must be an integer between 1 and "
+            f"{maximum_budget:,} for {normalized_quality} quality"
         )
-        for point in vertices
-    ]
-    min_x = min(point[0] for point in projected)
-    max_x = max(point[0] for point in projected)
-    min_y = min(point[1] for point in projected)
-    max_y = max(point[1] for point in projected)
+    configured_budget = (
+        triangle_budget
+        if triangle_budget is not None
+        else MODEL_RENDER_QUALITIES[normalized_quality]
+    )
+    supplied_bounds = model_bounds is not None
+    minima, maxima, vertex_count = (
+        model_bounds if model_bounds is not None else _model_geometry_bounds(geometries)
+    )
+    center = tuple((minima[axis] + maxima[axis]) / 2.0 for axis in range(3))
+    center_0, center_1, center_2 = center
+    yaw_radians = math.radians(camera_yaw)
+    pitch_radians = math.radians(camera_pitch)
+    yaw_cos = math.cos(yaw_radians)
+    yaw_sin = math.sin(yaw_radians)
+    pitch_cos = math.cos(pitch_radians)
+    pitch_sin = math.sin(pitch_radians)
+
+    def project(point: tuple[float, float, float]) -> tuple[float, float, float]:
+        """Project with camera trigonometry prepared once for this frame."""
+        x = point[0] - center_0
+        y = point[1] - center_1
+        z = point[2] - center_2
+        rotated_x = (x * yaw_cos) - (y * yaw_sin)
+        rotated_y = (x * yaw_sin) + (y * yaw_cos)
+        return (
+            rotated_x,
+            (z * pitch_cos) - (rotated_y * pitch_sin),
+            (rotated_y * pitch_cos) + (z * pitch_sin),
+        )
+
+    min_x = min_y = math.inf
+    max_x = max_y = -math.inf
+    # Orthographic projection is linear, so the eight AABB corners provide a
+    # conservative screen extent. This replaces an O(all vertices) pass on every
+    # camera update while retaining stable, selection-specific framing.
+    for x in (minima[0], maxima[0]):
+        for y in (minima[1], maxima[1]):
+            for z in (minima[2], maxima[2]):
+                px, py, _depth = project((x, y, z))
+                min_x, max_x = min(min_x, px), max(max_x, px)
+                min_y, max_y = min(min_y, py), max(max_y, py)
     width, height = 960, 680
     view_left, view_top, view_right, view_bottom = 38, 76, width - 38, height - 56
     span_x = max(max_x - min_x, 1e-9)
@@ -726,86 +1411,344 @@ def _render_model_wireframe(
     center_y = (view_top + view_bottom) / 2.0
 
     def screen(point: tuple[float, float, float]) -> tuple[float, float, float]:
-        px, py, depth = _project_model_point(
-            point, center, yaw_degrees=camera_yaw, pitch_degrees=camera_pitch,
-        )
+        x = point[0] - center_0
+        y = point[1] - center_1
+        z = point[2] - center_2
+        px = (x * yaw_cos) - (y * yaw_sin)
+        rotated_y = (x * yaw_sin) + (y * yaw_cos)
+        py = (z * pitch_cos) - (rotated_y * pitch_sin)
+        depth = (rotated_y * pitch_cos) + (z * pitch_sin)
         return center_x + (px * scale), center_y - (py * scale), depth
 
     total_triangles = sum(len(geometry.triangles) for geometry in geometries)
-    rendered: list[tuple[float, int, tuple[tuple[float, float], ...], float]] = []
+    selected_indices = _uniform_triangle_indices(total_triangles, configured_budget)
+    # depth, stable ordinal, geometry, local indices, screen polygon, light.
+    # Material records are held once per geometry instead of once per triangle;
+    # this matters for opt-in Full renders near the one-million-face scene cap.
+    rendered: list[
+        tuple[
+            float, int, int, tuple[int, int, int],
+            tuple[tuple[float, float], ...], float,
+        ]
+    ] = []
+    geometry_render_materials: list[
+        tuple[str, str, tuple[int, int, int]]
+    ] = []
+    prepared_materials = (
+        model_materials
+        if model_materials is not None and len(model_materials) == len(geometries)
+        else tuple(_model_material_identity(geometry) for geometry in geometries)
+    )
+    directional = (0.32, -0.42, 0.85)
+    directional_length = math.sqrt(sum(value * value for value in directional))
+    directional = tuple(value / directional_length for value in directional)
     for geometry_index, geometry in enumerate(geometries):
-        triangle_count = len(geometry.triangles)
-        if not triangle_count:
-            continue
-        quota = max(1, round(MAX_RENDERED_TRIANGLES * triangle_count / total_triangles))
-        stride = max(1, math.ceil(triangle_count / quota))
-        for triangle in geometry.triangles[::stride]:
-            raw = [geometry.vertices[index] for index in triangle]
-            transformed = [screen(point) for point in raw]
-            ax, ay, az = (raw[1][i] - raw[0][i] for i in range(3))
-            bx, by, bz = (raw[2][i] - raw[0][i] for i in range(3))
-            nx, ny, nz = (ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx)
-            magnitude = math.sqrt(nx * nx + ny * ny + nz * nz)
-            light = 0.3 if magnitude <= 1e-12 else abs(
-                ((nx * 0.32) + (ny * -0.42) + (nz * 0.85)) / magnitude
-            )
-            rendered.append((
-                sum(point[2] for point in transformed) / 3.0,
-                geometry_index,
-                tuple((point[0], point[1]) for point in transformed),
-                min(1.0, max(0.16, light)),
+        identity, semantic, base_color = prepared_materials[geometry_index]
+        if normalized_mode == "materials":
+            material_key = "|".join((
+                str(geometry.material_index), identity, *geometry.texture_names,
             ))
-    rendered.sort(key=lambda item: item[0])
+            base_color = _material_mode_color(base_color, material_key)
+        geometry_render_materials.append((identity, semantic, base_color))
 
-    image = Image.new("RGB", (width, height), "#101714")
+    cached_triangles = None
+    use_interactive_cache = (
+        normalized_quality == "interactive"
+        and selected_indices is not None
+        and interactive_triangle_cache is not None
+        and interactive_cache_key is not None
+    )
+    if use_interactive_cache:
+        cached_triangles = interactive_triangle_cache.get(interactive_cache_key)
+
+    if cached_triangles is not None:
+        for (
+            ordinal, geometry_index, triangle, raw_0, raw_1, raw_2, light,
+        ) in cached_triangles:
+            transformed_0 = screen(raw_0)
+            transformed_1 = screen(raw_1)
+            transformed_2 = screen(raw_2)
+            rendered.append((
+                (transformed_0[2] + transformed_1[2] + transformed_2[2]) / 3.0,
+                ordinal,
+                geometry_index,
+                triangle,
+                (
+                    (transformed_0[0], transformed_0[1]),
+                    (transformed_1[0], transformed_1[1]),
+                    (transformed_2[0], transformed_2[1]),
+                ),
+                light,
+            ))
+    else:
+        prepared_triangles: list[_PreparedInteractiveTriangle] = []
+        global_triangle = 0
+        selection_cursor = 0
+        for geometry_index, geometry in enumerate(geometries):
+            geometry_start = global_triangle
+            geometry_end = geometry_start + len(geometry.triangles)
+            if selected_indices is None:
+                triangle_items = (
+                    (geometry_start + local_index, triangle)
+                    for local_index, triangle in enumerate(geometry.triangles)
+                )
+            else:
+                selection_start = selection_cursor
+                while (
+                    selection_cursor < len(selected_indices)
+                    and selected_indices[selection_cursor] < geometry_end
+                ):
+                    selection_cursor += 1
+                triangle_items = (
+                    (
+                        selected_indices[position],
+                        geometry.triangles[
+                            selected_indices[position] - geometry_start
+                        ],
+                    )
+                    for position in range(selection_start, selection_cursor)
+                )
+            for ordinal, triangle in triangle_items:
+                raw_0 = geometry.vertices[triangle[0]]
+                raw_1 = geometry.vertices[triangle[1]]
+                raw_2 = geometry.vertices[triangle[2]]
+                transformed_0 = screen(raw_0)
+                transformed_1 = screen(raw_1)
+                transformed_2 = screen(raw_2)
+                ax = raw_1[0] - raw_0[0]
+                ay = raw_1[1] - raw_0[1]
+                az = raw_1[2] - raw_0[2]
+                bx = raw_2[0] - raw_0[0]
+                by = raw_2[1] - raw_0[1]
+                bz = raw_2[2] - raw_0[2]
+                nx, ny, nz = (
+                    ay * bz - az * by,
+                    az * bx - ax * bz,
+                    ax * by - ay * bx,
+                )
+                if normalized_mode == "materials":
+                    # Flat material IDs do not consume the normal-derived value.
+                    light = 1.0
+                else:
+                    magnitude = math.sqrt(nx * nx + ny * ny + nz * nz)
+                    diffuse = 0.0 if magnitude <= 1e-12 else abs(
+                        (nx / magnitude) * directional[0]
+                        + (ny / magnitude) * directional[1]
+                        + (nz / magnitude) * directional[2]
+                    )
+                    # Two-sided Lambert shading avoids turning valid diagnostic
+                    # surfaces black when source winding conventions differ.
+                    light = min(1.0, 0.36 + (0.64 * diffuse))
+                if use_interactive_cache and normalized_mode != "materials":
+                    prepared_triangles.append((
+                        ordinal, geometry_index, triangle,
+                        raw_0, raw_1, raw_2, light,
+                    ))
+                rendered.append((
+                    (transformed_0[2] + transformed_1[2] + transformed_2[2]) / 3.0,
+                    ordinal,
+                    geometry_index,
+                    triangle,
+                    (
+                        (transformed_0[0], transformed_0[1]),
+                        (transformed_1[0], transformed_1[1]),
+                        (transformed_2[0], transformed_2[1]),
+                    ),
+                    light,
+                ))
+            global_triangle = geometry_end
+        if prepared_triangles and interactive_triangle_cache is not None:
+            assert interactive_cache_key is not None
+            interactive_triangle_cache.pop(interactive_cache_key, None)
+            interactive_triangle_cache[interactive_cache_key] = tuple(
+                prepared_triangles
+            )
+            while len(interactive_triangle_cache) > 4:
+                interactive_triangle_cache.pop(next(iter(interactive_triangle_cache)))
+    rendered.sort(key=lambda item: (item[0], item[1]))
+
+    # Boundary edges are computed only for complete, normally bounded geometry.
+    # A sampled mesh has artificial holes, while building a multi-million-entry
+    # edge map would undermine the safety of opt-in Full renders near the scene cap.
+    boundary_counts: dict[tuple[int, int, int], int] = {}
+    trace_boundaries = (
+        selected_indices is None
+        and total_triangles <= MAX_RENDERED_TRIANGLES
+        and normalized_mode != "wireframe"
+    )
+    if trace_boundaries:
+        for _depth, _ordinal, geometry_index, triangle, *_rest in rendered:
+            for first, second in (
+                (triangle[0], triangle[1]),
+                (triangle[1], triangle[2]),
+                (triangle[2], triangle[0]),
+            ):
+                edge = (geometry_index, min(first, second), max(first, second))
+                boundary_counts[edge] = boundary_counts.get(edge, 0) + 1
+
+    image = _model_render_background().copy()
     draw = ImageDraw.Draw(image)
-    for y in range(view_top, view_bottom + 1, 48):
-        draw.line((view_left, y, view_right, y), fill="#18231e", width=1)
-    for x in range(view_left, view_right + 1, 48):
-        draw.line((x, view_top, x, view_bottom), fill="#18231e", width=1)
-    draw.rectangle((view_left, view_top, view_right, view_bottom), outline="#2d4036")
-    for _depth, geometry_index, polygon, light in rendered:
-        accent = (geometry_index * 31) % 45
+    sample_underlay = selected_indices is not None and normalized_mode == "shaded"
+    if sample_underlay:
+        silhouette_points: list[tuple[float, float]] = []
+        weighted_color = [0.0, 0.0, 0.0]
+        weighted_triangles = 0
+        silhouette_indices = (
+            _uniform_sample_indices(vertex_count, INTERACTIVE_SILHOUETTE_POINTS)
+            if normalized_quality == "interactive"
+            else None
+        )
+        silhouette_cursor = 0
+        global_vertex = 0
+        for geometry_index, geometry in enumerate(geometries):
+            if not geometry.vertices:
+                continue
+            geometry_vertex_end = global_vertex + len(geometry.vertices)
+            if normalized_quality != "interactive":
+                # Preserve the final/full preview's established silhouette.
+                stride = max(1, math.ceil(len(geometry.vertices) / 256))
+                points = geometry.vertices[::stride]
+            elif silhouette_indices is None:
+                points = geometry.vertices
+            else:
+                selection_start = silhouette_cursor
+                while (
+                    silhouette_cursor < len(silhouette_indices)
+                    and silhouette_indices[silhouette_cursor] < geometry_vertex_end
+                ):
+                    silhouette_cursor += 1
+                points = tuple(
+                    geometry.vertices[
+                        silhouette_indices[position] - global_vertex
+                    ]
+                    for position in range(selection_start, silhouette_cursor)
+                )
+            silhouette_points.extend(
+                (projected[0], projected[1])
+                for point in points
+                for projected in (screen(point),)
+            )
+            color = geometry_render_materials[geometry_index][2]
+            weight = max(1, len(geometry.triangles))
+            for channel in range(3):
+                weighted_color[channel] += color[channel] * weight
+            weighted_triangles += weight
+            global_vertex = geometry_vertex_end
+        hull = _convex_hull(silhouette_points)
+        if len(hull) >= 3 and weighted_triangles:
+            average = tuple(
+                round(value / weighted_triangles) for value in weighted_color
+            )
+            underlay = _shade_color(average, 0.48)
+            draw.polygon(hull, fill=underlay)
+            draw.line((*hull, hull[0]), fill=_shade_color(average, 0.62), width=1)
+    for (
+        _depth, _ordinal, geometry_index, triangle, polygon, light,
+    ) in rendered:
+        base_color = geometry_render_materials[geometry_index][2]
+        if normalized_mode == "wireframe":
+            edge_color = _shade_color(base_color, 0.72 + (0.28 * light))
+            draw.line((*polygon, polygon[0]), fill=edge_color, width=1)
+            continue
         fill = (
-            int(17 + (22 * light)),
-            int(48 + accent + (70 * light)),
-            int(39 + (50 * light)),
+            base_color
+            if normalized_mode == "materials"
+            else _shade_color(base_color, light)
         )
-        outline = (
-            int(42 + (38 * light)),
-            int(112 + (92 * light)),
-            int(76 + (68 * light)),
-        )
-        draw.polygon(polygon, fill=fill, outline=outline)
+        # Shaded intentionally has no per-triangle outline. Only true open edges
+        # and geometry/material boundaries receive a restrained silhouette.
+        draw.polygon(polygon, fill=fill)
+        if trace_boundaries:
+            for first, second, start, end in (
+                (triangle[0], triangle[1], polygon[0], polygon[1]),
+                (triangle[1], triangle[2], polygon[1], polygon[2]),
+                (triangle[2], triangle[0], polygon[2], polygon[0]),
+            ):
+                edge = (geometry_index, min(first, second), max(first, second))
+                if boundary_counts.get(edge) == 1:
+                    draw.line(
+                        (*start, *end), fill=_shade_color(fill, 0.48), width=1,
+                    )
     if not rendered:
-        for geometry in geometries:
+        for geometry_index, geometry in enumerate(geometries):
+            point_color = geometry_render_materials[geometry_index][2]
             points = [screen(point) for point in geometry.vertices]
             for point in points[::max(1, len(points) // 12_000)]:
                 x, y, _depth = point
-                draw.ellipse((x - 1, y - 1, x + 1, y + 1), fill="#5bd995")
-    draw.text((38, 24), f"{title}  |  {name[:72]}", fill="#E8F2EC")
+                draw.ellipse((x - 1, y - 1, x + 1, y + 1), fill=point_color)
+    draw.text(
+        (38, 24), f"{title} · {normalized_mode.upper()}  |  {name[:64]}",
+        fill="#E8F2EC",
+    )
     draw.text(
         (38, height - 32),
-        f"{len(vertices):,} vertices  |  {total_triangles:,} triangles  |  "
+        f"{vertex_count:,} vertices  |  {len(rendered):,}/{total_triangles:,} triangles  |  "
         f"{len(geometries):,} {geometry_label}  |  "
         f"yaw {camera_yaw:.0f}°  pitch {camera_pitch:.0f}°",
         fill="#AFC5B9",
     )
-    output = io.BytesIO()
-    image.save(output, format="PNG", optimize=True)
     lods: dict[str, int] = {}
     for geometry in geometries:
         lods[geometry.lod] = lods.get(geometry.lod, 0) + 1
-    return output.getvalue(), {
+    material_records = {
+        (identity, semantic)
+        for identity, semantic, _color in geometry_render_materials
+    }
+    return image, {
         "model_geometry_count": len(geometries),
-        "model_vertex_count": len(vertices),
+        "model_vertex_count": vertex_count,
         "model_triangle_count": total_triangles,
         "model_lods": ", ".join(f"{name}: {count}" for name, count in sorted(lods.items())),
         "model_bounds": " x ".join(
             f"{maxima[axis] - minima[axis]:.4g}" for axis in range(3)
         ),
         "model_preview": "isometric geometry diagnostic",
+        "model_render_mode": normalized_mode,
+        "model_render_quality": normalized_quality,
+        "model_render_triangle_budget": configured_budget,
+        "model_rendered_triangle_count": len(rendered),
+        "model_render_skipped_triangle_count": total_triangles - len(rendered),
+        "model_render_sampled": selected_indices is not None,
+        "model_render_sample_underlay": sample_underlay,
+        "model_render_material_count": len({item[0] for item in material_records}),
+        "model_render_semantic_materials": ", ".join(sorted({
+            item[1] for item in material_records
+        })) or "none",
+        "model_render_depth_ordering": "far-to-near triangle painter",
+        "model_render_lighting": (
+            "two-sided Lambert; ambient 0.36, directional 0.64"
+            if normalized_mode == "shaded"
+            else "flat material IDs" if normalized_mode == "materials"
+            else "edge-only material wireframe"
+        ),
+        "model_render_output_size": f"{width} x {height}",
+        "model_render_view_box": (view_left, view_top, view_right, view_bottom),
+        "model_render_bounds_source": (
+            "cached selection bounds" if supplied_bounds else "computed geometry bounds"
+        ),
+        "model_render_fidelity": (
+            "decoded geometry and material references only; game shaders, "
+            "textures, reflections, and skinning are not reproduced"
+        ),
     }
+
+
+def _encode_model_render(image: Image.Image, quality: str) -> bytes:
+    """Encode a model frame for callers that require the stable PNG contract."""
+    output = io.BytesIO()
+    if quality == "interactive":
+        image.save(output, format="PNG", compress_level=1)
+    else:
+        image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+def _render_model_wireframe(*args: Any, **kwargs: Any) -> tuple[bytes, dict[str, Any]]:
+    """Compatibility wrapper for collision/native preview byte consumers."""
+    image, metadata = _render_model_image(*args, **kwargs)
+    return _encode_model_render(
+        image, str(metadata["model_render_quality"]),
+    ), metadata
 
 
 def _safe_codewalker_xml(xml: Path) -> etree._ElementTree:
@@ -944,10 +1887,14 @@ def _model_scene_from_xml(
         tree = _safe_codewalker_xml(xml)
         root = tree.getroot()
         materials = _model_materials(root)
+        fragment_placements = _fragment_child_geometry_placements(root)
         geometries: list[_ModelGeometry] = []
         total_vertices = 0
         total_triangles = 0
         skipped_layouts = 0
+        transformed_fragment_geometries = 0
+        mirrored_fragment_geometries = 0
+        assembled_fragment_components: set[str] = set()
         for ordinal, vertex_buffer in enumerate(
             root.xpath(".//*[local-name()='VertexBuffer']")
         ):
@@ -957,13 +1904,29 @@ def _model_scene_from_xml(
             if geometry is None:
                 skipped_layouts += 1
                 continue
-            total_vertices += len(geometry.vertices)
-            total_triangles += len(geometry.triangles)
-            if total_vertices > MAX_MODEL_VERTICES:
-                raise ValueError("Model preview exceeds the guarded vertex limit")
-            if total_triangles > MAX_MODEL_TRIANGLES:
-                raise ValueError("Model preview exceeds the guarded triangle limit")
-            geometries.append(geometry)
+            expanded = [geometry]
+            placement = fragment_placements.get(vertex_buffer)
+            if placement is not None:
+                expanded = [_transform_model_geometry(
+                    geometry, placement.matrix, placement.component,
+                )]
+                transformed_fragment_geometries += 1
+                assembled_fragment_components.add(placement.component)
+                if placement.mirrored_matrix is not None:
+                    expanded.append(_transform_model_geometry(
+                        geometry, placement.mirrored_matrix,
+                        placement.mirrored_component,
+                    ))
+                    mirrored_fragment_geometries += 1
+                    assembled_fragment_components.add(placement.mirrored_component)
+            for expanded_geometry in expanded:
+                total_vertices += len(expanded_geometry.vertices)
+                total_triangles += len(expanded_geometry.triangles)
+                if total_vertices > MAX_MODEL_VERTICES:
+                    raise ValueError("Model preview exceeds the guarded vertex limit")
+                if total_triangles > MAX_MODEL_TRIANGLES:
+                    raise ValueError("Model preview exceeds the guarded triangle limit")
+                geometries.append(expanded_geometry)
         if not geometries:
             return None, {
                 "model_drawable_count": _model_drawable_count(root),
@@ -978,6 +1941,16 @@ def _model_scene_from_xml(
         metadata["model_material_binding_count"] = sum(
             item.material_index is not None for item in geometries
         )
+        if transformed_fragment_geometries:
+            metadata["model_fragment_child_transformed_geometry_count"] = (
+                transformed_fragment_geometries
+            )
+            metadata["model_fragment_mirrored_geometry_count"] = (
+                mirrored_fragment_geometries
+            )
+            metadata["model_fragment_assembled_components"] = ", ".join(sorted(
+                assembled_fragment_components, key=str.casefold,
+            ))
         if skipped_layouts:
             metadata["model_skipped_buffers"] = skipped_layouts
         scene = NativeModelScene(

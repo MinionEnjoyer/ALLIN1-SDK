@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import tkinter as tk
 from tkinter import ttk
 
+from allin1_sdk.ui_foundation import place_window
+
 
 @dataclass(frozen=True)
 class HelpTopic:
@@ -62,25 +64,27 @@ Commands return non-zero exit codes for invalid or unsafe inputs. Creating a sin
 
 The prompt stays docked at the bottom of every workspace. Ctrl+backtick focuses and expands it; Expand reveals output, history, and the complete suggestion table without leaving the current tool. Tab accepts the selected suggestion. Up and Down move through visible matches; Ctrl+Up and Ctrl+Down move through history. Enter runs the command asynchronously, Ctrl+L clears output, and Escape clears the command or collapses the dock.
 
-The console invokes the same Click commands and safety checks as allin1-sdk in a terminal. It does not bypass target authorization, acknowledgements, hashes, locks, game-process checks, or rollback requirements. Type help for the catalog or help <command> for detailed syntax.""",
-        ("console", "autocomplete", "completion", "history", "source", "terminal"),
+The console invokes the same Click commands and safety checks as allin1-sdk in a terminal. It does not bypass target authorization, acknowledgements, hashes, locks, game-process checks, or rollback requirements. Type help for the catalog or help <command> for detailed syntax.
+
+If the optional assistant was configured in the ALLIN1 Launcher's SDK Manager, type assistant prompt followed by a question to ask the configured Qwen/GGUF model. Quotes are optional for ordinary multi-word questions. assistant context followed by the question shows the repository, manifest, game-path, policy, selected source or telemetry evidence, and exact command evidence that would be supplied without starting the model. Use --source with --symbol for complete brace-balanced function definitions plus automatically retrieved counter writers/reset sites. Use --telemetry with --telemetry-pattern for bounded log excerpts and whole-file session aggregates, so an idle final line cannot hide earlier activity. The host budgets context before model startup, preserves explicitly requested definitions, reports every omission instead of silently truncating a large repository, and prints startup, prefill, generation, and heartbeat progress. Responses use a structured advisory format with separate engineering/security severity. The model may propose a conceptual change to a grounded file and symbol, but the host always marks it advisory-only and unexecuted. Invented, irrelevant, or already-completed inspections, manual-copy instructions, and destructive guidance are withheld by deterministic SDK code. Privacy-bounded receipts store hashes, evidence ranges, aggregate telemetry, omissions, timing, token usage, and the structured result without full prompts or source excerpts. A long-lived SDK or Agent process caches unchanged grounding and retains a local model for a bounded idle period; assistant stop closes it immediately. Prompting remains read-only and cannot execute a recommendation. Official Windows installs include a standalone allin1-sdk.exe that works from a newly opened PowerShell without Python.""",
+        ("console", "autocomplete", "completion", "history", "source", "terminal", "assistant", "qwen", "prompt"),
     ),
     HelpTopic(
         "agent-api", "Automation", "AI agent integration",
         "Let local AI and developer tools inspect and operate the SDK through structured JSON.",
         """Run allin1-sdk agent-api and exchange one JSON object per line over standard input and output. Use the ping action to negotiate the protocol, catalog to discover command schemas and risk levels, and execute with a command plus a string args array.
 
-The transport never invokes a shell and cannot evaluate Python. Requests are written to the per-user agent-api-audit.jsonl log. Game/archive mutation commands are rejected by default. A user must explicitly start the process with --allow-game-writes, and the requested SDK command must still pass its normal acknowledgement, closed-game, authorized-target, checksum, lock, backup, and rollback checks. list-installed-packages discovers receipt-backed installs; install-package validates and installs a mod.toml package; uninstall-package removes one through its owned-file and backup receipt.
+The transport never invokes a shell and cannot evaluate Python. Requests are written to the per-user agent-api-audit.jsonl log. Game/archive mutation commands are rejected by default. A user must explicitly start the process with --allow-game-writes, and the requested SDK command must still pass its normal acknowledgement, closed-game, authorized-target, checksum, lock, backup, and rollback checks. validate-package verifies a mod.toml and its payload hashes; inspect-package-receipt and verify-package-ownership provide read-only receipt evidence; list-installed-packages discovers receipt-backed installs; install-package validates and installs a package; uninstall-package removes one through its owned-file and backup receipt.
 
-This API is the stable foundation for AI-assisted package inspection and approved package lifecycle actions. The ALLIN1 Launcher remains the user-facing owner of interactive installation and game launch.""",
-        ("ai", "agent", "api", "json", "jsonl", "stdio", "automation", "audit"),
+The read-only assistant group is also available through execute requests: pass command assistant and args beginning with context or prompt. The host supplies focused repository, workspace, manifest, game-path, dirty-state, and live command evidence under a permanent ALLIN1 policy. A prompt response cannot approve or invoke another command. This API remains the stable foundation for later reviewed AI-assisted package inspection and approved package lifecycle actions. The ALLIN1 Launcher remains the user-facing owner of assistant installation, interactive package installation, and game launch.""",
+        ("ai", "agent", "api", "json", "jsonl", "stdio", "automation", "audit", "qwen", "assistant"),
     ),
     HelpTopic(
         "input", "Interface", "Navigating the SDK",
         "Use the integration graph, field inspector, menus, and search efficiently.",
         """Package imports and audits are grouped under Import or audit package. Inspect or export applies to the selected package, and Package tools contains cross-package workflows.
 
-Use the persistent sidebar to move between Package Linker, Asset Viewer, Vehicle Workbench, RPF Archives, Package Recipes, and Help Center. Ctrl+1–6 selects those workspaces without opening another application window. The SDK Console remains available along the bottom in every context.
+Use the workspace sidebar to move between Package Linker, Asset Viewer, Content Workbench, RPF Archives, Package Recipes, and Help Center. The slim arrow on its right edge points < while open to fold the sidebar in, then points > to expand it back out; Ctrl+B or View > Show workspace sidebar provides the same toggle from anywhere. Ctrl+1–6 selects those workspaces without opening another application window. A compact ‹ previous-workspace link appears in the header when there is somewhere useful to return; Alt+Left activates the same history route even while the sidebar is folded. Ctrl+Tab and Ctrl+Shift+Tab cycle between workspaces. The SDK Console remains available along the bottom in every context.
 
 Select an integration node to see its source, contract, and linked fields. Select a field for a plain-language explanation. Ctrl+` focuses or expands the console dock and F1 routes to contextual help.""",
         ("navigation", "menus", "graph", "field", "keyboard"),
@@ -111,7 +115,7 @@ Select the matching Legacy or Enhanced installation only when archive keys or na
         "Trace game-facing fields and audit add-on integration before installation.",
         """The Add-on SDK links authored package fields to metadata, native UI text, animations, runtime behavior, packaging, and rollback expectations.
 
-Import a DLC folder or archive, inspect its integration graph, then select nodes and fields for explanations. Package Tools opens the persistent Package Recipes workspace alongside DLC inventory, vehicle-data compilation, and structured META/XML comparison and round-trip tools.
+Import a DLC folder or archive, inspect its integration graph, then select nodes and fields for explanations. Workbench keeps vehicle, weapon, and ped projects in three tabs backed by the same package scan. Package Tools opens the persistent Package Recipes workspace alongside DLC inventory, vehicle-data compilation, and structured META/XML comparison and round-trip tools.
 
 Package Recipes recognizes official XML add/replace/remove, bounded line-oriented text, and native PSO grammar as compile workflows while keeping wildcard text masks, PSO edits in newly created archives, unbounded archive creation, ambiguous selectors, and unknown operations blocked. Select the matching outer RPF to compile supported recipes into verified payloads and a hash-bound inert plan; the source archive is not written. Native PSO targets are decoded with the selected game's keys, edited through bounded XPath, rebuilt against their immutable source, reparsed, and required to match the edited XML semantically. Text insert/replace/delete selectors use exact or prefix matching and must resolve to one line. Bounded createIfNotExist recipes replay declared adds, structured edits, and cleanup deletes in order before becoming exactly verified managed packages, while exact adds/replacements/deletes inside existing nested RPF trees can be exported as payload-backed batch manifests.""",
         ("authoring", "addon", "dlc", "audit", "linker", "developer"),
@@ -131,11 +135,46 @@ Workspace tools > Open YTD texture workspace switches this same window into a se
         ("ytd", "ydr", "yft", "awc", "audio", "texture", "model", "preview", "codewalker"),
     ),
     HelpTopic(
+        "workbench", "Inspectors", "Content Workbench",
+        "Review vehicle, weapon, and ped projects without reopening the package.",
+        """Open a loose add-on folder or supported archive once. The Workbench scans it once, shows counts on the Vehicles, Weapons, and Peds tabs, and keeps every specialist view tied to that same package evidence.
+
+Vehicles provides the existing model viewport and guarded vehicle-authoring tools. Weapons links definitions to ammo, animations, shop registration, attachment points, component models, and streamed assets. Peds links peds.meta definitions to drawable dictionaries, texture dictionaries, props, movement clips, and expression data.
+
+The Package Linker and all three content workbenches use the same slim green divider arrows around their center workspace. Use the left arrow to fold the catalog out and the right arrow to fold the inspector out; the arrows reverse when collapsed. Expanding a side restores its previous width, selection, and edit state, while the center workspace immediately uses the released room.
+
+Use Open selected asset to route a project member into the SDK Asset Viewer without creating another application window. Missing links remain visible as review findings; the Workbench does not invent metadata or execute package code. Console and Agent API command inspect-workbench returns the same records, component links, and findings as structured JSON. open-workbench accepts --category auto, vehicles, weapons, or peds. The older open-vehicle-workbench command remains a compatibility alias.""",
+        (
+            "workbench", "vehicle", "weapon", "ped", "package", "project",
+            "attachment", "component", "metadata",
+        ),
+    ),
+    HelpTopic(
+        "weapon-workbench", "Inspectors", "Weapons Workbench",
+        "Trace a weapon from its definition through attachments and package assets.",
+        """Select a weapon to review its slot, model, ammo pool, HUD and stat names, animation mapping, shop registration, and source metadata. Attachments lists every component linked at each attach bone, including the default choice and component model when the package declares it.
+
+Readiness separates required integration from optional attachment content. Asset matching is evidence-based and includes related drawable, texture, collision, and metadata files. Double-click an asset or use Open selected asset to continue in Asset Viewer. This first workbench pass is read-only; it exposes the complete structure needed for a later guarded weapon-authoring workflow without guessing component hashes or game behavior.""",
+        ("weapon", "ammo", "attachment", "component", "shop", "animation"),
+    ),
+    HelpTopic(
+        "ped-workbench", "Inspectors", "Peds Workbench",
+        "Review ped definitions, streamed models, textures, props, and motion links.",
+        """Select a ped to inspect its peds.meta fields and the package files that share its model or props identity. Readiness distinguishes visible loose assets from content that may still be packed inside an opaque RPF.
+
+The workbench checks core definition fields, drawable and texture presence, props, movement clip sets, and expression sets. Double-click a related file or use Open selected asset to inspect supported native content in Asset Viewer. It never previews a model by executing scripts or loading it into GTA V.""",
+        ("ped", "peds.meta", "ydd", "ydr", "ytd", "props", "movement"),
+    ),
+    HelpTopic(
         "vehicle-workbench", "Inspectors", "Vehicle Workbench",
         "Inspect each vehicle as one linked model, texture, metadata, and registration project.",
         """Open a loose DLC folder or supported package archive. The workbench resolves every vehicles.meta record against its primary and high-detail YFT fragments, YTD texture dictionary, handling record, variation record, tuning kits, labels, and DLC registration evidence.
 
-Select a vehicle on the left to see its resolved project members and unresolved links. The central diagnostic viewport uses the same bounded native conversion as Asset Viewer. Use the mouse wheel or plus/minus controls to zoom, left-drag to pan, right-drag to orbit, the tilt controls to change elevation, Fit to fill the workspace, and 100% to reset the image scale. Switch between primary and high-detail fragments, isolate any decoded LOD, or select one drawable component without reconverting the model. The component summary reports geometry counts, shader/material names, and named texture references. The workbench retains at most two decoded fragment scenes to keep memory bounded.
+Select a vehicle on the left to see its resolved project members and unresolved links. The live viewport is the responsive inspection view, works without Blender, and uses the same bounded native conversion as Asset Viewer. Its compact dark strip keeps the model area clear: choose Shaded for a lit solid preview, Materials to inspect material assignments, or Wireframe to study topology. Render full-quality frame stays inside the SDK viewport renderer and produces a more detailed static inspection frame; Studio / Compiled Render is the separate option for an offline presentation still. Model opens the fragment, LOD, and component filters; View provides perspective, orthographic-style side/front/top presets, incremental orbit controls, and camera reset. Use the mouse wheel or +/− keys to zoom, left-drag to pan, right-drag to orbit, F or a left double-click to fit, 0 to return to 100%, and R or a right double-click to reset the camera. The on-canvas summary reports geometry counts, shader/material names, and named texture references without taking another permanent toolbar row. Interactive orbit uses a reduced preview budget and resolves to the normal detailed render when released. Render full-quality frame is an opt-in background job for dense models and is cached for the exact model, filters, mode, and camera view. The workbench retains at most two decoded fragment scenes to keep memory bounded.
+
+Studio / Compiled Render opens one embedded drawer over the viewport instead of another application window. It uses Blender as a separately installed, optional offline renderer; Blender is not bundled, and every live viewport feature remains available without it. Choose the Eevee or Cycles render engine and a CPU/GPU device, then set the resolution, studio lighting rig, background, and output file. Advanced settings expose samples, custom dimensions, light rotation and strength, and an exact background color. Transparent output is available for PNG renders. The drawer reports the detected Blender backend, render stage, and progress. Cancel cooperatively stops an active job, and Open output becomes available only after a verified image is produced. If Blender is not detected, Locate Blender selects an existing executable and Get Blender opens the official download page; the SDK never downloads or installs it automatically.
+
+Compiled rendering is output-only: it creates temporary interchange files in an isolated workspace, removes them when the job finishes, and writes only the verified PNG to the output file you chose. It never changes the source package, RPF contents, vehicle metadata, or GTA V installation. Console and Agent API command render-native-model exposes the same guarded renderer for one existing YDR, YDD, or YFT source and an external PNG destination. A linked loose YTD is decoded through the verified native workspace path, and the renderer preserves UV0 plus named diffuse, normal, emissive, and specular sampler roles. Vehicle YFTs discover a safe same-name sibling YTD automatically; --texture-dictionary selects another explicit file. Missing shared-game textures retain the semantic material fallback. The render reproduces linked texture pixels but approximates game shader programs, reflections, and skinning, so it remains a presentation and diagnostic render rather than an exact in-game frame.
 
 Select a project member and choose Open selected in Asset Viewer, or double-click it, to continue detailed inspection and supported native workspace export inside the same SDK window. Open texture dictionary jumps directly to the linked YTD, where the existing editable texture workspace can be exported, changed, validated, and rebuilt.
 
@@ -149,7 +188,8 @@ Export vehicle project writes a new portable vehicle-project.json plus a readabl
             "carcols", "tuning", "viewport", "zoom", "pan", "component",
             "material", "package", "dlc.rpf", "author", "handling", "undo",
             "colors", "liveries", "lights", "sirens", "identity", "migration",
-            "parts", "performance", "slot", "builder",
+            "parts", "performance", "slot", "builder", "live viewport",
+            "studio render", "compiled render", "blender", "eevee", "cycles",
         ),
     ),
     HelpTopic(
@@ -259,8 +299,9 @@ class HelpCenterDialog(ttk.Frame):
         if not embedded:
             self._window = tk.Toplevel(parent)
             self._window.title("ALLIN1 SDK Help Center")
-            self._window.geometry("1040x700")
-            self._window.minsize(780, 540)
+            place_window(
+                self._window, preferred=(1040, 700), minimum=(780, 540),
+            )
             self._window.transient(parent.winfo_toplevel())
             host = self._window
         super().__init__(host)
@@ -271,7 +312,9 @@ class HelpCenterDialog(ttk.Frame):
         self._build()
         self._populate()
         if self._window is not None:
-            self.bind("<Escape>", lambda _event: self._window.destroy())
+            self._window.bind("<Escape>", lambda _event: self._window.destroy())
+            self._window.bind("<Control-f>", self._focus_search)
+            self.after_idle(self.search_entry.focus_set)
 
     def _build(self) -> None:
         outer = ttk.Frame(self, padding=20)
@@ -299,8 +342,9 @@ class HelpCenterDialog(ttk.Frame):
             anchor="w",
         )
         self.query = tk.StringVar()
-        search = ttk.Entry(navigation, textvariable=self.query)
-        search.pack(fill="x", pady=(6, 12))
+        self.search_entry = ttk.Entry(navigation, textvariable=self.query)
+        self.search_entry.pack(fill="x", pady=(6, 12))
+        self.search_entry.bind("<Escape>", lambda _event: self._clear_search())
         self.query.trace_add("write", lambda *_args: self._populate())
         self.results = tk.Listbox(
             navigation, exportselection=False, activestyle="none", borderwidth=0,
@@ -315,6 +359,7 @@ class HelpCenterDialog(ttk.Frame):
         self.results.pack(side="left", fill="both", expand=True)
         result_scroll.pack(side="right", fill="y")
         self.results.bind("<<ListboxSelect>>", self._select_topic)
+        self.results.bind("<Return>", self._select_topic)
 
         self.category = tk.StringVar(value="START HERE")
         self.heading = tk.StringVar(value="Select a help topic")
@@ -351,7 +396,7 @@ class HelpCenterDialog(ttk.Frame):
         self.results.delete(0, "end")
         self.topic_items.clear()
         for index, topic in enumerate(self.visible_topics):
-            label = f"{topic.category}\n   {topic.title}"
+            label = f"{topic.category} · {topic.title}"
             self.results.insert("end", label)
             self.topic_items[str(index)] = topic
         if not self.visible_topics:
@@ -370,6 +415,15 @@ class HelpCenterDialog(ttk.Frame):
         self.results.selection_set(selected_index)
         self.results.see(selected_index)
         self._show_topic(self.visible_topics[selected_index])
+
+    def _focus_search(self, _event: object | None = None) -> str:
+        self.search_entry.focus_set()
+        self.search_entry.selection_range(0, "end")
+        return "break"
+
+    def _clear_search(self) -> str:
+        self.query.set("")
+        return "break"
 
     def show_topic(self, key: str) -> None:
         """Navigate an existing help workspace without opening a window."""

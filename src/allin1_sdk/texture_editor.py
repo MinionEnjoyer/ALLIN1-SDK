@@ -111,9 +111,18 @@ class TextureDictionaryEditorFrame(ttk.Frame):
             self.tree.column(name, width=width, minwidth=40, stretch=name == "format")
         self.tree.column("#0", width=180, minwidth=110)
         scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        self.texture_xscroll = ttk.Scrollbar(
+            tree_frame, orient="horizontal", command=self.tree.xview,
+        )
+        self.tree.configure(
+            yscrollcommand=scroll.set,
+            xscrollcommand=self.texture_xscroll.set,
+        )
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.texture_xscroll.grid(row=1, column=0, sticky="ew")
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", self._select)
 
         self.preview_title = tk.StringVar(value="Select a texture")

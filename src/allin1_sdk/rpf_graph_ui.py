@@ -24,6 +24,7 @@ from allin1_sdk.rpf_graph_previews import (
 )
 from allin1_sdk.rpf_program_ui import RpfProgramFrame
 from allin1_sdk.rpf_tools import RpfExplorerService
+from allin1_sdk.ui_foundation import place_window
 
 
 NODE_WIDTH = 270
@@ -39,7 +40,7 @@ class _GraphWorkDialog(tk.Toplevel):
     def __init__(self, parent: tk.Misc, title: str, message: str, work, completed) -> None:
         super().__init__(parent)
         self.title(title)
-        self.geometry("520x145")
+        place_window(self, preferred=(520, 145), minimum=(440, 130))
         self.resizable(False, False)
         self.transient(parent.winfo_toplevel())
         self.grab_set()
@@ -319,7 +320,7 @@ class RpfPackageGraphFrame(ttk.Frame):
         canvas_host.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(
             canvas_host, background="#111714", highlightthickness=0,
-            scrollregion=(0, 0, 5000, 5000),
+            scrollregion=(0, 0, 5000, 5000), takefocus=True,
         )
         x_scroll = ttk.Scrollbar(canvas_host, orient="horizontal", command=self.canvas.xview)
         y_scroll = ttk.Scrollbar(canvas_host, orient="vertical", command=self.canvas.yview)
@@ -336,6 +337,7 @@ class RpfPackageGraphFrame(ttk.Frame):
         self.canvas.bind("<Shift-MouseWheel>", self._shift_mousewheel)
         self.canvas.bind("<Control-MouseWheel>", self._zoom_mousewheel)
         self.canvas.bind("<Double-1>", self._activate_selected)
+        self.canvas.bind("<Return>", self._activate_selected)
         self.canvas.bind("<Button-3>", self._show_context_menu)
 
         ttk.Label(
@@ -803,6 +805,7 @@ class RpfPackageGraphFrame(ttk.Frame):
         return next((tag[len(prefix):] for tag in tags if tag.startswith(prefix)), None)
 
     def _press(self, event: tk.Event) -> None:
+        self.canvas.focus_set()
         tags = self._tags_at_current()
         node_id = self._tag_value(tags, "node:")
         if node_id is None:
@@ -1515,8 +1518,9 @@ class RpfPackageGraphDialog(tk.Toplevel):
         super().__init__(parent)
         self._on_close = on_close
         self.title("ALLIN1 — RPF Package Node Graph")
-        self.geometry("1460x900")
-        self.minsize(1050, 680)
+        place_window(
+            self, preferred=(1460, 900), minimum=(1050, 680),
+        )
         self.transient(parent.winfo_toplevel())
         self.editor = RpfPackageGraphFrame(
             self, graph, project_root, game_path, on_close=self._finish_close,

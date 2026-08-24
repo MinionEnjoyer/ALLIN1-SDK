@@ -414,6 +414,26 @@ class WeaponRecord:
 
 
 @dataclass(frozen=True)
+class WeaponComponentRecord:
+    source: str
+    name: str
+    model: str
+    loc_name: str
+    loc_desc: str
+    attach_bone: str
+    component_type: str
+
+
+@dataclass(frozen=True)
+class WeaponComponentLink:
+    source: str
+    weapon_name: str
+    component_name: str
+    attach_bone: str
+    default: bool
+
+
+@dataclass(frozen=True)
 class AmmoRecord:
     source: str
     name: str
@@ -462,6 +482,19 @@ class VehicleKitRecord:
 
 
 @dataclass(frozen=True)
+class PedRecord:
+    source: str
+    name: str
+    ped_type: str
+    model_type: str
+    props_name: str
+    clip_dictionary: str
+    expression_set: str
+    movement_clip_set: str
+    creature_metadata: str
+
+
+@dataclass(frozen=True)
 class PackageRegistrationRecord:
     source: str
     kind: str
@@ -501,6 +534,9 @@ class PackageScan:
     installation_targets: tuple[str, ...] = ()
     dependency_hints: tuple[str, ...] = ()
     plugin_details: tuple[BinaryPluginRecord, ...] = ()
+    weapon_components: tuple[WeaponComponentRecord, ...] = ()
+    weapon_component_links: tuple[WeaponComponentLink, ...] = ()
+    peds: tuple[PedRecord, ...] = ()
 
     @property
     def valid(self) -> bool:
@@ -567,12 +603,15 @@ class AddonPackageInspector:
 
         weapons: list[WeaponRecord] = []
         ammo: list[AmmoRecord] = []
+        weapon_components: list[WeaponComponentRecord] = []
+        weapon_component_links: list[WeaponComponentLink] = []
         animations: list[str] = []
         shop_weapons: list[str] = []
         vehicles: list[VehicleRecord] = []
         handlings: list[HandlingRecord] = []
         variations: list[VehicleVariationRecord] = []
         kits: list[VehicleKitRecord] = []
+        peds: list[PedRecord] = []
         registrations: list[PackageRegistrationRecord] = []
         for entry in entries:
             if entry.content is None:
@@ -595,12 +634,19 @@ class AddonPackageInspector:
             found_weapons, found_ammo = self._metadata_records(entry.path, root)
             weapons.extend(found_weapons)
             ammo.extend(found_ammo)
+            weapon_components.extend(
+                self._weapon_component_records(entry.path, root)
+            )
+            weapon_component_links.extend(
+                self._weapon_component_links(entry.path, root)
+            )
             animations.extend(self._animation_records(root))
             shop_weapons.extend(self._shop_records(root))
             vehicles.extend(self._vehicle_records(entry.path, root))
             handlings.extend(self._handling_records(entry.path, root))
             variations.extend(self._variation_records(entry.path, root))
             kits.extend(self._kit_records(entry.path, root))
+            peds.extend(self._ped_records(entry.path, root))
             registrations.extend(self._xml_registration_records(entry.path, root))
 
         binary_plugins = tuple(
@@ -621,7 +667,7 @@ class AddonPackageInspector:
         replacement_assets = tuple(
             entry.path for entry in entries
             if entry.suffix in ASSET_SUFFIXES
-            and ((not vehicles and not weapons and not binary_plugins) or any(
+            and ((not vehicles and not weapons and not peds and not binary_plugins) or any(
                 part.casefold().endswith(".rpf")
                 for part in PurePosixPath(entry.path).parts
             ))
@@ -699,6 +745,8 @@ class AddonPackageInspector:
             package_kinds.append("vehicle_addon")
         if weapons:
             package_kinds.append("weapon_addon")
+        if peds:
+            package_kinds.append("ped_addon")
         if not package_kinds:
             package_kinds.append("data_or_unknown")
 
@@ -761,6 +809,17 @@ class AddonPackageInspector:
 
         weapons = self._dedupe_records(weapons, lambda item: item.name, findings)
         ammo = self._dedupe_records(ammo, lambda item: item.name, findings)
+        weapon_components = self._dedupe_records(
+            weapon_components, lambda item: item.name, findings,
+        )
+        weapon_component_links = self._dedupe_records(
+            weapon_component_links,
+            lambda item: (
+                item.weapon_name.casefold(), item.component_name.casefold(),
+                item.attach_bone.casefold(),
+            ),
+            findings,
+        )
         vehicles = self._dedupe_records(
             vehicles, lambda item: item.model_name.casefold(), findings,
         )
@@ -773,34 +832,46 @@ class AddonPackageInspector:
         kits = self._dedupe_records(
             kits, lambda item: item.name.casefold(), findings,
         )
+        peds = self._dedupe_records(
+            peds, lambda item: item.name.casefold(), findings,
+        )
         animation_names = tuple(_unique(animations))
         shop_names = tuple(_unique(shop_weapons))
-        ammo_names = {item.name for item in ammo}
-        animation_set = set(animation_names)
-        shop_set = set(shop_names)
+        ammo_names = {item.name.casefold() for item in ammo}
+        animation_set = {item.casefold() for item in animation_names}
+        shop_set = {item.casefold() for item in shop_names}
+        component_names = {item.name.casefold() for item in weapon_components}
         for weapon in weapons:
             if not weapon.ammo_info:
                 findings.append(PackageFinding(
                     "warning", "weapon_ammo_reference_missing",
                     f"{weapon.name} has no AmmoInfo reference.", weapon.source,
                 ))
-            elif weapon.ammo_info not in ammo_names:
+            elif weapon.ammo_info.casefold() not in ammo_names:
                 findings.append(PackageFinding(
                     "warning", "ammo_definition_not_found",
                     f"{weapon.name} references {weapon.ammo_info}, but its definition "
                     "was not visible in the package.", weapon.source,
                 ))
-            if weapon.name not in animation_set:
+            if weapon.name.casefold() not in animation_set:
                 findings.append(PackageFinding(
                     "warning", "animation_mapping_not_found",
                     f"No weaponanimations mapping was discovered for {weapon.name}.",
                     weapon.source,
                 ))
-            if weapon.name not in shop_set:
+            if weapon.name.casefold() not in shop_set:
                 findings.append(PackageFinding(
                     "warning", "storefront_mapping_not_found",
                     f"No weapon_shop entry was discovered for {weapon.name}.",
                     weapon.source,
+                ))
+        for link in weapon_component_links:
+            if link.component_name.casefold() not in component_names:
+                findings.append(PackageFinding(
+                    "warning", "weapon_component_definition_not_found",
+                    f"{link.weapon_name} references {link.component_name}, but its "
+                    "component definition was not visible in the package.",
+                    link.source,
                 ))
 
         handling_names = {item.name.casefold() for item in handlings}
@@ -866,6 +937,31 @@ class AddonPackageInspector:
                             f"{model_name}.", kit.source,
                         ))
 
+        ydd_models = {
+            PurePosixPath(entry.path).stem.casefold()
+            for entry in entries if entry.suffix == ".ydd"
+        }
+        ydr_models = {
+            PurePosixPath(entry.path).stem.casefold()
+            for entry in entries if entry.suffix == ".ydr"
+        }
+        has_loose_ped_assets = bool(ydd_models or ydr_models or ytd_models)
+        if has_loose_ped_assets:
+            for ped in peds:
+                model = ped.name.casefold()
+                if model not in ydd_models and model not in ydr_models:
+                    findings.append(PackageFinding(
+                        "warning", "ped_model_asset_not_found",
+                        f"No streamed YDD/YDR was discovered for {ped.name}.",
+                        ped.source,
+                    ))
+                if model not in ytd_models:
+                    findings.append(PackageFinding(
+                        "warning", "ped_texture_asset_not_found",
+                        f"No streamed YTD was discovered for {ped.name}.",
+                        ped.source,
+                    ))
+
         entry_paths = {entry.path.casefold() for entry in entries}
         for registration in registrations:
             if registration.kind != "fivem-resource":
@@ -900,23 +996,39 @@ class AddonPackageInspector:
                 f"{len(rpf_entries) - 20} additional RPF archives were omitted "
                 "from individual warnings.",
             ))
-        if not weapons and not vehicles:
+        if not weapons and not vehicles and not peds:
             findings.append(PackageFinding(
                 "warning", "no_content_records",
-                "No custom weapon or vehicle records were discovered. The draft "
+                "No custom weapon, vehicle, or ped records were discovered. The draft "
                 "will describe the detected plug-in, replacement, shader, archive, "
                 "or generic package shape instead.",
             ))
         return PackageScan(
-            path, source_kind, tuple(entries), tuple(findings),
-            tuple(weapons), tuple(ammo), animation_names, shop_names,
-            tuple(vehicles), tuple(handlings), tuple(variations), tuple(kits),
-            tuple(registrations),
-            binary_plugins, config_files, shader_assets, replacement_assets,
-            tuple(_unique(package_kinds)), tuple(_unique(edition_hints)),
-            tuple(_unique(installation_targets)),
-            tuple(_unique(dependency_hints)),
-            plugin_details,
+            source=path,
+            source_kind=source_kind,
+            entries=tuple(entries),
+            findings=tuple(findings),
+            weapons=tuple(weapons),
+            ammo=tuple(ammo),
+            animation_weapons=animation_names,
+            shop_weapons=shop_names,
+            vehicles=tuple(vehicles),
+            handlings=tuple(handlings),
+            variations=tuple(variations),
+            kits=tuple(kits),
+            registrations=tuple(registrations),
+            binary_plugins=binary_plugins,
+            config_files=config_files,
+            shader_assets=shader_assets,
+            replacement_assets=replacement_assets,
+            package_kinds=tuple(_unique(package_kinds)),
+            edition_hints=tuple(_unique(edition_hints)),
+            installation_targets=tuple(_unique(installation_targets)),
+            dependency_hints=tuple(_unique(dependency_hints)),
+            plugin_details=plugin_details,
+            weapon_components=tuple(weapon_components),
+            weapon_component_links=tuple(weapon_component_links),
+            peds=tuple(peds),
         )
 
     def _read_external_archive(
@@ -1132,6 +1244,66 @@ class AddonPackageInspector:
                 ))
         return weapons, ammo
 
+    @classmethod
+    def _weapon_component_records(
+        cls, source: str, root: ET.Element,
+    ) -> list[WeaponComponentRecord]:
+        records: list[WeaponComponentRecord] = []
+        for item in root.iter():
+            if _local_name(item.tag) != "Item":
+                continue
+            name = cls._direct_value(item, "Name")
+            component_type = item.attrib.get("type", "").strip()
+            if not name.startswith("COMPONENT_"):
+                continue
+            model = cls._direct_value(item, "Model")
+            loc_name = cls._direct_value(item, "LocName")
+            loc_desc = cls._direct_value(item, "LocDesc")
+            attach_bone = cls._direct_value(item, "AttachBone")
+            if not any((model, loc_name, loc_desc, attach_bone, component_type)):
+                continue
+            records.append(WeaponComponentRecord(
+                source, name, model, loc_name, loc_desc, attach_bone,
+                component_type,
+            ))
+        return records
+
+    @classmethod
+    def _weapon_component_links(
+        cls, source: str, root: ET.Element,
+    ) -> list[WeaponComponentLink]:
+        records: list[WeaponComponentLink] = []
+        for weapon in root.iter():
+            if _local_name(weapon.tag) != "Item":
+                continue
+            weapon_name = cls._direct_value(weapon, "Name")
+            if not weapon_name.startswith("WEAPON_"):
+                continue
+            for attach_points in weapon:
+                if _local_name(attach_points.tag) != "AttachPoints":
+                    continue
+                for attach in attach_points:
+                    if _local_name(attach.tag) != "Item":
+                        continue
+                    attach_bone = cls._direct_value(attach, "AttachBone")
+                    for components in attach:
+                        if _local_name(components.tag) != "Components":
+                            continue
+                        for component in components:
+                            if _local_name(component.tag) != "Item":
+                                continue
+                            component_name = cls._direct_value(component, "Name")
+                            if not component_name.startswith("COMPONENT_"):
+                                continue
+                            default_text = cls._direct_value(
+                                component, "Default",
+                            ).casefold()
+                            records.append(WeaponComponentLink(
+                                source, weapon_name, component_name, attach_bone,
+                                default_text in {"1", "true", "yes"},
+                            ))
+        return records
+
     @staticmethod
     def _animation_records(root: ET.Element) -> list[str]:
         return _unique(
@@ -1175,6 +1347,44 @@ class AddonPackageInspector:
                     cls._direct_value(item, "layout"),
                     cls._direct_value(item, "type"),
                     cls._direct_value(item, "vehicleClass"),
+                ))
+        return records
+
+    @classmethod
+    def _ped_records(
+        cls, source: str, root: ET.Element,
+    ) -> list[PedRecord]:
+        records: list[PedRecord] = []
+        for container in root.iter():
+            if _local_name(container.tag) != "InitDatas":
+                continue
+            for item in container:
+                if _local_name(item.tag) != "Item":
+                    continue
+                # vehicles.meta uses lower-case modelName while peds.meta uses
+                # the game-facing Name field. Keep the two record families
+                # disjoint even when both appear in one imported package.
+                if cls._direct_value(item, "modelName"):
+                    continue
+                name = cls._direct_value(item, "Name")
+                ped_type = cls._direct_value(item, "Pedtype")
+                props_name = cls._direct_value(item, "PropsName")
+                movement = cls._direct_value(item, "MovementClipSet")
+                creature = cls._direct_value(item, "CreatureMetadataName")
+                if not name or not any((ped_type, props_name, movement, creature)):
+                    continue
+                records.append(PedRecord(
+                    source=source,
+                    name=name,
+                    ped_type=ped_type,
+                    model_type=cls._direct_value(item, "ModelType"),
+                    props_name=props_name,
+                    clip_dictionary=cls._direct_value(
+                        item, "ClipDictionaryName",
+                    ),
+                    expression_set=cls._direct_value(item, "ExpressionSetName"),
+                    movement_clip_set=movement,
+                    creature_metadata=creature,
                 ))
         return records
 
@@ -1494,6 +1704,48 @@ class AddonDraftBuilder:
                     "weapon-ammo", "AmmoInfo", "ammo.imported", "Name",
                     "uses_ammo", "Match each weapon to its declared ammo pool.",
                 ))
+        if scan.weapon_components:
+            nodes.append(sourced({
+                "id": "weapon-components.imported",
+                "kind": "weapon_component",
+                "label": (
+                    "Discovered weapon components "
+                    f"({len(scan.weapon_components)})"
+                ),
+                "description": (
+                    "Attachment definitions inferred from weapon component metadata."
+                ),
+                "fields": {
+                    "WeaponNames": _unique(
+                        item.weapon_name for item in scan.weapon_component_links
+                    ),
+                    "Names": [item.name for item in scan.weapon_components],
+                    "Models": [item.model for item in scan.weapon_components],
+                    "AttachBones": [
+                        item.attach_bone for item in scan.weapon_components
+                    ],
+                    "ComponentTypes": [
+                        item.component_type for item in scan.weapon_components
+                    ],
+                },
+            }, scan.weapon_components[0].source))
+            linked_components = _unique(
+                item.component_name for item in scan.weapon_component_links
+            )
+            if scan.weapons and linked_components:
+                references.append({
+                    "id": "weapon-components",
+                    "source": "weapons.imported",
+                    "source_field": "Name",
+                    "target": "weapon-components.imported",
+                    "target_field": "WeaponNames",
+                    "relationship": "offers_components",
+                    "description": (
+                        "Weapon attachment mappings are retained for specialist "
+                        "Workbench review."
+                    ),
+                    "required": False,
+                })
         if scan.animation_weapons:
             source = next((
                 entry.path for entry in scan.entries
@@ -1626,9 +1878,34 @@ class AddonDraftBuilder:
                     source="vehicles.imported",
                 ))
 
+        if scan.peds:
+            nodes.append(sourced({
+                "id": "peds.imported", "kind": "ped",
+                "label": f"Discovered ped records ({len(scan.peds)})",
+                "description": "Ped definitions inferred from peds.meta.",
+                "fields": {
+                    "Names": [item.name for item in scan.peds],
+                    "PedTypes": [item.ped_type for item in scan.peds],
+                    "ModelTypes": [item.model_type for item in scan.peds],
+                    "PropsNames": [item.props_name for item in scan.peds],
+                    "ClipDictionaries": [
+                        item.clip_dictionary for item in scan.peds
+                    ],
+                    "ExpressionSets": [
+                        item.expression_set for item in scan.peds
+                    ],
+                    "MovementClipSets": [
+                        item.movement_clip_set for item in scan.peds
+                    ],
+                    "CreatureMetadata": [
+                        item.creature_metadata for item in scan.peds
+                    ],
+                },
+            }, scan.peds[0].source))
+
         streamed_models = _unique(
             PurePosixPath(entry.path).stem for entry in scan.entries
-            if entry.suffix == ".yft"
+            if entry.suffix in {".ydr", ".ydd", ".yft"}
         )
         streamed_textures = _unique(
             PurePosixPath(entry.path).stem for entry in scan.entries
@@ -1636,12 +1913,12 @@ class AddonDraftBuilder:
         )
         streamed_assets = [
             entry.path for entry in scan.entries
-            if entry.suffix in {".yft", ".ytd"}
+            if entry.suffix in {".ydr", ".ydd", ".yft", ".ytd"}
         ]
-        if streamed_assets and (scan.vehicles or scan.kits):
+        if streamed_assets and (scan.vehicles or scan.kits or scan.peds):
             nodes.append({
                 "id": "streaming.imported", "kind": "streaming",
-                "label": f"Discovered streamed vehicle assets ({len(streamed_assets)})",
+                "label": f"Discovered streamed assets ({len(streamed_assets)})",
                 "fields": {
                     "ModelNames": streamed_models,
                     "TextureNames": streamed_textures,
@@ -1662,6 +1939,20 @@ class AddonDraftBuilder:
                     "Require every tuning model referenced by carcols.meta.",
                     source="tuning.imported",
                 ))
+            if scan.peds:
+                references.append({
+                    "id": "ped-stream",
+                    "source": "peds.imported",
+                    "source_field": "Names",
+                    "target": "streaming.imported",
+                    "target_field": "ModelNames",
+                    "relationship": "streams_ped_assets",
+                    "description": (
+                        "Associate ped definitions with their streamed drawable "
+                        "and texture dictionaries."
+                    ),
+                    "required": False,
+                })
 
         if scan.registrations:
             registration_sources = [item.source for item in scan.registrations]
