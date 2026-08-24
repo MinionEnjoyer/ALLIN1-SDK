@@ -316,6 +316,7 @@ class GuardedXmlWorkspace:
         changes: tuple[dict[str, str], ...],
         *,
         operation: str,
+        renames: tuple[dict[str, str], ...] = (),
     ) -> Path:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         history = self.root / "history" / f"{stamp}-edit"
@@ -338,7 +339,12 @@ class GuardedXmlWorkspace:
                 "files": sorted(paths, key=str.casefold),
                 "sha256": hashes,
                 "changes": list(changes),
+                "renames": [dict(item) for item in renames],
             }
+            # Validate the complete rename graph before retaining a history
+            # record. Restore treats this document as authority, so a rename
+            # may only describe one of the exact members snapshotted above.
+            record["renames"] = list(self._history_renames(record))
             (history / "edit.json").write_text(
                 json.dumps(record, indent=2) + "\n", encoding="utf-8",
             )
@@ -355,6 +361,7 @@ class GuardedXmlWorkspace:
             raise ValueError(f"{self.subject_label} authoring history has invalid files")
         if not isinstance(hashes, dict):
             raise ValueError(f"{self.subject_label} authoring history has invalid hashes")
+        renames = self._history_renames(record)
         staged: dict[str, Path] = {}
         try:
             for value in files:
@@ -380,6 +387,26 @@ class GuardedXmlWorkspace:
                 )
                 shutil.copyfile(backup, temporary)
                 staged[value] = temporary
+            for rename in reversed(renames):
+                before = self.destination(rename["before"])
+                after = self.destination(rename["after"])
+                if after.exists() or after.is_symlink():
+                    if after.is_symlink() or not after.is_file():
+                        raise ValueError(
+                            f"{self.subject_label} authoring renamed member is "
+                            f"unsafe: {rename['after']}"
+                        )
+                    if before.exists() or before.is_symlink():
+                        raise ValueError(
+                            f"{self.subject_label} authoring restore collision: "
+                            f"{rename['before']}"
+                        )
+                    after.replace(before)
+                elif not before.exists() or before.is_symlink() or not before.is_file():
+                    raise ValueError(
+                        f"{self.subject_label} authoring renamed member is missing: "
+                        f"{rename['after']}"
+                    )
             for relative, temporary in staged.items():
                 temporary.replace(self.destination(relative))
         finally:
@@ -402,8 +429,17 @@ class GuardedXmlWorkspace:
             raise ValueError(
                 f"{self.subject_label} authoring history has invalid files"
             )
+        current_names = {
+            item["before"]: item["after"]
+            for item in self._history_renames(record)
+        }
         record["sha256_after"] = {
-            relative: _sha256(self.member(relative))
+            relative: {
+                "path": current_names.get(relative, relative),
+                "sha256": _sha256(
+                    self.member(current_names.get(relative, relative))
+                ),
+            }
             for relative in sorted(files, key=str.casefold)
         }
         self._write_history_record(history, record)
@@ -425,23 +461,36 @@ class GuardedXmlWorkspace:
                 "post-edit state"
             )
         for relative in files:
-            expected = hashes.get(relative)
-            if not isinstance(expected, str):
+            descriptor = hashes.get(relative)
+            if isinstance(descriptor, str):
+                # Schema-one workspaces created before rename-aware history
+                # stored only the post-edit hash. Their path is unchanged.
+                current_path = relative
+                expected = descriptor
+            elif isinstance(descriptor, dict):
+                current_path = descriptor.get("path")
+                expected = descriptor.get("sha256")
+            else:
+                raise ValueError(
+                    f"{self.subject_label} authoring post-edit hash is invalid: "
+                    f"{relative}"
+                )
+            if not isinstance(current_path, str) or not isinstance(expected, str):
                 raise ValueError(
                     f"{self.subject_label} authoring post-edit hash is invalid: "
                     f"{relative}"
                 )
             try:
-                current = _sha256(self.member(relative))
+                current = _sha256(self.member(current_path))
             except (OSError, ValueError) as exc:
                 raise ValueError(
                     f"{self.subject_label} authoring member changed after its "
-                    f"edit: {relative}"
+                    f"edit: {current_path}"
                 ) from exc
             if current != expected:
                 raise ValueError(
                     f"{self.subject_label} authoring member changed after its "
-                    f"edit: {relative}"
+                    f"edit: {current_path}"
                 )
 
     def commit_trees(self, trees: dict[str, etree._ElementTree]) -> None:
@@ -488,11 +537,19 @@ class GuardedXmlWorkspace:
         files = record.get("files")
         if not isinstance(files, list) or not all(isinstance(item, str) for item in files):
             raise ValueError(f"{self.subject_label} authoring history has invalid files")
+        renames = self._history_renames(record)
+        current_names = {item["before"]: item["after"] for item in renames}
+        current_files = tuple(current_names.get(item, item) for item in files)
+        recovery_renames = tuple(
+            {"before": item["after"], "after": item["before"]}
+            for item in renames
+        )
         snapshot = self.snapshot(
             str(record.get("subject", "")),
-            tuple(files),
+            current_files,
             (),
             operation=f"{self.operation}_undo_recovery",
+            renames=recovery_renames,
         )
         recovery = snapshot.with_name(f"{snapshot.name}.undo-recovery")
         snapshot.rename(recovery)
@@ -508,6 +565,64 @@ class GuardedXmlWorkspace:
         if not isinstance(value, dict):
             raise ValueError(f"Invalid {self.subject_label} authoring history")
         return value
+
+    def _history_renames(
+        self, record: dict[str, Any],
+    ) -> tuple[dict[str, str], ...]:
+        raw = record.get("renames", ())
+        if not isinstance(raw, (list, tuple)):
+            raise ValueError(
+                f"{self.subject_label} authoring history has invalid renames"
+            )
+        result: list[dict[str, str]] = []
+        raw_files = record.get("files")
+        if not isinstance(raw_files, list) or not all(
+            isinstance(item, str) for item in raw_files
+        ):
+            raise ValueError(
+                f"{self.subject_label} authoring history has invalid files"
+            )
+        file_members = {
+            safe_relative_path(item, label="authoring history member")
+            .as_posix().casefold()
+            for item in raw_files
+        }
+        before_seen: set[str] = set()
+        after_seen: set[str] = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"{self.subject_label} authoring history has an invalid rename"
+                )
+            before = item.get("before")
+            after = item.get("after")
+            if not isinstance(before, str) or not isinstance(after, str):
+                raise ValueError(
+                    f"{self.subject_label} authoring history has an invalid rename"
+                )
+            before_path = safe_relative_path(before, label="authoring rename source")
+            after_path = safe_relative_path(after, label="authoring rename destination")
+            normalized_before = before_path.as_posix()
+            normalized_after = after_path.as_posix()
+            if (
+                normalized_before.casefold() == normalized_after.casefold()
+                or normalized_before.casefold() in before_seen
+                or normalized_after.casefold() in after_seen
+                or normalized_before.casefold() not in file_members
+                or normalized_after.casefold() in file_members
+            ):
+                raise ValueError(
+                    f"{self.subject_label} authoring history has conflicting renames"
+                )
+            self.destination(normalized_before)
+            self.destination(normalized_after)
+            before_seen.add(normalized_before.casefold())
+            after_seen.add(normalized_after.casefold())
+            result.append({
+                "before": normalized_before,
+                "after": normalized_after,
+            })
+        return tuple(result)
 
     def _write_history_record(
         self, history: Path, record: dict[str, Any],

@@ -44,6 +44,7 @@ MAX_PROMPT_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 CONTEXT_SAFETY_TOKENS = 512
 CONTEXT_SAFETY_RATIO = 0.03
+CONTEXT_METADATA_TOKENS = 256
 LOCAL_RUNTIME_KEEPALIVE_SECONDS = 120.0
 MAX_ASSISTANT_RECEIPTS = 50
 MAX_ASSISTANT_RECEIPT_BYTES = 5 * 1024 * 1024
@@ -203,6 +204,57 @@ ASSISTANT_RESPONSE_FORMAT: dict[str, object] = {
         "schema": ASSISTANT_RESPONSE_SCHEMA,
     },
 }
+
+
+def _compact_advisory_schema() -> dict[str, object]:
+    """Return the same advisory contract with deliberately smaller bounds."""
+    schema = json.loads(json.dumps(ASSISTANT_RESPONSE_SCHEMA))
+    properties = schema["properties"]
+    properties["summary"]["maxLength"] = 480
+    properties["findings"]["maxItems"] = 4
+    properties["recommended_operations"]["maxItems"] = 2
+    properties["proposed_changes"]["maxItems"] = 3
+    properties["missing_context"]["maxItems"] = 4
+    properties["abstentions"]["maxItems"] = 4
+    properties["findings"]["items"]["properties"]["evidence"]["maxLength"] = 600
+    properties["recommended_operations"]["items"]["properties"]["arguments"][
+        "maxItems"
+    ] = 8
+    properties["recommended_operations"]["items"]["properties"]["rationale"][
+        "maxLength"
+    ] = 500
+    properties["recommended_operations"]["items"]["properties"]["expected_result"][
+        "maxLength"
+    ] = 400
+    properties["proposed_changes"]["items"]["properties"]["summary"][
+        "maxLength"
+    ] = 500
+    properties["proposed_changes"]["items"]["properties"]["rationale"][
+        "maxLength"
+    ] = 600
+    properties["missing_context"]["items"]["maxLength"] = 400
+    properties["abstentions"]["items"]["maxLength"] = 400
+    return schema
+
+
+ASSISTANT_REVIEW_RESPONSE_SCHEMA = _compact_advisory_schema()
+ASSISTANT_REVIEW_RESPONSE_FORMAT: dict[str, object] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": f"allin1_assistant_review_v{ASSISTANT_RESPONSE_SCHEMA_VERSION}",
+        "strict": True,
+        "schema": ASSISTANT_REVIEW_RESPONSE_SCHEMA,
+    },
+}
+ASSISTANT_REPAIR_RESPONSE_SCHEMA = _compact_advisory_schema()
+ASSISTANT_REPAIR_RESPONSE_FORMAT: dict[str, object] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": f"allin1_assistant_repair_v{ASSISTANT_RESPONSE_SCHEMA_VERSION}",
+        "strict": True,
+        "schema": ASSISTANT_REPAIR_RESPONSE_SCHEMA,
+    },
+}
 _SEVERITIES = frozenset({"info", "low", "medium", "high", "blocker", "critical"})
 _SEVERITY_DOMAINS = frozenset({"engineering", "security"})
 _EVIDENCE_STATES = frozenset({"confirmed", "inferred", "speculative"})
@@ -268,8 +320,13 @@ class PromptResult:
     estimated_input_tokens: int = 0
     actual_input_tokens: int | None = None
     actual_output_tokens: int | None = None
+    reserved_output_tokens: int = 0
     startup_seconds: float = 0.0
+    grounding_seconds: float = 0.0
+    primary_inference_seconds: float = 0.0
+    repair_seconds: float = 0.0
     inference_seconds: float = 0.0
+    repair_attempts: tuple[Mapping[str, object], ...] = ()
     truncated: bool = False
     omitted_context: tuple[str, ...] = ()
     receipt_path: str = ""
@@ -304,6 +361,19 @@ class StructuredPromptResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class ReviewResult:
+    symbols: tuple[str, ...]
+    priorities: tuple[str, ...]
+    source_discovery: Mapping[str, object]
+    chunks: tuple[Mapping[str, object], ...]
+    advisory: Mapping[str, object]
+    synthesis_method: str = "deterministic_validated_chunk_merge"
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
 class AssistantContextOverflow(ValueError):
     """Structured pre-inference refusal when the prompt cannot fit safely."""
 
@@ -318,6 +388,7 @@ class GroundingPlan:
     context: Mapping[str, object]
     estimated_input_tokens: int
     input_budget_tokens: int
+    reserved_output_tokens: int
     omitted_context: tuple[str, ...]
     truncated: bool
 
@@ -365,22 +436,31 @@ def _context_safety_tokens(context_tokens: int) -> int:
 
 
 def _grounding_preflight(context: Mapping[str, object]) -> dict[str, object]:
-    requested = 0
+    requested_symbols: set[str] = set()
+    preserved_symbols: set[str] = set()
     compacted: list[str] = []
-    preserved = True
     for raw in context.get("selected_grounding", []):
         if not isinstance(raw, Mapping) or raw.get("kind") != "source":
             continue
         symbols = [str(item) for item in raw.get("symbols", []) if str(item)]
-        requested += len(symbols)
-        if symbols and raw.get("explicit_symbols_preserved") is False:
-            preserved = False
+        requested_symbols.update(item.casefold() for item in symbols)
+        for excerpt in raw.get("excerpts", []):
+            if not isinstance(excerpt, Mapping) or not excerpt.get("symbol"):
+                continue
+            symbol = str(excerpt["symbol"])
+            if excerpt.get("preserve_full") and excerpt.get("truncated") is not True:
+                preserved_symbols.add(symbol.casefold())
         for item in raw.get("compacted_symbols", []):
             value = str(item)
             if value and value not in compacted:
                 compacted.append(value)
+    preserved = requested_symbols.issubset(preserved_symbols)
+    compacted = [
+        symbol for symbol in compacted
+        if symbol.casefold() not in preserved_symbols
+    ]
     return {
-        "explicit_symbol_count": requested,
+        "explicit_symbol_count": len(requested_symbols),
         "explicit_symbols_preserved": preserved,
         "compacted_symbols": compacted,
         "confirmed_findings_allowed": preserved,
@@ -428,7 +508,7 @@ def plan_grounding(
         })
     # Leave deterministic room for the context-budget record added after pruning.
     # Provider-tokenization drift is already covered by the larger reserve above.
-    planning_budget = max(512, input_budget - 96)
+    planning_budget = max(256, input_budget - CONTEXT_METADATA_TOKENS)
     payload = context.to_dict()
     omitted = list(context.omitted_context_summary)
     truncated = False
@@ -440,7 +520,7 @@ def plan_grounding(
 
     rendered, estimated = build()
     if payload.get("selected_grounding"):
-        for evidence_limit in (3000, 1500):
+        for evidence_limit in (3000, 1500, 750, 384):
             if estimated <= planning_budget:
                 break
             payload["selected_grounding"] = [
@@ -470,15 +550,19 @@ def plan_grounding(
                         continue
                     excerpt["text"] = ""
                     excerpt["truncated"] = True
-                for collection in ("references", "dependencies"):
+                # Generic references and declarations are lower-value than an
+                # exact definition, its writers, direct callers, state
+                # transitions, and tests. Drop them first under pressure.
+                for collection in ("references", "declarations"):
                     for item in record.get(collection, []):
                         item["text"] = ""
                         item["truncated"] = True
             elif record.get("kind") == "telemetry":
                 record["excerpt"] = ""
         omitted.append(
-            "Non-symbol evidence text was omitted; explicit requested definitions, hashes, "
-            "source locations, aggregates, and omission metadata remain."
+            "Low-priority generic references/declarations and non-symbol excerpts were "
+            "omitted; exact definitions, callers, state transitions, tests, counter "
+            "dependencies, hashes, aggregates, and locations remain."
         )
         truncated = True
         rendered, estimated = build()
@@ -490,6 +574,52 @@ def plan_grounding(
         omitted.append("SDK operation contracts were reduced to exact names and risk classes.")
         truncated = True
         rendered, estimated = build()
+    if estimated > planning_budget:
+        removed_records = 0
+        for record in payload.get("selected_grounding", []):
+            if not isinstance(record, dict) or record.get("kind") != "source":
+                continue
+            for collection in ("references", "declarations"):
+                values = record.get(collection, [])
+                if isinstance(values, list):
+                    removed_records += len(values)
+                    record[collection] = []
+            symbols = [str(item) for item in record.get("symbols", []) if str(item)]
+            relationship_omitted = record.setdefault("relationship_omitted", {})
+            for collection, omitted_key in (
+                ("callers", "callers"), ("tests", "tests"),
+                ("state_transitions", "state-transitions"),
+            ):
+                values = record.get(collection, [])
+                if not isinstance(values, list) or len(values) <= 6:
+                    continue
+                retained: list[object] = []
+                for symbol in symbols:
+                    retained.extend([
+                        item for item in values
+                        if isinstance(item, Mapping)
+                        and str(item.get("symbol", "")).casefold() == symbol.casefold()
+                    ][:2])
+                retained.extend(
+                    item for item in values
+                    if isinstance(item, Mapping) and not item.get("symbol")
+                )
+                retained = retained[:max(6, len(symbols) * 2)]
+                removed = len(values) - len(retained)
+                if removed > 0:
+                    record[collection] = retained
+                    removed_records += removed
+                    if isinstance(relationship_omitted, dict):
+                        relationship_omitted[omitted_key] = int(
+                            relationship_omitted.get(omitted_key, 0)
+                        ) + removed
+        if removed_records:
+            omitted.append(
+                f"{removed_records} lower-ranked declaration/reference/relationship "
+                "records were omitted before considering requested symbol compaction."
+            )
+            truncated = True
+            rendered, estimated = build()
     if estimated > planning_budget:
         # A few large brace-balanced definitions should not prevent a useful
         # advisory answer. Only after every less-authoritative field has been
@@ -529,8 +659,147 @@ def plan_grounding(
                 "not fit; every requested symbol remains represented, but omitted lines are "
                 "missing context and cannot support confirmed findings."
             )
+
+    # Near-fit requests should degrade deterministically instead of being
+    # refused because a generic command, repository field, or relationship
+    # excerpt consumed the final handful of tokens. These stages retain every
+    # requested symbol and all evidence locations/hashes.
+    def record_omission(message: str) -> None:
+        omitted.append(message)
+        payload["omitted_context_summary"] = list(dict.fromkeys(omitted))
+
+    def trim_validation_metadata() -> None:
+        if payload.get("validation_commands"):
+            payload["validation_commands"] = []
+            record_omission("Generic validation command hints were omitted.")
+        missing = payload.get("missing_context", [])
+        if isinstance(missing, list) and missing:
+            payload["missing_context"] = [str(item)[:240] for item in missing[:4]]
+
+    def trim_repository_metadata() -> None:
+        repositories = payload.get("workspace_repositories", [])
+        if isinstance(repositories, list) and len(repositories) > 1:
+            current_root = str(payload.get("current_repository", {}).get("root", ""))
+            payload["workspace_repositories"] = [
+                item for item in repositories
+                if isinstance(item, Mapping) and str(item.get("root", "")) == current_root
+            ][:1]
+            record_omission("Unselected workspace repository metadata was omitted.")
+        package = payload.get("package", {})
+        if isinstance(package, dict):
+            raw = package.get("raw_manifest")
+            if isinstance(raw, dict) and raw.get("text"):
+                raw["text"] = ""
+                raw["truncated"] = True
+                record_omission("Raw manifest text was omitted; validated fields remain.")
+
+    def trim_relationship_prose() -> None:
+        changed = False
+        for record in payload.get("selected_grounding", []):
+            if not isinstance(record, dict) or record.get("kind") != "source":
+                continue
+            for collection in ("callers", "tests", "state_transitions"):
+                for relation in record.get(collection, []):
+                    if isinstance(relation, dict) and relation.get("text"):
+                        relation["text"] = ""
+                        relation["truncated"] = True
+                        changed = True
+            for key in (
+                "state_identifiers", "repository_scan_files",
+                "repository_scan_truncated",
+            ):
+                record.pop(key, None)
+        if changed:
+            record_omission(
+                "Relationship prose was omitted; caller/test/state-transition paths and "
+                "line ranges remain."
+            )
+
+    def trim_auxiliary_records() -> None:
+        removed_generic = 0
+        removed_relationships = 0
+        for record in payload.get("selected_grounding", []):
+            if not isinstance(record, dict) or record.get("kind") != "source":
+                continue
+            for collection in ("references", "declarations"):
+                values = record.get(collection, [])
+                if isinstance(values, list):
+                    removed_generic += len(values)
+                    record[collection] = []
+            relationship_omitted = record.setdefault("relationship_omitted", {})
+            symbols = [str(item) for item in record.get("symbols", []) if str(item)]
+            for collection, omitted_key in (
+                ("callers", "callers"), ("tests", "tests"),
+                ("state_transitions", "state-transitions"),
+            ):
+                values = record.get(collection, [])
+                if not isinstance(values, list) or len(values) <= 6:
+                    continue
+                retained: list[object] = []
+                for symbol in symbols:
+                    matches = [
+                        item for item in values
+                        if isinstance(item, Mapping)
+                        and str(item.get("symbol", "")).casefold() == symbol.casefold()
+                    ]
+                    retained.extend(matches[:2])
+                retained.extend(
+                    item for item in values
+                    if isinstance(item, Mapping) and not item.get("symbol")
+                )
+                retained = retained[:max(6, len(symbols) * 2)]
+                removed = len(values) - len(retained)
+                if removed > 0:
+                    record[collection] = retained
+                    removed_relationships += removed
+                    if isinstance(relationship_omitted, dict):
+                        relationship_omitted[omitted_key] = int(
+                            relationship_omitted.get(omitted_key, 0)
+                        ) + removed
+        if removed_generic:
+            record_omission(
+                f"{removed_generic} generic declaration/reference metadata records were "
+                "omitted; exact definitions and counter dependencies remain."
+            )
+        if removed_relationships:
+            record_omission(
+                f"{removed_relationships} lower-ranked relationship records were omitted; "
+                "balanced caller/test/state ranges remain for requested symbols."
+            )
+
+    def trim_operation_names() -> None:
+        operations = payload.get("relevant_operations", [])
+        if isinstance(operations, list) and operations:
+            payload["relevant_operations"] = []
+            record_omission(
+                "Unneeded SDK operation suggestions were omitted from this code audit."
+            )
+
     payload["omitted_context_summary"] = list(dict.fromkeys(omitted))
     rendered, estimated = build()
+    for stage in (
+        trim_validation_metadata, trim_repository_metadata,
+        trim_relationship_prose, trim_auxiliary_records, trim_operation_names,
+    ):
+        if estimated <= planning_budget:
+            break
+        stage()
+        truncated = True
+        rendered, estimated = build()
+    if estimated > planning_budget:
+        summaries = payload.get("omitted_context_summary", [])
+        if isinstance(summaries, list) and summaries:
+            omitted_count = max(0, len(summaries) - 3)
+            payload["omitted_context_summary"] = [
+                str(item)[:220] for item in summaries[:3]
+            ]
+            if omitted_count:
+                payload["omitted_context_summary"].append(
+                    f"{omitted_count} additional deterministic omissions are recorded in "
+                    "the host receipt."
+                )
+            truncated = True
+            rendered, estimated = build()
     if estimated > input_budget:
         raise AssistantContextOverflow({
             "error": "assistant_context_overflow",
@@ -547,6 +816,9 @@ def plan_grounding(
     payload["context_budget"] = {
         "estimated_input_tokens": 0, "input_budget_tokens": input_budget,
         "configured_context_tokens": context_tokens, "requested_output_tokens": max_tokens,
+        "reserved_output_tokens": max_tokens,
+        "tokenization_safety_tokens": reserved_tokens,
+        # Backward-compatible name retained for existing receipt consumers.
         "reserved_tokens": reserved_tokens,
         "reserve_policy": "max(512, 3% of configured context)",
         "truncated": truncated,
@@ -564,19 +836,31 @@ def plan_grounding(
     estimated = estimate_tokens(rendered) + estimate_tokens(question)
     payload["context_budget"]["estimated_input_tokens"] = estimated
     if estimated > input_budget:
+        # The metadata estimate can cross a digit boundary after it is inserted.
+        # Compact diagnostic wording rather than refusing an otherwise fitting
+        # audit by a few tokens.
+        payload["omitted_context_summary"] = [
+            str(item)[:120] for item in payload.get("omitted_context_summary", [])[:2]
+        ]
+        payload["context_budget"]["metadata_compacted"] = True
+        rendered = _render_grounded_system(payload, system_prompt)
+        estimated = estimate_tokens(rendered) + estimate_tokens(question)
+        payload["context_budget"]["estimated_input_tokens"] = estimated
+    if estimated > input_budget:
         raise AssistantContextOverflow({
             "error": "assistant_context_overflow",
             "message": (
-                "Grounded input metadata exceeds the configured model context. "
-                "Reduce --max-tokens or select fewer grounding sources."
+                "Grounded input exceeds the configured model context after all safe "
+                "low-priority context was trimmed. Select fewer symbols or increase the "
+                "assistant context setting."
             ),
             "estimated_input_tokens": estimated,
             "input_budget_tokens": input_budget,
             "omitted_context_summary": payload["omitted_context_summary"],
         })
     return GroundingPlan(
-        rendered, payload, estimated, input_budget,
-        tuple(payload["omitted_context_summary"]), truncated,
+        rendered, payload, estimated, input_budget, max_tokens,
+        tuple(dict.fromkeys(omitted)), truncated,
     )
 
 
@@ -594,7 +878,12 @@ def _grounding_receipt_sources(context: Mapping[str, object] | None) -> list[dic
                 "explicit_symbols_preserved", "dependency_identifiers",
                 "dependencies_omitted", "declaration_identifiers",
                 "declarations_omitted", "aggregation_scope", "session_aggregates",
-                "access_scope",
+                "access_scope", "review_priorities", "relationship_omitted",
+                "repository_scan_files", "repository_scan_truncated",
+                "repository_untracked_sources_added",
+                "repository_untracked_sources_truncated",
+                "worktree_status", "worktree_dirty", "worktree_untracked",
+                "worktree_status_available",
             ) if key in raw
         }
         if raw.get("kind") == "source":
@@ -602,6 +891,19 @@ def _grounding_receipt_sources(context: Mapping[str, object] | None) -> list[dic
                 {"line_start": excerpt.get("line_start"), "line_end": excerpt.get("line_end")}
                 for excerpt in raw.get("excerpts", []) if isinstance(excerpt, Mapping)
             ]
+            item["relationships"] = {
+                role: [
+                    {
+                        key: relation.get(key) for key in (
+                            "role", "path", "relative_path", "symbol", "identifier",
+                            "line_start", "line_end", "truncated",
+                        ) if key in relation
+                    }
+                    for relation in raw.get(role, []) if isinstance(relation, Mapping)
+                ]
+                for role in ("callers", "tests", "state_transitions")
+                if raw.get(role)
+            }
         records.append(item)
     return records
 
@@ -653,7 +955,10 @@ def write_assistant_receipt(
     context: Mapping[str, object] | None, omitted_context: Iterable[str],
     estimated_input_tokens: int = 0, actual_input_tokens: int | None = None,
     actual_output_tokens: int | None = None, startup_seconds: float = 0.0,
-    inference_seconds: float = 0.0, truncated: bool = False,
+    grounding_seconds: float = 0.0, primary_inference_seconds: float = 0.0,
+    repair_seconds: float = 0.0, inference_seconds: float = 0.0,
+    configured_context_tokens: int = 0, reserved_output_tokens: int = 0,
+    repair_attempts: Iterable[Mapping[str, object]] = (), truncated: bool = False,
     advisory: Mapping[str, object] | None = None, failure_reason: str = "",
     safety_flags: Iterable[str] = (),
     sdk_build_id: str = "", model_sha256: str = "",
@@ -667,7 +972,7 @@ def write_assistant_receipt(
     receipt_id = now.strftime("%Y%m%dT%H%M%S.%fZ")
     destination = directory / f"assistant-{receipt_id}-{prompt_hash[:12]}.json"
     payload = {
-        "schema": 2, "timestamp": now.isoformat(), "prompt_sha256": prompt_hash,
+        "schema": 3, "timestamp": now.isoformat(), "prompt_sha256": prompt_hash,
         "assistant_schema_version": ASSISTANT_RESPONSE_SCHEMA_VERSION,
         "sdk_build_id": sdk_build_id,
         "model": model, "mode": mode,
@@ -678,10 +983,19 @@ def write_assistant_receipt(
         "selected_grounding_sources": _grounding_receipt_sources(context),
         "omitted_context_summary": list(dict.fromkeys(omitted_context)),
         "estimated_input_tokens": estimated_input_tokens,
+        "configured_context_tokens": configured_context_tokens,
+        "reserved_output_tokens": reserved_output_tokens,
         "actual_input_tokens": actual_input_tokens,
         "actual_output_tokens": actual_output_tokens,
+        "grounding_seconds": round(grounding_seconds, 3),
         "runtime_startup_seconds": round(startup_seconds, 3),
+        "primary_inference_seconds": round(primary_inference_seconds, 3),
+        "structured_repair_seconds": round(repair_seconds, 3),
         "inference_seconds": round(inference_seconds, 3),
+        "total_latency_seconds": round(
+            grounding_seconds + startup_seconds + inference_seconds, 3,
+        ),
+        "repair_attempts": [dict(item) for item in repair_attempts],
         "truncated": bool(truncated), "safety_flags": list(safety_flags),
         "structured_response": _receipt_response(advisory, context),
         "failure_reason": failure_reason,
@@ -1691,6 +2005,67 @@ def _repair_envelope(
     }, ensure_ascii=False, separators=(",", ":"))
 
 
+def _recover_read_only_prose(
+    draft: str, context: AssistantContextBundle,
+) -> tuple[dict[str, object], tuple[str, ...]]:
+    """Retain bounded observations after schema failure without accepting authority."""
+    candidates: list[str] = []
+    for field in ("summary", "evidence", "rationale"):
+        expression = re.compile(
+            rf'"{field}"\s*:\s*("(?:\\.|[^"\\])*")', re.IGNORECASE,
+        )
+        for match in expression.finditer(draft):
+            try:
+                value = json.loads(match.group(1))
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
+    if not candidates:
+        for line in draft.replace("```json", "").replace("```", "").splitlines():
+            cleaned = re.sub(r"^[\s*#>-]+", "", line).strip().strip(",")
+            if (
+                cleaned and not cleaned.startswith(("{", "[", "}"))
+                and len(cleaned) >= 12
+            ):
+                candidates.append(cleaned)
+    bounded: list[str] = []
+    for value in candidates:
+        value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", value)
+        value = re.sub(r"\s+", " ", value).strip()[:600]
+        if value and value not in bounded:
+            bounded.append(value)
+        if len(bounded) >= 5:
+            break
+    if not bounded or _unsafe_fragments(bounded):
+        return ({
+            "summary": "Malformed assistant output was withheld after structured repair failed.",
+            "findings": [], "recommended_operations": [], "proposed_changes": [],
+            "missing_context": list(context.missing_context),
+            "abstentions": [
+                "No prose, operation, or mutation was accepted from the malformed output."
+            ],
+        }, ("prose_recovery_unavailable",))
+    summary = bounded[0][:480]
+    evidence = bounded[1:] or [summary]
+    return ({
+        "summary": (
+            "Structured parsing failed; the following read-only observations were "
+            f"preserved without operation authority: {summary}"
+        )[:800],
+        "findings": [{
+            "severity_domain": "engineering", "severity": "info",
+            "evidence": item, "file": "", "line": None,
+            "confidence": 0.25, "status": "speculative",
+        } for item in evidence[:4]],
+        "recommended_operations": [], "proposed_changes": [],
+        "missing_context": list(context.missing_context),
+        "abstentions": [
+            "Structured operation parsing failed; no operation or mutation was accepted."
+        ],
+    }, ("prose_findings_preserved_after_schema_failure",))
+
+
 def _structured_response_format(
     schema: Mapping[str, object], *, name: str,
 ) -> dict[str, object]:
@@ -1969,6 +2344,10 @@ def prompt_assistant(
     gta_path: Path | None = None, operation_mode: str = "advisory",
     sources: Iterable[Path] = (), symbols: Iterable[str] = (),
     telemetry_files: Iterable[Path] = (), telemetry_patterns: Iterable[str] = (),
+    source_priorities: Iterable[str] = (),
+    preserve_findings_on_schema_failure: bool = False,
+    compact_response: bool = False,
+    require_explicit_symbols_preserved: bool = False,
     progress: Callable[[str], None] | None = None,
     context_builder: Callable[..., AssistantContextBundle] = build_assistant_context,
 ) -> PromptResult:
@@ -1993,11 +2372,13 @@ def prompt_assistant(
     notify = progress or (lambda _state: None)
     prompt_hash = hashlib.sha256(question.encode("utf-8")).hexdigest()
     notify("building grounding")
+    grounding_started = time.monotonic()
     context = context_builder(
         question, repository_root=repository_root,
         workspace_roots=workspace_roots, manifest=manifest, gta_path=gta_path,
         operation_mode=operation_mode, sources=sources, symbols=symbols,
         telemetry_files=telemetry_files, telemetry_patterns=telemetry_patterns,
+        source_priorities=source_priorities,
     )
     try:
         plan = plan_grounding(
@@ -2005,8 +2386,9 @@ def prompt_assistant(
             context_tokens=settings.context_tokens, max_tokens=max_tokens,
         )
     except AssistantContextOverflow as exc:
+        grounding_seconds = time.monotonic() - grounding_started
         try:
-            write_assistant_receipt(
+            receipt = write_assistant_receipt(
                 settings.root, prompt_hash=prompt_hash,
                 model=settings.model_name, mode=settings.mode,
                 context=context.to_dict(), omitted_context=context.omitted_context_summary,
@@ -2014,11 +2396,55 @@ def prompt_assistant(
                 model_sha256=model_sha256, llama_cpp_revision=llama_cpp_revision,
                 provider_capabilities=settings.provider_capabilities,
                 thinking=settings.thinking,
+                configured_context_tokens=settings.context_tokens,
+                reserved_output_tokens=max_tokens,
+                grounding_seconds=grounding_seconds,
             )
-        except OSError:
-            pass
+            exc.details.setdefault("receipt_path", str(receipt))
+        except (OSError, TypeError, ValueError):
+            exc.details.setdefault("receipt_path", "")
+        exc.details.setdefault("inference_started", False)
         raise
+    grounding_seconds = time.monotonic() - grounding_started
     preflight = _grounding_preflight(plan.context)
+    if (
+        require_explicit_symbols_preserved
+        and preflight["explicit_symbol_count"]
+        and not preflight["explicit_symbols_preserved"]
+    ):
+        details: dict[str, object] = {
+            "error": "assistant_context_overflow",
+            "reason": "explicit_symbol_compaction",
+            "message": (
+                "This review chunk would compact an explicitly requested definition; "
+                "the review abstained before inference."
+            ),
+            "estimated_input_tokens": plan.estimated_input_tokens,
+            "input_budget_tokens": plan.input_budget_tokens,
+            "symbols": list(symbols),
+            "explicit_symbols_preserved": False,
+            "inference_started": False,
+        }
+        try:
+            receipt = write_assistant_receipt(
+                settings.root, prompt_hash=prompt_hash,
+                model=settings.model_name, mode=settings.mode,
+                context=plan.context, omitted_context=plan.omitted_context,
+                estimated_input_tokens=plan.estimated_input_tokens,
+                configured_context_tokens=settings.context_tokens,
+                reserved_output_tokens=plan.reserved_output_tokens,
+                grounding_seconds=grounding_seconds, truncated=plan.truncated,
+                failure_reason=str(details["message"]),
+                safety_flags=("review_abstained_explicit_symbol_compaction",),
+                sdk_build_id=sdk_build_id, model_sha256=model_sha256,
+                llama_cpp_revision=llama_cpp_revision,
+                provider_capabilities=settings.provider_capabilities,
+                thinking=settings.thinking,
+            )
+            details["receipt_path"] = str(receipt)
+        except (OSError, TypeError, ValueError):
+            details["receipt_path"] = ""
+        raise AssistantContextOverflow(details)
     if (
         preflight["explicit_symbol_count"]
         and not preflight["explicit_symbols_preserved"]
@@ -2077,7 +2503,11 @@ def prompt_assistant(
         "max_tokens": max_tokens,
         "stream": False,
     }
-    body.update(_provider_request_fields(settings, ASSISTANT_RESPONSE_FORMAT))
+    response_format = (
+        ASSISTANT_REVIEW_RESPONSE_FORMAT if compact_response
+        else ASSISTANT_RESPONSE_FORMAT
+    )
+    body.update(_provider_request_fields(settings, response_format))
     request = Request(
         _chat_url(endpoint), method="POST", headers=headers,
         data=json.dumps(body).encode("utf-8"),
@@ -2101,7 +2531,11 @@ def prompt_assistant(
                 context=plan.context, omitted_context=plan.omitted_context,
                 estimated_input_tokens=plan.estimated_input_tokens,
                 startup_seconds=startup_seconds,
+                grounding_seconds=grounding_seconds,
+                primary_inference_seconds=time.monotonic() - started,
                 inference_seconds=time.monotonic() - started,
+                configured_context_tokens=settings.context_tokens,
+                reserved_output_tokens=plan.reserved_output_tokens,
                 truncated=plan.truncated, failure_reason=str(error),
                 sdk_build_id=sdk_build_id, model_sha256=model_sha256,
                 llama_cpp_revision=llama_cpp_revision,
@@ -2119,7 +2553,11 @@ def prompt_assistant(
                 context=plan.context, omitted_context=plan.omitted_context,
                 estimated_input_tokens=plan.estimated_input_tokens,
                 startup_seconds=startup_seconds,
+                grounding_seconds=grounding_seconds,
+                primary_inference_seconds=time.monotonic() - started,
                 inference_seconds=time.monotonic() - started,
+                configured_context_tokens=settings.context_tokens,
+                reserved_output_tokens=plan.reserved_output_tokens,
                 truncated=plan.truncated, failure_reason=str(error),
                 sdk_build_id=sdk_build_id, model_sha256=model_sha256,
                 llama_cpp_revision=llama_cpp_revision,
@@ -2132,6 +2570,7 @@ def prompt_assistant(
     finally:
         if settings.mode in {"managed_local", "custom_local"}:
             active_server.schedule_stop(LOCAL_RUNTIME_KEEPALIVE_SECONDS)
+    primary_inference_seconds = time.monotonic() - started
     primary_text = _response_text(payload)
     advisory, safety_flags = validate_advisory(
         primary_text, context, grounding_context=plan.context,
@@ -2145,6 +2584,8 @@ def prompt_assistant(
             ("unstructured_response" in safety_flags, "initial_response_unstructured"),
         ) if condition
     )
+    repair_attempts: list[dict[str, object]] = []
+    repair_seconds = 0.0
     if repair_needed:
         repair_system = (
             DEFAULT_SYSTEM_PROMPT
@@ -2165,6 +2606,12 @@ def prompt_assistant(
         )
         repair_tokens = min(max_tokens, available_output)
         if repair_tokens >= 256:
+            repair_attempt = {
+                "attempt": 1, "reason": list(repair_reasons),
+                "output_budget_tokens": repair_tokens,
+                "schema": "compact_advisory_repair",
+            }
+            repair_started = time.monotonic()
             if settings.mode in {"managed_local", "custom_local"}:
                 # The primary-request cleanup schedules an idle stop. Reuse the
                 # healthy server here to cancel that timer before a potentially
@@ -2183,7 +2630,7 @@ def prompt_assistant(
                 "stream": False,
             }
             repair_body.update(
-                _provider_request_fields(settings, ASSISTANT_RESPONSE_FORMAT)
+                _provider_request_fields(settings, ASSISTANT_REPAIR_RESPONSE_FORMAT)
             )
             repair_request = Request(
                 _chat_url(endpoint), method="POST", headers=headers,
@@ -2215,10 +2662,12 @@ def prompt_assistant(
                         actual_input = (actual_input or 0) + repair_input
                     if repair_output is not None:
                         actual_output = (actual_output or 0) + repair_output
+                    repair_attempt["result"] = "accepted"
                 else:
                     safety_flags = tuple(dict.fromkeys((
                         *safety_flags, *candidate_flags, "structured_repair_failed",
                     )))
+                    repair_attempt["result"] = "invalid_schema"
             except (
                 HTTPError, OSError, URLError, UnicodeDecodeError,
                 json.JSONDecodeError, TypeError, ValueError,
@@ -2229,10 +2678,31 @@ def prompt_assistant(
                 safety_flags = tuple(dict.fromkeys((
                     *safety_flags, "structured_repair_failed",
                 )))
+                repair_attempt["result"] = "request_or_parse_failed"
+            finally:
+                repair_seconds += time.monotonic() - repair_started
+                repair_attempt["latency_seconds"] = round(
+                    time.monotonic() - repair_started, 3,
+                )
+                repair_attempts.append(repair_attempt)
         else:
             safety_flags = tuple(dict.fromkeys((
                 *safety_flags, "structured_repair_context_unavailable",
             )))
+            repair_attempts.append({
+                "attempt": 1, "reason": list(repair_reasons),
+                "output_budget_tokens": repair_tokens,
+                "schema": "compact_advisory_repair",
+                "result": "insufficient_context",
+            })
+    if preserve_findings_on_schema_failure and any(
+        flag in safety_flags for flag in (
+            "structured_repair_failed", "structured_repair_context_unavailable",
+        )
+    ):
+        recovered, recovery_flags = _recover_read_only_prose(primary_text, context)
+        advisory = recovered
+        safety_flags = tuple(dict.fromkeys((*safety_flags, *recovery_flags)))
     if settings.mode in {"managed_local", "custom_local"} and repair_needed:
         active_server.schedule_stop(LOCAL_RUNTIME_KEEPALIVE_SECONDS)
     inference_seconds = time.monotonic() - started
@@ -2245,6 +2715,12 @@ def prompt_assistant(
             actual_input_tokens=(int(actual_input) if actual_input is not None else None),
             actual_output_tokens=(int(actual_output) if actual_output is not None else None),
             startup_seconds=startup_seconds, inference_seconds=inference_seconds,
+            grounding_seconds=grounding_seconds,
+            primary_inference_seconds=primary_inference_seconds,
+            repair_seconds=repair_seconds,
+            configured_context_tokens=settings.context_tokens,
+            reserved_output_tokens=plan.reserved_output_tokens,
+            repair_attempts=repair_attempts,
             truncated=truncated, advisory=advisory, safety_flags=safety_flags,
             sdk_build_id=sdk_build_id, model_sha256=model_sha256,
             llama_cpp_revision=llama_cpp_revision,
@@ -2257,18 +2733,341 @@ def prompt_assistant(
     notify("complete")
     return PromptResult(
         text=format_advisory(advisory), model=model_name, mode=settings.mode,
-        elapsed_seconds=round(startup_seconds + inference_seconds, 3),
+        elapsed_seconds=round(grounding_seconds + startup_seconds + inference_seconds, 3),
         advisory=advisory, context=plan.context, safety_flags=safety_flags,
         estimated_input_tokens=plan.estimated_input_tokens,
         actual_input_tokens=(int(actual_input) if actual_input is not None else None),
         actual_output_tokens=(int(actual_output) if actual_output is not None else None),
+        reserved_output_tokens=plan.reserved_output_tokens,
         startup_seconds=round(startup_seconds, 3),
+        grounding_seconds=round(grounding_seconds, 3),
+        primary_inference_seconds=round(primary_inference_seconds, 3),
+        repair_seconds=round(repair_seconds, 3),
         inference_seconds=round(inference_seconds, 3), truncated=truncated,
+        repair_attempts=tuple(repair_attempts),
         omitted_context=plan.omitted_context, receipt_path=receipt_path,
         sdk_build_id=sdk_build_id, model_sha256=model_sha256,
         llama_cpp_revision=llama_cpp_revision,
         provider_capabilities=settings.provider_capabilities,
         thinking=settings.thinking,
+    )
+
+
+def _merge_review_advisories(
+    advisories: Iterable[Mapping[str, object]],
+) -> dict[str, object]:
+    selected = list(advisories)
+    blocked_operation_abstentions: list[str] = []
+
+    def complete_summary(value: str, *, limit: int = 800) -> str:
+        normalized = " ".join(value.split()).strip()
+        if not normalized:
+            return "Grounded review completed."
+        if len(normalized) <= limit:
+            if normalized[-1:] in ".!?":
+                return normalized
+            return (normalized + ".") if len(normalized) < limit else normalized[:-1] + "."
+        candidate = normalized[:limit]
+        endings = [match.end() for match in re.finditer(r"[.!?](?=\s|$)", candidate)]
+        if endings and endings[-1] >= limit // 3:
+            return candidate[:endings[-1]]
+        return (
+            "The model summary exceeded the deterministic merge limit and was omitted; "
+            "use the complete grounded findings and abstentions below."
+        )
+
+    def unique_records(key: str, *, limit: int) -> list[dict[str, object]]:
+        output: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for advisory in selected:
+            values = advisory.get(key, [])
+            if not isinstance(values, list):
+                continue
+            for raw in values:
+                if not isinstance(raw, Mapping):
+                    continue
+                item = dict(raw)
+                if key == "recommended_operations":
+                    name = str(item.get("operation", "")).strip() or "unknown operation"
+                    blocked_reason = str(item.get("blocked_reason", "")).strip()
+                    if item.get("executed") is not False:
+                        continue
+                    if item.get("arguments_grounded") is not True or blocked_reason:
+                        explanation = blocked_reason or "its arguments were not grounded"
+                        abstention = (
+                            f"'{name}' was omitted from the merged recommendations because "
+                            f"{explanation}."
+                        )
+                        if abstention not in blocked_operation_abstentions:
+                            blocked_operation_abstentions.append(abstention)
+                        continue
+                if key == "proposed_changes" and (
+                    item.get("executed") is not False
+                    or item.get("execution_authorized") is not False
+                ):
+                    continue
+                identity = json.dumps(item, sort_keys=True, ensure_ascii=False)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                output.append(item)
+                if len(output) >= limit:
+                    return output
+        return output
+
+    def unique_strings(key: str, *, limit: int) -> list[str]:
+        output: list[str] = []
+        for advisory in selected:
+            values = advisory.get(key, [])
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                text = str(value).strip()
+                if text and text not in output:
+                    output.append(text)
+                    if len(output) >= limit:
+                        return output
+        return output
+
+    summaries = [
+        str(item.get("summary", "")).strip() for item in selected
+        if str(item.get("summary", "")).strip()
+    ]
+    findings = unique_records("findings", limit=8)
+    operations = unique_records("recommended_operations", limit=6)
+    changes = unique_records("proposed_changes", limit=6)
+    missing_context = unique_strings("missing_context", limit=8)
+    abstentions = unique_strings("abstentions", limit=8)
+    for abstention in blocked_operation_abstentions:
+        if abstention not in abstentions and len(abstentions) < 8:
+            abstentions.append(abstention)
+    preflight_abstentions = sum(
+        1 for item in selected
+        if item.get("review_status") == "abstained_before_inference"
+    )
+    if len(selected) > 1:
+        completed = len(selected) - preflight_abstentions
+        summary = (
+            f"Deterministically merged {completed} grounded review chunk(s) and "
+            f"{preflight_abstentions} pre-inference abstention(s)."
+            if preflight_abstentions else
+            f"Deterministically merged {completed} grounded review chunk(s)."
+        )
+    else:
+        summary = complete_summary(summaries[0] if summaries else "")
+    return {
+        "summary": summary,
+        "findings": findings,
+        "recommended_operations": operations,
+        "proposed_changes": changes,
+        "missing_context": missing_context,
+        "abstentions": abstentions,
+    }
+
+
+def review_assistant(
+    symbols: Iterable[str], *, root: Path | None = None,
+    repository_root: Path | None = None, sources: Iterable[Path] = (),
+    priorities: Iterable[str] = ("callers", "tests", "state-transitions"),
+    question: str = "", timeout: float = 180.0, startup_timeout: float = 90.0,
+    max_tokens: int = 1024, chunk_size: int = 3,
+    preserve_findings_on_schema_failure: bool = True,
+    progress: Callable[[str], None] | None = None, opener=urlopen,
+    server: LocalAssistantServer | None = None,
+) -> ReviewResult:
+    """Run a repository-grounded, automatically chunked multi-symbol audit."""
+    from allin1_sdk.assistant_evidence import (
+        REVIEW_PRIORITIES, discover_symbol_sources,
+    )
+
+    selected_symbols = tuple(dict.fromkeys(
+        item.strip() for item in symbols if item.strip()
+    ))
+    if not selected_symbols:
+        raise ValueError("Assistant review requires at least one symbol")
+    if len(selected_symbols) > 32:
+        raise ValueError("Assistant review is limited to 32 symbols")
+    if not 1 <= chunk_size <= 8:
+        raise ValueError("Assistant review chunk size must be between 1 and 8")
+    selected_priorities = tuple(dict.fromkeys(
+        item.strip().casefold() for item in priorities if item.strip()
+    ))
+    unknown = [item for item in selected_priorities if item not in REVIEW_PRIORITIES]
+    if unknown:
+        raise ValueError("Unknown assistant review priorities: " + ", ".join(unknown))
+    repository = (repository_root or Path.cwd()).expanduser().resolve(strict=True)
+    explicit_sources = tuple(
+        path.expanduser().resolve(strict=True) for path in sources
+    )
+    if explicit_sources:
+        discovery: dict[str, object] = {
+            "repository_root": str(repository), "symbols": list(selected_symbols),
+            "sources": [str(path) for path in explicit_sources],
+            "source_selection": "explicit",
+        }
+    else:
+        discovery = discover_symbol_sources(
+            repository, selected_symbols, allow_missing=True,
+        )
+
+    missing_discovery = [
+        str(item) for item in discovery.get("missing_symbols", []) if str(item)
+    ]
+    if missing_discovery:
+        reason = (
+            "Automatic discovery could not locate complete definitions for: "
+            + ", ".join(missing_discovery)
+        )
+        return ReviewResult(
+            symbols=selected_symbols, priorities=selected_priorities,
+            source_discovery=discovery,
+            chunks=({
+                "index": 1, "symbols": list(selected_symbols),
+                "sources": list(discovery.get("sources", [])),
+                "status": "abstained_before_inference",
+                "inference_started": False,
+                "explicit_symbols_preserved": False,
+                "receipt": "", "estimated_input_tokens": 0,
+                "reserved_output_tokens": max_tokens,
+                "actual_input_tokens": None, "actual_output_tokens": None,
+                "truncated": bool(discovery.get("scan_truncated", False)),
+                "omitted_context_summary": [reason], "repair_attempts": [],
+                "latency_seconds": 0.0,
+                "safety_flags": ["review_abstained_missing_definition"],
+            },),
+            advisory={
+                "summary": "Review abstained before inference because requested definitions were missing.",
+                "findings": [], "recommended_operations": [],
+                "proposed_changes": [], "missing_context": [reason],
+                "abstentions": [
+                    "No model inference ran without every requested definition."
+                ],
+            },
+        )
+
+    discovered_by_symbol = discovery.get("symbol_sources", {})
+
+    def chunk_sources(chunk: tuple[str, ...]) -> tuple[Path, ...]:
+        if explicit_sources:
+            return explicit_sources
+        paths: list[Path] = []
+        if isinstance(discovered_by_symbol, Mapping):
+            for symbol in chunk:
+                records = discovered_by_symbol.get(symbol, [])
+                if not isinstance(records, list):
+                    continue
+                for record in records:
+                    if isinstance(record, Mapping) and record.get("path"):
+                        path = Path(str(record["path"])).resolve()
+                        if path not in paths:
+                            paths.append(path)
+        return tuple(paths)
+
+    pending = [
+        selected_symbols[index:index + chunk_size]
+        for index in range(0, len(selected_symbols), chunk_size)
+    ]
+    merged_advisories: list[Mapping[str, object]] = []
+    chunk_records: list[dict[str, object]] = []
+    while pending:
+        chunk = pending.pop(0)
+        selected_chunk_sources = chunk_sources(chunk)
+        audit_question = question.strip() or (
+            "Audit the requested C++ lifecycle/concurrency symbols. Identify grounded "
+            "correctness risks, state-transition gaps, and a specific advisory-only fix."
+        )
+        audit_question += " Requested symbols: " + ", ".join(chunk) + "."
+        try:
+            result = prompt_assistant(
+                audit_question, root=root, repository_root=repository,
+                sources=selected_chunk_sources, symbols=chunk,
+                source_priorities=selected_priorities,
+                preserve_findings_on_schema_failure=(
+                    preserve_findings_on_schema_failure
+                ),
+                compact_response=True, timeout=timeout,
+                require_explicit_symbols_preserved=True,
+                startup_timeout=startup_timeout, max_tokens=max_tokens,
+                progress=progress, opener=opener, server=server,
+            )
+        except (AssistantContextOverflow, ValueError) as error:
+            if isinstance(error, ValueError) and not isinstance(
+                error, AssistantContextOverflow,
+            ):
+                if not str(error).startswith(
+                    "Requested symbol definition exceeds the "
+                ):
+                    raise
+                details: Mapping[str, object] = {
+                    "message": str(error), "receipt_path": "",
+                    "estimated_input_tokens": 0,
+                    "inference_started": False,
+                }
+            else:
+                details = error.details
+            if len(chunk) > 1:
+                midpoint = max(1, len(chunk) // 2)
+                pending[0:0] = [chunk[:midpoint], chunk[midpoint:]]
+                continue
+            symbol = chunk[0]
+            reason = str(details.get("message", str(error))).strip()
+            abstention = {
+                "review_status": "abstained_before_inference",
+                "summary": (
+                    f"Review abstained before inference for '{symbol}' because its "
+                    "requested definition could not be preserved in full."
+                ),
+                "findings": [], "recommended_operations": [],
+                "proposed_changes": [],
+                "missing_context": [
+                    "Use a larger assistant context or narrow the selected source while "
+                    "keeping the requested definition complete."
+                ],
+                "abstentions": [reason],
+            }
+            merged_advisories.append(abstention)
+            chunk_records.append({
+                "index": len(chunk_records) + 1, "symbols": [symbol],
+                "sources": [str(path) for path in selected_chunk_sources],
+                "status": "abstained_before_inference",
+                "inference_started": False,
+                "explicit_symbols_preserved": False,
+                "receipt": str(details.get("receipt_path", "")),
+                "estimated_input_tokens": int(
+                    details.get("estimated_input_tokens", 0) or 0
+                ),
+                "reserved_output_tokens": max_tokens,
+                "actual_input_tokens": None, "actual_output_tokens": None,
+                "truncated": True, "omitted_context_summary": [reason],
+                "repair_attempts": [], "latency_seconds": 0.0,
+                "safety_flags": ["review_abstained_before_inference"],
+            })
+            continue
+        merged_advisories.append(result.advisory or {})
+        preflight = _grounding_preflight(result.context or {})
+        chunk_records.append({
+            "index": len(chunk_records) + 1, "symbols": list(chunk),
+            "sources": [str(path) for path in selected_chunk_sources],
+            "status": "completed", "inference_started": True,
+            "explicit_symbols_preserved": bool(
+                preflight["explicit_symbols_preserved"]
+            ),
+            "receipt": result.receipt_path,
+            "estimated_input_tokens": result.estimated_input_tokens,
+            "reserved_output_tokens": result.reserved_output_tokens,
+            "actual_input_tokens": result.actual_input_tokens,
+            "actual_output_tokens": result.actual_output_tokens,
+            "truncated": result.truncated,
+            "omitted_context_summary": list(result.omitted_context),
+            "repair_attempts": [dict(item) for item in result.repair_attempts],
+            "latency_seconds": result.elapsed_seconds,
+            "safety_flags": list(result.safety_flags),
+        })
+    advisory = _merge_review_advisories(merged_advisories)
+    return ReviewResult(
+        symbols=selected_symbols, priorities=selected_priorities,
+        source_discovery=discovery, chunks=tuple(chunk_records),
+        advisory=advisory,
     )
 
 

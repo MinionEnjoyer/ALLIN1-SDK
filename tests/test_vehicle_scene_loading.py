@@ -201,7 +201,10 @@ def test_destroy_closes_scene_loader_without_waiting_for_active_decode(
     assert started.wait(1.0)
     began = time.perf_counter()
     frame.destroy()
-    assert time.perf_counter() - began < 0.15
+    # Full-suite Tk teardown can cross 150 ms under scheduler pressure even
+    # though the one-second decode is not joined. Keep the boundary well below
+    # that worker wait while avoiding a sub-millisecond timing false positive.
+    assert time.perf_counter() - began < 0.25
     with pytest.raises(RuntimeError, match="closed"):
         frame._viewport_scene_worker.submit("late", lambda: None)
     release.set()

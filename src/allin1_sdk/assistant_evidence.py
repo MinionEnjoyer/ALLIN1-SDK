@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import subprocess
 import threading
 from collections import OrderedDict, deque
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
+
+from allin1_sdk.processes import hidden_process_options
 
 
 MAX_EVIDENCE_FILE_BYTES = 8 * 1024 * 1024
@@ -18,7 +22,13 @@ MAX_EVIDENCE_CHARS = 24_000
 MAX_EXPLICIT_SYMBOL_CHARS = 96_000
 MAX_SOURCE_DEPENDENCIES = 32
 MAX_SOURCE_DECLARATIONS = 32
+MAX_REPOSITORY_SOURCE_FILES = 6000
+MAX_REPOSITORY_RELATIONSHIPS = 18
+MAX_UNTRACKED_SOURCE_FILES = 256
+MAX_UNTRACKED_SOURCE_BYTES = 32 * 1024 * 1024
+MAX_GIT_INVENTORY_BYTES = 2 * 1024 * 1024
 EVIDENCE_CACHE_ENTRIES = 48
+REVIEW_PRIORITIES = ("callers", "tests", "state-transitions")
 _COMPACTION_STOPWORDS = frozenset({
     "about", "after", "against", "also", "before", "between", "could",
     "diagnose", "does", "from", "have", "into", "only", "please", "review",
@@ -30,6 +40,15 @@ TEXT_SUFFIXES = frozenset({
     ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
     ".cs", ".py", ".toml", ".json", ".jsonl", ".log", ".txt",
     ".md", ".xml", ".yaml", ".yml", ".ini", ".cfg",
+})
+SOURCE_SUFFIXES = frozenset({
+    ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
+    ".cs", ".py",
+})
+_REPOSITORY_SKIP_DIRECTORIES = frozenset({
+    ".git", ".hg", ".svn", ".idea", ".pytest_cache", ".mypy_cache",
+    ".ruff_cache", ".venv", "venv", "node_modules", "packages", "bin",
+    "obj", "build", "dist", "__pycache__",
 })
 _EVIDENCE_CACHE: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
 _EVIDENCE_CACHE_LOCK = threading.RLock()
@@ -43,6 +62,16 @@ _IMMUTABLE_DECLARATION = re.compile(
     r"\b(?:const|constexpr|constinit|readonly)\b"
     r"(?P<body>[^;=]{0,256})\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=",
     re.IGNORECASE,
+)
+_STATE_IDENTIFIER_HINT = re.compile(
+    r"(?i)(state|status|phase|mode|generation|epoch|active|ready|pending|"
+    r"lifecycle|terminal|record|reset|retire|publish|observe|owner|queue)"
+)
+_STATE_TRANSITION = re.compile(
+    r"(?i)(?:\.\s*(?:store|exchange|compare_exchange(?:_weak|_strong)?|"
+    r"fetch_add|fetch_sub|clear|erase|reset|emplace|push_back)\s*\(|"
+    r"\b(?:transition|retire|publish|reset|activate|deactivate|invalidate)\w*\s*\(|"
+    r"\+\+|--|(?<![=!<>])=(?!=))"
 )
 
 
@@ -72,6 +101,293 @@ def _read_text(path: Path) -> tuple[Path, str, str]:
     except UnicodeDecodeError:
         text = raw.decode("utf-8", errors="replace")
     return resolved, text, hashlib.sha256(raw).hexdigest()
+
+
+def _repository_source_files(
+    root: Path, *, limit: int = MAX_REPOSITORY_SOURCE_FILES,
+) -> tuple[tuple[Path, ...], bool]:
+    """Return a deterministic, symlink-free repository source inventory."""
+    resolved = root.expanduser().resolve(strict=True)
+    if not resolved.is_dir():
+        raise ValueError(f"Repository root is not a directory: {resolved}")
+    files: list[Path] = []
+    truncated = False
+    for directory, names, filenames in os.walk(resolved, followlinks=False):
+        names[:] = sorted(
+            name for name in names
+            if name.casefold() not in _REPOSITORY_SKIP_DIRECTORIES
+            and not (Path(directory) / name).is_symlink()
+        )
+        for name in sorted(filenames, key=str.casefold):
+            candidate = Path(directory) / name
+            if candidate.suffix.casefold() not in SOURCE_SUFFIXES or candidate.is_symlink():
+                continue
+            try:
+                size = candidate.stat().st_size
+            except OSError:
+                continue
+            if size > MAX_EVIDENCE_FILE_BYTES:
+                continue
+            if len(files) >= limit:
+                truncated = True
+                return tuple(files), truncated
+            files.append(candidate)
+    return tuple(files), truncated
+
+
+def _git_inventory_bytes(
+    root: Path, *arguments: str,
+) -> tuple[bytes | None, bool]:
+    """Read one bounded local Git inventory without invoking a shell."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=10, check=False,
+            **hidden_process_options(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, False
+    if completed.returncode != 0:
+        return None, False
+    if len(completed.stdout) > MAX_GIT_INVENTORY_BYTES:
+        return None, True
+    return completed.stdout, False
+
+
+def _repository_worktree_state(root: Path) -> dict[str, object]:
+    """Return tracked, dirty, and untracked path evidence for one repository."""
+    status_raw, status_truncated = _git_inventory_bytes(
+        root, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+        "--ignored=no",
+    )
+    tracked_raw, tracked_truncated = _git_inventory_bytes(
+        root, "ls-files", "-z", "--cached",
+    )
+    if status_raw is None or tracked_raw is None:
+        return {
+            "available": False, "paths": {}, "tracked": set(),
+            "inventory_truncated": status_truncated or tracked_truncated,
+        }
+    statuses: dict[str, str] = {}
+    records = status_raw.split(b"\0")
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if len(record) < 4:
+            continue
+        code = record[:2].decode("ascii", errors="replace")
+        relative = record[3:].decode(
+            "utf-8", errors="surrogateescape",
+        ).replace("\\", "/")
+        if not relative:
+            continue
+        if code == "??":
+            status = "untracked"
+        elif "R" in code or "C" in code:
+            status = "renamed_or_copied"
+            index += 1  # Porcelain v1 -z includes the second rename/copy path.
+        elif code[0] not in {" ", "?"} and code[1] not in {" ", "?"}:
+            status = "staged_and_modified"
+        elif code[0] not in {" ", "?"}:
+            status = "staged"
+        else:
+            status = "modified"
+        statuses[relative] = status
+    tracked = {
+        value.decode("utf-8", errors="surrogateescape").replace("\\", "/")
+        for value in tracked_raw.split(b"\0") if value
+    }
+    return {
+        "available": True, "paths": statuses, "tracked": tracked,
+        "inventory_truncated": status_truncated or tracked_truncated,
+    }
+
+
+def _path_worktree_evidence(
+    root: Path, path: Path, state: Mapping[str, object],
+) -> dict[str, object]:
+    relative = path.resolve().relative_to(root.resolve()).as_posix()
+    statuses = state.get("paths", {})
+    tracked = state.get("tracked", set())
+    status = "unavailable"
+    if state.get("available") and isinstance(statuses, Mapping):
+        status = str(statuses.get(relative, ""))
+        if not status:
+            status = "tracked_clean" if relative in tracked else "untracked_ignored"
+    return {
+        "worktree_status": status,
+        "worktree_dirty": status not in {"tracked_clean", "unavailable"},
+        "worktree_untracked": status in {"untracked", "untracked_ignored"},
+        "worktree_status_available": bool(state.get("available")),
+    }
+
+
+def _repository_review_files(
+    root: Path,
+) -> tuple[tuple[Path, ...], bool, dict[str, object]]:
+    """Merge the regular source walk with bounded Git-reported untracked sources."""
+    resolved = root.expanduser().resolve(strict=True)
+    files, truncated = _repository_source_files(resolved)
+    state = _repository_worktree_state(resolved)
+    output = list(files)
+    known = {path.resolve() for path in output}
+    untracked_added = 0
+    untracked_bytes = 0
+    untracked_truncated = bool(state.get("inventory_truncated", False))
+    statuses = state.get("paths", {})
+    if isinstance(statuses, Mapping):
+        for relative, status in sorted(statuses.items(), key=lambda item: item[0].casefold()):
+            if status != "untracked":
+                continue
+            candidate = (resolved / str(relative)).resolve()
+            if (
+                candidate in known or not candidate.is_relative_to(resolved)
+                or candidate.is_symlink() or not candidate.is_file()
+                or candidate.suffix.casefold() not in SOURCE_SUFFIXES
+            ):
+                continue
+            try:
+                size = candidate.stat().st_size
+            except OSError:
+                continue
+            if (
+                size > MAX_EVIDENCE_FILE_BYTES
+                or untracked_added >= MAX_UNTRACKED_SOURCE_FILES
+                or untracked_bytes + size > MAX_UNTRACKED_SOURCE_BYTES
+            ):
+                untracked_truncated = True
+                continue
+            output.append(candidate)
+            known.add(candidate)
+            untracked_added += 1
+            untracked_bytes += size
+    state = dict(state)
+    state.update({
+        "untracked_sources_added": untracked_added,
+        "untracked_source_bytes": untracked_bytes,
+        "untracked_sources_truncated": untracked_truncated,
+    })
+    return tuple(output), bool(truncated or untracked_truncated), state
+
+
+def _repository_signature(root: Path) -> tuple[str, bool]:
+    """Hash source paths and stat identities so cached relations cannot go stale."""
+    resolved = root.expanduser().resolve(strict=True)
+    files, truncated, state = _repository_review_files(resolved)
+    digest = hashlib.sha256()
+    for path in files:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        relative = path.relative_to(resolved).as_posix()
+        digest.update(relative.encode("utf-8", errors="surrogatepass"))
+        digest.update(b"\0")
+        digest.update(str(stat.st_size).encode("ascii"))
+        digest.update(b":")
+        digest.update(str(stat.st_mtime_ns).encode("ascii"))
+        digest.update(b":")
+        digest.update(
+            str(_path_worktree_evidence(resolved, path, state)["worktree_status"])
+            .encode("utf-8", errors="replace")
+        )
+        digest.update(b"\n")
+    digest.update(b"truncated=" + (b"1" if truncated else b"0"))
+    digest.update(
+        b"untracked=" + str(state.get("untracked_sources_added", 0)).encode("ascii")
+    )
+    return digest.hexdigest(), truncated
+
+
+def _read_repository_source(path: Path) -> tuple[list[str], str] | None:
+    try:
+        if path.stat().st_size > MAX_EVIDENCE_FILE_BYTES:
+            return None
+    except OSError:
+        return None
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if b"\0" in raw[:8192]:
+        return None
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("utf-8", errors="replace")
+    return text.splitlines(), text
+
+
+def discover_symbol_sources(
+    repository_root: Path, symbols: Iterable[str], *, allow_missing: bool = False,
+) -> dict[str, object]:
+    """Locate exact definitions for a bounded set of requested symbols.
+
+    The result is evidence only. It never guesses a path when no definition is
+    found, and it reports repository inventory truncation explicitly.
+    """
+    root = repository_root.expanduser().resolve(strict=True)
+    selected = tuple(dict.fromkeys(item.strip() for item in symbols if item.strip()))
+    if not selected:
+        raise ValueError("At least one symbol is required for repository discovery")
+    if len(selected) > 32:
+        raise ValueError("Repository symbol discovery is limited to 32 symbols")
+    files, truncated, worktree = _repository_review_files(root)
+    matches: dict[str, list[dict[str, object]]] = {symbol: [] for symbol in selected}
+    for path in files:
+        loaded = _read_repository_source(path)
+        if loaded is None:
+            continue
+        lines, text = loaded
+        folded = text.casefold()
+        for symbol in selected:
+            if symbol.casefold() not in folded:
+                continue
+            expression = re.compile(rf"\b{re.escape(symbol)}\b", re.IGNORECASE)
+            for index, line in enumerate(lines):
+                if expression.search(line) is None:
+                    continue
+                definition = _function_definition_window(lines, index, symbol)
+                declaration = None if definition is not None else _declaration_window(
+                    lines, index, symbol,
+                )
+                window = definition or declaration
+                if window is None:
+                    continue
+                start, end = window
+                record = {
+                    "path": str(path.resolve()),
+                    "line_start": start + 1,
+                    "line_end": end,
+                    "selection": "definition" if definition is not None else "declaration",
+                    **_path_worktree_evidence(root, path, worktree),
+                }
+                if record not in matches[symbol]:
+                    matches[symbol].append(record)
+    missing = [symbol for symbol, records in matches.items() if not records]
+    if missing and not allow_missing:
+        suffix = " (repository scan reached its safety limit)" if truncated else ""
+        raise ValueError(
+            "Requested review symbols were not defined in the repository: "
+            + ", ".join(missing) + suffix
+        )
+    sources = sorted({
+        str(record["path"]) for records in matches.values() for record in records
+    }, key=str.casefold)
+    return {
+        "repository_root": str(root), "symbols": list(selected),
+        "symbol_sources": matches, "sources": sources,
+        "missing_symbols": missing,
+        "scanned_files": len(files), "scan_truncated": truncated,
+        "worktree_status_available": bool(worktree.get("available")),
+        "untracked_sources_added": int(worktree.get("untracked_sources_added", 0)),
+        "untracked_source_bytes": int(worktree.get("untracked_source_bytes", 0)),
+        "untracked_sources_truncated": bool(
+            worktree.get("untracked_sources_truncated", False)
+        ),
+    }
 
 
 def _line_windows(
@@ -355,9 +671,204 @@ def _source_dependencies(
     return dependencies, identifiers, omitted
 
 
+def _is_test_source(path: Path, root: Path) -> bool:
+    relative = path.relative_to(root)
+    parts = {part.casefold() for part in relative.parts[:-1]}
+    name = path.stem.casefold()
+    return (
+        bool(parts.intersection({"test", "tests", "spec", "specs"}))
+        or name.startswith("test_") or name.endswith(("_test", "tests", "spec"))
+    )
+
+
+def _relationship_record(
+    root: Path, path: Path, lines: list[str], index: int, *, role: str,
+    symbol: str = "", identifier: str = "",
+) -> dict[str, object]:
+    start = max(0, index - 2)
+    end = min(len(lines), index + 3)
+    return {
+        "role": role, "path": str(path.resolve()),
+        "relative_path": path.relative_to(root).as_posix(),
+        "symbol": symbol, "identifier": identifier,
+        "line_start": start + 1, "line_end": end,
+        "text": _numbered(lines, start, end), "truncated": False,
+    }
+
+
+def _repository_relationships(
+    repository_root: Path, selected_path: Path, lines: list[str],
+    selected_symbols: tuple[str, ...],
+    definition_records: tuple[tuple[str, int, int], ...],
+    *, priorities: tuple[str, ...],
+) -> dict[str, object]:
+    root = repository_root.expanduser().resolve(strict=True)
+    source = selected_path.resolve(strict=True)
+    if source != root and not source.is_relative_to(root):
+        raise ValueError(f"Selected source is outside the review repository: {source}")
+    unknown = [item for item in priorities if item not in REVIEW_PRIORITIES]
+    if unknown:
+        raise ValueError("Unknown source-review priorities: " + ", ".join(unknown))
+    files, scan_truncated, worktree = _repository_review_files(root)
+    callers: list[dict[str, object]] = []
+    tests: list[dict[str, object]] = []
+    transitions: list[dict[str, object]] = []
+    omitted = {"callers": 0, "tests": 0, "state-transitions": 0}
+    state_identifiers: list[str] = []
+    transition_candidates: dict[str, list[tuple[int, int]]] = {}
+    for symbol, start, end in definition_records:
+        candidates: list[tuple[int, int]] = []
+        for index in range(start, end):
+            code = _code_for_braces(lines[index])
+            for identifier in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", code):
+                if (
+                    _STATE_IDENTIFIER_HINT.search(identifier)
+                    and identifier not in state_identifiers
+                ):
+                    state_identifiers.append(identifier)
+            if "state-transitions" in priorities and _STATE_TRANSITION.search(code):
+                score = 1
+                folded = code.casefold()
+                if "compare_exchange" in folded:
+                    score += 6
+                elif any(token in folded for token in (".store(", ".exchange(")):
+                    score += 5
+                elif any(token in folded for token in ("fetch_add", "fetch_sub")):
+                    score += 4
+                if any(identifier.casefold() in folded for identifier in state_identifiers):
+                    score += 2
+                candidates.append((score, index))
+        transition_candidates[symbol] = candidates
+
+    # A long publication routine must not consume the entire transition budget
+    # before reset/retire and observe routines are represented. Allocate the
+    # bounded slots round-robin across requested definitions, selecting the
+    # strongest atomic/state mutations within each one.
+    ranked_transitions = {
+        symbol: sorted(candidates, key=lambda item: (-item[0], item[1]))
+        for symbol, candidates in transition_candidates.items()
+    }
+    while len(transitions) < MAX_REPOSITORY_RELATIONSHIPS:
+        added = False
+        for symbol, _start, _end in definition_records:
+            candidates = ranked_transitions.get(symbol, [])
+            if not candidates or len(transitions) >= MAX_REPOSITORY_RELATIONSHIPS:
+                continue
+            _score, index = candidates.pop(0)
+            transitions.append(_relationship_record(
+                root, source, lines, index,
+                role="selected_state_transition", symbol=symbol,
+            ))
+            added = True
+        if not added:
+            break
+    omitted["state-transitions"] += max(
+        0,
+        sum(len(candidates) for candidates in transition_candidates.values())
+        - len(transitions),
+    )
+
+    definition_ranges = tuple(
+        (start, end) for _symbol, start, end in definition_records
+    )
+
+    symbol_patterns = {
+        symbol: re.compile(rf"\b{re.escape(symbol)}\s*\(", re.IGNORECASE)
+        for symbol in selected_symbols
+    }
+    state_patterns = {
+        identifier: re.compile(rf"\b{re.escape(identifier)}\b", re.IGNORECASE)
+        for identifier in state_identifiers[:32]
+    }
+    seen: dict[str, set[tuple[str, int, str]]] = {
+        "callers": set(), "tests": set(), "state-transitions": set(),
+    }
+    seen["state-transitions"].update(
+        (str(item["path"]), int(item["line_start"]), str(item.get("symbol", "")))
+        for item in transitions
+    )
+
+    def append(kind: str, record: dict[str, object]) -> None:
+        key = (str(record["path"]), int(record["line_start"]), str(record.get("symbol", "")))
+        if key in seen[kind]:
+            return
+        seen[kind].add(key)
+        target = callers if kind == "callers" else tests if kind == "tests" else transitions
+        if len(target) >= MAX_REPOSITORY_RELATIONSHIPS:
+            omitted[kind] += 1
+            return
+        target.append(record)
+
+    for path in files:
+        loaded = _read_repository_source(path)
+        if loaded is None:
+            continue
+        candidate_lines, candidate_text = loaded
+        folded = candidate_text.casefold()
+        is_test = _is_test_source(path, root)
+        if "tests" in priorities and is_test:
+            for symbol in selected_symbols:
+                if symbol.casefold() not in folded:
+                    continue
+                expression = re.compile(rf"\b{re.escape(symbol)}\b", re.IGNORECASE)
+                for index, line in enumerate(candidate_lines):
+                    if expression.search(line):
+                        append("tests", _relationship_record(
+                            root, path, candidate_lines, index,
+                            role="nearby_test", symbol=symbol,
+                        ))
+        if "callers" in priorities and not is_test:
+            for symbol, expression in symbol_patterns.items():
+                if symbol.casefold() not in folded:
+                    continue
+                for index, line in enumerate(candidate_lines):
+                    if expression.search(line) is None:
+                        continue
+                    if path.resolve() == source and any(
+                        start <= index < end for start, end in definition_ranges
+                    ):
+                        continue
+                    if _function_definition_window(candidate_lines, index, symbol) is not None:
+                        continue
+                    append("callers", _relationship_record(
+                        root, path, candidate_lines, index,
+                        role="direct_caller", symbol=symbol,
+                    ))
+        if "state-transitions" in priorities and state_patterns:
+            for index, line in enumerate(candidate_lines):
+                code = _code_for_braces(line)
+                if _STATE_TRANSITION.search(code) is None:
+                    continue
+                for identifier, expression in state_patterns.items():
+                    if expression.search(code) is None:
+                        continue
+                    append("state-transitions", _relationship_record(
+                        root, path, candidate_lines, index,
+                        role="related_state_transition", identifier=identifier,
+                    ))
+                    break
+    return {
+        "review_priorities": list(priorities),
+        "callers": callers, "tests": tests,
+        "state_transitions": transitions,
+        "relationship_omitted": omitted,
+        "repository_scan_files": len(files),
+        "repository_scan_truncated": scan_truncated,
+        "repository_untracked_sources_added": int(
+            worktree.get("untracked_sources_added", 0)
+        ),
+        "repository_untracked_sources_truncated": bool(
+            worktree.get("untracked_sources_truncated", False)
+        ),
+        "state_identifiers": state_identifiers[:32],
+    }
+
+
 def inspect_source(
     path: Path, *, symbols: Iterable[str] = (), context_lines: int = 16,
     max_chars: int = MAX_EVIDENCE_CHARS,
+    repository_root: Path | None = None,
+    priorities: Iterable[str] = (),
 ) -> dict[str, object]:
     """Return complete requested definitions plus bounded references and dependencies."""
     if not 0 <= context_lines <= 200:
@@ -365,6 +876,14 @@ def inspect_source(
     if not 256 <= max_chars <= MAX_EVIDENCE_CHARS:
         raise ValueError(f"Source excerpt limit must be 256-{MAX_EVIDENCE_CHARS:,} characters")
     resolved, text, digest = _read_text(path)
+    worktree_evidence: dict[str, object] = {}
+    if repository_root is not None:
+        root = repository_root.expanduser().resolve(strict=True)
+        if resolved != root and not resolved.is_relative_to(root):
+            raise ValueError(f"Selected source is outside the review repository: {resolved}")
+        worktree_evidence = _path_worktree_evidence(
+            root, resolved, _repository_worktree_state(root),
+        )
     lines = text.splitlines()
     selected = tuple(dict.fromkeys(item.strip() for item in symbols if item.strip()))
     missing_symbols: list[str] = []
@@ -456,6 +975,23 @@ def inspect_source(
     declarations, declaration_identifiers, declarations_omitted = (
         _referenced_declarations(lines, definition_ranges, selected)
     )
+    selected_priorities = tuple(dict.fromkeys(
+        item.strip().casefold() for item in priorities if item.strip()
+    ))
+    relationships: dict[str, object] = {}
+    if selected_priorities:
+        if repository_root is None:
+            raise ValueError("Source-review priorities require a repository root")
+        relationships = _repository_relationships(
+            repository_root, resolved, lines, selected,
+            tuple(
+                (str(excerpt["symbol"]), int(excerpt["line_start"]) - 1,
+                 int(excerpt["line_end"]))
+                for excerpt in excerpts
+                if excerpt.get("selection") == "definition" and excerpt.get("symbol")
+            ),
+            priorities=selected_priorities,
+        )
     return {
         "kind": "source", "path": str(resolved), "sha256": digest,
         "symbols": list(selected), "missing_symbols": missing_symbols,
@@ -471,6 +1007,8 @@ def inspect_source(
             not item["truncated"] and item["preserve_full"] for item in excerpts
             if item.get("symbol")
         ),
+        **worktree_evidence,
+        **relationships,
     }
 
 
@@ -711,13 +1249,31 @@ def _cached_evidence(
 def cached_inspect_source(
     path: Path, *, symbols: Iterable[str] = (), context_lines: int = 16,
     max_chars: int = MAX_EVIDENCE_CHARS,
+    repository_root: Path | None = None,
+    priorities: Iterable[str] = (),
 ) -> dict[str, object]:
     """Cache unchanged source grounding inside a long-lived SDK/Agent process."""
     selected = tuple(dict.fromkeys(item.strip() for item in symbols if item.strip()))
-    key = _cache_key("source", path, (selected, context_lines, max_chars))
+    selected_priorities = tuple(dict.fromkeys(
+        item.strip().casefold() for item in priorities if item.strip()
+    ))
+    repository = (
+        repository_root.expanduser().resolve(strict=True)
+        if repository_root is not None else None
+    )
+    repository_signature = _repository_signature(repository) if repository else ("", False)
+    key = _cache_key(
+        "source", path,
+        (
+            selected, context_lines, max_chars,
+            str(repository) if repository else "", selected_priorities,
+            *repository_signature,
+        ),
+    )
     return _cached_evidence(
         key, lambda: inspect_source(
             path, symbols=selected, context_lines=context_lines, max_chars=max_chars,
+            repository_root=repository, priorities=selected_priorities,
         ),
     )
 
@@ -822,7 +1378,9 @@ def compact_grounding(record: dict[str, object], *, max_chars: int) -> dict[str,
                 excerpt["truncated"] = True
             excerpt["text"] = compacted[:remaining]
             remaining = max(0, remaining - len(excerpt["text"]))
-        for collection in ("references", "dependencies"):
+        for collection in (
+            "callers", "state_transitions", "tests", "references", "dependencies",
+        ):
             records = payload.get(collection, [])
             if not isinstance(records, list):
                 continue
@@ -977,7 +1535,9 @@ def compact_explicit_symbols(
         excerpt["query_terms_retained"] = sorted(matched_terms)
         if symbol and symbol not in compacted_symbols:
             compacted_symbols.append(symbol)
-    for collection in ("references", "dependencies"):
+    for collection in (
+        "callers", "state_transitions", "tests", "references", "dependencies",
+    ):
         for item in payload.get(collection, []):
             if isinstance(item, dict) and item.get("text"):
                 item["text"] = ""

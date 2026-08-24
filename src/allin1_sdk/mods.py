@@ -17,6 +17,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator
 
 from allin1_sdk.processes import run_hidden
+from allin1_sdk.mod_package_contract import (
+    WeaponEnhancementContract,
+    parse_workbench_contract,
+    validate_mod_schema_envelope,
+)
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -35,7 +40,7 @@ _PACKAGE_REQUIREMENT_PATTERN = re.compile(
 _EXTENSION_API_VERSION = 1
 _EXTENSION_MANIFEST_FIELDS = frozenset({
     "schema_version", "api_version", "id", "name", "version",
-    "description", "capabilities", "systems", "gbay", "runtime",
+    "description", "capabilities", "systems", "gbay", "runtime", "workbench",
 })
 _RESERVED_DESTINATIONS = frozenset({
     "dinput8.dll",
@@ -165,6 +170,7 @@ class ExtensionReference:
     manifest_path: Path
     api_version: int
     requirements: tuple[str, ...]
+    workbench_weapon_enhancements: tuple[WeaponEnhancementContract, ...] = ()
 
 
 def _extension_reference(
@@ -177,26 +183,11 @@ def _extension_reference(
     SDK nevertheless validates the same versioned package envelope so a valid
     launcher package is not incorrectly rejected during read-only diagnostics.
     """
-    raw_allin1 = data.get("allin1")
-    if schema_version == 1:
-        if raw_allin1 is not None:
-            raise ValueError(
-                "ALLIN1 extension declarations require mod.toml schema_version = 2"
-            )
-        return None
+    validated_schema, raw_allin1 = validate_mod_schema_envelope(data)
+    if validated_schema != schema_version:
+        raise ValueError("mod.toml schema validation changed during package loading")
     if raw_allin1 is None:
-        raise ValueError(
-            "mod.toml schema_version 2 requires an [allin1] extension table"
-        )
-    if not isinstance(raw_allin1, dict):
-        raise ValueError("[allin1] must be a table")
-    unknown = set(raw_allin1) - {"api_version", "content", "requires"}
-    if unknown:
-        raise ValueError(
-            "Unsupported [allin1] field(s): " + ", ".join(sorted(unknown))
-        )
-    if raw_allin1.get("api_version") != _EXTENSION_API_VERSION:
-        raise ValueError(f"[allin1].api_version must be {_EXTENSION_API_VERSION}")
+        return None
     content_path = _relative_path(raw_allin1.get("content"), "[allin1].content")
     content_file = _contained_path(manifest_path.parent, content_path)
     if not content_file.is_file():
@@ -262,6 +253,13 @@ def _extension_reference(
         isinstance(item, dict) for item in raw_assemblies
     ):
         raise ValueError("runtime assemblies must be an array of objects")
+    workbench_weapon_enhancements = parse_workbench_contract(
+        content.get("workbench"),
+        runtime_entry_points=(
+            str(item.get("entry_point", "")).strip()
+            for item in raw_assemblies if item.get("entry_point")
+        ),
+    )
 
     capability_set = set(capabilities)
     if raw_sections and "gbay.sections" not in capability_set:
@@ -318,6 +316,7 @@ def _extension_reference(
         manifest_path=content_file,
         api_version=_EXTENSION_API_VERSION,
         requirements=requirements,
+        workbench_weapon_enhancements=workbench_weapon_enhancements,
     )
 
 
@@ -364,9 +363,7 @@ class ModManifest:
         except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
             raise ValueError(f"Invalid mod.toml manifest: {exc}") from exc
 
-        schema_version = data.get("schema_version")
-        if schema_version not in {1, 2}:
-            raise ValueError("mod.toml schema_version must be 1 or 2")
+        schema_version, _raw_allin1 = validate_mod_schema_envelope(data)
         mod_id = str(data.get("id", "")).strip().lower()
         if not _ID_PATTERN.fullmatch(mod_id):
             raise ValueError("Mod id must be 2-64 lowercase letters, numbers, dots, dashes, or underscores")

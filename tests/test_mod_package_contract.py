@@ -40,6 +40,20 @@ def test_contract_fixture_bytes_match_launcher_copy() -> None:
     assert local == launcher
 
 
+def test_shared_contract_implementation_matches_launcher_copy() -> None:
+    launcher_module = (
+        Path(__file__).resolve().parents[2] / "ALLIN1" / "src" / "allin1"
+        / "mod_package_contract.py"
+    )
+    if not launcher_module.is_file():
+        pytest.skip("Sibling ALLIN1 checkout is not present")
+    sdk_module = (
+        Path(__file__).resolve().parents[1] / "src" / "allin1_sdk"
+        / "mod_package_contract.py"
+    )
+    assert sdk_module.read_bytes() == launcher_module.read_bytes()
+
+
 def _zip_tree(archive: Path, root: Path, prefix: str = "") -> None:
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
         for source in root.rglob("*"):

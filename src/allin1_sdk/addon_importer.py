@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -16,6 +17,14 @@ from typing import Any, Iterable
 from xml.etree import ElementTree as ET
 
 from allin1_sdk.processes import hidden_process_options
+from allin1_sdk.mod_package_contract import (
+    WeaponEnhancementContract,
+    parse_workbench_contract,
+)
+from allin1_sdk.material_progression import (
+    MaterialProgressionReport,
+    audit_material_progressions,
+)
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -34,7 +43,7 @@ EXTERNAL_ARCHIVE_SUFFIXES = frozenset({".rar", ".7z"})
 MANIFEST_TEXT_SUFFIXES = frozenset({".lua"})
 PARSED_TEXT_SUFFIXES = XML_SUFFIXES | MANIFEST_TEXT_SUFFIXES
 INSPECTION_TEXT_SUFFIXES = PARSED_TEXT_SUFFIXES | frozenset({
-    ".txt", ".md", ".toml",
+    ".txt", ".md", ".toml", ".json",
 })
 BINARY_PLUGIN_SUFFIXES = frozenset({".dll", ".asi", ".addon64"})
 TEXT_SUFFIXES = frozenset({
@@ -602,6 +611,42 @@ class BinaryPluginRecord:
 
 
 @dataclass(frozen=True)
+class RpfPackageRecord:
+    """One package-owned RPF that was recursively indexed read-only."""
+
+    source: str
+    edition: str
+    archive_count: int
+    entry_count: int
+    suffix_counts: dict[str, int]
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RpfNativeEntryRecord:
+    """A native asset discovered at any depth inside a package-owned RPF."""
+
+    source: str
+    archive_path: str
+    path: str
+    entry_id: str
+    kind: str
+    suffix: str
+    size: int
+
+
+@dataclass(frozen=True)
+class ScriptedWeaponSystemRecord:
+    """A schema-2 runtime system that enhances vanilla weapon behavior."""
+
+    system_id: str
+    name: str
+    capabilities: tuple[str, ...]
+    script_entry_points: tuple[str, ...]
+    relationships_declared: bool
+
+
+@dataclass(frozen=True)
 class PackageScan:
     source: Path
     source_kind: str
@@ -630,6 +675,11 @@ class PackageScan:
     peds: tuple[PedRecord, ...] = ()
     weapon_animation_records: tuple[WeaponAnimationRecord, ...] = ()
     weapon_shop_records: tuple[WeaponShopRecord, ...] = ()
+    weapon_enhancements: tuple[WeaponEnhancementContract, ...] = ()
+    scripted_weapon_systems: tuple[ScriptedWeaponSystemRecord, ...] = ()
+    rpf_archives: tuple[RpfPackageRecord, ...] = ()
+    rpf_native_assets: tuple[RpfNativeEntryRecord, ...] = ()
+    material_progressions: tuple[MaterialProgressionReport, ...] = ()
 
     @property
     def valid(self) -> bool:
@@ -678,6 +728,19 @@ class ImportedAddonDraft:
 class AddonPackageInspector:
     """Read a loose DLC folder or OIV/ZIP/RAR/7z without installing it."""
 
+    def __init__(
+        self, project_root: str | Path | None = None,
+        gta_path: str | Path | None = None,
+    ) -> None:
+        self.project_root = (
+            Path(project_root).expanduser().resolve()
+            if project_root is not None else None
+        )
+        self.gta_path = (
+            Path(gta_path).expanduser().resolve()
+            if gta_path is not None else None
+        )
+
     def inspect(self, source: str | Path) -> PackageScan:
         path = Path(source).expanduser().resolve()
         if path.is_dir():
@@ -699,6 +762,8 @@ class AddonPackageInspector:
             if PurePosixPath(entry.path).name.casefold() == "mod.toml"
         ]
         manifest_editions: tuple[str, ...] = ()
+        weapon_enhancements: tuple[WeaponEnhancementContract, ...] = ()
+        scripted_weapon_systems: tuple[ScriptedWeaponSystemRecord, ...] = ()
         if len(managed_manifests) > 1:
             paths = ", ".join(entry.path for entry in managed_manifests[:4])
             if len(managed_manifests) > 4:
@@ -714,6 +779,9 @@ class AddonPackageInspector:
             if manifest.content is not None:
                 manifest_editions = self._managed_manifest_editions(
                     manifest, findings,
+                )
+                weapon_enhancements, scripted_weapon_systems = self._managed_workbench_contract(
+                    entries, manifest, findings,
                 )
 
         weapons: list[WeaponRecord] = []
@@ -866,6 +934,8 @@ class AddonPackageInspector:
             package_kinds.append("vehicle_addon")
         if weapons:
             package_kinds.append("weapon_addon")
+        if weapon_enhancements or scripted_weapon_systems:
+            package_kinds.append("scripted_weapon_enhancement")
         if peds:
             package_kinds.append("ped_addon")
         if not package_kinds:
@@ -1154,19 +1224,27 @@ class AddonPackageInspector:
             ))
 
         rpf_entries = [entry.path for entry in entries if entry.suffix == ".rpf"]
-        for rpf_path in rpf_entries[:20]:
-            findings.append(PackageFinding(
-                "warning", "opaque_rpf",
-                "Nested RPF content is inventoried but not inferred by the Python "
-                "draft importer; inspect it with the Enhanced-aware RPF tool.",
-                rpf_path,
-            ))
-        if len(rpf_entries) > 20:
-            findings.append(PackageFinding(
-                "warning", "opaque_rpf_summary",
-                f"{len(rpf_entries) - 20} additional RPF archives were omitted "
-                "from individual warnings.",
-            ))
+        rpf_archives: tuple[RpfPackageRecord, ...] = ()
+        rpf_native_assets: tuple[RpfNativeEntryRecord, ...] = ()
+        material_progressions: tuple[MaterialProgressionReport, ...] = ()
+        if rpf_entries and self.project_root is not None and self.gta_path is not None:
+            rpf_archives, rpf_native_assets, material_progressions = self._inspect_package_rpfs(
+                path, entries, findings, weapon_enhancements,
+            )
+        else:
+            for rpf_path in rpf_entries[:20]:
+                findings.append(PackageFinding(
+                    "warning", "opaque_rpf",
+                    "Nested RPF content is inventoried but not inferred without a "
+                    "matching GTA path; reopen the Workbench with --gta-path.",
+                    rpf_path,
+                ))
+            if len(rpf_entries) > 20:
+                findings.append(PackageFinding(
+                    "warning", "opaque_rpf_summary",
+                    f"{len(rpf_entries) - 20} additional RPF archives were omitted "
+                    "from individual warnings.",
+                ))
         nested_package_entries = [
             entry.path for entry in entries
             if entry.suffix in {".zip", ".oiv", ".rar", ".7z"}
@@ -1184,7 +1262,10 @@ class AddonPackageInspector:
                 f"{len(nested_package_entries) - 20} additional nested package "
                 "archives were omitted from individual notices.",
             ))
-        if not weapons and not vehicles and not peds:
+        if (
+            not weapons and not vehicles and not peds
+            and not weapon_enhancements and not scripted_weapon_systems
+        ):
             recognized_non_content = bool(
                 binary_plugins or config_files or shader_assets
                 or replacement_assets or rpf_entries or registrations
@@ -1225,6 +1306,11 @@ class AddonPackageInspector:
             peds=tuple(peds),
             weapon_animation_records=tuple(weapon_animation_records),
             weapon_shop_records=tuple(weapon_shop_records),
+            weapon_enhancements=weapon_enhancements,
+            scripted_weapon_systems=scripted_weapon_systems,
+            rpf_archives=rpf_archives,
+            rpf_native_assets=rpf_native_assets,
+            material_progressions=material_progressions,
         )
 
     @staticmethod
@@ -1266,6 +1352,189 @@ class AddonPackageInspector:
             ))
             return ()
         return editions
+
+    @staticmethod
+    def _managed_workbench_contract(
+        entries: list[PackageEntry], manifest: PackageEntry,
+        findings: list[PackageFinding],
+    ) -> tuple[
+        tuple[WeaponEnhancementContract, ...],
+        tuple[ScriptedWeaponSystemRecord, ...],
+    ]:
+        """Load explicitly declared script/vanilla/asset relationships."""
+        assert manifest.content is not None
+        try:
+            package = tomllib.loads(decode_text_preview(manifest.content))
+            raw_allin1 = package.get("allin1")
+            if package.get("schema_version") != 2 or not isinstance(raw_allin1, dict):
+                return (), ()
+            relative = _safe_member_path(str(raw_allin1.get("content", "")))
+            content_path = (
+                PurePosixPath(manifest.path).parent / relative
+            ).as_posix()
+            matches = [
+                entry for entry in entries
+                if entry.path.casefold() == content_path.casefold()
+            ]
+            if len(matches) != 1 or matches[0].content is None:
+                raise ValueError(
+                    f"Declared ALLIN1 content manifest was not readable: {content_path}"
+                )
+            content = json.loads(decode_text_preview(matches[0].content))
+            if not isinstance(content, dict):
+                raise ValueError("ALLIN1 content manifest must be a JSON object")
+            runtime = content.get("runtime", {})
+            assemblies = (
+                runtime.get("assemblies", []) if isinstance(runtime, dict) else []
+            )
+            entry_points = tuple(
+                str(item.get("entry_point", "")).strip()
+                for item in assemblies
+                if isinstance(item, dict) and item.get("entry_point")
+            )
+            enhancements = parse_workbench_contract(
+                content.get("workbench"), runtime_entry_points=entry_points,
+            )
+            capabilities = tuple(
+                str(item).strip() for item in content.get("capabilities", [])
+                if isinstance(item, str) and item.strip()
+            )
+            weapon_capabilities = tuple(
+                item for item in capabilities
+                if item.casefold().startswith("weapon.")
+            )
+            systems: list[ScriptedWeaponSystemRecord] = []
+            for system in content.get("systems", []):
+                if not isinstance(system, dict):
+                    continue
+                if (
+                    str(system.get("category", "")).casefold() != "weapons"
+                    and not weapon_capabilities
+                ):
+                    continue
+                systems.append(ScriptedWeaponSystemRecord(
+                    system_id=str(system.get("id", "")).strip(),
+                    name=str(system.get("name", "")).strip(),
+                    capabilities=weapon_capabilities,
+                    script_entry_points=entry_points,
+                    relationships_declared=bool(enhancements),
+                ))
+            if systems and not enhancements:
+                findings.append(PackageFinding(
+                    "info", "scripted_vanilla_weapon_system",
+                    "Schema-2 runtime declares a script-driven vanilla weapon "
+                    "enhancement. Add workbench.weapon_enhancements to expose "
+                    "exact weapon, component, script, and visual-asset links.",
+                    content_path,
+                ))
+            return enhancements, tuple(systems)
+        except (
+            json.JSONDecodeError, tomllib.TOMLDecodeError, TypeError, ValueError,
+        ) as exc:
+            findings.append(PackageFinding(
+                "warning", "workbench_contract_invalid",
+                f"Could not load declared Workbench relationships: {exc}",
+                manifest.path,
+            ))
+            return (), ()
+
+    def _inspect_package_rpfs(
+        self, source: Path, entries: list[PackageEntry],
+        findings: list[PackageFinding],
+        weapon_enhancements: tuple[WeaponEnhancementContract, ...] = (),
+    ) -> tuple[
+        tuple[RpfPackageRecord, ...],
+        tuple[RpfNativeEntryRecord, ...],
+        tuple[MaterialProgressionReport, ...],
+    ]:
+        """Recursively index bounded package RPFs through the pinned helper."""
+        assert self.project_root is not None and self.gta_path is not None
+        from allin1_sdk.rpf_tools import RpfExplorerService
+
+        members = [entry for entry in entries if entry.suffix == ".rpf"]
+        if len(members) > 20:
+            findings.append(PackageFinding(
+                "warning", "rpf_inspection_limit",
+                "Only the first 20 package RPF members were recursively inspected.",
+            ))
+        records: list[RpfPackageRecord] = []
+        native: list[RpfNativeEntryRecord] = []
+        material_reports: list[MaterialProgressionReport] = []
+        declarations = tuple(
+            visual
+            for enhancement in weapon_enhancements
+            for visual in enhancement.visual_assets
+        )
+        reader = PackageAssetReader(source)
+        service = RpfExplorerService(self.project_root, self.gta_path)
+        with tempfile.TemporaryDirectory(prefix="allin1-workbench-rpf-") as temporary:
+            root = Path(temporary)
+            for number, member in enumerate(members[:20], start=1):
+                try:
+                    if member.size <= 0 or member.size > 512 * 1024 * 1024:
+                        raise ValueError(
+                            "RPF is empty or exceeds the 512 MiB inspection limit"
+                        )
+                    content = reader.read(member.path, limit=member.size + 1)
+                    if content.truncated or len(content.data) != member.size:
+                        raise ValueError("RPF could not be read completely")
+                    extracted = root / f"member-{number}.rpf"
+                    extracted.write_bytes(content.data)
+                    index = service.index(extracted)
+                    records.append(RpfPackageRecord(
+                        source=member.path,
+                        edition=index.edition,
+                        archive_count=len(index.archives),
+                        entry_count=len(index.entries),
+                        suffix_counts=index.suffix_counts(),
+                        warnings=index.warnings,
+                    ))
+                    native.extend(
+                        RpfNativeEntryRecord(
+                            source=member.path,
+                            archive_path=item.archive_path,
+                            path=item.path,
+                            entry_id=item.id,
+                            kind=item.kind,
+                            suffix=item.suffix,
+                            size=item.size,
+                        )
+                        for item in index.entries
+                        if item.kind != "directory" and item.suffix in ASSET_SUFFIXES
+                    )
+                    findings.append(PackageFinding(
+                        "info", "rpf_recursively_inspected",
+                        f"Recursively inspected {len(index.archives)} archive layer(s) "
+                        f"and {len(index.entries)} entries.",
+                        member.path,
+                    ))
+                    try:
+                        audited = audit_material_progressions(
+                            service, index, root / f"material-{number}",
+                            source=member.path, declarations=declarations,
+                        )
+                        material_reports.extend(audited)
+                        for report in audited:
+                            findings.append(PackageFinding(
+                                "info", "material_progression_audited",
+                                f"Audited {report.model_count} YDR tiers, "
+                                f"{report.texture_count} YTD textures, and "
+                                f"{report.archetype_count} YTYP archetypes.",
+                                member.path,
+                            ))
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        findings.append(PackageFinding(
+                            "warning", "material_progression_audit_failed",
+                            f"Material progression audit could not complete: {exc}",
+                            member.path,
+                        ))
+                except (OSError, RuntimeError, ValueError) as exc:
+                    findings.append(PackageFinding(
+                        "warning", "rpf_recursive_inspection_failed",
+                        f"Could not recursively inspect this RPF: {exc}",
+                        member.path,
+                    ))
+        return tuple(records), tuple(native), tuple(material_reports)
 
     def _read_external_archive(
         self, archive: Path,

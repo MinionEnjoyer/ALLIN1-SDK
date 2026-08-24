@@ -251,6 +251,7 @@ class WeaponWorkbenchFrame(ttk.Frame):
         component_page = ttk.Frame(self.project_tabs, padding=8)
         component_author_page = ttk.Frame(self.project_tabs, padding=8)
         integration_page = ttk.Frame(self.project_tabs, padding=8)
+        enhancement_page = ttk.Frame(self.project_tabs, padding=8)
         asset_page = ttk.Frame(self.project_tabs, padding=8)
         self.project_tabs.add(definition_page, text="Definition + ammo")
         self.project_tabs.add(author_page, text="Author")
@@ -258,7 +259,68 @@ class WeaponWorkbenchFrame(ttk.Frame):
         self.project_tabs.add(component_page, text="Attachments")
         self.project_tabs.add(component_author_page, text="Component author")
         self.project_tabs.add(integration_page, text="Integration")
+        self.project_tabs.add(enhancement_page, text="Script enhancements")
         self.project_tabs.add(asset_page, text="Assets")
+        self.enhancement_page = enhancement_page
+
+        self.enhancement_summary = tk.StringVar(
+            value="No script-driven vanilla weapon enhancement was declared."
+        )
+        ttk.Label(
+            enhancement_page, textvariable=self.enhancement_summary,
+            foreground="#52635c", wraplength=610, justify="left",
+        ).pack(fill="x", pady=(0, 6))
+        enhancement_tabs = ttk.Notebook(enhancement_page)
+        enhancement_tabs.pack(fill="both", expand=True)
+        relationship_page = ttk.Frame(enhancement_tabs, padding=5)
+        runtime_page = ttk.Frame(enhancement_tabs, padding=5)
+        visual_page = ttk.Frame(enhancement_tabs, padding=5)
+        enhancement_tabs.add(relationship_page, text="Vanilla links")
+        enhancement_tabs.add(runtime_page, text="Runtime")
+        enhancement_tabs.add(visual_page, text="Visual assets")
+        self.enhancement_tree = ttk.Treeview(
+            relationship_page,
+            columns=("weapon_hash", "component", "component_hash"),
+            show="tree headings",
+        )
+        self.enhancement_tree.heading("#0", text="Vanilla weapon")
+        self.enhancement_tree.heading("weapon_hash", text="Weapon hash")
+        self.enhancement_tree.heading("component", text="Vanilla component")
+        self.enhancement_tree.heading("component_hash", text="Component hash")
+        self.enhancement_tree.column("#0", width=180)
+        self.enhancement_tree.column("weapon_hash", width=95, stretch=False)
+        self.enhancement_tree.column("component", width=210)
+        self.enhancement_tree.column("component_hash", width=105, stretch=False)
+        enhancement_scroll = ttk.Scrollbar(
+            relationship_page, orient="vertical",
+            command=self.enhancement_tree.yview,
+        )
+        self.enhancement_tree.configure(yscrollcommand=enhancement_scroll.set)
+        self.enhancement_tree.pack(side="left", fill="both", expand=True)
+        enhancement_scroll.pack(side="right", fill="y")
+        self.enhancement_runtime_tree = ttk.Treeview(
+            runtime_page, columns=("kind", "value"), show="tree headings",
+        )
+        self.enhancement_runtime_tree.heading("#0", text="System")
+        self.enhancement_runtime_tree.heading("kind", text="Relationship")
+        self.enhancement_runtime_tree.heading("value", text="Declared value")
+        self.enhancement_runtime_tree.column("#0", width=175)
+        self.enhancement_runtime_tree.column("kind", width=105, stretch=False)
+        self.enhancement_runtime_tree.column("value", width=330)
+        self.enhancement_runtime_tree.pack(fill="both", expand=True)
+        self.enhancement_visual_tree = ttk.Treeview(
+            visual_page, columns=("role", "count", "archive"),
+            show="tree headings",
+        )
+        self.enhancement_visual_tree.heading("#0", text="Asset")
+        self.enhancement_visual_tree.heading("role", text="Role")
+        self.enhancement_visual_tree.heading("count", text="Count")
+        self.enhancement_visual_tree.heading("archive", text="Nested archive")
+        self.enhancement_visual_tree.column("#0", width=220)
+        self.enhancement_visual_tree.column("role", width=95, stretch=False)
+        self.enhancement_visual_tree.column("count", width=62, stretch=False)
+        self.enhancement_visual_tree.column("archive", width=300)
+        self.enhancement_visual_tree.pack(fill="both", expand=True)
 
         field_table = ttk.Frame(definition_page)
         field_table.pack(fill="both", expand=True)
@@ -813,6 +875,7 @@ class WeaponWorkbenchFrame(ttk.Frame):
         self._selected_component_item = None
         self._loaded_editor_snapshot = None
         self._refresh_catalog()
+        self._populate_script_enhancements(scan)
         self.author_button.configure(
             state=(
                 "disabled"
@@ -824,7 +887,9 @@ class WeaponWorkbenchFrame(ttk.Frame):
             ),
         )
         self.status.set(
-            f"{len(scan.weapons)} weapons · {len(scan.weapon_components)} component "
+            f"{len(scan.weapons)} custom weapons · "
+            f"{len(scan.weapon_enhancements) + len(scan.scripted_weapon_systems)} "
+            f"script enhancements · {len(scan.weapon_components)} component "
             f"definitions · {scan.warning_count} package warnings"
         )
         if self.weapon_tree.get_children():
@@ -836,9 +901,84 @@ class WeaponWorkbenchFrame(ttk.Frame):
             self.weapon_tree.selection_set(selected)
             self.weapon_tree.focus(selected)
             self._select_weapon()
+        elif scan.weapon_enhancements or scan.scripted_weapon_systems:
+            system = (
+                scan.weapon_enhancements[0].name
+                if scan.weapon_enhancements else scan.scripted_weapon_systems[0].name
+            )
+            self.heading.set(system)
+            self.summary.set(
+                "Script-driven vanilla weapon/component enhancement; no custom "
+                "weapons.meta record is required."
+            )
+            self.project_tabs.select(self.enhancement_page)
         else:
             self._clear_project(
                 "No weapons.meta records were discovered in this package."
+            )
+
+    def _populate_script_enhancements(self, scan: PackageScan) -> None:
+        for tree in (
+            self.enhancement_tree, self.enhancement_runtime_tree,
+            self.enhancement_visual_tree,
+        ):
+            tree.delete(*tree.get_children())
+        relationship_count = 0
+        for enhancement in scan.weapon_enhancements:
+            for link in enhancement.weapon_components:
+                relationship_count += 1
+                self.enhancement_tree.insert(
+                    "", "end", text=link.weapon_name,
+                    values=(
+                        link.weapon_hash, link.component_name, link.component_hash,
+                    ),
+                )
+            for entry_point in enhancement.script_entry_points:
+                self.enhancement_runtime_tree.insert(
+                    "", "end", text=enhancement.name,
+                    values=("Entry point", entry_point),
+                )
+            for visual in enhancement.visual_assets:
+                self.enhancement_visual_tree.insert(
+                    "", "end", text=visual.texture_dictionary,
+                    values=("Texture tiers", visual.levels, visual.archive),
+                )
+                self.enhancement_visual_tree.insert(
+                    "", "end", text=visual.archetype_dictionary,
+                    values=(
+                        "Archetypes", len(visual.families) * visual.levels,
+                        visual.archive,
+                    ),
+                )
+        for system in scan.scripted_weapon_systems:
+            for entry_point in system.script_entry_points:
+                self.enhancement_runtime_tree.insert(
+                    "", "end", text=system.name,
+                    values=("Entry point", entry_point),
+                )
+            for capability in system.capabilities:
+                self.enhancement_runtime_tree.insert(
+                    "", "end", text=system.name,
+                    values=("Capability", capability),
+                )
+        for report in scan.material_progressions:
+            self.enhancement_visual_tree.insert(
+                "", "end", text=report.texture_dictionary,
+                values=("Decoded textures", report.texture_count, report.archive_path),
+            )
+            self.enhancement_visual_tree.insert(
+                "", "end", text=report.archetype_dictionary,
+                values=("Decoded archetypes", report.archetype_count, report.archive_path),
+            )
+        if scan.scripted_weapon_systems or scan.weapon_enhancements:
+            self.enhancement_summary.set(
+                f"{len(scan.scripted_weapon_systems)} runtime weapon system(s) · "
+                f"{relationship_count} exact vanilla weapon/component link(s) · "
+                f"{len(scan.material_progressions)} material progression audit(s)."
+            )
+        else:
+            self.enhancement_summary.set(
+                "No script-driven vanilla weapon enhancement was declared."
             )
 
     def select_weapon(self, name: str) -> bool:

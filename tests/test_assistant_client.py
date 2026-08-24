@@ -443,6 +443,18 @@ def test_console_cli_and_agent_api_expose_read_only_prompt(
     result = PromptResult("Qwen says hello", "qwen-test", "compatible_api", 0.125)
     monkeypatch.setattr(assistant_client, "prompt_assistant", lambda *_a, **_k: result)
     monkeypatch.setattr(
+        assistant_client, "review_assistant",
+        lambda *_a, **_k: assistant_client.ReviewResult(
+            symbols=("one",), priorities=("callers",),
+            source_discovery={"sources": []}, chunks=(),
+            advisory={
+                "summary": "Review complete", "findings": [],
+                "recommended_operations": [], "proposed_changes": [],
+                "missing_context": [], "abstentions": [],
+            },
+        ),
+    )
+    monkeypatch.setattr(
         assistant_client, "assistant_status",
         lambda _root=None: {"enabled": True, "mode": "compatible_api"},
     )
@@ -450,6 +462,8 @@ def test_console_cli_and_agent_api_expose_read_only_prompt(
     assert "assistant" in console_commands
     suggestion = suggestions_for("assistant pr", cwd=tmp_path)
     assert suggestion[0].replacement == "assistant prompt "
+    review_suggestion = suggestions_for("assistant re", cwd=tmp_path)
+    assert review_suggestion[0].replacement == "assistant review "
     console_result = execute_console_command("assistant prompt hello from console")
     assert console_result.exit_code == 0 and "Qwen says hello" in console_result.output
 
@@ -460,6 +474,15 @@ def test_console_cli_and_agent_api_expose_read_only_prompt(
         "args": ["prompt", "hello", "from", "api", "--json-output"],
     }, audit_path=tmp_path / "audit.jsonl")
     assert api["ok"] is True and "Qwen says hello" in api["result"]["output"]
+    review_api = execute_request({
+        "id": "qwen-review", "action": "execute", "command": "assistant",
+        "args": [
+            "review", "--symbols", "one", "--repository-root", str(tmp_path),
+            "--no-progress",
+        ],
+    }, audit_path=tmp_path / "audit.jsonl")
+    assert review_api["ok"] is True
+    assert "Review complete" in review_api["result"]["output"]
 
     status = CliRunner().invoke(cli.main, ["assistant", "status"])
     assert status.exit_code == 0 and "compatible_api" in status.output

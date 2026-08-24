@@ -98,7 +98,9 @@ class WorkbenchFrame(ttk.Frame):
             weapon_page, on_open_asset=self._route_asset, on_help=self._on_help,
         )
         self.ped_workspace = PedWorkbenchFrame(
-            ped_page, on_open_asset=self._route_asset, on_help=self._on_help,
+            ped_page, self.project_root,
+            installation_roots=self.installation_roots,
+            on_open_asset=self._route_asset, on_help=self._on_help,
         )
         for workspace in (
             self.vehicle_workspace, self.weapon_workspace, self.ped_workspace,
@@ -132,7 +134,12 @@ class WorkbenchFrame(ttk.Frame):
             return False
         try:
             resolved = Path(source).expanduser().resolve(strict=True)
-            loaded_scan = scan or AddonPackageInspector().inspect(resolved)
+            game = next(
+                (path for path in self.installation_roots if path.is_dir()), None,
+            )
+            loaded_scan = scan or AddonPackageInspector(
+                self.project_root, game,
+            ).inspect(resolved)
         except (OSError, ValueError) as exc:
             messagebox.showerror("Could not open package", str(exc), parent=self)
             return False
@@ -143,7 +150,11 @@ class WorkbenchFrame(ttk.Frame):
         self.ped_workspace.open_source(resolved, loaded_scan)
         counts = {
             "vehicles": len(loaded_scan.vehicles),
-            "weapons": len(loaded_scan.weapons),
+            "weapons": (
+                len(loaded_scan.weapons)
+                + len(loaded_scan.weapon_enhancements)
+                + len(loaded_scan.scripted_weapon_systems)
+            ),
             "peds": len(loaded_scan.peds),
         }
         for key, label in (
@@ -171,6 +182,7 @@ class WorkbenchFrame(ttk.Frame):
         return (
             self.vehicle_workspace.confirm_navigation()
             and self.weapon_workspace.confirm_navigation()
+            and self.ped_workspace.confirm_navigation()
         )
 
     def reload(self) -> bool:

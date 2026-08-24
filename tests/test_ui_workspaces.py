@@ -13,7 +13,8 @@ def test_primary_sdk_routes_are_plain_language_and_package_selection_works():
     source = _source("addon_sdk_ui.py")
     for label in (
         '"Package Linker"', '"Asset Viewer"', '"RPF Archives"',
-        '"Package Recipes"', '"Help Center"', 'text="Import or audit package"',
+        '"Models & Materials"', '"Package Recipes"', '"Help Center"',
+        'text="Import or audit package"',
         'text="Inspect or export"', 'text="Package tools"',
     ):
         assert label in source
@@ -173,6 +174,31 @@ def test_unified_workbench_is_integrated_and_exposes_vehicle_viewport_controls()
         assert operation in weapon
     assert 'expected_revision=workspace.revision' in weapon
     assert "acknowledge_shared=acknowledge_shared" in weapon
+    ped = _source("ped_workbench.py")
+    for control in (
+        'text="Create authoring workspace…"',
+        'text="Apply fields"',
+        'text="Undo latest"',
+        'text="New from template"',
+        'text="Review plan"',
+        'text="Create reviewed ped"',
+        'text="Migrate identity + assets"',
+        'text="Preview"',
+        'text="Refresh"',
+    ):
+        assert control in ped
+    for operation in (
+        "PedAuthoringWorkspace.create(",
+        "workspace.plan_ped_clone(",
+        "workspace.clone_ped_bundle(",
+        "workspace.migrate_identity(",
+        "workspace.update(",
+        "workspace.undo(",
+        "expected_revision=workspace.revision",
+        "LatestOnlyRenderWorker(",
+        "NativeAssetInspector(",
+    ):
+        assert operation in ped
     assert "workbench.confirm_navigation()" in shell
     assert 'self.tabs.add(vehicle_page, text="Vehicles")' in unified
     assert 'self.tabs.add(weapon_page, text="Weapons")' in unified
@@ -226,11 +252,45 @@ def test_unified_workbench_is_integrated_and_exposes_vehicle_viewport_controls()
     assert "def select_asset(self, path: str) -> bool" in _source("asset_viewer.py")
 
 
+def test_model_material_workbench_is_integrated_and_guarded():
+    shell = _source("addon_sdk_ui.py")
+    ui = _source("model_material_workbench.py")
+    core = _source("model_materials.py")
+    assert '("models", "Models & Materials", "Ctrl+4")' in shell
+    assert '"models": models_page' in shell
+    assert "from allin1_sdk.model_material_workbench import ModelMaterialWorkbenchFrame" in shell
+    assert "self.model_material_workspace = workspace" in shell
+    assert 'label="Open in Models & Materials…"' in shell
+    assert "class ModelMaterialWorkbenchFrame(ttk.Frame)" in ui
+    assert "tk.Toplevel" not in ui
+    for control in (
+        'text="Create editable copy"', 'text="Build verified asset…"',
+        'text="Undo"', 'text="Render…"',
+        '("Shaded", "Materials", "Wireframe")',
+        'text="Apply to editable copy"', 'text="Assign"',
+        '"<MouseWheel>"', '"<ButtonPress-1>"',
+    ):
+        assert control in ui
+    for operation in (
+        "LatestOnlyRenderWorker(", "CompiledRenderPanel(",
+        "compile_vehicle_render(", "MaterialAuthoringWorkspace.create(",
+        "workspace.set_material(", "workspace.set_geometry_material(",
+        "workspace.undo(", "workspace.build(",
+    ):
+        assert operation in ui
+    for invariant in (
+        "GuardedXmlWorkspace(", "expected_revision", "xml_sha256",
+        "record_post_edit_state", "verify_post_edit_state",
+        "synthesize schema fields", "load_native_model_scene",
+    ):
+        assert invariant in core
+
+
 def test_specialist_workspaces_are_lazy_loaded_inside_the_unified_shell():
     shell = _source("addon_sdk_ui.py")
     imports, _separator, body = shell.partition("class AddonSdkDialog")
     for module in (
-        "asset_viewer", "workbench", "rpf_explorer",
+        "asset_viewer", "workbench", "model_material_workbench", "rpf_explorer",
         "oiv_workbench_ui", "help_center",
     ):
         assert f"from allin1_sdk.{module} import" not in imports

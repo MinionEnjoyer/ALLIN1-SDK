@@ -53,15 +53,21 @@ def test_command_catalog_combines_cli_and_console_builtins():
     assert "inspect-package-graph-relations" in catalog
     assert "plan-weapon-clone" in catalog
     assert "clone-weapon-bundle" in catalog
+    assert "plan-ped-clone" in catalog
+    assert "clone-ped-bundle" in catalog
+    assert "migrate-ped-identity" in catalog
 
 
 def test_progressive_command_option_and_alias_suggestions(tmp_path):
     commands = suggestions_for("ins", cwd=tmp_path)
     assert [item.replacement for item in commands] == [
-        "inspect-binary-workspace ", "inspect-log ", "inspect-native-asset ",
+            "inspect-binary-workspace ", "inspect-log ",
+            "inspect-material-workspace ", "inspect-model-materials ",
+            "inspect-native-asset ",
         "inspect-package-graph-relations ",
         "inspect-package-receipt ",
         "inspect-package-rpfs ",
+        "inspect-ped-authoring ",
         "inspect-rpf ", "inspect-rpf-change-set ", "inspect-rpf-graph ",
         "inspect-rpf-native-entry ",
         "inspect-rpf-program ", "inspect-source ", "inspect-vehicle-authoring ",
@@ -81,6 +87,9 @@ def test_progressive_command_option_and_alias_suggestions(tmp_path):
 
     weapon_aliases = suggestions_for("sdk plan-weapon-c", cwd=tmp_path)
     assert weapon_aliases[0].replacement == "sdk plan-weapon-clone "
+
+    ped_aliases = suggestions_for("sdk plan-ped-c", cwd=tmp_path)
+    assert ped_aliases[0].replacement == "sdk plan-ped-clone "
 
     help_matches = suggestions_for("help can", cwd=tmp_path)
     assert help_matches[0].replacement == "help canary-rpf-transaction"

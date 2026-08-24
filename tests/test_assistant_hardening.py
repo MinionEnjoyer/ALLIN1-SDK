@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,13 +12,13 @@ from click.testing import CliRunner
 from allin1_sdk import cli
 from allin1_sdk.agent_api import command_catalog
 from allin1_sdk.assistant_client import (
-    AssistantContextOverflow, plan_grounding, prompt_assistant,
-    prompt_structured_assistant, validate_advisory,
+    AssistantContextOverflow, _merge_review_advisories, plan_grounding, prompt_assistant,
+    prompt_structured_assistant, review_assistant, validate_advisory,
 )
 from allin1_sdk.assistant_context import build_assistant_context
 from allin1_sdk.assistant_evidence import (
     cached_inspect_source, clear_evidence_cache, compact_grounding,
-    compare_telemetry, inspect_log, inspect_source,
+    compare_telemetry, discover_symbol_sources, inspect_log, inspect_source,
 )
 
 
@@ -307,6 +309,40 @@ def test_root_cause_wording_does_not_misclassify_package_installation_as_source_
         "validate-package", "install-package", "inspect-package-receipt",
     })
 
+    ped_operations = {
+        item["name"] for item in retrieve_operations(
+            "Clone a ped template, inspect its props, then migrate its YDD and YTD identity",
+            command_catalog(),
+        )
+    }
+    assert {
+        "inspect-ped-authoring", "plan-ped-clone", "clone-ped-bundle",
+        "migrate-ped-identity",
+    } <= ped_operations
+    assert not ped_operations.intersection({
+        "plan-weapon-clone", "clone-weapon-bundle", "clone-weapon-animation",
+    })
+    assert "inspect-native-asset" in ped_operations
+
+    weapon_operations = {
+        item["name"] for item in retrieve_operations(
+            "Clone a weapon template with ammo and attachments",
+            command_catalog(),
+        )
+    }
+    assert {"plan-weapon-clone", "clone-weapon-bundle"} <= weapon_operations
+    assert not weapon_operations.intersection({
+        "plan-ped-clone", "clone-ped-bundle", "migrate-ped-identity",
+    })
+
+    mixed_operations = {
+        item["name"] for item in retrieve_operations(
+            "Compare the ped clone plan with the weapon clone plan",
+            command_catalog(), limit=20,
+        )
+    }
+    assert {"plan-ped-clone", "plan-weapon-clone"} <= mixed_operations
+
 
 def test_failed_package_validation_keeps_raw_manifest_grounded(
     tmp_path: Path,
@@ -463,6 +499,40 @@ def test_context_budget_prunes_explicit_evidence_and_reports_omissions(tmp_path:
         )
     assert captured.value.details["error"] == "assistant_context_overflow"
     assert "Reduce --max-tokens" in captured.value.details["message"]
+
+
+def test_near_fit_review_trims_low_value_metadata_before_refusing(tmp_path: Path) -> None:
+    repository = _repository(tmp_path / "EZ-GTA-V-R")
+    source = repository / "carrier.cpp"
+    source.write_text(
+        "void publish_record() { state.store(1); }\n"
+        "void retire_record() { state.store(0); }\n"
+        "bool observe_record() { return state.load(); }\n",
+        encoding="utf-8",
+    )
+    context = build_assistant_context(
+        "Audit the carrier lifecycle", repository_root=repository,
+        sources=(source,),
+        symbols=("publish_record", "retire_record", "observe_record"),
+    )
+    context = replace(
+        context,
+        validation_commands=tuple(
+            f"generic-validation-{index}-" + ("irrelevant " * 80)
+            for index in range(12)
+        ),
+    )
+
+    plan = plan_grounding(
+        context, "Audit the carrier lifecycle", "",
+        context_tokens=4096, max_tokens=1000,
+    )
+
+    assert plan.estimated_input_tokens <= plan.input_budget_tokens
+    assert plan.reserved_output_tokens == 1000
+    assert plan.context["context_budget"]["reserved_output_tokens"] == 1000
+    assert plan.context["validation_commands"] == []
+    assert any("validation command hints" in item for item in plan.omitted_context)
 
 
 def test_context_budget_compacts_large_requested_definitions_without_dropping_symbols(
@@ -768,13 +838,13 @@ def test_prompt_retries_truncated_unstructured_output_as_strict_json(
     )
 
     assert len(bodies) == 2
-    for body in bodies:
+    for index, body in enumerate(bodies):
         response_format = body["response_format"]
         assert response_format["type"] == "json_schema"
         assert response_format["json_schema"]["strict"] is True
         schema = response_format["json_schema"]["schema"]
         assert schema["additionalProperties"] is False
-        assert schema["properties"]["findings"]["maxItems"] == 8
+        assert schema["properties"]["findings"]["maxItems"] == (8 if index == 0 else 4)
     assert bodies[1]["temperature"] == 0
     assert bodies[1]["max_tokens"] == 600
     assert result.advisory["summary"] == "The telemetry shows a containment gap."
@@ -790,6 +860,342 @@ def test_prompt_retries_truncated_unstructured_output_as_strict_json(
         "building grounding", "prefill", "generating",
         "repairing structured response", "complete",
     ]
+
+
+def test_repository_review_discovers_definitions_callers_tests_and_transitions(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path / "EZ-GTA-V-R")
+    source = repository / "src" / "carrier.cpp"
+    source.parent.mkdir()
+    source.write_text(
+        "std::atomic<int> terminal_state{0};\n"
+        "void publish_record() { terminal_state.store(1); }\n"
+        "void retire_records() { terminal_state.store(0); }\n"
+        "bool observe_execute() { return terminal_state.load() == 1; }\n"
+        "void command_list_tick() { publish_record(); observe_execute(); }\n",
+        encoding="utf-8",
+    )
+    test_source = repository / "tests" / "carrier_test.cpp"
+    test_source.parent.mkdir()
+    test_source.write_text(
+        "TEST(Carrier, Reset) { publish_record(); retire_records(); "
+        "EXPECT_FALSE(observe_execute()); }\n",
+        encoding="utf-8",
+    )
+    symbols = ("publish_record", "retire_records", "observe_execute")
+
+    discovery = discover_symbol_sources(repository, symbols)
+    assert discovery["sources"] == [str(source.resolve())]
+    assert discovery["scan_truncated"] is False
+
+    evidence = inspect_source(
+        source, symbols=symbols, repository_root=repository,
+        priorities=("callers", "tests", "state-transitions"),
+    )
+    assert evidence["review_priorities"] == [
+        "callers", "tests", "state-transitions",
+    ]
+    assert {item["symbol"] for item in evidence["callers"]} >= {
+        "publish_record", "observe_execute",
+    }
+    assert {item["symbol"] for item in evidence["tests"]} == set(symbols)
+    assert evidence["state_transitions"]
+    assert {item["symbol"] for item in evidence["state_transitions"] if item["symbol"]} == {
+        "publish_record", "retire_records",
+    }
+    assert all("line_start" in item and "line_end" in item for item in evidence["callers"])
+
+
+def test_review_discovers_bounded_untracked_source_and_receipts_worktree_status(
+    tmp_path: Path,
+) -> None:
+    assistant = tmp_path / "Assistant"
+    _assistant_config(assistant, context_tokens=8192)
+    repository = tmp_path / "EZ-GTA-V-R"
+    repository.mkdir()
+    subprocess.run(
+        ["git", "init", "--quiet", str(repository)], check=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    tracked = repository / "carrier.cpp"
+    tracked.write_text(
+        "std::atomic<int> carrier_state{0};\n"
+        "void publish_record() { carrier_state.store(1); }\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "add", "carrier.cpp"], check=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    untracked = repository / "build" / "dirty_carrier.cpp"
+    untracked.parent.mkdir()
+    untracked.write_text(
+        "extern std::atomic<int> carrier_state;\n"
+        "void retire_records() { carrier_state.store(0); }\n"
+        "bool observe_execute() { return carrier_state.load() != 0; }\n",
+        encoding="utf-8",
+    )
+    symbols = ("publish_record", "retire_records", "observe_execute")
+    discovery = discover_symbol_sources(repository, symbols)
+
+    assert str(untracked.resolve()) in discovery["sources"]
+    assert discovery["untracked_sources_added"] == 1
+    assert discovery["untracked_sources_truncated"] is False
+    assert all(
+        record["worktree_status"] == "untracked"
+        and record["worktree_dirty"] is True
+        and record["worktree_untracked"] is True
+        for symbol in symbols[1:]
+        for record in discovery["symbol_sources"][symbol]
+    )
+
+    def opener(request, timeout):
+        assert timeout == 20
+        return Response(json.dumps({
+            "choices": [{"finish_reason": "stop", "message": {"content": json.dumps({
+                "summary": "All requested definitions were grounded.",
+                "findings": [], "recommended_operations": [],
+                "proposed_changes": [], "missing_context": [], "abstentions": [],
+            })}}],
+            "usage": {"prompt_tokens": 900, "completion_tokens": 80},
+        }).encode("utf-8"))
+
+    result = review_assistant(
+        symbols, root=assistant, repository_root=repository,
+        timeout=20, opener=opener, max_tokens=700,
+    )
+    assert result.chunks[0]["status"] == "completed"
+    assert result.chunks[0]["explicit_symbols_preserved"] is True
+    receipt = json.loads(Path(result.chunks[0]["receipt"]).read_text(encoding="utf-8"))
+    selected = receipt["selected_grounding_sources"]
+    untracked_receipt = next(
+        item for item in selected if item.get("path") == str(untracked.resolve())
+    )
+    assert untracked_receipt["worktree_status"] == "untracked"
+    assert untracked_receipt["worktree_dirty"] is True
+    assert untracked_receipt["worktree_untracked"] is True
+
+
+def test_single_symbol_review_abstains_before_inference_if_definition_compacts(
+    tmp_path: Path,
+) -> None:
+    assistant = tmp_path / "Assistant"
+    _assistant_config(assistant, context_tokens=4096)
+    repository = _repository(tmp_path / "EZ-GTA-V-R")
+    source = repository / "large_carrier.cpp"
+    source.write_text(
+        "void large_carrier_symbol() {\n"
+        + "".join(
+            f"  int lifecycle_state_{index} = {index};\n" for index in range(700)
+        )
+        + "}\n",
+        encoding="utf-8",
+    )
+
+    def opener(_request, _timeout):
+        raise AssertionError("Model inference must not start after definition compaction")
+
+    result = review_assistant(
+        ("large_carrier_symbol",), root=assistant,
+        repository_root=repository, timeout=20, opener=opener,
+        max_tokens=900,
+    )
+
+    assert result.chunks[0]["status"] == "abstained_before_inference"
+    assert result.chunks[0]["inference_started"] is False
+    assert result.chunks[0]["explicit_symbols_preserved"] is False
+    assert result.advisory["findings"] == []
+    assert result.advisory["recommended_operations"] == []
+    assert "abstained before inference" in result.advisory["summary"].casefold()
+    receipt = json.loads(Path(result.chunks[0]["receipt"]).read_text(encoding="utf-8"))
+    assert receipt["actual_input_tokens"] is None
+    assert receipt["actual_output_tokens"] is None
+    assert receipt["inference_seconds"] == 0
+    assert "abstained before inference" in receipt["failure_reason"].casefold()
+
+
+def test_review_merge_omits_blocked_ungrounded_operations_without_fragments() -> None:
+    long_fragment = "incomplete diagnostic fragment " * 80
+    merged = _merge_review_advisories((
+        {
+            "summary": long_fragment,
+            "findings": [],
+            "recommended_operations": [{
+                "operation": "inspect-log", "arguments": ["invented.log"],
+                "arguments_grounded": False,
+                "blocked_reason": "no explicit telemetry file was selected",
+                "executed": False,
+            }],
+            "proposed_changes": [], "missing_context": [], "abstentions": [],
+        },
+        {
+            "summary": "Second fragment without a full stop",
+            "findings": [],
+            "recommended_operations": [{
+                "operation": "inspect-source", "arguments": ["carrier.cpp"],
+                "arguments_grounded": True, "blocked_reason": "", "executed": False,
+            }],
+            "proposed_changes": [], "missing_context": [], "abstentions": [],
+        },
+    ))
+
+    assert merged["summary"] == "Deterministically merged 2 grounded review chunk(s)."
+    assert [item["operation"] for item in merged["recommended_operations"]] == [
+        "inspect-source",
+    ]
+    assert any(
+        "inspect-log" in item and "no explicit telemetry" in item
+        for item in merged["abstentions"]
+    )
+
+
+def test_three_symbol_review_uses_one_compact_grounded_request_and_receipt(
+    tmp_path: Path,
+) -> None:
+    assistant = tmp_path / "Assistant"
+    _assistant_config(assistant, context_tokens=8192)
+    repository = _repository(tmp_path / "EZ-GTA-V-R")
+    source = repository / "carrier.cpp"
+    source.write_text(
+        "std::atomic<int> carrier_state{0};\n"
+        "void publish_record() { carrier_state.store(1); }\n"
+        "void retire_records() { carrier_state.store(0); }\n"
+        "bool observe_execute() { return carrier_state.load() != 0; }\n"
+        "void caller() { publish_record(); observe_execute(); }\n",
+        encoding="utf-8",
+    )
+    bodies: list[dict[str, object]] = []
+
+    def opener(request, timeout):
+        assert timeout == 20
+        bodies.append(json.loads(request.data))
+        return Response(json.dumps({
+            "choices": [{"finish_reason": "stop", "message": {"content": json.dumps({
+                "summary": "The lifecycle review completed.",
+                "findings": [{
+                    "severity_domain": "engineering", "severity": "medium",
+                    "evidence": "The selected state is published and reset.",
+                    "file": str(source.resolve()), "line": 2,
+                    "confidence": 0.9, "status": "inferred",
+                }],
+                "recommended_operations": [], "proposed_changes": [],
+                "missing_context": [], "abstentions": [],
+            })}}],
+            "usage": {"prompt_tokens": 1200, "completion_tokens": 180},
+        }).encode("utf-8"))
+
+    symbols = ("publish_record", "retire_records", "observe_execute")
+    result = review_assistant(
+        symbols, root=assistant, repository_root=repository,
+        timeout=20, opener=opener, max_tokens=900,
+        preserve_findings_on_schema_failure=True,
+    )
+
+    assert len(bodies) == 1 and len(result.chunks) == 1
+    schema = bodies[0]["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["findings"]["maxItems"] == 4
+    system = bodies[0]["messages"][0]["content"]
+    assert all(symbol in system for symbol in symbols)
+    assert result.advisory["findings"][0]["status"] == "inferred"
+    receipt = json.loads(Path(result.chunks[0]["receipt"]).read_text(encoding="utf-8"))
+    assert receipt["schema"] == 3
+    assert receipt["reserved_output_tokens"] == 900
+    selected = receipt["selected_grounding_sources"][0]
+    assert selected["review_priorities"] == ["callers", "tests", "state-transitions"]
+    assert "relationships" in selected
+
+
+def test_review_automatically_splits_overflowing_chunks_and_merges_safely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from allin1_sdk.assistant_client import PromptResult
+
+    repository = _repository(tmp_path / "EZ-GTA-V-R")
+    source = repository / "carrier.cpp"
+    symbols = tuple(f"carrier_symbol_{index}" for index in range(5))
+    source.write_text(
+        "\n".join(f"void {symbol}() {{}}" for symbol in symbols) + "\n",
+        encoding="utf-8",
+    )
+    attempted: list[tuple[str, ...]] = []
+    preserve_requirements: list[bool] = []
+
+    def fake_prompt(_question: str, **kwargs):
+        chunk = tuple(kwargs["symbols"])
+        attempted.append(chunk)
+        preserve_requirements.append(kwargs["require_explicit_symbols_preserved"])
+        if len(chunk) > 2:
+            raise AssistantContextOverflow({
+                "error": "assistant_context_overflow", "message": "split",
+            })
+        return PromptResult(
+            text="safe", model="qwen-test", mode="compatible_api",
+            elapsed_seconds=0.1, advisory={
+                "summary": "Reviewed " + ", ".join(chunk),
+                "findings": [],
+                "recommended_operations": [{
+                    "operation": "inspect-source", "arguments": [str(source)],
+                    "risk": "read_only", "mutating": False,
+                    "acknowledgement_required": False, "rationale": "Grounded",
+                    "expected_result": "Evidence", "arguments_grounded": True,
+                    "blocked_reason": "", "executed": False,
+                }],
+                "proposed_changes": [], "missing_context": [], "abstentions": [],
+            }, reserved_output_tokens=900,
+        )
+
+    monkeypatch.setattr(
+        "allin1_sdk.assistant_client.prompt_assistant", fake_prompt,
+    )
+    result = review_assistant(
+        symbols, repository_root=repository, sources=(source,),
+        chunk_size=3, max_tokens=900,
+    )
+
+    assert attempted[0] == symbols[:3]
+    assert preserve_requirements == [True, True, True, True]
+    assert [tuple(item["symbols"]) for item in result.chunks] == [
+        symbols[:1], symbols[1:3], symbols[3:],
+    ]
+    assert len(result.advisory["recommended_operations"]) == 1
+    operation = result.advisory["recommended_operations"][0]
+    assert operation["executed"] is False
+    assert operation["acknowledgement_required"] is False
+
+
+def test_failed_structured_repair_can_preserve_safe_prose_without_authority(
+    tmp_path: Path,
+) -> None:
+    assistant = tmp_path / "Assistant"
+    _assistant_config(assistant)
+    repository = _repository(tmp_path / "EZ-GTA-V-R")
+    bodies: list[dict[str, object]] = []
+
+    def opener(request, timeout):
+        bodies.append(json.loads(request.data))
+        content = (
+            "The lifecycle can race when reset overlaps publication."
+            if len(bodies) == 1 else "still not json"
+        )
+        return Response(json.dumps({
+            "choices": [{"finish_reason": "stop", "message": {"content": content}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 30},
+        }).encode("utf-8"))
+
+    result = prompt_assistant(
+        "Review lifecycle", root=assistant, repository_root=repository,
+        timeout=20, opener=opener,
+        preserve_findings_on_schema_failure=True,
+    )
+
+    assert len(bodies) == 2
+    assert "structured_repair_failed" in result.safety_flags
+    assert "prose_findings_preserved_after_schema_failure" in result.safety_flags
+    assert result.advisory["findings"][0]["status"] == "speculative"
+    assert result.advisory["recommended_operations"] == []
+    assert result.advisory["proposed_changes"] == []
+    assert result.repair_attempts[0]["result"] == "invalid_schema"
 
 
 def test_generic_structured_prompt_validates_and_repairs_once(tmp_path: Path) -> None:

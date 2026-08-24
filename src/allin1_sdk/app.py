@@ -174,6 +174,10 @@ def _launch_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         "--workbench-package", type=Path,
         help="Open an add-on package directly in the unified Workbench.",
     )
+    direct_open.add_argument(
+        "--model-material-source", type=Path,
+        help="Open a model or package directly in Models & Materials.",
+    )
     parser.add_argument(
         "--workbench-category", choices=("auto", "vehicles", "weapons", "peds"),
         default="auto", help="Workbench tab selected after opening a package.",
@@ -201,6 +205,7 @@ def main(argv: list[str] | None = None) -> None:
         arguments.rpf_graph is None
         and arguments.vehicle_package is None
         and arguments.workbench_package is None
+        and arguments.model_material_source is None
         and not _claim_single_instance()
     ):
         return
@@ -256,6 +261,9 @@ def main(argv: list[str] | None = None) -> None:
     elif arguments.vehicle_package is not None:
         package = arguments.vehicle_package
         dialog.after_idle(lambda: dialog.open_vehicle_package(package))
+    elif arguments.model_material_source is not None:
+        source = arguments.model_material_source
+        dialog.after_idle(lambda: dialog.open_model_material_source(source))
     root.mainloop()
 
 

@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import math
+import re
 import shutil
 import struct
 import tempfile
@@ -68,6 +69,23 @@ MODEL_RENDER_QUALITIES = {
     "final": MAX_RENDERED_TRIANGLES,
     "full": MAX_MODEL_TRIANGLES,
 }
+
+# CodeWalker can emit unresolved shader identities as their lower-case Jenkins
+# hash.  Keep this small catalog deterministic and source-controlled so reports
+# remain useful even when a game build does not ship a readable shader-name
+# table.  Names are verified against the same hash algorithm used by RAGE.
+KNOWN_SHADER_HASH_NAMES = {
+    "59b24d3d": "weapon_emissivestrong_alpha.sps",
+}
+
+
+def resolve_shader_name(value: str) -> str:
+    """Return a stable authored shader name for a known CodeWalker hash."""
+    authored = str(value or "").strip()
+    match = re.fullmatch(r"hash_([0-9a-fA-F]{8})", authored)
+    if match is None:
+        return authored
+    return KNOWN_SHADER_HASH_NAMES.get(match.group(1).casefold(), authored)
 MAX_MAP_ENTITIES = 250_000
 MAX_RENDERED_MAP_ENTITIES = 80_000
 MAX_NAV_POLYGONS = 300_000
@@ -908,7 +926,9 @@ def _model_material_record(
     textures = tuple(dict.fromkeys(value for _slot, value in parameters))
     return NativeModelMaterial(
         index=index,
-        name=_direct_model_text(shader, "Name") or f"Shader {index}",
+        name=resolve_shader_name(
+            _direct_model_text(shader, "Name") or f"Shader {index}"
+        ),
         texture_names=textures,
         texture_parameters=parameters,
     )
@@ -1959,6 +1979,21 @@ def _model_scene_from_xml(
         return scene, metadata, None
     except (OSError, ValueError, etree.XMLSyntaxError, OverflowError) as exc:
         return None, {}, f"Model scene unavailable: {exc}"
+
+
+def load_native_model_scene(
+    xml: str | Path, *, name: str | None = None,
+) -> tuple[NativeModelScene | None, dict[str, Any], str | None]:
+    """Load a guarded CodeWalker model XML document for SDK workbenches.
+
+    The native asset inspector historically kept this decoder private because
+    it was used only to produce preview images.  Model/material authoring also
+    needs the exact same bounded parser and scene semantics, so expose one
+    narrow read-only entry point rather than letting each workbench grow a
+    subtly different XML decoder.
+    """
+    source = Path(xml).expanduser().resolve()
+    return _model_scene_from_xml(source, name or source.name)
 
 
 def _model_preview_from_xml(

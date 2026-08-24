@@ -66,7 +66,11 @@ The prompt stays docked at the bottom of every workspace. Ctrl+backtick focuses 
 
 The console invokes the same Click commands and safety checks as allin1-sdk in a terminal. It does not bypass target authorization, acknowledgements, hashes, locks, game-process checks, or rollback requirements. Type help for the catalog or help <command> for detailed syntax.
 
-If the optional assistant was configured in the ALLIN1 Launcher's SDK Manager, type assistant prompt followed by a question to ask the configured Qwen/GGUF model. Quotes are optional for ordinary multi-word questions. assistant context followed by the question shows the repository, manifest, game-path, policy, selected source or telemetry evidence, and exact command evidence that would be supplied without starting the model. Use --source with --symbol for complete brace-balanced function definitions plus automatically retrieved counter writers/reset sites. Use --telemetry with --telemetry-pattern for bounded log excerpts and whole-file session aggregates, so an idle final line cannot hide earlier activity. The host budgets context before model startup, preserves explicitly requested definitions, reports every omission instead of silently truncating a large repository, and prints startup, prefill, generation, and heartbeat progress. Responses use a structured advisory format with separate engineering/security severity. The model may propose a conceptual change to a grounded file and symbol, but the host always marks it advisory-only and unexecuted. Invented, irrelevant, or already-completed inspections, manual-copy instructions, and destructive guidance are withheld by deterministic SDK code. Privacy-bounded receipts store hashes, evidence ranges, aggregate telemetry, omissions, timing, token usage, and the structured result without full prompts or source excerpts. A long-lived SDK or Agent process caches unchanged grounding and retains a local model for a bounded idle period; assistant stop closes it immediately. Prompting remains read-only and cannot execute a recommendation. Official Windows installs include a standalone allin1-sdk.exe that works from a newly opened PowerShell without Python.""",
+If the optional assistant was configured in the ALLIN1 Launcher's SDK Manager, type assistant prompt followed by a question to ask the configured Qwen/GGUF model. Quotes are optional for ordinary multi-word questions. assistant context followed by the question shows the repository, manifest, game-path, policy, selected source or telemetry evidence, and exact command evidence that would be supplied without starting the model. Use --source with --symbol for complete brace-balanced function definitions plus automatically retrieved counter writers/reset sites. Use --telemetry with --telemetry-pattern for bounded log excerpts and whole-file session aggregates, so an idle final line cannot hide earlier activity.
+
+Use assistant review --symbols name1,name2,name3 for a repository-grounded code audit. The review route discovers exact definitions when source files are not supplied, including a bounded Git inventory of untracked text sources beneath the repository, and records clean, dirty, staged, or untracked source state in receipts. It prioritizes direct callers, state transitions, and nearby tests, reserves output tokens before selecting evidence, and automatically splits larger audits into bounded chunks. A chunk abstains before model startup if any requested definition cannot remain complete. Its final synthesis merges only host-validated chunk results, omits blocked or ungrounded operations, and does not join model summaries into sentence fragments. --preserve-findings-on-schema-failure can retain bounded read-only observations if strict JSON and one compact repair both fail; no operation or proposed mutation is accepted from that prose.
+
+The host budgets context before model startup, preserves explicitly requested symbols, trims low-value context before refusing a near-fit request, reports every omission, and prints startup, prefill, generation, and heartbeat progress. Responses use a structured advisory format with separate engineering/security severity. The model may propose a conceptual change to a grounded file and symbol, but the host always marks it advisory-only and unexecuted. Invented, irrelevant, or already-completed inspections, manual-copy instructions, and destructive guidance are withheld by deterministic SDK code. Privacy-bounded receipts store hashes, selected symbol and relationship ranges, aggregate telemetry, omissions, configured and reserved tokens, grounding/startup/inference/repair timing, repair attempts, and the structured result without full prompts or source excerpts. A long-lived SDK or Agent process caches unchanged grounding and retains a local model for a bounded idle period; assistant stop closes it immediately. Prompting remains read-only and cannot execute a recommendation. Official Windows installs include a standalone allin1-sdk.exe that works from a newly opened PowerShell without Python.""",
         ("console", "autocomplete", "completion", "history", "source", "terminal", "assistant", "qwen", "prompt"),
     ),
     HelpTopic(
@@ -84,7 +88,7 @@ The read-only assistant group is also available through execute requests: pass c
         "Use the integration graph, field inspector, menus, and search efficiently.",
         """Package imports and audits are grouped under Import or audit package. Inspect or export applies to the selected package, and Package tools contains cross-package workflows.
 
-Use the workspace sidebar to move between Package Linker, Asset Viewer, Content Workbench, RPF Archives, Package Recipes, and Help Center. The slim arrow on its right edge points < while open to fold the sidebar in, then points > to expand it back out; Ctrl+B or View > Show workspace sidebar provides the same toggle from anywhere. Ctrl+1–6 selects those workspaces without opening another application window. A compact ‹ previous-workspace link appears in the header when there is somewhere useful to return; Alt+Left activates the same history route even while the sidebar is folded. Ctrl+Tab and Ctrl+Shift+Tab cycle between workspaces. The SDK Console remains available along the bottom in every context.
+Use the workspace sidebar to move between Package Linker, Asset Viewer, Content Workbench, Models & Materials, RPF Archives, Package Recipes, and Help Center. The slim arrow on its right edge points < while open to fold the sidebar in, then points > to expand it back out; Ctrl+B or View > Show workspace sidebar provides the same toggle from anywhere. Ctrl+1–7 selects those workspaces without opening another application window. A compact ‹ previous-workspace link appears in the header when there is somewhere useful to return; Alt+Left activates the same history route even while the sidebar is folded. Ctrl+Tab and Ctrl+Shift+Tab cycle between workspaces. The SDK Console remains available along the bottom in every context.
 
 Select an integration node to see its source, contract, and linked fields. Select a field for a plain-language explanation. Ctrl+` focuses or expands the console dock and F1 routes to contextual help.""",
         ("navigation", "menus", "graph", "field", "keyboard"),
@@ -135,11 +139,28 @@ Workspace tools > Open YTD texture workspace switches this same window into a se
         ("ytd", "ydr", "yft", "awc", "audio", "texture", "model", "preview", "codewalker"),
     ),
     HelpTopic(
+        "model-material-workbench", "Authoring", "Model & Materials Workbench",
+        "Inspect native model hierarchy and safely edit existing material bindings.",
+        """Open a loose YDR, YDD, or YFT model, or open an extracted/package archive and choose one model from its inventory. The left navigator separates renderable models from related YTD textures, YBN collision, and YTYP archetype context. Related assets are evidence, not guessed dependencies.
+
+The center viewport decodes the same bounded native scene used by the Asset Viewer. Drag to orbit, use the wheel to zoom, filter by LOD or component, and switch between Shaded, Materials, and Wireframe diagnostics. Side arrows collapse either tall inspector so the viewport can use the full window. Render opens the embedded Blender drawer for a lit production PNG; package-folder models can automatically use one exact same-name YTD candidate.
+
+Package RPFs are recursively indexed when a matching GTA installation is configured. Nested YDR/YDD/YFT models appear in the model navigator as read-only RPF assets instead of an opaque archive warning. When a package contains a numbered YDR material progression beside one YTD and YTYP, Progression decodes every tier, graphs the texture/emissive result, and lists alpha, luminance, shader, geometry, missing-reference, monotonicity, and neighboring-difference checks. Its top strip shows the real decoded texture over transparency and an approximate in-game alpha/emissive blend over a dark weapon surface.
+
+Materials lists every shader, existing texture sampler, typed texture role, and geometry use. Geometry lists each local ShaderIndex and the shader catalog valid for that drawable. Create editable copy exports an immutable native source snapshot, structured XML, and dependencies. Apply may change only existing Name, texture sampler, and ShaderIndex values. It never invents XML nodes. Every mutation requires the current revision, records exact pre/post hashes, reparses the model, preserves catalog and geometry shape, and can be undone byte-for-byte. Build verified asset compiles outside GTA V and reparses the new resource before publishing it.
+
+Console and Agent API commands expose the same contract: open-model-material-workbench, inspect-model-materials, create-material-workspace, inspect-material-workspace, set-material-binding, set-geometry-material, undo-material-edit, and build-material-workspace. Edit commands require --expected-revision and --acknowledge-edit; no command writes the game installation.""",
+        (
+            "materials", "shader", "texture binding", "sampler", "ydr", "ydd",
+            "yft", "render", "blender", "geometry", "lod", "authoring",
+        ),
+    ),
+    HelpTopic(
         "workbench", "Inspectors", "Content Workbench",
         "Review vehicle, weapon, and ped projects without reopening the package.",
         """Open a loose add-on folder or supported archive once. The Workbench scans it once, shows counts on the Vehicles, Weapons, and Peds tabs, and keeps every specialist view tied to that same package evidence.
 
-Vehicles provides the existing model viewport and guarded vehicle-authoring tools. Weapons links definitions to ammo, animations, shop registration, attachment points, component models, and streamed assets, then enables supported fields only inside a verified copied authoring workspace. Peds links peds.meta definitions to drawable dictionaries, texture dictionaries, props, movement clips, and expression data.
+Vehicles provides the existing model viewport and guarded vehicle-authoring tools. Weapons links definitions to ammo, animations, shop registration, attachment points, component models, and streamed assets, then enables supported fields only inside a verified copied authoring workspace. Peds links peds.meta definitions to drawable dictionaries, texture dictionaries, props, movement clips, and expression data, with guarded editing inside its own copied workspace.
 
 The Package Linker and all three content workbenches use the same slim green divider arrows around their center workspace. Use the left arrow to fold the catalog out and the right arrow to fold the inspector out; the arrows reverse when collapsed. Expanding a side restores its previous width, selection, and edit state, while the center workspace immediately uses the released room.
 
@@ -153,6 +174,8 @@ Use Open selected asset to route a project member into the SDK Asset Viewer with
         "weapon-workbench", "Inspectors", "Weapons Workbench",
         "Trace and safely edit weapon, ammo, attachment, animation, and shop records.",
         """Select a weapon to review its slot, model, ammo pool, HUD and stat names, animation mapping, shop registration, and source metadata. Attachments lists every component linked at each attach bone, including the default choice and component model when the package declares it.
+
+Script enhancements supports schema-2 packages that enhance stock weapons through a ScriptHookVDotNet controller without adding weapons.meta records. An author can declare exact vanilla weapon hashes, vanilla component hashes, controller entry points, and related DLC model/texture/archetype progressions under content workbench.weapon_enhancements. Existing packages that already declare a Weapons system and a weapon.* capability remain visible as inferred script-driven systems; the Workbench clearly marks when exact relationships have not yet been authored. Nested RPF inventories and decoded material progression counts appear beside those relationships.
 
 Readiness separates required integration from optional attachment content. Asset matching is evidence-based and includes related drawable, texture, collision, and metadata files. Double-click an asset or use Open selected asset to continue in Asset Viewer.
 
@@ -172,11 +195,22 @@ Apply actions include the current workspace revision, retain a complete local sn
     ),
     HelpTopic(
         "ped-workbench", "Inspectors", "Peds Workbench",
-        "Review ped definitions, streamed models, textures, props, and motion links.",
+        "Review and safely edit ped definitions, assets, props, and motion links.",
         """Select a ped to inspect its peds.meta fields and the package files that share its model or props identity. Readiness distinguishes visible loose assets from content that may still be packed inside an opaque RPF.
 
-The workbench checks core definition fields, drawable and texture presence, props, movement clip sets, and expression sets. Double-click a related file or use Open selected asset to inspect supported native content in Asset Viewer. It never previews a model by executing scripts or loading it into GTA V.""",
-        ("ped", "peds.meta", "ydd", "ydr", "ytd", "props", "movement"),
+The workbench checks core definition fields, drawable and texture presence, props, movement clip sets, and expression sets. Preview decodes the exact package-owned drawable and texture dictionary on one background worker: the model panel is a diagnostic geometry/material view, while the texture panel shows the actual packaged texture sheet. These are inspection views rather than an exact in-game shader render. Double-click a related file or use Open selected asset to continue in Asset Viewer. It never executes package scripts or loads content into GTA V.
+
+Create authoring workspace copies and verifies every visible package member before enabling writes. Normal field edits keep the ped identity locked. Existing ped type, model type, props, clip dictionary, expression set, movement clip set, and creature metadata fields can be edited without inventing missing schema nodes. Apply records the current revision, retains a complete local snapshot, preserves each field's text/value/ref representation and unknown XML, reparses the package, and rolls back any validation regression.
+
+New from template handles the new-record boundary as a two-step reviewed plan. It copies the donor's complete peds.meta Item, including unknown fields and node order, but requires one exact target drawable and texture dictionary plus the requested props asset family to exist before the plan becomes ready. It never copies native bytes under a new filename, because their internal identity may still belong to the donor. The plan binds the workspace revision, inventory, every selected source hash, requested fields, and plan_sha256; any change invalidates it.
+
+Identity and streamed assets is a separate explicit migration. It changes Name and PropsName only in the selected metadata record, renames exact package-owned YDD/YDR/YTD/YMT members in the same transaction, rejects incomplete asset families and existing destinations, then reparses the result. Undo latest verifies all post-edit hashes and reverses both metadata and filename changes. Unapplied normal fields block ped, package, and SDK workspace navigation until you explicitly discard them.
+
+Console and Agent API commands create-ped-authoring, inspect-ped-authoring, plan-ped-clone, clone-ped-bundle, set-ped-fields, migrate-ped-identity, and undo-ped-edit expose the same guarded implementation. plan-ped-clone is read-only; clone-ped-bundle requires the exact --expected-revision, exact --plan-sha256, and --acknowledge-edit. All authoring operations affect only the copied workspace and never write to the original package or GTA V installation.""",
+        (
+            "ped", "peds.meta", "ydd", "ydr", "ytd", "props", "movement",
+            "authoring", "clone", "template", "preview", "migration", "undo",
+        ),
     ),
     HelpTopic(
         "vehicle-workbench", "Inspectors", "Vehicle Workbench",

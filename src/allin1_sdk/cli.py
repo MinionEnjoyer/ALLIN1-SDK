@@ -34,6 +34,10 @@ from allin1_sdk.gxt2_workspace import Gxt2Workspace
 from allin1_sdk.detector import detect_gta_path
 from allin1_sdk.dlc_inventory import DlcInventory
 from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
+from allin1_sdk.model_materials import (
+    MaterialAuthoringWorkspace,
+    inspect_model_file,
+)
 from allin1_sdk.native_assets import (
     MAX_NATIVE_PREVIEW_BYTES, MODEL_PREVIEW_SUFFIXES,
     NativeAssetInspector, NativeAssetReport,
@@ -43,6 +47,7 @@ from allin1_sdk.oiv_workbench import OivWorkbench
 from allin1_sdk.package_graph import PackageGraphWorkspace
 from allin1_sdk.package_relations import PackageRelationshipAnalyzer
 from allin1_sdk.paths import project_root
+from allin1_sdk.ped_authoring import PedAuthoringWorkspace
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.rage_data_compiler import RageVehicleDataCompiler
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
@@ -236,6 +241,44 @@ def _open_workbench_window(
     return process.pid, counts
 
 
+def _open_model_material_window(
+    source: Path, gta_path: Path | None = None,
+) -> tuple[int, int]:
+    """Validate a model/package and open the dedicated desktop workspace."""
+    resolved = source.expanduser().resolve(strict=True)
+    if resolved.is_file() and resolved.suffix.casefold() in MODEL_PREVIEW_SUFFIXES:
+        model_count = 1
+    else:
+        scan = AddonPackageInspector().inspect(resolved)
+        model_count = sum(
+            entry.suffix in MODEL_PREVIEW_SUFFIXES for entry in scan.entries
+        )
+    if not model_count:
+        raise ValueError("The selected source does not contain a YDR, YDD, or YFT model.")
+    selected_game = gta_path.expanduser().resolve(strict=True) if gta_path else None
+    executable = Path(sys.executable).resolve()
+    if getattr(sys, "frozen", False):
+        desktop = _frozen_desktop_executable(executable)
+        command = [str(desktop), "--model-material-source", str(resolved)]
+    else:
+        interpreter = executable
+        if os.name == "nt":
+            windowed = executable.with_name("pythonw.exe")
+            if windowed.is_file():
+                interpreter = windowed
+        command = [
+            str(interpreter), "-m", "allin1_sdk.app",
+            "--model-material-source", str(resolved),
+        ]
+    if selected_game is not None:
+        command.extend(("--gta-path", str(selected_game)))
+    options: dict[str, object] = {}
+    if os.name == "nt":
+        options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = subprocess.Popen(command, cwd=PROJECT_ROOT, **options)
+    return process.pid, model_count
+
+
 def _open_package_graph_window(
     source: Path, gta_path: Path | None = None,
 ) -> tuple[int, Path, int, int, bool]:
@@ -274,10 +317,26 @@ def _native_report_payload(
 
 def _publish_native_report(
     report: NativeAssetReport, payload: dict[str, object], output_dir: Path,
+    *, safe_overwrite: bool = False,
 ) -> None:
     destination = output_dir.expanduser().resolve()
     if destination.exists() or destination.is_symlink():
-        raise ValueError(f"Native preview output already exists: {destination}")
+        if not safe_overwrite:
+            raise ValueError(f"Native preview output already exists: {destination}")
+        if destination.is_symlink() or not destination.is_dir():
+            raise ValueError("Safe overwrite requires an existing regular report folder")
+        marker = destination / "report.json"
+        try:
+            existing = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "Safe overwrite refused a folder without a readable report.json"
+            ) from exc
+        if existing.get("operation") != "inspect_rpf_native_entry":
+            raise ValueError(
+                "Safe overwrite refused a folder not owned by native-entry inspection"
+            )
+        shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(
         prefix=f".{destination.name}.allin1-stage-", dir=destination.parent,
@@ -465,6 +524,10 @@ def assistant_status_command(root: Path | None) -> None:
 )
 @click.option("--symbol", "symbols", multiple=True, help="Source symbol or text to retrieve; repeatable.")
 @click.option(
+    "--prioritize", "source_priorities", multiple=True,
+    help="Repository relationship evidence: callers, tests, or state-transitions.",
+)
+@click.option(
     "--telemetry", "telemetry_files", multiple=True,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Explicit log or telemetry file to retrieve; repeatable.",
@@ -474,7 +537,8 @@ def assistant_context_command(
     question: tuple[str, ...], repository_root: Path | None,
     workspace_roots: tuple[Path, ...], manifest: Path | None,
     gta_path: Path | None, operation_mode: str, sources: tuple[Path, ...],
-    symbols: tuple[str, ...], telemetry_files: tuple[Path, ...],
+    symbols: tuple[str, ...], source_priorities: tuple[str, ...],
+    telemetry_files: tuple[Path, ...],
     telemetry_patterns: tuple[str, ...],
 ) -> None:
     """Show the exact evidence and typed operations supplied to the model."""
@@ -485,6 +549,7 @@ def assistant_context_command(
             " ".join(question), repository_root=repository_root,
             workspace_roots=workspace_roots, manifest=manifest, gta_path=gta_path,
             operation_mode=operation_mode, sources=sources, symbols=symbols,
+            source_priorities=source_priorities,
             telemetry_files=telemetry_files, telemetry_patterns=telemetry_patterns,
         )
     except (OSError, TypeError, ValueError) as exc:
@@ -527,6 +592,10 @@ def assistant_context_command(
 )
 @click.option("--symbol", "symbols", multiple=True, help="Source symbol or text to retrieve; repeatable.")
 @click.option(
+    "--prioritize", "source_priorities", multiple=True,
+    help="Repository relationship evidence: callers, tests, or state-transitions.",
+)
+@click.option(
     "--telemetry", "telemetry_files", multiple=True,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Explicit log or telemetry file to retrieve; repeatable.",
@@ -551,6 +620,7 @@ def assistant_prompt_command(
     repository_root: Path | None, workspace_roots: tuple[Path, ...],
     manifest: Path | None, gta_path: Path | None, operation_mode: str,
     sources: tuple[Path, ...], symbols: tuple[str, ...],
+    source_priorities: tuple[str, ...],
     telemetry_files: tuple[Path, ...], telemetry_patterns: tuple[str, ...],
     timeout: float, startup_timeout: float, max_tokens: int, json_output: bool,
     no_progress: bool,
@@ -570,6 +640,7 @@ def assistant_prompt_command(
             manifest=manifest, gta_path=gta_path, operation_mode=operation_mode,
             sources=sources, symbols=symbols, telemetry_files=telemetry_files,
             telemetry_patterns=telemetry_patterns,
+            source_priorities=source_priorities,
             progress=(None if no_progress else lambda state: click.echo(
                 f"assistant: {state}", err=True,
             )),
@@ -589,6 +660,93 @@ def assistant_prompt_command(
             f"\n[{result.model} | {result.mode.replace('_', ' ')} | "
             f"{result.elapsed_seconds:.3f}s]"
         )
+
+
+@assistant_group.command("review")
+@click.argument("question", nargs=-1)
+@click.option("--root", type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--repository-root", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Repository containing the requested source symbols.",
+)
+@click.option(
+    "--source", "sources", multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Optional explicit source file; otherwise exact definitions are discovered.",
+)
+@click.option(
+    "--symbols", "symbol_values", multiple=True, required=True,
+    help="Comma-separated requested symbols; option may be repeated.",
+)
+@click.option(
+    "--prioritize", "priority_values", multiple=True,
+    default=("callers,tests,state-transitions",), show_default=True,
+    help="Comma-separated relationship evidence to prioritize.",
+)
+@click.option(
+    "--format", "output_format", type=click.Choice(("structured",)),
+    default="structured", show_default=True,
+)
+@click.option(
+    "--preserve-findings-on-schema-failure", is_flag=True, default=False,
+    help="Keep safe read-only prose findings if strict JSON repair fails.",
+)
+@click.option(
+    "--chunk-size", type=click.IntRange(1, 8), default=3, show_default=True,
+    help="Maximum requested symbols per grounded inference pass.",
+)
+@click.option(
+    "--timeout", type=click.FloatRange(1, 600), default=180.0, show_default=True,
+)
+@click.option(
+    "--startup-timeout", type=click.FloatRange(1, 300), default=90.0,
+    show_default=True,
+)
+@click.option(
+    "--max-tokens", type=click.IntRange(256, 8192), default=1024,
+    show_default=True,
+)
+@click.option("--no-progress", is_flag=True)
+def assistant_review_command(
+    question: tuple[str, ...], root: Path | None, repository_root: Path | None,
+    sources: tuple[Path, ...], symbol_values: tuple[str, ...],
+    priority_values: tuple[str, ...], output_format: str,
+    preserve_findings_on_schema_failure: bool, chunk_size: int,
+    timeout: float, startup_timeout: float, max_tokens: int, no_progress: bool,
+) -> None:
+    """Run a chunked, repository-grounded multi-symbol code audit."""
+    from allin1_sdk.assistant_client import (
+        AssistantContextOverflow, review_assistant,
+    )
+
+    del output_format  # Click constrains the only currently supported contract.
+    symbols = tuple(dict.fromkeys(
+        item.strip() for value in symbol_values for item in value.split(",")
+        if item.strip()
+    ))
+    priorities = tuple(dict.fromkeys(
+        item.strip() for value in priority_values for item in value.split(",")
+        if item.strip()
+    ))
+    try:
+        result = review_assistant(
+            symbols, root=root, repository_root=repository_root, sources=sources,
+            priorities=priorities, question=" ".join(question), timeout=timeout,
+            startup_timeout=startup_timeout, max_tokens=max_tokens,
+            chunk_size=chunk_size,
+            preserve_findings_on_schema_failure=(
+                preserve_findings_on_schema_failure
+            ),
+            progress=(None if no_progress else lambda state: click.echo(
+                f"assistant: {state}", err=True,
+            )),
+        )
+    except AssistantContextOverflow as exc:
+        click.echo(json.dumps(exc.details, indent=2, ensure_ascii=False))
+        raise click.exceptions.Exit(2) from exc
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
 
 
 @assistant_group.command("stop")
@@ -694,6 +852,28 @@ def open_workbench(source: Path, category: str, gta_path: Path | None) -> None:
     }, indent=2))
 
 
+@main.command("open-model-material-workbench")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation for native model decoding and builds.",
+)
+def open_model_material_workbench(
+    source: Path, gta_path: Path | None,
+) -> None:
+    """Open a native model or package in the desktop Models & Materials workspace."""
+    try:
+        pid, model_count = _open_model_material_window(source, gta_path)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "open_model_material_workbench",
+        "source": str(source.resolve()),
+        "model_assets": model_count,
+        "pid": pid,
+    }, indent=2))
+
+
 @main.command("inspect-workbench")
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.option(
@@ -702,12 +882,20 @@ def open_workbench(source: Path, category: str, gta_path: Path | None) -> None:
     default="all", show_default=True,
     help="Limit the structured report to one Workbench content family.",
 )
-def inspect_workbench(source: Path, category: str) -> None:
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation; auto-detected when omitted.",
+)
+def inspect_workbench(
+    source: Path, category: str, gta_path: Path | None,
+) -> None:
     """Return the Workbench's linked vehicle, weapon, and ped evidence as JSON."""
     try:
         resolved = source.expanduser().resolve(strict=True)
-        scan = AddonPackageInspector().inspect(resolved)
-    except (OSError, ValueError) as exc:
+        scan = AddonPackageInspector(
+            PROJECT_ROOT, _game_path(gta_path),
+        ).inspect(resolved)
+    except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     selected = category.casefold()
     payload: dict[str, object] = {
@@ -719,7 +907,12 @@ def inspect_workbench(source: Path, category: str) -> None:
             "vehicles": len(scan.vehicles),
             "weapons": len(scan.weapons),
             "weapon_components": len(scan.weapon_components),
+            "weapon_enhancements": len(scan.weapon_enhancements),
+            "scripted_weapon_systems": len(scan.scripted_weapon_systems),
             "peds": len(scan.peds),
+            "rpf_archives": len(scan.rpf_archives),
+            "rpf_native_assets": len(scan.rpf_native_assets),
+            "material_progressions": len(scan.material_progressions),
             "errors": scan.error_count,
             "warnings": scan.warning_count,
         },
@@ -739,10 +932,24 @@ def inspect_workbench(source: Path, category: str) -> None:
         payload["weapon_component_links"] = [
             asdict(item) for item in scan.weapon_component_links
         ]
+        payload["weapon_enhancements"] = [
+            item.to_dict() for item in scan.weapon_enhancements
+        ]
+        payload["scripted_weapon_systems"] = [
+            asdict(item) for item in scan.scripted_weapon_systems
+        ]
+        payload["material_progressions"] = [
+            item.to_dict() for item in scan.material_progressions
+        ]
         payload["animation_weapons"] = list(scan.animation_weapons)
         payload["shop_weapons"] = list(scan.shop_weapons)
     if selected in {"all", "peds"}:
         payload["peds"] = [asdict(item) for item in scan.peds]
+    if selected == "all":
+        payload["rpf_archives"] = [asdict(item) for item in scan.rpf_archives]
+        payload["rpf_native_assets"] = [
+            asdict(item) for item in scan.rpf_native_assets
+        ]
     click.echo(json.dumps(payload, indent=2))
 
 
@@ -1684,6 +1891,225 @@ def undo_vehicle_edit(workspace: Path, acknowledge_edit: bool) -> None:
     del acknowledge_edit
     try:
         result = VehicleAuthoringWorkspace(workspace).undo()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("create-ped-authoring")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--output-dir", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+def create_ped_authoring(source: Path, output_dir: Path) -> None:
+    """Copy visible ped metadata into a safe editable workspace."""
+    try:
+        workspace = PedAuthoringWorkspace.create(source, output_dir)
+        project = workspace.inspect()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "workspace": str(workspace.root),
+        "content_root": str(workspace.source),
+        "revision": workspace.revision,
+        "peds": [item.name for item in project.peds],
+    }, indent=2))
+
+
+@main.command("inspect-ped-authoring")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option("--ped", help="Include editable values for one ped record.")
+def inspect_ped_authoring(workspace: Path, ped: str | None) -> None:
+    """Inspect a ped workspace, validation state, and editable values."""
+    try:
+        authoring = PedAuthoringWorkspace(workspace)
+        project = authoring.inspect()
+        payload: dict[str, object] = {
+            "workspace": str(authoring.root),
+            "content_root": str(authoring.source),
+            "revision": authoring.revision,
+            "validation": project.to_dict(),
+        }
+        if ped:
+            payload["ped_authoring"] = authoring.values(ped).to_dict()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(payload, indent=2))
+
+
+@main.command("plan-ped-clone")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("donor")
+@click.option("--ped-name", required=True, help="New ped model identity.")
+@click.option(
+    "--set", "assignments", multiple=True,
+    help="Optional cloned field override as FIELD=VALUE; repeat as needed.",
+)
+def plan_ped_clone(
+    workspace: Path,
+    donor: str,
+    ped_name: str,
+    assignments: tuple[str, ...],
+) -> None:
+    """Plan a complete donor-based ped record without changing files."""
+    try:
+        updates = _field_assignments(assignments, "Ped clone") \
+            if assignments else {}
+        plan = PedAuthoringWorkspace(workspace).plan_ped_clone(
+            donor, ped_name=ped_name, updates=updates,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(plan.to_dict(), indent=2))
+
+
+@main.command("clone-ped-bundle")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("donor")
+@click.option("--ped-name", required=True, help="New ped model identity.")
+@click.option(
+    "--set", "assignments", multiple=True,
+    help="Optional cloned field override as FIELD=VALUE; repeat as needed.",
+)
+@click.option(
+    "--expected-revision", required=True, type=click.IntRange(min=0),
+    help="Reject the edit if the copied workspace revision has changed.",
+)
+@click.option(
+    "--plan-sha256", required=True,
+    help="Exact digest returned by plan-ped-clone.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def clone_ped_bundle(
+    workspace: Path,
+    donor: str,
+    ped_name: str,
+    assignments: tuple[str, ...],
+    expected_revision: int,
+    plan_sha256: str,
+    acknowledge_edit: bool,
+) -> None:
+    """Apply one reviewed, revision-bound complete ped clone plan."""
+    del acknowledge_edit
+    try:
+        updates = _field_assignments(assignments, "Ped clone") \
+            if assignments else {}
+        authoring = PedAuthoringWorkspace(workspace)
+        plan = authoring.plan_ped_clone(
+            donor, ped_name=ped_name, updates=updates,
+        )
+        if plan.plan_sha256.casefold() != plan_sha256.strip().casefold():
+            raise ValueError(
+                "ped clone plan digest mismatch; run plan-ped-clone again "
+                "and review the current plan"
+            )
+        result = authoring.clone_ped_bundle(
+            plan,
+            expected_revision=expected_revision,
+            expected_plan_sha256=plan_sha256,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("set-ped-fields")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("ped")
+@click.option(
+    "--set", "assignments", multiple=True, required=True,
+    help="Editable field assignment as FIELD=VALUE; repeat for multiple fields.",
+)
+@click.option(
+    "--expected-revision", type=click.IntRange(min=0),
+    help="Reject the edit if the copied workspace revision has changed.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def set_ped_fields(
+    workspace: Path,
+    ped: str,
+    assignments: tuple[str, ...],
+    expected_revision: int | None,
+    acknowledge_edit: bool,
+) -> None:
+    """Transactionally update copied ped metadata and revalidate the package."""
+    del acknowledge_edit
+    try:
+        updates = _field_assignments(assignments, "Ped")
+        result = PedAuthoringWorkspace(workspace).update(
+            ped, updates, expected_revision=expected_revision,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("migrate-ped-identity")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("ped")
+@click.option("--new-name", required=True, help="New ped model identity.")
+@click.option(
+    "--new-props",
+    help="New props identity; defaults to NEW_NAME_p for conventional donors.",
+)
+@click.option(
+    "--expected-revision", type=click.IntRange(min=0),
+    help="Reject the edit if the copied workspace revision has changed.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def migrate_ped_identity(
+    workspace: Path,
+    ped: str,
+    new_name: str,
+    new_props: str | None,
+    expected_revision: int | None,
+    acknowledge_edit: bool,
+) -> None:
+    """Transactionally migrate ped metadata and owned streamed filenames."""
+    del acknowledge_edit
+    try:
+        result = PedAuthoringWorkspace(workspace).migrate_identity(
+            ped,
+            new_name=new_name,
+            new_props=new_props,
+            expected_revision=expected_revision,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("undo-ped-edit")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option(
+    "--expected-revision", type=click.IntRange(min=0),
+    help="Reject the undo if the copied workspace revision has changed.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def undo_ped_edit(
+    workspace: Path,
+    expected_revision: int | None,
+    acknowledge_edit: bool,
+) -> None:
+    """Restore the latest ped metadata edit from retained local history."""
+    del acknowledge_edit
+    try:
+        result = PedAuthoringWorkspace(workspace).undo(
+            expected_revision=expected_revision,
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(result.to_dict(), indent=2))
@@ -3001,11 +3427,18 @@ def extract_rpf_entry(
 @click.option("--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option(
     "--output-dir", type=click.Path(file_okay=False, path_type=Path),
-    help="Publish a new report folder containing any XML/text and PNG preview.",
+    help=(
+        "Publish a report folder. Include the native extension in its name "
+        "(for example asset.ytd.native-report) to prevent basename collisions."
+    ),
+)
+@click.option(
+    "--safe-overwrite", is_flag=True,
+    help="Replace only an existing report folder created by this command.",
 )
 def inspect_rpf_native_entry(
     archive: Path, entry_path: str, archive_path: str,
-    gta_path: Path | None, output_dir: Path | None,
+    gta_path: Path | None, output_dir: Path | None, safe_overwrite: bool,
 ) -> None:
     """Inspect an exact root or nested-RPF asset without modifying its archive."""
     service = _rpf_service(gta_path)
@@ -3018,7 +3451,11 @@ def inspect_rpf_native_entry(
         )
         payload["operation"] = "inspect_rpf_native_entry"
         if output_dir is not None:
-            _publish_native_report(report, payload, output_dir)
+            _publish_native_report(
+                report, payload, output_dir, safe_overwrite=safe_overwrite,
+            )
+        elif safe_overwrite:
+            raise ValueError("--safe-overwrite requires --output-dir")
         click.echo(json.dumps(payload, indent=2))
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -3663,6 +4100,183 @@ def export_native_workspace(
     click.echo(f"Exported verified native editing workspace: {workspace}")
 
 
+@main.command("inspect-model-materials")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--edition", type=click.Choice(("Legacy", "Enhanced"), case_sensitive=False),
+    default="Enhanced", show_default=True,
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation for native decoding; never written.",
+)
+def inspect_model_materials(
+    source: Path, edition: str, gta_path: Path | None,
+) -> None:
+    """Inspect model hierarchy, shader usage, and typed texture bindings."""
+    try:
+        project = inspect_model_file(
+            PROJECT_ROOT, source, edition=edition, gta_path=gta_path,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(project.to_dict(), indent=2))
+
+
+@main.command("create-material-workspace")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--output-dir", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+@click.option(
+    "--edition", type=click.Choice(("Legacy", "Enhanced"), case_sensitive=False),
+    default="Enhanced", show_default=True,
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+def create_material_workspace(
+    source: Path, output_dir: Path, edition: str, gta_path: Path | None,
+) -> None:
+    """Export one native model into a revisioned material workspace."""
+    try:
+        workspace = MaterialAuthoringWorkspace.create(
+            PROJECT_ROOT, source, output_dir, edition=edition, gta_path=gta_path,
+        )
+        project = workspace.inspect()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "create_material_workspace",
+        "workspace": str(workspace.root),
+        "revision": workspace.revision,
+        "validation": project.to_dict(),
+    }, indent=2))
+
+
+@main.command("inspect-material-workspace")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+def inspect_material_workspace(workspace: Path) -> None:
+    """Inspect the exact revision and material state of an editing workspace."""
+    try:
+        authoring = MaterialAuthoringWorkspace(workspace)
+        project = authoring.inspect()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "inspect_material_workspace",
+        "workspace": str(authoring.root),
+        "revision": authoring.revision,
+        "validation": project.to_dict(),
+    }, indent=2))
+
+
+@main.command("set-material-binding")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("material_index", type=click.IntRange(min=0))
+@click.option("--shader-name", help="Replace the existing shader Name value.")
+@click.option(
+    "--texture", "texture_assignments", multiple=True,
+    help="Existing sampler assignment as SLOT=TEXTURE; repeat as needed.",
+)
+@click.option("--expected-revision", required=True, type=click.IntRange(min=0))
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def set_material_binding(
+    workspace: Path, material_index: int, shader_name: str | None,
+    texture_assignments: tuple[str, ...], expected_revision: int,
+    acknowledge_edit: bool,
+) -> None:
+    """Edit existing shader and texture values without synthesizing XML nodes."""
+    del acknowledge_edit
+    try:
+        textures = _field_assignments(texture_assignments, "Texture") \
+            if texture_assignments else {}
+        if shader_name is None and not textures:
+            raise ValueError("Provide --shader-name or at least one --texture SLOT=TEXTURE")
+        result = MaterialAuthoringWorkspace(workspace).set_material(
+            material_index, expected_revision=expected_revision,
+            shader_name=shader_name, textures=textures,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("set-geometry-material")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("geometry_index", type=click.IntRange(min=0))
+@click.argument("material_index", type=click.IntRange(min=0))
+@click.option("--expected-revision", required=True, type=click.IntRange(min=0))
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def set_geometry_material(
+    workspace: Path, geometry_index: int, material_index: int,
+    expected_revision: int, acknowledge_edit: bool,
+) -> None:
+    """Assign one geometry to an existing shader in its local catalog."""
+    del acknowledge_edit
+    try:
+        result = MaterialAuthoringWorkspace(workspace).set_geometry_material(
+            geometry_index, material_index,
+            expected_revision=expected_revision,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("undo-material-edit")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option("--expected-revision", required=True, type=click.IntRange(min=0))
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def undo_material_edit(
+    workspace: Path, expected_revision: int, acknowledge_edit: bool,
+) -> None:
+    """Restore the last exact material XML snapshot after drift validation."""
+    del acknowledge_edit
+    try:
+        result = MaterialAuthoringWorkspace(workspace).undo(
+            expected_revision=expected_revision,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("build-material-workspace")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def build_material_workspace(
+    workspace: Path, gta_path: Path | None, output: Path,
+) -> None:
+    """Compile edited material XML and reparse it before publication."""
+    try:
+        asset, report = MaterialAuthoringWorkspace(workspace).build(
+            PROJECT_ROOT, output, gta_path=gta_path,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "build_material_workspace",
+        "workspace": str(workspace.resolve()),
+        "output": str(asset),
+        "validation_report": str(report),
+    }, indent=2))
+
+
 @main.command("inspect-native-asset")
 @click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
@@ -4264,6 +4878,9 @@ for _command in (
     inspect_vehicle_project, export_vehicle_project, build_vehicle_package,
     create_vehicle_authoring, inspect_vehicle_authoring,
     set_vehicle_fields, undo_vehicle_edit,
+    create_ped_authoring, inspect_ped_authoring,
+    plan_ped_clone, clone_ped_bundle,
+    set_ped_fields, migrate_ped_identity, undo_ped_edit,
     create_weapon_authoring, inspect_weapon_authoring,
     plan_weapon_clone, clone_weapon_bundle,
     set_weapon_fields, set_weapon_component, set_weapon_attachment,

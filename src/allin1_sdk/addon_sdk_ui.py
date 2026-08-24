@@ -51,9 +51,10 @@ class AddonSdkDialog(tk.Toplevel):
         ("linker", "Package Linker", "Ctrl+1"),
         ("assets", "Asset Viewer", "Ctrl+2"),
         ("workbench", "Content Workbench", "Ctrl+3"),
-        ("rpf", "RPF Archives", "Ctrl+4"),
-        ("recipes", "Package Recipes", "Ctrl+5"),
-        ("help", "Help Center", "Ctrl+6"),
+        ("models", "Models & Materials", "Ctrl+4"),
+        ("rpf", "RPF Archives", "Ctrl+5"),
+        ("recipes", "Package Recipes", "Ctrl+6"),
+        ("help", "Help Center", "Ctrl+7"),
     )
 
     def __init__(
@@ -82,6 +83,12 @@ class AddonSdkDialog(tk.Toplevel):
         apply_sdk_window_icon(self, self.project_root)
         self._build()
         self._load_examples()
+
+    def _package_inspector(self) -> AddonPackageInspector:
+        game = next(
+            (path for path in self.installation_roots if path.is_dir()), None,
+        )
+        return AddonPackageInspector(self.project_root, game)
 
     def _build_menu(self) -> None:
         menu = tk.Menu(self, tearoff=False)
@@ -153,6 +160,10 @@ class AddonSdkDialog(tk.Toplevel):
             state="disabled",
         )
         menu.add_command(
+            label="Open in Models & Materials…",
+            command=self._open_model_materials, state="disabled",
+        )
+        menu.add_command(
             label="Inspect package RPFs…", command=self._inspect_package_rpfs,
             state="disabled",
         )
@@ -186,6 +197,10 @@ class AddonSdkDialog(tk.Toplevel):
                 "Open in Workbench…",
                 state="normal" if workbench else "disabled",
             )
+            menu.entryconfigure(
+                "Open in Models & Materials…",
+                state="normal" if assets else "disabled",
+            )
 
     def _open_console(self) -> None:
         self.console_workspace.expand_and_focus()
@@ -207,6 +222,7 @@ class AddonSdkDialog(tk.Toplevel):
         topic = {
             "linker": "sdk", "assets": "asset-viewer",
             "workbench": workbench_topic, "rpf": "rpf-explorer",
+            "models": "model-material-workbench",
             "recipes": "package-recipes", "help": "input",
         }.get(getattr(self, "current_workspace", "linker"), "sdk")
         self._open_help(topic)
@@ -245,6 +261,16 @@ class AddonSdkDialog(tk.Toplevel):
         workbench = getattr(self, "workbench_workspace", None)
         if workbench is not None and not workbench.confirm_navigation():
             self._select_workspace("workbench")
+            return False
+        models = getattr(self, "model_material_workspace", None)
+        if models is not None and models.has_active_work():
+            self._select_workspace("models")
+            models.focus_active_work()
+            messagebox.showinfo(
+                "Model operation still running",
+                "Wait for the current model decode or render to finish before "
+                "closing the SDK.", parent=self,
+            )
             return False
         self.destroy()
         return True
@@ -416,6 +442,16 @@ class AddonSdkDialog(tk.Toplevel):
             self.vehicle_workspace = workspace.vehicle_workspace
             self.weapon_workspace = workspace.weapon_workspace
             self.ped_workspace = workspace.ped_workspace
+        elif key == "models":
+            from allin1_sdk.model_material_workbench import ModelMaterialWorkbenchFrame
+            workspace = ModelMaterialWorkbenchFrame(
+                page, self.project_root,
+                installation_roots=self.installation_roots,
+                on_help=self._open_help, on_close=self._go_back,
+                on_open_asset=self._open_workbench_asset,
+            )
+            workspace.pack(fill="both", expand=True)
+            self.model_material_workspace = workspace
         elif key == "rpf":
             from allin1_sdk.rpf_explorer import RpfExplorerDialog
             workspace = RpfExplorerDialog(
@@ -578,6 +614,7 @@ class AddonSdkDialog(tk.Toplevel):
         linker_page = ttk.Frame(workspace)
         assets_page = ttk.Frame(workspace)
         workbench_page = ttk.Frame(workspace)
+        models_page = ttk.Frame(workspace)
         rpf_page = ttk.Frame(workspace)
         recipes_page = ttk.Frame(workspace)
         help_page = ttk.Frame(workspace)
@@ -585,6 +622,7 @@ class AddonSdkDialog(tk.Toplevel):
             "linker": linker_page,
             "assets": assets_page,
             "workbench": workbench_page,
+            "models": models_page,
             "rpf": rpf_page,
             "recipes": recipes_page,
             "help": help_page,
@@ -959,7 +997,7 @@ class AddonSdkDialog(tk.Toplevel):
 
     def _import_package(self, source: Path) -> None:
         try:
-            scan = AddonPackageInspector().inspect(source)
+            scan = self._package_inspector().inspect(source)
         except (OSError, ValueError) as exc:
             messagebox.showerror("Package scan failed", str(exc), parent=self)
             return
@@ -1018,7 +1056,10 @@ class AddonSdkDialog(tk.Toplevel):
         self._set_package_actions(
             assets=True,
             rpfs=any(entry.suffix == ".rpf" for entry in scan.entries),
-            workbench=bool(scan.vehicles or scan.weapons or scan.peds),
+            workbench=bool(
+                scan.vehicles or scan.weapons or scan.peds
+                or scan.weapon_enhancements or scan.scripted_weapon_systems
+            ),
         )
 
     def _open_asset_viewer(self) -> None:
@@ -1039,6 +1080,31 @@ class AddonSdkDialog(tk.Toplevel):
                     f"Content Workbench · {self.package_source.name}",
                 )
 
+    def _open_model_materials(self) -> None:
+        """Route the current package into the integrated native model workspace."""
+        self._select_workspace("models")
+        if self.package_source is not None:
+            self.model_material_workspace.open_source(self.package_source)
+            self.status.set(
+                f"Models & Materials · {self.package_source.name}",
+            )
+
+    def open_model_material_source(self, source: str | Path) -> bool:
+        """Public desktop/automation route into Models & Materials."""
+        try:
+            resolved = Path(source).expanduser().resolve(strict=True)
+        except OSError as exc:
+            messagebox.showerror(
+                "Could not open Models & Materials", str(exc), parent=self,
+            )
+            return False
+        self.package_source = resolved
+        self.package_scan = None
+        self._select_workspace("models")
+        self.model_material_workspace.open_source(resolved)
+        self.status.set(f"Models & Materials · {resolved.name}")
+        return True
+
     def _open_vehicle_workbench(self) -> None:
         """Compatibility route for existing vehicle-focused integrations."""
         self._open_workbench("vehicles")
@@ -1049,7 +1115,7 @@ class AddonSdkDialog(tk.Toplevel):
         """Load a package directly into the unified content Workbench."""
         try:
             resolved = Path(source).expanduser().resolve(strict=True)
-            scan = AddonPackageInspector().inspect(resolved)
+            scan = self._package_inspector().inspect(resolved)
         except (OSError, ValueError) as exc:
             messagebox.showerror(
                 "Could not open package in Workbench", str(exc), parent=self,
@@ -1057,7 +1123,10 @@ class AddonSdkDialog(tk.Toplevel):
             return False
         available = {
             "vehicles": bool(scan.vehicles),
-            "weapons": bool(scan.weapons),
+            "weapons": bool(
+                scan.weapons or scan.weapon_enhancements
+                or scan.scripted_weapon_systems
+            ),
             "peds": bool(scan.peds),
         }
         if category not in {"auto", *available}:
@@ -1069,7 +1138,8 @@ class AddonSdkDialog(tk.Toplevel):
         if not any(available.values()):
             messagebox.showerror(
                 "No Workbench content found",
-                "The selected package does not contain vehicle, weapon, or ped metadata.",
+                "The selected package does not contain vehicle, weapon, ped, or "
+                "script-driven vanilla weapon relationships.",
                 parent=self,
             )
             return False
@@ -1118,7 +1188,7 @@ class AddonSdkDialog(tk.Toplevel):
         root_path = Path(root).expanduser().resolve()
         try:
             relative = source_path.relative_to(root_path).as_posix()
-            scan = AddonPackageInspector().inspect(root_path)
+            scan = self._package_inspector().inspect(root_path)
         except (OSError, ValueError) as exc:
             messagebox.showerror(
                 "Could not route graph asset", str(exc), parent=self,
@@ -1136,7 +1206,7 @@ class AddonSdkDialog(tk.Toplevel):
     def _open_graph_vehicle(self, root: str, model: str) -> None:
         root_path = Path(root).expanduser().resolve()
         try:
-            scan = AddonPackageInspector().inspect(root_path)
+            scan = self._package_inspector().inspect(root_path)
         except (OSError, ValueError) as exc:
             messagebox.showerror(
                 "Could not route vehicle system", str(exc), parent=self,

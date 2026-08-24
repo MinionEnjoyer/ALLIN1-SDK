@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import time
 import tkinter as tk
+from io import BytesIO
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from allin1_sdk.app import _configure_style
 from allin1_sdk.addon_importer import AddonPackageInspector
 from allin1_sdk.asset_viewer import AssetViewerDialog
+from allin1_sdk.ped_authoring import PedAuthoringWorkspace
+from allin1_sdk.ped_workbench import PedWorkbenchFrame
 from allin1_sdk.weapon_authoring import WeaponAuthoringWorkspace
 from allin1_sdk.weapon_workbench import (
     AMMO_MODE_CLONE,
@@ -35,6 +40,8 @@ PED_META = """<CPedModelInfo__InitDataList><InitDatas><Item>
 <Name>ig_workbench</Name><Pedtype>CIVMALE</Pedtype><ModelType>STANDARD</ModelType>
 <PropsName>ig_workbench_p</PropsName><MovementClipSet>move_m@generic</MovementClipSet>
 <ExpressionSetName>expr_set_ambient_male</ExpressionSetName>
+<ClipDictionaryName>move_m@generic</ClipDictionaryName>
+<CreatureMetadataName>METADATA_HUMAN_MALE</CreatureMetadataName>
 </Item></InitDatas></CPedModelInfo__InitDataList>"""
 
 
@@ -72,9 +79,39 @@ def _package(root: Path) -> Path:
     for name in (
         "w_pi_workbench.ydr", "w_at_workbench_clip.ydr",
         "ig_workbench.ydd", "ig_workbench.ytd",
+        "ig_workbench_p.ydd", "ig_workbench_p.ytd",
+        "ig_clone.ydd", "ig_clone.ytd",
+        "ig_clone_p.ydd", "ig_clone_p.ytd",
     ):
         (stream / name).write_bytes(name.encode("ascii"))
     return package
+
+
+def _png_bytes(color: str) -> bytes:
+    output = BytesIO()
+    Image.new("RGBA", (12, 8), color).save(output, format="PNG")
+    return output.getvalue()
+
+
+def _wait_for(tk_root, predicate, *, timeout: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        tk_root.update()
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("timed out waiting for asynchronous UI state")
+
+
+def _destroy_with_ped_preview(
+    frame: PedWorkbenchFrame | WorkbenchFrame,
+) -> None:
+    """Drain preview work before Tk variables can be finalized off-thread."""
+    ped_frame = (
+        frame.ped_workspace if isinstance(frame, WorkbenchFrame) else frame
+    )
+    ped_frame._preview_worker.close(wait=True)
+    frame.destroy()
 
 
 def test_workbench_shares_one_scan_across_weapon_and_ped_tabs(tmp_path, tk_root):
@@ -105,7 +142,157 @@ def test_workbench_shares_one_scan_across_weapon_and_ped_tabs(tmp_path, tk_root)
     assert frame.ped_workspace.selected_ped is not None
     frame._route_asset("stream/ig_workbench.ytd")
     assert routed == ["stream/ig_workbench.ytd"]
-    frame.destroy()
+    _destroy_with_ped_preview(frame)
+
+
+def test_ped_authoring_controls_apply_only_inside_copied_workspace(
+    tmp_path, monkeypatch, tk_root,
+):
+    package = _package(tmp_path)
+    original = (package / "peds.meta").read_bytes()
+    frame = PedWorkbenchFrame(tk_root)
+    frame.pack(fill="both", expand=True)
+    frame.open_source(package, AddonPackageInspector().inspect(package))
+    assert all(
+        str(entry.cget("state")) == "disabled"
+        for entry in frame.authoring_inputs.values()
+    )
+    assert str(frame.author_button.cget("state")) == "normal"
+
+    workspace = PedAuthoringWorkspace.create(
+        package, tmp_path / "ped-authoring",
+    )
+    frame.open_source(
+        workspace.source, AddonPackageInspector().inspect(workspace.source),
+        authoring_workspace=workspace,
+    )
+    assert all(
+        str(entry.cget("state")) == "normal"
+        for entry in frame.authoring_inputs.values()
+    )
+    assert str(frame.author_button.cget("state")) == "disabled"
+
+    monkeypatch.setattr(
+        "allin1_sdk.ped_workbench.messagebox.askyesno",
+        lambda *_args, **_kwargs: True,
+    )
+    frame.authoring_values["ped.expressionSet"].set("expr_set_workbench")
+    frame._save_authoring_fields()
+    assert workspace.revision == 1
+    assert workspace.values("ig_workbench").values["ped.expressionSet"] == (
+        "expr_set_workbench"
+    )
+    assert (package / "peds.meta").read_bytes() == original
+
+    frame.authoring_values["ped.expressionSet"].set("expr_not_applied")
+    frame.search.set("definitely-not-this-ped")
+    assert frame.selected_ped is not None
+    assert frame.selected_ped.name == "ig_workbench"
+    assert frame.authoring_values["ped.expressionSet"].get() == "expr_not_applied"
+    monkeypatch.setattr(
+        "allin1_sdk.ped_workbench.messagebox.askyesno",
+        lambda *_args, **_kwargs: False,
+    )
+    assert not frame.confirm_navigation()
+    _destroy_with_ped_preview(frame)
+
+
+def test_ped_workbench_reviews_clone_and_migrates_identity(tmp_path, monkeypatch, tk_root):
+    package = _package(tmp_path)
+    workspace = PedAuthoringWorkspace.create(
+        package, tmp_path / "ped-authoring",
+    )
+    frame = PedWorkbenchFrame(tk_root, Path(__file__).resolve().parents[1])
+    frame.pack(fill="both", expand=True)
+    frame.open_source(
+        workspace.source, AddonPackageInspector().inspect(workspace.source),
+        authoring_workspace=workspace,
+    )
+    monkeypatch.setattr(
+        "allin1_sdk.ped_workbench.messagebox.askyesno",
+        lambda *_args, **_kwargs: True,
+    )
+
+    frame.clone_name.set("ig_clone")
+    frame._review_clone()
+    assert frame._reviewed_clone_plan is not None
+    assert frame._reviewed_clone_plan.ready
+    assert str(frame.apply_clone_button.cget("state")) == "normal"
+    frame._apply_clone()
+    assert workspace.revision == 1
+    assert workspace.values("ig_clone").ped == "ig_clone"
+
+    assert frame.select_ped("ig_workbench")
+    frame.migrate_name.set("ig_migrated")
+    frame.migrate_props.set("")
+    frame._migrate_identity()
+    assert workspace.revision == 2
+    assert workspace.values("ig_migrated").values["ped.propsName"] \
+        == "ig_migrated_p"
+    assert (workspace.source / "stream" / "ig_migrated.ydd").is_file()
+    assert (workspace.source / "stream" / "ig_migrated_p.ytd").is_file()
+    _destroy_with_ped_preview(frame)
+
+
+def test_ped_preview_worker_decodes_frames_and_surfaces_background_errors(
+    tmp_path, monkeypatch, tk_root,
+):
+    package = _package(tmp_path)
+    model_png = _png_bytes("#2b8a57")
+    texture_png = _png_bytes("#d7b348")
+    monkeypatch.setattr(
+        PedWorkbenchFrame, "_render_preview_bundle",
+        lambda _self, *_args: (model_png, texture_png, "preview ready"),
+    )
+    frame = PedWorkbenchFrame(tk_root, Path(__file__).resolve().parents[1])
+    frame.pack(fill="both", expand=True)
+    frame.open_source(package, AddonPackageInspector().inspect(package))
+    _wait_for(tk_root, lambda: frame.preview_status.get() == "preview ready")
+    model, texture = frame._preview_source_images
+    assert model is not None and model.size == (12, 8)
+    assert texture is not None and texture.size == (12, 8)
+    assert str(frame.refresh_preview_button.cget("state")) == "normal"
+
+    def fail(*_args):
+        raise RuntimeError("forced preview backend failure")
+
+    frame._preview_worker.invalidate(clear_cache=True)
+    monkeypatch.setattr(frame, "_render_preview_bundle", fail)
+    frame._request_preview()
+    _wait_for(
+        tk_root,
+        lambda: "forced preview backend failure" in frame.preview_status.get(),
+    )
+    assert frame._preview_source_images == (None, None)
+    _destroy_with_ped_preview(frame)
+
+
+def test_ped_preview_and_template_plan_explain_missing_exact_assets(
+    tmp_path, tk_root,
+):
+    package = _package(tmp_path)
+    (package / "stream" / "ig_workbench.ydd").unlink()
+    (package / "stream" / "ig_workbench.ytd").unlink()
+    workspace = PedAuthoringWorkspace.create(
+        package, tmp_path / "ped-authoring",
+    )
+    (workspace.source / "stream" / "ig_clone.ytd").unlink()
+    frame = PedWorkbenchFrame(tk_root, Path(__file__).resolve().parents[1])
+    frame.pack(fill="both", expand=True)
+    frame.open_source(
+        workspace.source, AddonPackageInspector().inspect(workspace.source),
+        authoring_workspace=workspace,
+    )
+    assert str(frame.refresh_preview_button.cget("state")) == "disabled"
+    assert "external or missing" in frame.preview_status.get()
+
+    frame.clone_name.set("ig_clone")
+    frame._review_clone()
+    assert frame._reviewed_clone_plan is not None
+    assert frame._reviewed_clone_plan.ready is False
+    assert str(frame.apply_clone_button.cget("state")) == "disabled"
+    assert "target_model_texture_not_unique" in frame.clone_status.get()
+    _destroy_with_ped_preview(frame)
 
 
 def test_specialist_filters_clear_stale_selection_and_keep_asset_accessible(

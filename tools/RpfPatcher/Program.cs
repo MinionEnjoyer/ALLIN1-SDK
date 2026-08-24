@@ -18,6 +18,7 @@
 //   RpfPatcher.exe extract-virtual-entries <gta_path> <rpf_path> <manifest_tsv> <output_root>
 //   RpfPatcher.exe apply-entry-changes <gta_path> <rpf_path> <manifest_tsv> <payload_root>
 //   RpfPatcher.exe asset-from-xml <input_xml> <output_asset> <asset_folder> [legacy|gen9] [source_asset] [gta_path]
+//   RpfPatcher.exe asset-xml-batch <manifest_tsv> [legacy|gen9] [gta_path]
 //   RpfPatcher.exe audit-seats  <gta_path> <output_json> [output_cs]
 //   RpfPatcher.exe install-euphoria <gta_path> <payload_folder> [--allow-enhanced]
 //   RpfPatcher.exe verify-euphoria  <gta_path> <payload_folder>
@@ -78,6 +79,7 @@ namespace RpfPatcher
                     "  RpfPatcher.exe extract-virtual-entry <gta_path> <rpf_path> <archive_path> <entry_path> <output>\n" +
                     "  RpfPatcher.exe extract-virtual-entries <gta_path> <rpf_path> <manifest_tsv> <output_root>\n" +
                     "  RpfPatcher.exe asset-xml    <input_asset> <output_xml> <asset_folder> [legacy|gen9] [gta_path]\n" +
+                    "  RpfPatcher.exe asset-xml-batch <manifest_tsv> [legacy|gen9] [gta_path]\n" +
                     "  RpfPatcher.exe asset-from-xml <input_xml> <output_asset> <asset_folder> [legacy|gen9] [source_asset] [gta_path]\n" +
                     "  RpfPatcher.exe audit-seats  <gta_path> <output_json> [output_cs]\n" +
                     "  RpfPatcher.exe build-ytd    <dds_folder> <output_ytd> [legacy|gen9]\n" +
@@ -142,6 +144,8 @@ namespace RpfPatcher
                 return ExtractVirtualEntries(args);
             if (command == "asset-xml")
                 return ExportAssetXml(args);
+            if (command == "asset-xml-batch")
+                return ExportAssetXmlBatch(args);
             if (command == "asset-from-xml")
                 return ImportAssetXml(args);
             if (command == "audit-seats")
@@ -1906,6 +1910,68 @@ namespace RpfPatcher
             finally
             {
                 RpfManager.IsGen9 = previous;
+            }
+        }
+
+        // Converts a bounded set of already-extracted native assets in one
+        // helper process. Each TSV line is input<TAB>xml<TAB>asset-folder.
+        // Workbench audits use this to avoid paying process/JIT startup once
+        // per material tier while retaining the exact asset-xml converter.
+        static int ExportAssetXmlBatch(string[] args)
+        {
+            if (args.Length < 2)
+            {
+                Console.Error.WriteLine(
+                    "Usage: RpfPatcher.exe asset-xml-batch <manifest_tsv> [legacy|gen9] [gta_path]");
+                return 1;
+            }
+            string manifestPath = Path.GetFullPath(args[1]);
+            if (!File.Exists(manifestPath))
+            {
+                Console.Error.WriteLine($"ERROR: Batch manifest not found: {manifestPath}");
+                return 4;
+            }
+            string mode = args.Length >= 3 ? args[2] : "legacy";
+            string gtaPath = args.Length >= 4 ? Path.GetFullPath(args[3]) : null;
+            try
+            {
+                var rows = File.ReadAllLines(manifestPath)
+                    .Where(line => !string.IsNullOrWhiteSpace(line)
+                        && !line.TrimStart().StartsWith("#"))
+                    .Select(line => line.Split(new[] { '\t' }, 3))
+                    .ToArray();
+                if (rows.Length == 0 || rows.Length > 512
+                    || rows.Any(row => row.Length != 3))
+                {
+                    Console.Error.WriteLine(
+                        "ERROR: Asset XML batch must contain 1 through 512 valid TSV rows.");
+                    return 4;
+                }
+                var outputs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string[] row in rows)
+                {
+                    string input = Path.GetFullPath(row[0]);
+                    string output = Path.GetFullPath(row[1]);
+                    string assets = Path.GetFullPath(row[2]);
+                    if (!File.Exists(input) || !outputs.Add(output))
+                    {
+                        Console.Error.WriteLine(
+                            $"ERROR: Missing input or duplicate XML output: {row[0]}");
+                        return 4;
+                    }
+                    var conversionArgs = gtaPath == null
+                        ? new[] { "asset-xml", input, output, assets, mode }
+                        : new[] { "asset-xml", input, output, assets, mode, gtaPath };
+                    int result = ExportAssetXml(conversionArgs);
+                    if (result != 0) return result;
+                }
+                Console.WriteLine($"Exported {rows.Length:N0} native asset XML file(s).");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"ERROR: Native asset batch conversion failed: {ex.Message}");
+                return 99;
             }
         }
 

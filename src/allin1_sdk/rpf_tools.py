@@ -550,6 +550,71 @@ class RpfExplorerService:
             raise ValueError(f"RPF extraction failed: {detail}")
         return target
 
+    def extract_many(
+        self, index: RpfIndex, entries: Iterable[RpfEntryRecord],
+        destination: str | Path,
+    ) -> tuple[Path, ...]:
+        """Extract exact entries in one archive scan into a new guarded folder."""
+        self._require_tool()
+        selected = tuple(entries)
+        if not selected:
+            raise ValueError("Select at least one RPF entry to extract")
+        if len(selected) > 512:
+            raise ValueError("A single guarded extraction is limited to 512 entries")
+        if len({item.id for item in selected}) != len(selected):
+            raise ValueError("RPF batch extraction contains duplicate entries")
+        for entry in selected:
+            if entry.kind == "directory" or index.entry(entry.id) != entry:
+                raise ValueError("An entry does not belong to this RPF index")
+        target = Path(destination).expanduser().resolve()
+        if target.exists() or target.is_symlink():
+            raise ValueError(f"RPF batch destination already exists: {target}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source_hash = _sha256_file(index.source)
+        staging = Path(tempfile.mkdtemp(
+            prefix=f".{target.name}.allin1-stage-", dir=target.parent,
+        )).resolve()
+        relative = tuple(
+            f"{number:04d}{entry.suffix or '.bin'}"
+            for number, entry in enumerate(selected, start=1)
+        )
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="allin1-rpf-batch-manifest-",
+            ) as temporary:
+                manifest = Path(temporary) / "entries.tsv"
+                manifest.write_text("".join(
+                    f"{entry.archive_path}\t{entry.path}\t{name}\n"
+                    for entry, name in zip(selected, relative)
+                ), encoding="utf-8")
+                completed = run_hidden(
+                    [
+                        self.patcher, "extract-virtual-entries", self.gta_path,
+                        index.source, manifest, staging,
+                    ],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace",
+                )
+            if completed.returncode:
+                detail = (
+                    completed.stderr or completed.stdout
+                    or "unknown helper error"
+                ).strip()
+                raise ValueError(f"RPF batch extraction failed: {detail}")
+            produced = tuple(staging / name for name in relative)
+            if any(not path.is_file() for path in produced):
+                raise ValueError("RPF helper omitted a requested batch entry")
+            if _sha256_file(index.source) != source_hash:
+                raise RuntimeError(
+                    "RPF changed during read-only batch extraction; output was discarded"
+                )
+            staging.rename(target)
+            return tuple(target / name for name in relative)
+        except Exception:
+            if staging.is_dir():
+                shutil.rmtree(staging)
+            raise
+
     def export_native_workspace(
         self, index: RpfIndex, entry: RpfEntryRecord, destination: str | Path,
     ) -> Path:

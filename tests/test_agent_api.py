@@ -30,6 +30,14 @@ def test_catalog_is_structured_and_classifies_risk():
     assert catalog["inspect-native-asset"]["risk"] == "authoring_write"
     assert catalog["inspect-rpf-native-entry"]["risk"] == "authoring_write"
     assert catalog["build-native-workspace"]["risk"] == "authoring_write"
+    assert catalog["inspect-model-materials"]["risk"] == "read_only"
+    assert catalog["inspect-material-workspace"]["risk"] == "read_only"
+    for command in (
+        "create-material-workspace", "set-material-binding",
+        "set-geometry-material", "undo-material-edit",
+        "build-material-workspace",
+    ):
+        assert catalog[command]["risk"] == "authoring_write"
     assert catalog["build-binary-workspace"]["risk"] == "authoring_write"
     assert catalog["build-gxt2-workspace"]["risk"] == "authoring_write"
     assert catalog["build-rpf-tree"]["risk"] == "authoring_write"
@@ -68,6 +76,7 @@ def test_catalog_is_structured_and_classifies_risk():
     ):
         assert catalog[command]["risk"] == "authoring_write"
     assert catalog["open-vehicle-workbench"]["risk"] == "read_only"
+    assert catalog["open-model-material-workbench"]["risk"] == "read_only"
     assert catalog["open-package-graph"]["risk"] == "authoring_write"
     assert catalog["import-package-graph"]["risk"] == "authoring_write"
     assert catalog["expand-rpf-graph-sealed"]["risk"] == "authoring_write"

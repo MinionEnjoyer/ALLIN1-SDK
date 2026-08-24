@@ -270,6 +270,31 @@ def test_rpf_service_indexes_extracts_and_builds_plan(tmp_path, monkeypatch):
     assert plan["safety"]["writes_performed"] is False
 
 
+def test_rpf_service_extract_many_uses_one_guarded_archive_scan(tmp_path, monkeypatch):
+    service, archive, _ = _service(tmp_path)
+    index = RpfIndex.load(_write_index(tmp_path, _index_payload(archive)))
+    selected = (
+        index.entry("::common/data/test.ymap"),
+        index.entry("x64/textures.rpf::vehicle.ytd"),
+    )
+    calls = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(args)
+        assert args[1] == "extract-virtual-entries"
+        output = Path(args[5])
+        for line in Path(args[4]).read_text(encoding="utf-8").splitlines():
+            _archive_path, _entry_path, relative = line.split("\t")
+            (output / relative).write_bytes(relative.encode("ascii"))
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(rpf_tools, "run_hidden", fake_run)
+    extracted = service.extract_many(index, selected, tmp_path / "batch")
+    assert len(calls) == 1
+    assert [item.suffix for item in extracted] == [".ymap", ".ytd"]
+    assert all(item.is_file() for item in extracted)
+
+
 def test_rpf_service_inspects_bound_native_entry_without_archive_write(tmp_path, monkeypatch):
     service, archive, _ = _service(tmp_path)
     index = RpfIndex.load(_write_index(tmp_path, _index_payload(archive)))
@@ -2826,6 +2851,14 @@ def test_new_rpf_cli_index_extract_and_plan(tmp_path, monkeypatch):
     inspected = json.loads(native_inspection.output)
     assert inspected["operation"] == "inspect_rpf_native_entry"
     assert inspected["binding"]["entry_path"] == "common/data/test.ymap"
+    assert (tmp_path / "native-inspection" / "report.json").is_file()
+    safe_replaced = runner.invoke(main, [
+        "sdk", "inspect-rpf-native-entry", str(archive),
+        "common/data/test.ymap", "--gta-path", str(game),
+        "--output-dir", str(tmp_path / "native-inspection"),
+        "--safe-overwrite",
+    ])
+    assert safe_replaced.exit_code == 0, safe_replaced.output
     assert (tmp_path / "native-inspection" / "report.json").is_file()
 
     native_export = runner.invoke(main, [

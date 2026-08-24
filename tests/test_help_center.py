@@ -6,6 +6,7 @@ def test_help_center_has_unique_keys_and_core_workflows():
     assert len(keys) == len(set(keys))
     assert {
         "getting-started", "packages", "package-recipes", "asset-viewer",
+        "model-material-workbench",
         "workbench", "vehicle-workbench", "weapon-workbench",
         "ped-workbench", "rpf-explorer", "recovery",
     } <= set(keys)
@@ -42,6 +43,24 @@ def test_weapon_workbench_help_explains_guarded_authoring_boundaries():
     assert "raw schema remain preserved and locked" in body
     assert "plan-weapon-clone is read-only" in body
     assert "exact --plan-sha256" in body
+    assert "undo latest" in body
+    assert "never write to the original package" in body
+
+
+def test_ped_workbench_help_explains_guarded_authoring_boundaries():
+    topic = next(topic for topic in HELP_TOPICS if topic.key == "ped-workbench")
+    body = topic.body.casefold()
+
+    assert "create authoring workspace copies and verifies" in body
+    assert "normal field edits keep the ped identity locked" in body
+    assert "without inventing missing schema nodes" in body
+    assert "text/value/ref representation" in body
+    assert "rolls back any validation regression" in body
+    assert "new from template handles the new-record boundary" in body
+    assert "requires one exact target drawable and texture dictionary" in body
+    assert "plan-ped-clone is read-only" in body
+    assert "exact --plan-sha256" in body
+    assert "renames exact package-owned ydd/ydr/ytd/ymt" in body
     assert "undo latest" in body
     assert "never write to the original package" in body
 

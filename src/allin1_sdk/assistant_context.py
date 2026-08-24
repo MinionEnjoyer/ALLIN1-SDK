@@ -42,6 +42,15 @@ PACKAGE_DOMAIN_TERMS = frozenset({
     "package", "manifest", "receipt", "ownership", "deploy", "deployment",
     "install", "installation", "uninstall", "mod.toml",
 })
+CONTENT_FAMILY_TERMS = {
+    "ped": frozenset({"ped", "peds", "pedestrian", "pedestrians", "peds.meta"}),
+    "weapon": frozenset({
+        "weapon", "weapons", "ammo", "attachment", "attachments",
+    }),
+    "vehicle": frozenset({
+        "vehicle", "vehicles", "handling", "carcols", "carvariations", "tuning",
+    }),
+}
 OPERATION_DOMAINS = {
     "inspect-source": frozenset({
         "source", "code", "cpp", "c++", "symbol", "function", "renderer",
@@ -100,6 +109,31 @@ OPERATION_DOMAINS = {
     }),
     "undo-weapon-edit": frozenset({
         "weapon", "weapons", "ammo", "attachment", "attachments",
+    }),
+    "create-ped-authoring": frozenset({
+        "ped", "peds", "pedestrian", "peds.meta", "character",
+    }),
+    "inspect-ped-authoring": frozenset({
+        "ped", "peds", "pedestrian", "peds.meta", "character",
+    }),
+    "plan-ped-clone": frozenset({
+        "ped", "peds", "pedestrian", "clone", "donor", "template",
+        "drawable", "texture", "props", "plan", "schema",
+    }),
+    "clone-ped-bundle": frozenset({
+        "ped", "peds", "pedestrian", "clone", "donor", "template",
+        "drawable", "texture", "props", "author", "schema",
+    }),
+    "set-ped-fields": frozenset({
+        "ped", "peds", "pedestrian", "peds.meta", "props", "movement",
+        "expression", "clip",
+    }),
+    "migrate-ped-identity": frozenset({
+        "ped", "peds", "pedestrian", "identity", "rename", "migration",
+        "ydd", "ydr", "ytd", "ymt", "props",
+    }),
+    "undo-ped-edit": frozenset({
+        "ped", "peds", "pedestrian", "undo", "authoring",
     }),
 }
 MANAGED_PACKAGE_POLICY = (
@@ -407,6 +441,13 @@ def retrieve_operations(
 ) -> tuple[Mapping[str, object], ...]:
     """Retrieve exact live command contracts relevant to one question."""
     query = _terms(question)
+    requested_families = {
+        family for family, terms in CONTENT_FAMILY_TERMS.items()
+        if query.intersection(terms)
+    }
+    exclusive_family = (
+        next(iter(requested_families)) if len(requested_families) == 1 else None
+    )
     by_name = {str(item.get("name", "")): item for item in catalog}
     specialized_domain = any(query.intersection(domain) for domain in OPERATION_DOMAINS.values())
     include_package_domain = bool(query.intersection(PACKAGE_DOMAIN_TERMS)) or not specialized_domain
@@ -418,6 +459,16 @@ def retrieve_operations(
     for item in catalog:
         name = str(item.get("name", ""))
         if name in CORE_PACKAGE_COMMANDS or name in {"assistant", "agent-api"}:
+            continue
+        command_family = next((
+            family for family in CONTENT_FAMILY_TERMS
+            if f"-{family}-" in f"-{name}-"
+        ), None)
+        if (
+            exclusive_family is not None
+            and command_family is not None
+            and command_family != exclusive_family
+        ):
             continue
         domain = OPERATION_DOMAINS.get(name)
         if specialized_domain and not include_package_domain and domain is None:
@@ -445,6 +496,8 @@ def _selected_grounding(
     roots: tuple[Path, ...], sources: Iterable[Path], symbols: Iterable[str],
     telemetry_files: Iterable[Path], telemetry_patterns: Iterable[str], *,
     telemetry_roots: Iterable[Path] = (),
+    repository_root: Path | None = None,
+    source_priorities: Iterable[str] = (),
 ) -> tuple[tuple[Mapping[str, object], ...], tuple[str, ...]]:
     from allin1_sdk.assistant_evidence import cached_inspect_log, cached_inspect_source
 
@@ -455,6 +508,9 @@ def _selected_grounding(
         item.strip() for item in symbols if item.strip()
     ))
     selected_patterns = tuple(telemetry_patterns)
+    selected_priorities = tuple(dict.fromkeys(
+        item.strip().casefold() for item in source_priorities if item.strip()
+    ))
     if selected_symbols and not selected_sources:
         raise ValueError(
             "--symbol requires at least one explicit --source so the requested "
@@ -467,7 +523,11 @@ def _selected_grounding(
             raise ValueError(
                 f"Selected source is outside the declared workspace roots: {resolved}"
             )
-        record = cached_inspect_source(resolved, symbols=selected_symbols)
+        record = cached_inspect_source(
+            resolved, symbols=selected_symbols,
+            repository_root=repository_root,
+            priorities=selected_priorities,
+        )
         evidence.append(record)
         grounded_symbols.update(
             str(item.get("symbol", "")).casefold()
@@ -483,6 +543,13 @@ def _selected_grounding(
             omitted.append(f"{resolved.name}: additional matching source windows were omitted")
         if record.get("dependencies_omitted"):
             omitted.append(f"{resolved.name}: additional counter dependencies were omitted")
+        relation_omitted = record.get("relationship_omitted", {})
+        if isinstance(relation_omitted, Mapping):
+            for role, count in relation_omitted.items():
+                if isinstance(count, int) and count:
+                    omitted.append(
+                        f"{resolved.name}: {count} additional {role} relationships were omitted"
+                    )
     globally_missing = [
         symbol for symbol in selected_symbols
         if symbol.casefold() not in grounded_symbols
@@ -519,6 +586,7 @@ def build_assistant_context(
     gta_path: Path | None = None, operation_mode: str = "advisory",
     sources: Iterable[Path] = (), symbols: Iterable[str] = (),
     telemetry_files: Iterable[Path] = (), telemetry_patterns: Iterable[str] = (),
+    source_priorities: Iterable[str] = (),
     catalog_provider: Callable[[], Sequence[Mapping[str, object]]] | None = None,
 ) -> AssistantContextBundle:
     mode = operation_mode.casefold()
@@ -553,6 +621,8 @@ def build_assistant_context(
     selected_grounding, omitted = _selected_grounding(
         roots, sources, symbols, telemetry_files, telemetry_patterns,
         telemetry_roots=telemetry_roots,
+        repository_root=current,
+        source_priorities=source_priorities,
     )
     question_terms = _terms(question)
     focused_engineering_evidence = bool(selected_grounding) and (

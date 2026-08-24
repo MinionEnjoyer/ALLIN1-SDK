@@ -12,7 +12,7 @@ make weapons, vehicles, archives, and other add-ons work coherently.
 ALLIN1 SDK supports GTA V Legacy and GTA V Enhanced. Its inspection and planning
 workflows are designed for Story Mode mod development.
 
-> **Current public release:** **0.5.3**. Install it from ALLIN1 Launcher or
+> **Current public release:** **0.5.4**. Install it from ALLIN1 Launcher or
 > download the self-contained Windows package from
 > [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases).
 
@@ -20,6 +20,23 @@ workflows are designed for Story Mode mod development.
 
 If ALLIN1 Launcher and SDK are useful to you, project support is available through
 [Buy Me a Coffee](https://buymeacoffee.com/minionenjoyer).
+
+## What's new in 0.5.4
+
+- The launcher and SDK now validate schema-1 and schema-2 packages through the
+  same mirrored contract and regression fixtures.
+- Weapons Workbench recognizes script-driven vanilla weapon/component systems
+  without requiring replacement `weapons.meta` records.
+- Packages can declare exact vanilla weapon hashes, component hashes, runtime
+  entry points, and associated visual DLC progressions.
+- Package-owned RPFs are inspected recursively inside the Workbench, including
+  nested YDR, YTD, and YTYP assets.
+- Material Progression renders decoded texture and approximate emissive/alpha
+  tier strips, measures neighboring visual changes, resolves known shader
+  hashes, and reports missing or non-monotonic progression evidence in both the
+  desktop UI and structured JSON.
+- Expanded model/material and ped authoring, assistant review hardening, CLI,
+  Agent API, and desktop workspace coverage are included in this release.
 
 ## Code signing policy
 
@@ -75,13 +92,38 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   through the SDK Console or structured Agent API.
   The embedded YTD editor catalogs and previews every DDS, imports common raster formats,
   synchronizes dimensions/mips/formats, supports add/replace/remove, and retains undo history.
+- **Model & Materials Workbench** — open loose or packaged YDR/YDD/YFT models in
+  one dedicated workspace with drawable/component hierarchy, geometry and LOD filters,
+  shader assignments, typed texture samplers, related YTD/YBN/YTYP package context,
+  and a responsive cached orbit viewport. Shaded, material-ID, and wireframe views use
+  the same bounded native decoder, while the embedded Blender drawer compiles lit
+  production renders outside the package and game. Editable copies retain an immutable
+  native source, exact XML/dependencies, optimistic revisions, complete pre/post hashes,
+  validation reports, and byte-exact undo. Edits may change only existing shader names,
+  texture bindings, and local geometry ShaderIndex values; they cannot invent schema
+  nodes. Verified builds recompile and reparse the native resource before publication.
+  Desktop, console, and Agent API routes share this project and transaction model.
 - **Content Workbench** — open a loose DLC folder or package archive once, then move
   between **Vehicles**, **Weapons**, and **Peds** without losing package context.
   Weapons link definitions, ammo pools, animations, shop registration, attachment
   bones, default components, component models, and streamed assets. Peds link
   `peds.meta` definitions to drawables, textures, props, movement clips, and
-  expression sets. Shared readiness and finding panels keep missing evidence visible,
+  expression sets. A copied Ped Author workspace safely edits existing type, props,
+  clip, expression, movement, and creature-metadata fields with revision checks,
+  validation, rollback, and undo while keeping identity locked during normal edits.
+  A separate reviewed template builder copies a donor's complete metadata record only
+  when the new model/texture/props asset family already exists. Explicit identity
+  migration renames metadata and exact package-owned streamed files atomically. The
+  embedded background preview keeps a diagnostic model view and actual texture sheet
+  together. Shared readiness and finding panels keep missing evidence visible,
   and selected assets route into Asset Viewer inside the same application window.
+  Schema-2 script-driven vanilla weapon enhancements also remain first-class even
+  when they intentionally have no custom `weapons.meta`: packages may declare exact
+  vanilla weapon/component hashes, controller entry points, and visual DLC assets.
+  Recursive RPF inspection inventories nested YDR/YTD/YTYP resources, and the material
+  progression view graphs real texture alpha, luminance, emissive scalars, resolved
+  shaders, topology consistency, missing bindings, monotonicity, and neighboring-tier
+  visual differences.
   The mature Vehicles tab works with each vehicle as one resolved project instead
   of unrelated files. It links primary and high-detail YFT fragments, YTD textures, handling, variations,
   tuning kits, labels, and DLC registration evidence; unresolved relationships stay
@@ -240,9 +282,22 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   host-built evidence bundle:
   repository roles and dirty state, available workspace roots, validated package
   metadata, the verified GTA path, and exact relevant SDK command contracts.
-  Responses must follow a structured advisory schema. Unsupported operations and
-  manual-copy or destructive guidance are rejected deterministically. Prompting is
-  read-only and grants no install or archive authority to the model.
+  Responses must follow a structured advisory schema. The dedicated code-review
+  command discovers exact symbol definitions, ranks direct callers, state transitions,
+  and nearby tests, reserves completion space before selecting context, and
+  automatically chunks multi-symbol audits when one grounded request cannot fit.
+  Compact schema repair can retain safe prose findings without accepting operations
+  if a provider still returns malformed JSON. Unsupported operations and manual-copy
+  or destructive guidance are rejected deterministically. Prompting is read-only and
+  grants no install or archive authority to the model.
+
+## Next roadmap milestone
+
+The next Model & Materials depth pass will join resolved YTD texture previews, UV
+coverage, material scalar/vector parameters, and YBN collision ownership into the same
+project without guessing shared game dependencies. New edit types will follow the
+current rule: preserve unknown XML, modify only proven existing fields, retain revision
+and hash history, and compile/reparse outside GTA V before a result can be published.
 
 ## How it fits together
 
@@ -255,6 +310,7 @@ ALLIN1 Launcher
 ALLIN1 SDK
   Package Linker + Package Tools
   Asset Viewer + Content Workbench (Vehicles / Weapons / Peds)
+  Model & Materials Workbench + verified studio rendering
   RPF Archives + Package Recipes
   OIV Workbench + DLC Inventory
   Vehicle Data Compiler
@@ -341,8 +397,15 @@ commands are grouped by task:
   binds exact sources, revision, collisions, and a SHA-256 digest before the separate
   acknowledged clone can write. Unknown/raw schema, ordering, and text/value/ref
   representation stay copied and locked instead of being guessed from a partial form.
-  The Peds tab exposes
-  linked definitions, supporting metadata, assets, and readiness findings. The
+  The Peds tab exposes linked definitions, supporting metadata, assets, and
+  readiness findings. Its guarded Author tab copies and verifies the source before
+  enabling existing metadata fields, preserves unknown XML and scalar representation,
+  rolls back validation regressions, and retains tamper-checked undo history. New from
+  template is a two-step revision- and SHA-bound plan that preserves the donor's full
+  raw record but refuses to relabel native bytes; the target asset family must already
+  exist. A separate identity migration moves exact YDD/YDR/YTD/YMT members in the same
+  reversible transaction as Name and PropsName. The Preview tab decodes the selected
+  model and texture sheet off the UI thread. The
   Vehicles tab resolves a vehicle's linked model, textures,
   handling,
   variation, tuning, labels, and registration in one view. A copied authoring
@@ -367,6 +430,56 @@ commands are grouped by task:
 User-created projects and remembered paths are stored separately from the
 application under `%LOCALAPPDATA%\ALLIN1-SDK`.
 
+### Script-driven vanilla weapon enhancements
+
+Schema-2 packages that enhance built-in weapons through a script do not need to
+invent `weapons.meta` records. Their ALLIN1 content JSON can instead describe the
+exact relationship the Weapons and Material Workbenches should inspect:
+
+```json
+{
+  "workbench": {
+    "weapon_enhancements": [
+      {
+        "id": "example.suppressor-heat",
+        "name": "Suppressor heat materials",
+        "mode": "scripted_vanilla_components",
+        "weapon_components": [
+          {
+            "weapon_name": "WEAPON_CARBINERIFLE",
+            "weapon_hash": "0x83BF0278",
+            "component_name": "COMPONENT_AT_AR_SUPP",
+            "component_hash": "0x837445AA"
+          }
+        ],
+        "script_entry_points": ["Example.SuppressorController"],
+        "visual_assets": [
+          {
+            "dlc_pack": "example_suppressor_heat",
+            "archive": "x64/models/cdimages/example_suppressor_heat.rpf",
+            "families": ["ar", "pi", "sr"],
+            "levels": 24,
+            "model_pattern": "example_{family}_{level:02d}.ydr",
+            "base_model_pattern": "example_{family}.ydr",
+            "texture_dictionary": "example_suppressor_heat.ytd",
+            "texture_pattern": "example_heat_gradient_{level:02d}",
+            "archetype_dictionary": "example_suppressor_heat.ytyp",
+            "base_level_uses_unsuffixed": true
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The declared controller must also be present in `runtime.assemblies`. Paths are
+package-relative, hashes are eight-digit hexadecimal values, and declarations
+remain descriptive: opening a package never executes its scripts. Packages that
+omit this optional block can still be recognized conservatively as script-driven
+weapon systems, but exact vanilla component relationships will be reported as
+undeclared instead of guessed.
+
 ## Command line
 
 Source installations expose `allin1-sdk`. Official Windows packages also include a
@@ -378,6 +491,7 @@ app exposes the same commands through the bottom **SDK Console** dock:
 allin1-sdk assistant status
 allin1-sdk assistant prompt What type of mod package is this?
 allin1-sdk assistant prompt --source C:\Mods\Example\src\main.cpp --symbol InitializeMod --telemetry C:\Mods\Example\logs\latest.log Diagnose the failed initialization
+allin1-sdk assistant review --repository-root C:\Code\EZ-GTA-V-R --symbols publish_rage_shadow_terminal_record,retire_rage_shadow_terminal_records_for_reset,observe_rage_shadow_terminal_execute --prioritize callers,tests,state-transitions --format structured --preserve-findings-on-schema-failure
 allin1-sdk assistant stop
 allin1-sdk inspect-source C:\Mods\Example\src\main.cpp --symbol InitializeMod
 allin1-sdk inspect-log C:\Mods\Example\logs\latest.log --pattern error
@@ -406,6 +520,15 @@ allin1-sdk plan-rpf-native-workspace C:\Mods\Example\dlc.rpf common/data/model.y
 allin1-sdk inspect-native-asset C:\Audio\voice.awc --edition Enhanced --gta-path "D:\Games\GTA V Enhanced" --output-dir C:\Work\voice-report
 allin1-sdk export-native-workspace C:\Audio\voice.awc --edition Enhanced --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\voice-workspace
 allin1-sdk build-native-workspace C:\Work\voice-workspace --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\voice-rebuilt.awc
+allin1-sdk inspect-model-materials C:\Mods\Example\model.yft --edition Enhanced --gta-path "D:\Games\GTA V Enhanced"
+allin1-sdk open-model-material-workbench C:\Mods\Example --gta-path "D:\Games\GTA V Enhanced"
+allin1-sdk inspect-workbench C:\Mods\Example\Package.zip --category weapons --gta-path "D:\Games\GTA V Enhanced"
+allin1-sdk create-material-workspace C:\Mods\Example\model.yft --edition Enhanced --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\model-materials
+allin1-sdk inspect-material-workspace C:\Work\model-materials
+allin1-sdk set-material-binding C:\Work\model-materials 0 --shader-name vehicle_paint --texture DiffuseSampler=example_d --expected-revision 0 --acknowledge-edit
+allin1-sdk set-geometry-material C:\Work\model-materials 2 1 --expected-revision 1 --acknowledge-edit
+allin1-sdk undo-material-edit C:\Work\model-materials --expected-revision 2 --acknowledge-edit
+allin1-sdk build-material-workspace C:\Work\model-materials --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\model-materials-built.yft
 allin1-sdk export-rpf-binary-workspace C:\Mods\Example\dlc.rpf common/data/table.bin --gta-path "D:\Games\GTA V Enhanced" -o C:\Work\table-binary
 allin1-sdk inspect-binary-workspace C:\Work\table-binary --offset 0x100 --length 256
 allin1-sdk patch-binary-workspace C:\Work\table-binary --offset 0x108 --expected-hex "01 02" --hex "03 04" --acknowledge-edit
@@ -491,9 +614,26 @@ the newest matching lines fit in the excerpt.
 Omitted facts remain listed as missing instead of being guessed. These readers are
 bounded, reject binary and oversized inputs, and never write the selected files.
 
+`assistant review --symbols ...` is the code-audit route. It can discover exact
+definitions beneath the declared repository, retrieve direct callers, state mutation
+sites, and nearby tests, and split a larger symbol set into bounded review chunks.
+Discovery merges the normal source walk with a Git-reported, count- and size-bounded
+inventory of untracked text sources, including files beneath normally skipped build
+folders. Selected source receipts record whether each file was clean, modified,
+staged, or untracked. Every chunk must retain every requested definition through its
+closing line; if even a single definition cannot fit, that chunk abstains before the
+model or local runtime starts.
+The final response is a deterministic merge of host-validated chunk results rather
+than a new ungrounded synthesis pass. It does not concatenate model summaries and
+removes blocked operations or recommendations whose arguments were not grounded.
+Every selected file, symbol, relationship range, worktree status, omission, chunk,
+and repair attempt remains visible in the result or its receipt.
+
 Before model startup, the host calculates a conservative input budget. It preserves
-the permanent safety policy and selected evidence identities, then prunes low-ranked
-command contracts or excerpt text when necessary. Every omission is reported. A
+the requested completion allowance plus tokenizer headroom, the permanent safety
+policy, and selected evidence identities, then prunes low-ranked command contracts,
+generic declarations, repository metadata, or relationship prose when necessary.
+Every omission is reported. A
 request that still cannot fit returns a structured context-overflow result instead
 of silently truncating a large or dirty repository.
 
@@ -501,7 +641,9 @@ Interactive prompts print startup, prefill, generation, and periodic heartbeat
 progress to stderr. A compact UTF-8 JSON receipt is written under
 `%LOCALAPPDATA%\ALLIN1\Assistant\receipts`; it records hashes, selected evidence
 ranges, omissions, token/timing data, safety flags, and the structured result without
-copying prompt text or full source excerpts. Receipts are count- and size-bounded.
+copying prompt text or full source excerpts. Receipts also identify the configured
+context, reserved output, grounding/startup/primary/repair latency, repair attempts,
+and relationship line ranges. Receipts are count- and size-bounded.
 
 Prompting always retains the permanent ALLIN1 policy even when request-specific
 system guidance is supplied. The model must return Summary, evidence-calibrated

@@ -185,6 +185,39 @@ def test_desktop_accepts_direct_unified_workbench_arguments(tmp_path):
     assert parsed.rpf_graph is None
 
 
+def test_desktop_accepts_direct_model_material_arguments(tmp_path):
+    model = tmp_path / "example.yft"
+    parsed = _launch_arguments([
+        "--model-material-source", str(model),
+    ])
+    assert parsed.model_material_source == model
+    assert parsed.workbench_package is None
+    assert parsed.rpf_graph is None
+
+
+def test_open_model_material_cli_routes_validated_source(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from allin1_sdk.cli import main
+
+    model = tmp_path / "example.yft"
+    model.write_bytes(b"RSC8" + b"\0" * 32)
+    launched = []
+    monkeypatch.setattr(
+        "allin1_sdk.cli._open_model_material_window",
+        lambda source, game: (launched.append((source, game)) or (9123, 1)),
+    )
+
+    result = CliRunner().invoke(main, [
+        "open-model-material-workbench", str(model),
+    ])
+
+    assert result.exit_code == 0
+    assert '"operation": "open_model_material_workbench"' in result.output
+    assert '"model_assets": 1' in result.output
+    assert launched == [(model, None)]
+
+
 def test_inspect_workbench_exposes_ped_evidence_as_json(tmp_path):
     from click.testing import CliRunner
 
@@ -201,6 +234,7 @@ def test_inspect_workbench_exposes_ped_evidence_as_json(tmp_path):
     )
     result = CliRunner().invoke(main, [
         "inspect-workbench", str(package), "--category", "peds",
+        "--gta-path", str(tmp_path),
     ])
     assert result.exit_code == 0
     assert '"operation": "inspect_workbench"' in result.output
