@@ -17,6 +17,12 @@ def _prebuilt_package(root: Path, *, second: bool = False) -> Path:
     pack = source / "rs5b10"
     pack.mkdir(parents=True)
     (pack / "dlc.rpf").write_bytes(b"RPF7-vehicle-payload")
+    (pack / "vehicles.meta").write_text("""<CVehicleModelInfo__InitDataList>
+  <InitDatas><Item><modelName>rs5b10</modelName><txdName>rs5b10</txdName>
+  <handlingId>RS5B10</handlingId><gameName>RS5 B10</gameName>
+  <vehicleMakeName>AUDI</vehicleMakeName><type>VEHICLE_TYPE_CAR</type>
+  <vehicleClass>VC_SPORT</vehicleClass></Item></InitDatas>
+</CVehicleModelInfo__InitDataList>""", encoding="utf-8")
     if second:
         other = source / "other"
         other.mkdir()
@@ -37,6 +43,9 @@ def test_vehicle_package_builder_publishes_valid_manifest_atomically(tmp_path):
     manifest = ModManifest.load(result.manifest)
     assert manifest.dlc_packs == ("rs5b10",)
     assert manifest.dependencies == ("openrpf",)
+    assert manifest.schema_version == 2
+    assert manifest.mod_type == "mixed"
+    assert str(manifest.package_requirements[0]) == "allin1.online-content>=0.5.5"
     assert manifest.files[0].destination.as_posix() == (
         "mods/update/x64/dlcpacks/rs5b10/dlc.rpf"
     )
@@ -44,6 +53,10 @@ def test_vehicle_package_builder_publishes_valid_manifest_atomically(tmp_path):
     assert report["status"] == "validated"
     assert report["safety"]["stock_game_files_modified"] is False
     assert report["payload"]["sha256"] == result.payload_sha256
+    assert result.catalog.is_file()
+    catalog_payload = json.loads(result.catalog.read_text(encoding="utf-8"))
+    assert catalog_payload["vehicles"][0]["model"] == "rs5b10"
+    assert catalog_payload["vehicles"][0]["traffic"]["enabled"] is False
 
     with pytest.raises(FileExistsError, match="already exists"):
         VehicleAddonPackageBuilder(tmp_path).build(source, destination)

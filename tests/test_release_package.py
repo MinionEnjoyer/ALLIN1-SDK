@@ -21,6 +21,7 @@ def test_release_package_contains_launcher_contract_and_checksums(tmp_path):
     app.mkdir()
     rpf.mkdir()
     (root / "sdk" / "addon.schema.json").write_text("{}")
+    (root / "sdk" / "runtime-api-contract.schema.json").write_text("{}")
     (root / "assets" / "ALLIN1_SDK.png").write_bytes(b"png")
     (root / "assets" / "favicon.ico").write_bytes(b"ico")
     (root / "README.md").write_text("SDK")
@@ -44,7 +45,8 @@ def test_release_package_contains_launcher_contract_and_checksums(tmp_path):
         assert {
             "ALLIN1-SDK-Desktop.exe", "allin1-sdk.exe", "ALLIN1-SDK-Agent.exe",
             "release.json", "checksums.json",
-            "sdk/addon.schema.json", "tools/RpfPatcher/RpfPatcher.exe",
+            "sdk/addon.schema.json", "sdk/runtime-api-contract.schema.json",
+            "tools/RpfPatcher/RpfPatcher.exe",
             "assets/ALLIN1_SDK.png", "assets/favicon.ico",
         } <= names
         metadata = json.loads(package.read("release.json"))

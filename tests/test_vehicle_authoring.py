@@ -117,6 +117,54 @@ def test_vehicle_authoring_workspace_copies_edits_validates_and_undoes(tmp_path)
     )
 
 
+def test_vehicle_distribution_is_typed_traffic_opt_in_and_agent_accessible(tmp_path):
+    workspace = VehicleAuthoringWorkspace.create(
+        _source(tmp_path), tmp_path / "distribution-workspace",
+    )
+    initial = workspace.distribution("authorcar")
+    assert initial.listed is True
+    assert initial.category == "sports"
+    assert initial.storage == "garage"
+    assert initial.traffic_enabled is False
+
+    updated = workspace.set_distribution("authorcar", {
+        "name": "Author Roadster",
+        "manufacturer": "Author Motors",
+        "price": 125_000,
+        "preview_dictionary": "author_previews",
+        "preview_texture": "authorcar",
+        "traffic_enabled": True,
+        "traffic_weight": 0.75,
+    }, expected_revision=0)
+    assert updated.traffic_enabled is True
+    assert workspace.revision == 1
+    catalog = workspace.distribution_catalog(
+        "example.authorcar", "Author Vehicle", "authorcar",
+    )
+    assert catalog.vehicles[0].source_pack == "authorcar"
+    assert catalog.vehicles[0].traffic.weight == 0.75
+
+    runner = CliRunner()
+    inspected = runner.invoke(main, [
+        "inspect-vehicle-distribution", str(workspace.root), "--model", "authorcar",
+    ])
+    assert inspected.exit_code == 0, inspected.output
+    assert json.loads(inspected.output)["traffic_opt_in"] is True
+
+    risks = {item["name"]: item["risk"] for item in command_catalog()}
+    assert risks["inspect-vehicle-distribution"] == "read_only"
+    assert risks["set-vehicle-distribution"] == "authoring_write"
+    response = execute_request({
+        "id": "distribution",
+        "action": "execute",
+        "command": "set-vehicle-distribution",
+        "args": [str(workspace.root), "authorcar", "--price", "130000",
+                 "--acknowledge-edit"],
+    }, audit_path=tmp_path / "audit.jsonl")
+    assert response["ok"] is True
+    assert VehicleAuthoringWorkspace(workspace.root).distribution("authorcar").price == 130_000
+
+
 def test_vehicle_edit_tolerates_preexisting_malformed_unrelated_xml(tmp_path):
     source = _source(tmp_path)
     (source / "unrelated.meta").write_text("<Unrelated>", encoding="utf-8")

@@ -2,6 +2,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from PIL import Image
+import pytest
 
 from allin1_sdk import branding
 
@@ -95,5 +96,30 @@ def test_sdk_workspace_banner_uses_sdk_specific_artwork():
     source = (ROOT / "src" / "allin1_sdk" / "addon_sdk_ui.py").read_text(
         encoding="utf-8"
     )
-    assert 'logo = self.project_root / "assets" / "ALLIN1_SDK.png"' in source
-    assert 'header_title, text="Developer Workspace"' in source
+    assert "load_sdk_banner_logo(" in source
+    assert 'text="ALLIN1 · GTA V SDK"' in source
+    assert "background=SURFACE_BACKGROUND" in source
+    assert "maximum=(180, 88)" in source
+
+
+def test_sdk_banner_loader_uses_sdk_art_and_preserves_aspect_ratio(
+    tmp_path, monkeypatch,
+):
+    artwork = tmp_path / "assets" / "ALLIN1_SDK.png"
+    artwork.parent.mkdir()
+    Image.new("RGBA", (880, 667), (42, 156, 80, 255)).save(artwork)
+    photo = object()
+    factory = Mock(return_value=photo)
+    monkeypatch.setattr(branding.ImageTk, "PhotoImage", factory)
+    window = Mock()
+
+    loaded = branding.load_sdk_banner_logo(
+        window, tmp_path, maximum=(145, 82),
+    )
+
+    assert loaded is photo
+    rendered = factory.call_args.args[0]
+    assert rendered.width <= 145
+    assert rendered.height <= 82
+    assert rendered.width / rendered.height == pytest.approx(880 / 667, rel=0.02)
+    assert factory.call_args.kwargs["master"] is window

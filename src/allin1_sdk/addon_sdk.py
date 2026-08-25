@@ -8,6 +8,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from allin1_sdk.product_api_contract import RuntimeContractReport
+
 
 SCHEMA_VERSION = 1
 SUPPORTED_NODE_KINDS = frozenset({
@@ -15,7 +17,9 @@ SUPPORTED_NODE_KINDS = frozenset({
     "runtime", "storefront", "archive", "package", "vehicle",
     "handling", "vehicle_variation", "tuning", "ped", "streaming",
     "dlc_registration", "script_plugin", "asi_plugin", "reshade_addon",
-    "replacement",
+    "replacement", "launcher_host", "story_runtime", "official_content_pack",
+    "optional_package", "sdk_example", "build_tool", "test_evidence",
+    "documentation_evidence",
 })
 REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "weapon": ("Name", "Slot", "AmmoInfo", "Model", "HumanNameHash", "StatName"),
@@ -58,6 +62,14 @@ REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "replacement": (
         "Assets", "TargetArchives", "Editions", "MergeStrategy", "Backup",
     ),
+    "launcher_host": ("WorkspaceId", "Role", "Paths"),
+    "story_runtime": ("WorkspaceId", "Role", "Paths", "RuntimeArtifact"),
+    "official_content_pack": ("WorkspaceId", "Role", "Paths", "PackageId"),
+    "optional_package": ("WorkspaceId", "Role", "Paths", "PackageId"),
+    "sdk_example": ("WorkspaceId", "Role", "Paths", "PackageId"),
+    "build_tool": ("WorkspaceId", "Role", "Paths", "ArtifactName"),
+    "test_evidence": ("WorkspaceId", "Role", "Paths"),
+    "documentation_evidence": ("WorkspaceId", "Role", "Paths"),
 }
 WEAPON_RELATIONSHIPS = frozenset({
     "uses_ammo", "uses_animation", "uses_label", "uses_hud_icon",
@@ -137,6 +149,26 @@ FIELD_HELP: dict[str, str] = {
     "Editions": "Legacy/Enhanced payload hints inferred from directory names; they are not compatibility proof.",
     "Architecture": "PE machine type read from the compiled plug-in header without loading the binary; GTA V plug-ins must be x64.",
     "Managed": "A bounded header scan found .NET metadata. This is a hint, not execution or dependency verification.",
+    "WorkspaceId": "Identifier of the bounded product workspace that owns this component graph.",
+    "Role": "Declared product role; roles keep hosts, runtimes, packages, tools, and evidence distinct.",
+    "Paths": "Git-tracked, allowlisted source paths represented by this component.",
+    "RuntimeArtifact": "Game-relative runtime artifact deployed by the shared Story Mode runtime component.",
+    "PackageId": "Declarative content/package identifier. Evidence nodes can never declare one.",
+    "ArtifactName": "Expected output name of a build-tool component; the SDK never executes it while inspecting.",
+    "InstallCandidate": "Whether the descriptor permits this component to enter package discovery.",
+    "ManagedBuiltin": "Whether this component is managed as built-in ALLIN1 content rather than an optional install candidate.",
+    "Evidence": "Bounded tracked-file coverage attributed to this product-workspace component.",
+    "API version": "The version requested by a content package or exposed by the checked-in Story Mode runtime contract.",
+    "API provider": "The product-workspace runtime component that owns the checked-in public API contract.",
+    "Contract status": "Deterministic compatibility state produced from the checked-in API contract, content manifest, and bounded source evidence.",
+    "Capabilities": "Permission and discovery identifiers declared by the package. Runtime calls that require a capability must be covered here.",
+    "Entry points": "Receipt-owned runtime types declared by the content package and located in bounded component source.",
+    "API calls": "Calls to the checked-in ALLIN1 runtime surface found in bounded, data-only source inspection.",
+    "Required capability": "Capability the host contract requires before this API member can be used.",
+    "Source line": "One-based line containing the bounded evidence used by the contract audit.",
+    "Expected signature": "Method, property, or constant signature declared by the checked-in runtime API contract.",
+    "Observed signature": "Normalized public signature found in bounded runtime source for drift comparison.",
+    "Workbench relationships": "Authored package relationships connecting script behavior to exact Workbench weapon, component, and visual evidence.",
 }
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{1,95}$")
 
@@ -250,6 +282,9 @@ class AddonManifest:
     catalog_state: str = "Built-in example"
     catalog_origin: str = "built-in"
     package_source: Path | None = None
+    source_issues: tuple[AddonIssue, ...] = ()
+    workspace_summary: Mapping[str, Any] | None = None
+    runtime_contracts: RuntimeContractReport | None = None
 
     @classmethod
     def load(
@@ -264,6 +299,8 @@ class AddonManifest:
             data = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid SDK JSON: {exc}") from exc
+        if isinstance(data, dict) and data.get("kind") == "product_workspace":
+            return cls._load_product_workspace(path)
         if not isinstance(data, dict) or data.get("schema_version") != SCHEMA_VERSION:
             raise ValueError(f"addon.json schema_version must be {SCHEMA_VERSION}")
 
@@ -354,9 +391,150 @@ class AddonManifest:
             tuple(references), tuple(steps),
         )
 
+    @classmethod
+    def _load_product_workspace(cls, path: Path) -> "AddonManifest":
+        """Adapt a validated product workspace to the existing visual linker."""
+        from allin1_sdk.product_workspace import ProductWorkspaceInspector
+
+        report = ProductWorkspaceInspector().inspect(path)
+        if not report.structurally_valid:
+            errors = [
+                item.message for item in report.findings
+                if item.severity == "error"
+                and not item.code.startswith(("api_contract_", "runtime_contract_"))
+            ]
+            raise ValueError(
+                "Product workspace validation failed: " + "; ".join(errors[:8])
+            )
+        components = {
+            item.component_id: item for item in report.workspace.components
+        }
+        evidence_by_component = {
+            item.component_id: item for item in report.evidence.components
+        }
+        nodes: list[AddonNode] = []
+        for graph_node in report.nodes:
+            component = components[graph_node.node_id]
+            evidence = evidence_by_component.get(component.component_id)
+            fields: dict[str, Any] = {
+                "WorkspaceId": report.workspace.workspace_id,
+                "Role": component.role,
+                "Category": component.category,
+                "Paths": [item.as_posix() for item in component.paths],
+                "Experimental": component.experimental,
+                "InstallCandidate": component.install_candidate,
+                "ManagedBuiltin": graph_node.managed_builtin,
+                "Defaults": dict(component.defaults or {}),
+            }
+            if evidence is not None:
+                fields["Evidence"] = {
+                    "Declared paths": list(evidence.declared_paths),
+                    "Matched files": evidence.matched_files,
+                    "Matched bytes": evidence.matched_bytes,
+                    "Unique files": evidence.unique_files,
+                    "Unique bytes": evidence.unique_bytes,
+                    "Shared files": evidence.shared_files,
+                    "Shared bytes": evidence.shared_bytes,
+                }
+            if component.package_id is not None:
+                fields["PackageId"] = component.package_id
+            if component.manifest is not None:
+                fields["Manifest"] = component.manifest.as_posix()
+            if component.content_manifest is not None:
+                fields["ContentManifest"] = component.content_manifest.as_posix()
+            if component.runtime_artifact is not None:
+                fields["RuntimeArtifact"] = component.runtime_artifact.as_posix()
+            if component.artifact_name is not None:
+                fields["ArtifactName"] = component.artifact_name
+            source = (
+                component.manifest.as_posix()
+                if component.manifest is not None
+                else component.paths[0].as_posix()
+            )
+            nodes.append(AddonNode(
+                component.component_id, component.role, component.name,
+                f"{component.category.title()} component in the bounded "
+                f"{report.workspace.name} workspace.",
+                source, fields,
+            ))
+        references = tuple(AddonReference(
+            f"workspace.edge.{index}", edge.source, "WorkspaceId",
+            edge.target, "WorkspaceId", edge.relation,
+            f"Declared product relationship: {edge.relation}.", True,
+        ) for index, edge in enumerate(report.edges, start=1))
+        source_issues = tuple(AddonIssue(
+            item.severity, item.code, item.message,
+            " · ".join(value for value in (item.component_id, item.path) if value)
+            or None,
+            item.path,
+        ) for item in report.findings)
+        tracked_files = len(report.inventory.entries)
+        unassigned_files = report.evidence.unassigned.files
+        assigned_files = max(0, tracked_files - unassigned_files)
+        coverage = (
+            f"{assigned_files / tracked_files:.1%}" if tracked_files else "n/a"
+        )
+        workspace_summary: dict[str, Any] = {
+            "Components": len(report.nodes),
+            "Relationships": len(report.edges),
+            "Inventory method": report.inventory.method,
+            "Tracked files": tracked_files,
+            "Tracked bytes": report.inventory.total_bytes,
+            "Assigned files": assigned_files,
+            "Coverage": coverage,
+            "Unassigned files": unassigned_files,
+            "Shared files": report.evidence.shared.files,
+            "Managed built-ins": sum(item.managed_builtin for item in report.nodes),
+            "Install candidates": len(report.install_candidates),
+            "API hosts": len(report.runtime_contracts.hosts),
+            "API packages": len(report.runtime_contracts.packages),
+            "API calls": sum(
+                len(item.api_calls) for item in report.runtime_contracts.packages
+            ),
+            "Verified API calls": sum(
+                call.status == "verified"
+                for item in report.runtime_contracts.packages
+                for call in item.api_calls
+            ),
+            "API errors": report.runtime_contracts.error_count,
+            "API warnings": report.runtime_contracts.warning_count,
+        }
+        return cls(
+            path, path.parent.resolve(), report.workspace.workspace_id,
+            report.workspace.name, report.workspace.version,
+            report.workspace.description, report.workspace.editions,
+            tuple(nodes), references, (), "Product workspace",
+            "product-workspace", path.resolve(), source_issues,
+            workspace_summary, report.runtime_contracts,
+        )
+
     @property
     def node_map(self) -> dict[str, AddonNode]:
         return {node.node_id: node for node in self.nodes}
+
+    @property
+    def is_product_workspace(self) -> bool:
+        return self.catalog_origin == "product-workspace"
+
+    @property
+    def catalog_identity(self) -> tuple[str, str, str]:
+        """Return a stable UI/catalog identity for this manifest.
+
+        Product workspaces are evidence descriptors rather than package roots.
+        Older SDK builds persisted their repository directory as
+        ``package_source`` while current builds retain the descriptor itself.
+        Keying those records by the descriptor prevents one workspace from
+        appearing twice during that state migration.
+        """
+        if self.is_product_workspace:
+            return (
+                self.addon_id.casefold(), "product-workspace",
+                str(self.manifest_path).casefold(),
+            )
+        return (
+            self.addon_id.casefold(), self.catalog_origin.casefold(),
+            str(self.package_source or self.manifest_path).casefold(),
+        )
 
 
 @dataclass(frozen=True)
@@ -365,6 +543,7 @@ class AddonIssue:
     code: str
     message: str
     subject: str | None = None
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -416,13 +595,107 @@ class AddonLinkReport:
             )
         else:
             lines.append("- No issues.")
-        lines.extend(["", "## Install plan", ""])
-        for step in self.manifest.install_steps:
-            lines.append(
-                f"{step.order}. **{step.title}** — `{step.target}` ({step.strategy})"
+        contracts = self.manifest.runtime_contracts
+        if contracts is not None:
+            call_count = sum(len(item.api_calls) for item in contracts.packages)
+            verified_calls = sum(
+                call.status == "verified"
+                for item in contracts.packages for call in item.api_calls
             )
-            if step.description:
-                lines.append(f"   {step.description}")
+            contract_state = "PASS" if contracts.valid else "FAIL"
+            lines.extend([
+                "", "## Runtime API contracts", "",
+                f"- Result: **{contract_state}**",
+                f"- Hosts: {len(contracts.hosts)}",
+                f"- Packages: {len(contracts.packages)}",
+                f"- Calls: {verified_calls}/{call_count} verified",
+                f"- Findings: {contracts.error_count} errors and "
+                f"{contracts.warning_count} warnings",
+            ])
+            for host in contracts.hosts:
+                lines.extend([
+                    "",
+                    f"### Host `{host.component_id}` — API v{host.api_version}",
+                    "",
+                    f"- Public type: `{host.public_type}`",
+                    f"- Assembly: `{host.assembly}`",
+                    f"- Source: `{host.source}`",
+                    f"- Status: **{host.status.upper()}**",
+                    f"- Members: {len(host.members)}",
+                ])
+                for member in host.members:
+                    capability = (
+                        f"; capability `{member.capability}`"
+                        if member.capability else ""
+                    )
+                    location = (
+                        f" — `{member.evidence.path}:{member.evidence.line}`"
+                        if member.evidence else ""
+                    )
+                    lines.append(
+                        f"  - `{member.name}` ({member.kind}; {member.status}"
+                        f"{capability}){location}"
+                    )
+                    if member.expected_signature is not None:
+                        lines.append(
+                            f"    - Expected: `{member.expected_signature}`"
+                        )
+                        lines.append(
+                            f"    - Observed: `"
+                            f"{member.actual_signature or 'not found'}`"
+                        )
+            for package in contracts.packages:
+                api_version = (
+                    f"API v{package.api_version}"
+                    if package.api_version is not None else "API unresolved"
+                )
+                lines.extend([
+                    "",
+                    f"### Package `{package.package_id or package.component_id}`",
+                    "",
+                    f"- Component: `{package.component_id}`",
+                    f"- Provider: `{package.provider_component_id}` ({package.relation})",
+                    f"- Contract: {api_version}; **{package.status.upper()}**",
+                    f"- Manifest: `{package.manifest}`",
+                    "- Capabilities: " + (
+                        ", ".join(f"`{item}`" for item in package.capabilities)
+                        or "none"
+                    ),
+                    "- Runtime assemblies: " + (
+                        ", ".join(f"`{item}`" for item in package.runtime_assemblies)
+                        or "none"
+                    ),
+                    "- Entry points: " + (
+                        ", ".join(f"`{item}`" for item in package.entry_points)
+                        or "none"
+                    ),
+                    "- Settings: " + (
+                        ", ".join(f"`{item}`" for item in package.settings)
+                        or "none"
+                    ),
+                    "- Workbench relationships: " + (
+                        ", ".join(
+                            f"`{item}`" for item in package.workbench_relationships
+                        ) or "none"
+                    ),
+                ])
+                for call in package.api_calls:
+                    capability = (
+                        f"; capability `{call.capability}`"
+                        if call.capability else ""
+                    )
+                    lines.append(
+                        f"  - `{call.member}` ({call.status}{capability}) — "
+                        f"`{call.evidence.path}:{call.evidence.line}`"
+                    )
+        if self.manifest.install_steps:
+            lines.extend(["", "## Install plan", ""])
+            for step in self.manifest.install_steps:
+                lines.append(
+                    f"{step.order}. **{step.title}** — `{step.target}` ({step.strategy})"
+                )
+                if step.description:
+                    lines.append(f"   {step.description}")
         lines.extend(["", "## Linked references", ""])
         for linked in self.references:
             mark = "✓" if linked.valid else "✗"
@@ -438,7 +711,11 @@ class AddonLinker:
     """Resolve an SDK manifest without making any game or archive changes."""
 
     def link(self, manifest: AddonManifest) -> AddonLinkReport:
-        issues: list[AddonIssue] = []
+        # Product-workspace ingestion performs additional bounded-inventory and
+        # package-contract checks.  Keep those diagnostics attached when the
+        # graph is adapted to the general linker instead of silently replacing
+        # them with linker-only findings.
+        issues: list[AddonIssue] = list(manifest.source_issues)
         linked: list[LinkedReference] = []
         nodes = manifest.node_map
 
@@ -451,7 +728,11 @@ class AddonLinker:
                     ))
             if node.source:
                 source = _contained_source(manifest.source_root, node.source)
-                if not source.is_file():
+                source_exists = (
+                    source.exists()
+                    if manifest.is_product_workspace else source.is_file()
+                )
+                if not source_exists:
                     issues.append(AddonIssue(
                         "error", "missing_source",
                         f"Source file does not exist: {node.source}", node.node_id,
@@ -611,6 +892,11 @@ class AddonSdkCatalog:
             if package_source else root
         )
         manifest = AddonManifest.load(path, source_root=root)
+        if manifest.is_product_workspace:
+            # A product workspace is evidence, not a package payload. Retain
+            # its descriptor as catalog provenance instead of teaching future
+            # package actions to treat the entire repository as an asset root.
+            package = manifest.manifest_path
         records = self._registry_records()
         key = str(path).casefold()
         records = [
@@ -628,6 +914,8 @@ class AddonSdkCatalog:
             "manifests": records,
         }, indent=2), encoding="utf-8")
         temporary.replace(self.registry_path)
+        if manifest.catalog_origin == "product-workspace":
+            return replace(manifest, package_source=package)
         return replace(
             manifest, catalog_state="Imported draft", catalog_origin="imported",
             package_source=package,
@@ -853,11 +1141,20 @@ class AddonSdkCatalog:
                 package = Path(
                     str(record.get("package_source", root))
                 ).expanduser().resolve()
-                manifests.append(replace(
-                    AddonManifest.load(path, source_root=root),
-                    catalog_state="Imported draft", catalog_origin="imported",
-                    package_source=package,
-                ))
+                loaded = AddonManifest.load(path, source_root=root)
+                if loaded.catalog_origin == "product-workspace":
+                    # Normalize records written by early product-workspace
+                    # builds, which stored the repository root here.  The
+                    # descriptor is the canonical evidence identity and keeps
+                    # a transient CLI open from becoming a duplicate listing.
+                    manifests.append(replace(
+                        loaded, package_source=loaded.manifest_path,
+                    ))
+                else:
+                    manifests.append(replace(
+                        loaded, catalog_state="Imported draft",
+                        catalog_origin="imported", package_source=package,
+                    ))
             except (OSError, ValueError):
                 continue
 
@@ -878,7 +1175,7 @@ class AddonSdkCatalog:
         # the same ID while keeping deterministic display order.
         priority = {
             "built-in": 0, "imported": 1, "mod-catalog": 2,
-            "installed-receipt": 3,
+            "product-workspace": 2, "installed-receipt": 3,
         }
         selected: dict[str, AddonManifest] = {}
         for manifest in manifests:

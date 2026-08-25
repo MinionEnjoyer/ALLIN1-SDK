@@ -57,6 +57,10 @@ from allin1_sdk.vehicle_authoring import (
     VehicleTuningAsset,
     VehicleTuningEntry,
 )
+from allin1_sdk.vehicle_catalog import (
+    STORAGE_KINDS,
+    VEHICLE_CATEGORIES,
+)
 
 
 TUNING_COLLECTION_LABELS = {
@@ -268,6 +272,8 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.authoring_workspace: VehicleAuthoringWorkspace | None = None
         self.authoring_values: dict[str, tk.StringVar] = {}
         self.authoring_inputs: dict[str, ttk.Entry] = {}
+        self.distribution_values: dict[str, tk.Variable] = {}
+        self.distribution_inputs: list[tk.Widget] = []
         self.appearance_edit_inputs: list[ttk.Entry] = []
         self.appearance_edit_buttons: list[ttk.Button] = []
         self._appearance_colors: dict[str, dict[str, object]] = {}
@@ -629,11 +635,13 @@ class VehicleWorkbenchFrame(ttk.Frame):
         inspector_tabs.pack(fill="both", expand=True)
         overview_tab = ttk.Frame(inspector_tabs, padding=7)
         author_tab = ttk.Frame(inspector_tabs, padding=7)
+        distribution_tab = ttk.Frame(inspector_tabs, padding=7)
         appearance_tab = ttk.Frame(inspector_tabs, padding=7)
         tuning_builder_tab = ttk.Frame(inspector_tabs, padding=7)
         assets_tab = ttk.Frame(inspector_tabs, padding=7)
         inspector_tabs.add(overview_tab, text="Overview")
         inspector_tabs.add(author_tab, text="Author")
+        inspector_tabs.add(distribution_tab, text="Distribution")
         inspector_tabs.add(appearance_tab, text="Appearance")
         inspector_tabs.add(tuning_builder_tab, text="Tuning Builder")
         inspector_tabs.add(assets_tab, text="Assets")
@@ -726,6 +734,85 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.identity_button.grid(row=0, column=4)
         identity.columnconfigure(1, weight=1)
         identity.columnconfigure(3, weight=1)
+
+        distribution = ttk.LabelFrame(
+            distribution_tab, text="GBAY vehicle listing", padding=8,
+        )
+        distribution.pack(fill="x")
+        self.distribution_values = {
+            "listed": tk.BooleanVar(value=True),
+            "name": tk.StringVar(),
+            "manufacturer": tk.StringVar(),
+            "category": tk.StringVar(value="special"),
+            "price": tk.StringVar(value="0"),
+            "storage": tk.StringVar(value="garage"),
+            "size_tier": tk.StringVar(value="0"),
+            "preview_dictionary": tk.StringVar(),
+            "preview_texture": tk.StringVar(),
+            "traffic_enabled": tk.BooleanVar(value=False),
+            "traffic_weight": tk.StringVar(value="1.0"),
+        }
+        listed = ttk.Checkbutton(
+            distribution, text="List in GBAY",
+            variable=self.distribution_values["listed"], state="disabled",
+        )
+        listed.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        self.distribution_inputs.append(listed)
+        fields = (
+            ("Name", "name"), ("Manufacturer", "manufacturer"),
+            ("Price", "price"), ("Preview dictionary", "preview_dictionary"),
+            ("Preview texture", "preview_texture"),
+            ("Traffic weight", "traffic_weight"),
+        )
+        for index, (label, key) in enumerate(fields, start=1):
+            ttk.Label(distribution, text=label).grid(
+                row=index, column=0, sticky="w", pady=2,
+            )
+            entry = ttk.Entry(
+                distribution, textvariable=self.distribution_values[key],
+                state="disabled",
+            )
+            entry.grid(row=index, column=1, sticky="ew", padx=(7, 0), pady=2)
+            self.distribution_inputs.append(entry)
+        option_row = len(fields) + 1
+        for offset, (label, key, values) in enumerate((
+            ("Category", "category", tuple(sorted(VEHICLE_CATEGORIES))),
+            ("Storage", "storage", tuple(sorted(STORAGE_KINDS))),
+            ("Size tier", "size_tier", ("0", "1", "2")),
+        )):
+            ttk.Label(distribution, text=label).grid(
+                row=option_row + offset, column=0, sticky="w", pady=2,
+            )
+            combo = ttk.Combobox(
+                distribution, textvariable=self.distribution_values[key],
+                values=values, state="disabled",
+            )
+            combo.grid(
+                row=option_row + offset, column=1, sticky="ew", padx=(7, 0), pady=2,
+            )
+            self.distribution_inputs.append(combo)
+        traffic = ttk.Checkbutton(
+            distribution,
+            text="Eligible for ambient traffic (package setting stays off by default)",
+            variable=self.distribution_values["traffic_enabled"], state="disabled",
+        )
+        traffic.grid(
+            row=option_row + 3, column=0, columnspan=2, sticky="w", pady=(7, 2),
+        )
+        self.distribution_inputs.append(traffic)
+        distribution.columnconfigure(1, weight=1)
+        self.save_distribution_button = ttk.Button(
+            distribution_tab, text="Apply distribution + validate", state="disabled",
+            command=self._save_distribution,
+        )
+        self.save_distribution_button.pack(anchor="w", pady=(8, 0))
+        self.distribution_status = tk.StringVar(
+            value="Create an authoring workspace to configure distribution."
+        )
+        ttk.Label(
+            distribution_tab, textvariable=self.distribution_status,
+            foreground="#52635c", wraplength=330, justify="left",
+        ).pack(fill="x", pady=(5, 0))
 
         selection = ttk.LabelFrame(appearance_tab, text="Vehicle appearance", padding=6)
         selection.pack(fill="x")
@@ -1436,6 +1523,12 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.authoring_status.set("Select a vehicle before editing package metadata.")
         self.save_author_button.configure(state="disabled")
         self.undo_author_button.configure(state="disabled")
+        for key, variable in self.distribution_values.items():
+            variable.set(False if key in {"listed", "traffic_enabled"} else "")
+        for widget in self.distribution_inputs:
+            widget.configure(state="disabled")
+        self.save_distribution_button.configure(state="disabled")
+        self.distribution_status.set("Select a vehicle to inspect distribution settings.")
         self._viewport_photo = None
         self._viewport_photo_zoom = None
         self.viewport_message.set(message)
@@ -1456,6 +1549,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
             self.identity_model.get(), self.identity_handling.get(),
             self.appearance_kits.get(), self.appearance_light.get(),
             self.appearance_siren.get(), colors,
+            tuple((key, variable.get()) for key, variable in self.distribution_values.items()),
         )
 
     def confirm_navigation(self) -> bool:
@@ -1813,6 +1907,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
             self.identity_model_entry.configure(state="disabled")
             self.identity_handling_entry.configure(state="disabled")
             self.identity_button.configure(state="disabled")
+            self._load_distribution(model, editable=False)
             self._load_appearance(model, editable=False)
             return
         try:
@@ -1824,6 +1919,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
             self.save_author_button.configure(state="disabled")
             self.undo_author_button.configure(state="disabled")
             self.authoring_status.set(f"Authoring unavailable: {exc}")
+            self._load_distribution(model, editable=False)
             self._clear_appearance()
             return
         for key, variable in self.authoring_values.items():
@@ -1845,7 +1941,57 @@ class VehicleWorkbenchFrame(ttk.Frame):
             f"Revision {workspace.revision}. Apply and identity migration revalidate "
             "all linked package metadata."
         )
+        self._load_distribution(model, editable=True)
         self._load_appearance(model, editable=True)
+
+    def _load_distribution(
+        self, model: VehicleProjectModel, *, editable: bool,
+    ) -> None:
+        workspace = self.authoring_workspace
+        try:
+            values = (
+                workspace.distribution(model.model).to_dict()
+                if workspace is not None
+                else {
+                    "listed": True,
+                    "name": model.display_name or model.model,
+                    "manufacturer": model.make_name,
+                    "category": "special",
+                    "price": 0,
+                    "storage": "garage",
+                    "size_tier": 0,
+                    "preview_dictionary": "",
+                    "preview_texture": "",
+                    "traffic_enabled": False,
+                    "traffic_weight": 1.0,
+                }
+            )
+        except (OSError, ValueError) as exc:
+            values = {}
+            editable = False
+            self.distribution_status.set(f"Distribution unavailable: {exc}")
+        for key, variable in self.distribution_values.items():
+            value = values.get(key, False if key in {"listed", "traffic_enabled"} else "")
+            variable.set(value if value is not None else "")
+        for widget in self.distribution_inputs:
+            state = "readonly" if editable and isinstance(widget, ttk.Combobox) else (
+                "normal" if editable else "disabled"
+            )
+            widget.configure(state=state)
+        self.save_distribution_button.configure(
+            state="normal" if editable else "disabled",
+        )
+        if editable:
+            self.distribution_status.set(
+                "GBAY listing is independent from traffic. Ambient traffic is an "
+                "explicit opt-in and its launcher toggle defaults off."
+            )
+        elif not values:
+            return
+        else:
+            self.distribution_status.set(
+                "Create an authoring workspace to edit distribution settings."
+            )
 
     def _clear_appearance(self) -> None:
         self._appearance_colors.clear()
@@ -2584,6 +2730,49 @@ class VehicleWorkbenchFrame(ttk.Frame):
             f"Applied {len(result.changes)} vehicle fields · revision {result.revision}"
         )
 
+    def _save_distribution(self) -> None:
+        workspace = self.authoring_workspace
+        model = self.selected_model
+        if workspace is None or model is None:
+            return
+        try:
+            updates = {
+                "listed": bool(self.distribution_values["listed"].get()),
+                "name": str(self.distribution_values["name"].get()).strip(),
+                "manufacturer": str(
+                    self.distribution_values["manufacturer"].get()
+                ).strip(),
+                "category": str(self.distribution_values["category"].get()).strip(),
+                "price": int(str(self.distribution_values["price"].get()).strip()),
+                "storage": str(self.distribution_values["storage"].get()).strip(),
+                "size_tier": int(
+                    str(self.distribution_values["size_tier"].get()).strip()
+                ),
+                "preview_dictionary": str(
+                    self.distribution_values["preview_dictionary"].get()
+                ).strip() or None,
+                "preview_texture": str(
+                    self.distribution_values["preview_texture"].get()
+                ).strip() or None,
+                "traffic_enabled": bool(
+                    self.distribution_values["traffic_enabled"].get()
+                ),
+                "traffic_weight": float(
+                    str(self.distribution_values["traffic_weight"].get()).strip()
+                ),
+            }
+            values = workspace.set_distribution(
+                model.model, updates, expected_revision=workspace.revision,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            messagebox.showerror("Distribution rejected", str(exc), parent=self)
+            self.distribution_status.set(f"Distribution rejected: {exc}")
+            return
+        self._reload_authoring_model(model.model)
+        self.status.set(
+            f"Updated {values.model} distribution · revision {workspace.revision}"
+        )
+
     def _undo_authoring_edit(self) -> None:
         workspace = self.authoring_workspace
         model = self.selected_model
@@ -2625,7 +2814,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.update_idletasks()
         try:
             package_source = (
-                self.authoring_workspace.publish_source()
+                self.authoring_workspace.root
                 if self.authoring_workspace is not None else self.source
             )
             result = VehicleAddonPackageBuilder(

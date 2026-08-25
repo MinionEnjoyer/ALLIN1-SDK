@@ -6,18 +6,39 @@ def test_help_center_has_unique_keys_and_core_workflows():
     assert len(keys) == len(set(keys))
     assert {
         "getting-started", "packages", "package-recipes", "asset-viewer",
+        "product-workspace",
         "model-material-workbench",
-        "workbench", "vehicle-workbench", "weapon-workbench",
+        "quick-import", "workbench", "vehicle-workbench", "weapon-workbench",
         "ped-workbench", "rpf-explorer", "recovery",
     } <= set(keys)
+
+
+def test_product_workspace_help_explains_component_evidence_boundaries():
+    topic = next(topic for topic in HELP_TOPICS if topic.key == "product-workspace")
+    body = topic.body.casefold()
+
+    assert "managed built-ins" in body
+    assert "installable packages" in body
+    assert "matched file/byte total" in body
+    assert "unique file/byte total" in body
+    assert "shared file/byte total" in body
+    assert "unassigned evidence" in body
+    assert "never imports or executes" in body
+    assert "read-only agent api" in body
 
 
 def test_navigation_help_matches_the_unified_shell_shortcuts():
     topic = next(topic for topic in HELP_TOPICS if topic.key == "input")
 
     assert "Content Workbench" in topic.body
+    assert "Quick Import" in topic.body
+    assert "Ctrl+I" in topic.body
     assert "Alt+Left" in topic.body
     assert "Ctrl+Tab" in topic.body
+    assert "white product header" in topic.body
+    assert "activity strip" in topic.body
+    assert "Ctrl+O" in topic.body
+    assert "F5" in topic.body
 
 
 def test_workbench_help_explains_collapsible_side_panes():
@@ -25,6 +46,21 @@ def test_workbench_help_explains_collapsible_side_panes():
 
     assert "slim green divider arrows" in topic.body
     assert "restores its previous width, selection, and edit state" in topic.body
+
+
+def test_quick_import_help_explains_launcher_owned_install_boundary():
+    topic = next(topic for topic in HELP_TOPICS if topic.key == "quick-import")
+    body = topic.body.casefold()
+
+    assert "separate from the advanced content workbench" in body
+    assert "traffic is off by default" in body
+    assert "does not write gta v" in body
+    assert "per-user allin1 package library" in body
+    assert "export legacy oiv" in body
+    assert "requires an explicit author" in body
+    assert "gbay listings" in body and "intentionally not included" in body
+    assert "enhanced-only packages" in body
+    assert "weapon and ped quick import remain clearly marked" in body
 
 
 def test_weapon_workbench_help_explains_guarded_authoring_boundaries():

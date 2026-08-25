@@ -26,7 +26,7 @@
         "required": ["id", "kind", "fields"],
         "properties": {
           "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{1,95}$"},
-          "kind": {"enum": ["weapon", "weapon_component", "ammo", "animation", "text_label", "hud_alias", "runtime", "storefront", "vehicle", "handling", "vehicle_variation", "tuning", "ped", "streaming", "dlc_registration", "script_plugin", "asi_plugin", "reshade_addon", "replacement", "archive", "package"]},
+          "kind": {"enum": ["weapon", "weapon_component", "ammo", "animation", "text_label", "hud_alias", "runtime", "storefront", "vehicle", "handling", "vehicle_variation", "tuning", "ped", "streaming", "dlc_registration", "script_plugin", "asi_plugin", "reshade_addon", "replacement", "archive", "package", "launcher_host", "story_runtime", "official_content_pack", "optional_package", "sdk_example", "build_tool", "test_evidence", "documentation_evidence"]},
           "label": {"type": "string"},
           "description": {"type": "string"},
           "source": {"type": "string", "minLength": 1},

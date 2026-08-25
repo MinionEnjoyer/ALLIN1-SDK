@@ -9,6 +9,26 @@ from pathlib import Path
 from PIL import Image, ImageTk
 
 
+def load_sdk_banner_logo(
+    window: tk.Misc,
+    sdk_root: Path | str,
+    *,
+    maximum: tuple[int, int] = (145, 82),
+) -> ImageTk.PhotoImage | None:
+    """Load the SDK-specific transparent artwork at a bounded banner size."""
+
+    source_path = Path(sdk_root) / "assets" / "ALLIN1_SDK.png"
+    if not source_path.is_file():
+        return None
+    try:
+        with Image.open(source_path) as source:
+            image = source.convert("RGBA")
+            image.thumbnail(maximum, Image.Resampling.LANCZOS)
+            return ImageTk.PhotoImage(image.copy(), master=window)
+    except (OSError, ValueError, tk.TclError):
+        return None
+
+
 def _apply_windows_native_icon(window: tk.Misc, favicon: Path) -> bool:
     """Set both Tk's client window and its native Windows wrapper icons."""
     if os.name != "nt":

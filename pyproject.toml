@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "allin1-sdk"
-version = "0.5.4"
+version = "0.5.5"
 description = "Standalone GTA V add-on authoring, package auditing, and native asset inspection SDK"
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"

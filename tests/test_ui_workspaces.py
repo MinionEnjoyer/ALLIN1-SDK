@@ -13,7 +13,8 @@ def test_primary_sdk_routes_are_plain_language_and_package_selection_works():
     source = _source("addon_sdk_ui.py")
     for label in (
         '"Package Linker"', '"Asset Viewer"', '"RPF Archives"',
-        '"Models & Materials"', '"Package Recipes"', '"Help Center"',
+        '"Quick Import"', '"Models & Materials"', '"Package Recipes"',
+        '"Help Center"',
         'text="Import or audit package"',
         'text="Inspect or export"', 'text="Package tools"',
     ):
@@ -23,9 +24,14 @@ def test_primary_sdk_routes_are_plain_language_and_package_selection_works():
     assert 'label="Show workspace sidebar", accelerator="Ctrl+B"' in source
     assert 'self.bind("<Control-b>", self._toggle_sidebar)' in source
     assert 'text="← Back"' not in source
-    assert 'style="Link.TButton", cursor="hand2"' in source
+    assert 'style="HeaderLink.TButton", cursor="hand2"' in source
     assert 'button.configure(text=f"‹ {self._workspace_label(target)}")' in source
     assert "cancelling the workbench's unsaved-edit warning" in source
+    assert 'label="Open vehicle in Quick Import — Legacy…"' in source
+    assert 'label="Open vehicle in Quick Import — Enhanced…"' in source
+    assert 'self._select_workspace("quick_import")' in source
+    assert "self.quick_import_workspace.open_source(" in source
+    assert "ManagedVehiclePackageConverter(" not in source
 
 
 def test_graph_binary_and_gxt2_authoring_are_embedded_with_compatibility_hosts():
@@ -252,6 +258,23 @@ def test_unified_workbench_is_integrated_and_exposes_vehicle_viewport_controls()
     assert "def select_asset(self, path: str) -> bool" in _source("asset_viewer.py")
 
 
+def test_quick_import_is_separate_from_the_consolidated_content_workbench():
+    shell = _source("addon_sdk_ui.py")
+    quick_import = _source("quick_import_ui.py")
+
+    assert '("quick_import", "Quick Import", "Ctrl+I")' in shell
+    assert '"quick_import": quick_import_page' in shell
+    assert "from allin1_sdk.quick_import_ui import QuickImportFrame" in shell
+    assert "self.quick_import_workspace = workspace" in shell
+    assert "class QuickImportFrame(ttk.Frame)" in quick_import
+    assert "tk.Toplevel" not in quick_import
+    assert 'self.tabs.add(vehicle_page, text="Vehicles")' in quick_import
+    assert 'self.tabs.add(weapon_page, text="Weapons")' in quick_import
+    assert 'self.tabs.add(ped_page, text="Peds")' in quick_import
+    assert "on_open_workbench=self._open_quick_import_workbench" in shell
+    assert 'quick_import.confirm_navigation()' in shell
+
+
 def test_model_material_workbench_is_integrated_and_guarded():
     shell = _source("addon_sdk_ui.py")
     ui = _source("model_material_workbench.py")
@@ -291,7 +314,7 @@ def test_specialist_workspaces_are_lazy_loaded_inside_the_unified_shell():
     imports, _separator, body = shell.partition("class AddonSdkDialog")
     for module in (
         "asset_viewer", "workbench", "model_material_workbench", "rpf_explorer",
-        "oiv_workbench_ui", "help_center",
+        "oiv_workbench_ui", "quick_import_ui", "help_center",
     ):
         assert f"from allin1_sdk.{module} import" not in imports
         assert f"from allin1_sdk.{module} import" in body

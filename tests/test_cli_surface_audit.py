@@ -9,6 +9,13 @@ import allin1_sdk
 from allin1_sdk.cli import main
 
 
+def test_cli_reports_the_public_sdk_version() -> None:
+    result = CliRunner().invoke(main, ["--version"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == f"ALLIN1 SDK, version {allin1_sdk.__version__}"
+
+
 def test_every_shipped_sdk_module_imports_without_optional_tool_startup() -> None:
     failures: list[str] = []
     for module in pkgutil.iter_modules(allin1_sdk.__path__):

@@ -26,6 +26,11 @@ from allin1_sdk.vehicle_project import (
     VehicleProject,
     VehicleProjectResolver,
 )
+from allin1_sdk.vehicle_catalog import (
+    VehicleCatalog,
+    VehicleCatalogEntry,
+    VehicleTrafficPolicy,
+)
 
 
 AUTHORING_SCHEMA_VERSION = 1
@@ -158,6 +163,39 @@ _ATTRIBUTE_TUNING_FIELDS = frozenset({
     "disableDrivebySeatSecondary", "modifier",
 })
 
+_DISTRIBUTION_FIELDS = frozenset({
+    "listed", "name", "manufacturer", "category", "price", "storage",
+    "size_tier", "preview_dictionary", "preview_texture", "traffic_enabled",
+    "traffic_weight",
+})
+_CLASS_TO_CATEGORY = {
+    "VC_COMPACT": "compacts", "VC_COUPES": "coupes", "VC_COUPE": "coupes",
+    "VC_SEDAN": "sedans", "VC_SEDANS": "sedans", "VC_SUV": "suvs",
+    "VC_MUSCLE": "muscle", "VC_SPORT": "sports", "VC_SPORTS": "sports",
+    "VC_SPORT_CLASSIC": "sportsclassics", "VC_SPORTS_CLASSIC": "sportsclassics",
+    "VC_SUPER": "super", "VC_OFF_ROAD": "offroad", "VC_OFFROAD": "offroad",
+    "VC_MOTORCYCLE": "motorcycles", "VC_MOTORCYCLES": "motorcycles",
+    "VC_VAN": "vans", "VC_VANS": "vans", "VC_BOAT": "boats",
+    "VC_BOATS": "boats", "VC_HELICOPTER": "helicopters",
+    "VC_HELICOPTERS": "helicopters", "VC_PLANE": "planes",
+    "VC_PLANES": "planes", "VC_MILITARY": "military",
+    "VC_INDUSTRIAL": "industrial", "VC_OPEN_WHEEL": "openwheel",
+    "VC_OPENWHEEL": "openwheel", "VC_EMERGENCY": "emergency",
+    "VC_CYCLE": "cycles", "VC_CYCLES": "cycles", "VC_SERVICE": "service",
+}
+
+
+def _distribution_category(value: str) -> str:
+    return _CLASS_TO_CATEGORY.get(
+        value.strip().upper().replace("-", "_").replace(" ", "_"), "special",
+    )
+
+
+def _distribution_storage(category: str) -> str:
+    return {"boats": "harbour", "helicopters": "helipad", "planes": "hangar"}.get(
+        category, "garage",
+    )
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -260,6 +298,45 @@ class VehicleAuthoringValues:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class VehicleDistributionValues:
+    model: str
+    listed: bool
+    name: str
+    manufacturer: str
+    category: str
+    price: int
+    storage: str
+    size_tier: int
+    preview_dictionary: str | None
+    preview_texture: str | None
+    traffic_enabled: bool
+    traffic_weight: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def catalog_entry(self, source_pack: str) -> VehicleCatalogEntry:
+        return VehicleCatalogEntry.from_dict({
+            "model": self.model,
+            "name": self.name,
+            "manufacturer": self.manufacturer,
+            "category": self.category,
+            "price": self.price,
+            "storage": self.storage,
+            "source_pack": source_pack,
+            "size_tier": self.size_tier,
+            **({"preview_dictionary": self.preview_dictionary}
+               if self.preview_dictionary else {}),
+            **({"preview_texture": self.preview_texture}
+               if self.preview_texture else {}),
+            "traffic": {
+                "enabled": self.traffic_enabled,
+                "weight": self.traffic_weight,
+            },
+        }, 1)
 
 
 @dataclass(frozen=True)
@@ -503,6 +580,24 @@ class VehicleAuthoringWorkspace:
                 "editable_fields": list(EDITABLE_FIELDS),
                 "identity_migration": "transactional",
                 "identity_fields_locked": ["kitName", "id"],
+                "distribution": {
+                    item.model.casefold(): {
+                        "listed": True,
+                        "name": item.display_name or item.model,
+                        "manufacturer": item.make_name,
+                        "category": _distribution_category(item.vehicle_class),
+                        "price": 0,
+                        "storage": _distribution_storage(
+                            _distribution_category(item.vehicle_class)
+                        ),
+                        "size_tier": 0,
+                        "preview_dictionary": None,
+                        "preview_texture": None,
+                        "traffic_enabled": False,
+                        "traffic_weight": 1.0,
+                    }
+                    for item in copied_project.models
+                },
             }
             (stage / "history").mkdir()
             (stage / "reports").mkdir()
@@ -560,6 +655,116 @@ class VehicleAuthoringWorkspace:
 
     def inspect(self) -> VehicleProject:
         return self._scan_project()[1]
+
+    def distribution(self, model: str) -> VehicleDistributionValues:
+        project_model = self.inspect().model(model)
+        category = _distribution_category(project_model.vehicle_class)
+        defaults: dict[str, Any] = {
+            "listed": True,
+            "name": project_model.display_name or project_model.model,
+            "manufacturer": project_model.make_name,
+            "category": category,
+            "price": 0,
+            "storage": _distribution_storage(category),
+            "size_tier": 0,
+            "preview_dictionary": None,
+            "preview_texture": None,
+            "traffic_enabled": False,
+            "traffic_weight": 1.0,
+        }
+        raw_distribution = self.manifest.get("distribution", {})
+        if raw_distribution is not None and not isinstance(raw_distribution, dict):
+            raise ValueError("Vehicle authoring distribution settings are invalid")
+        raw = (raw_distribution or {}).get(project_model.model.casefold(), {})
+        if not isinstance(raw, dict):
+            raise ValueError(f"Distribution settings are invalid: {project_model.model}")
+        unknown = sorted(set(raw) - _DISTRIBUTION_FIELDS)
+        if unknown:
+            raise ValueError("Unsupported distribution fields: " + ", ".join(unknown))
+        values = {**defaults, **raw}
+        candidate = VehicleDistributionValues(
+            model=project_model.model.casefold(),
+            listed=values["listed"],
+            name=values["name"],
+            manufacturer=values["manufacturer"],
+            category=str(values["category"]).strip().lower(),
+            price=values["price"],
+            storage=str(values["storage"]).strip().lower(),
+            size_tier=values["size_tier"],
+            preview_dictionary=values["preview_dictionary"] or None,
+            preview_texture=values["preview_texture"] or None,
+            traffic_enabled=values["traffic_enabled"],
+            traffic_weight=values["traffic_weight"],
+        )
+        if not isinstance(candidate.listed, bool):
+            raise ValueError("Distribution listed must be a boolean")
+        candidate.catalog_entry("addon")
+        return candidate
+
+    def set_distribution(
+        self, model: str, updates: dict[str, Any], *, expected_revision: int | None = None,
+    ) -> VehicleDistributionValues:
+        unknown = sorted(set(updates) - _DISTRIBUTION_FIELDS)
+        if unknown:
+            raise ValueError("Unsupported distribution fields: " + ", ".join(unknown))
+        if expected_revision is not None and expected_revision != self.revision:
+            raise ValueError(
+                f"Vehicle authoring revision changed (expected {expected_revision}, "
+                f"found {self.revision})"
+            )
+        current = self.distribution(model)
+        payload = current.to_dict()
+        payload.pop("model", None)
+        payload.update(updates)
+        candidate = VehicleDistributionValues(
+            model=current.model,
+            listed=payload["listed"],
+            name=str(payload["name"]).strip(),
+            manufacturer=str(payload["manufacturer"]).strip(),
+            category=str(payload["category"]).strip().lower(),
+            price=payload["price"],
+            storage=str(payload["storage"]).strip().lower(),
+            size_tier=payload["size_tier"],
+            preview_dictionary=(str(payload["preview_dictionary"]).strip()
+                                if payload.get("preview_dictionary") else None),
+            preview_texture=(str(payload["preview_texture"]).strip()
+                             if payload.get("preview_texture") else None),
+            traffic_enabled=payload["traffic_enabled"],
+            traffic_weight=payload["traffic_weight"],
+        )
+        if not isinstance(candidate.listed, bool):
+            raise ValueError("Distribution listed must be a boolean")
+        candidate.catalog_entry("addon")
+        distribution = self.manifest.setdefault("distribution", {})
+        if not isinstance(distribution, dict):
+            raise ValueError("Vehicle authoring distribution settings are invalid")
+        if candidate.to_dict() == current.to_dict():
+            raise ValueError("Vehicle distribution update contains no changed values")
+        stored = candidate.to_dict()
+        stored.pop("model", None)
+        distribution[current.model.casefold()] = stored
+        self.manifest["revision"] = self.revision + 1
+        self.manifest["updated_utc"] = datetime.now(timezone.utc).isoformat()
+        self._write_manifest()
+        return candidate
+
+    def distribution_catalog(
+        self, package_id: str, package_name: str, source_pack: str,
+    ) -> VehicleCatalog:
+        entries = tuple(
+            values.catalog_entry(source_pack)
+            for item in self.inspect().models
+            for values in (self.distribution(item.model),)
+            if values.listed
+        )
+        if not entries:
+            raise ValueError("List at least one vehicle in GBAY before building the package")
+        return VehicleCatalog.from_dict({
+            "schema_version": 1,
+            "id": package_id,
+            "name": package_name,
+            "vehicles": [entry.to_dict() for entry in entries],
+        })
 
     def _scan_project(self) -> tuple[PackageScan, VehicleProject]:
         """Scan once when an operation needs inventory and resolved relationships."""

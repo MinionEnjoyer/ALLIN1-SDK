@@ -7,7 +7,7 @@ import os
 import sys
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox
 
 from allin1_sdk import __version__
 from allin1_sdk.addon_sdk_ui import AddonSdkDialog
@@ -17,11 +17,19 @@ from allin1_sdk.paths import project_root
 from allin1_sdk.rpf_graph import RpfPackageGraph
 from allin1_sdk.rpf_graph_ui import RpfPackageGraphDialog
 from allin1_sdk.ui_foundation import (
+    configure_sdk_style,
     configure_tk_scaling,
     enable_windows_dpi_awareness,
 )
 
 _INSTANCE_MUTEX: int | None = None
+
+
+def _open_direct_addon_manifest(
+    dialog: AddonSdkDialog, manifest: Path,
+) -> None:
+    """Open an externally requested manifest without changing the catalog."""
+    dialog.open_manifest_path(manifest, remember=False)
 
 
 def _focus_existing_sdk() -> bool:
@@ -75,88 +83,9 @@ def _claim_single_instance() -> bool:
 
 
 def _configure_style(root: tk.Tk) -> None:
-    style = ttk.Style(root)
-    if "clam" in style.theme_names():
-        style.theme_use("clam")
-    root.option_add("*tearOff", False)
-    style.configure(".", font=("Segoe UI", 10), foreground="#173d32")
-    style.configure("TFrame", background="#f4f7f5")
-    style.configure("TLabel", background="#f4f7f5", foreground="#24332d")
-    style.configure("Surface.TFrame", background="#ffffff")
-    style.configure("TButton", padding=(11, 7))
-    style.configure("TEntry", padding=(7, 6))
-    style.configure("TCombobox", padding=(6, 5))
-    style.configure("TLabelframe", background="#ffffff", bordercolor="#d4ddd9")
-    style.configure(
-        "TLabelframe.Label", background="#f4f7f5", foreground="#1f7f42",
-        font=("Segoe UI Semibold", 10),
-    )
-    style.configure(
-        "Accent.TButton", background="#2d9c50", foreground="white",
-        font=("Segoe UI Semibold", 10), padding=(13, 8),
-    )
-    style.map(
-        "Accent.TButton",
-        background=[("active", "#1f7f42"), ("disabled", "#c8d4cc")],
-        foreground=[("disabled", "#66756e")],
-    )
-    style.configure(
-        "Nav.TButton", anchor="w", padding=(16, 11), relief="flat",
-        background="#eef3f0", foreground="#3c5048",
-    )
-    style.map(
-        "Nav.TButton",
-        background=[("active", "#e2ebe6"), ("focus", "#e2ebe6")],
-        foreground=[("disabled", "#84928c")],
-    )
-    style.configure(
-        "NavSelected.TButton", anchor="w", padding=(16, 11), relief="flat",
-        background="#dcefe3", foreground="#176b36",
-        font=("Segoe UI Semibold", 10),
-    )
-    style.map(
-        "NavSelected.TButton",
-        background=[("active", "#d2e8da"), ("focus", "#c9e4d3")],
-    )
-    style.configure(
-        "DialogTitle.TLabel", font=("Segoe UI Semibold", 17),
-        foreground="#173d32",
-    )
-    style.configure(
-        "Treeview", rowheight=28, font=("Segoe UI", 10),
-        background="#ffffff", fieldbackground="#ffffff",
-    )
-    style.configure(
-        "Treeview.Heading", font=("Segoe UI Semibold", 9), padding=(7, 7),
-    )
-    style.map(
-        "Treeview",
-        background=[("selected", "#176b36")],
-        foreground=[("selected", "#ffffff")],
-    )
-    style.configure("TNotebook.Tab", padding=(10, 6))
-    style.map(
-        "TNotebook.Tab",
-        background=[("selected", "#ffffff"), ("active", "#e6efe9")],
-        foreground=[("selected", "#176b36")],
-    )
-    style.configure(
-        "FieldLabel.TLabel", font=("Segoe UI Semibold", 9), foreground="#52635c",
-    )
-    style.configure("Muted.TLabel", foreground="#52635c")
-    style.configure("Success.TLabel", foreground="#176b36")
-    style.configure("Warning.TLabel", foreground="#8a5a00")
-    style.configure("Error.TLabel", foreground="#a52a2a")
-    style.configure(
-        "Link.TButton", relief="flat", borderwidth=0, padding=(4, 3),
-        background="#f4f7f5", foreground="#176b36",
-        font=("Segoe UI Semibold", 9, "underline"),
-    )
-    style.map(
-        "Link.TButton",
-        foreground=[("active", "#0e5228"), ("focus", "#0e5228")],
-        background=[("active", "#e2ebe6"), ("focus", "#e2ebe6")],
-    )
+    """Backward-compatible test and extension hook for the shared SDK theme."""
+
+    configure_sdk_style(root)
 
 
 def _launch_arguments(argv: list[str] | None = None) -> argparse.Namespace:
@@ -177,6 +106,10 @@ def _launch_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     direct_open.add_argument(
         "--model-material-source", type=Path,
         help="Open a model or package directly in Models & Materials.",
+    )
+    direct_open.add_argument(
+        "--addon-manifest", type=Path,
+        help="Open an addon.json or allin1.workspace.json in the Package Linker.",
     )
     parser.add_argument(
         "--workbench-category", choices=("auto", "vehicles", "weapons", "peds"),
@@ -206,6 +139,7 @@ def main(argv: list[str] | None = None) -> None:
         and arguments.vehicle_package is None
         and arguments.workbench_package is None
         and arguments.model_material_source is None
+        and arguments.addon_manifest is None
         and not _claim_single_instance()
     ):
         return
@@ -264,6 +198,13 @@ def main(argv: list[str] | None = None) -> None:
     elif arguments.model_material_source is not None:
         source = arguments.model_material_source
         dialog.after_idle(lambda: dialog.open_model_material_source(source))
+    elif arguments.addon_manifest is not None:
+        manifest = arguments.addon_manifest
+        # Direct CLI/API opens are transient inspections. Manual opens inside
+        # the desktop keep their default remember=True catalog behavior.
+        dialog.after_idle(
+            lambda: _open_direct_addon_manifest(dialog, manifest),
+        )
     root.mainloop()
 
 

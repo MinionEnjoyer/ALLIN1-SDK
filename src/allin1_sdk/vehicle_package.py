@@ -20,6 +20,15 @@ from allin1_sdk.addon_importer import (
 from allin1_sdk.mods import ModManifest
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.vehicle_project import VehicleProjectResolver
+from allin1_sdk.vehicle_catalog import (
+    VehicleCatalog,
+    VehicleCatalogEntry,
+    VehicleTrafficPolicy,
+)
+from allin1_sdk.managed_package_conversion import (
+    normalized_vehicle_category,
+    storage_for_category,
+)
 
 
 MAX_IMPORTED_DLC_RPF_BYTES = 1024 * 1024 * 1024
@@ -51,6 +60,8 @@ class VehiclePackageResult:
     mod_id: str
     payload_sha256: str
     source_mode: str
+    catalog: Path
+    content_manifest: Path
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -63,6 +74,8 @@ class VehiclePackageResult:
             "mod_id": self.mod_id,
             "payload_sha256": self.payload_sha256,
             "source_mode": self.source_mode,
+            "catalog": str(self.catalog),
+            "content_manifest": str(self.content_manifest),
         }
 
 
@@ -87,13 +100,16 @@ class VehicleAddonPackageBuilder:
         name: str | None = None,
         version: str = "1.0.0",
         editions: tuple[str, ...] = ("legacy", "enhanced"),
+        catalog: VehicleCatalog | None = None,
     ) -> VehiclePackageResult:
         source_path = Path(source).expanduser().resolve()
         authoring_manifest = source_path / "vehicle-authoring.json"
+        authoring_workspace = None
         if authoring_manifest.is_file() and not authoring_manifest.is_symlink():
             from allin1_sdk.vehicle_authoring import VehicleAuthoringWorkspace
 
-            source_path = VehicleAuthoringWorkspace(source_path).publish_source()
+            authoring_workspace = VehicleAuthoringWorkspace(source_path)
+            source_path = authoring_workspace.publish_source()
         scan = AddonPackageInspector().inspect(source_path)
         inferred_pack = self._infer_pack_name(scan)
         selected_pack = (pack_name or inferred_pack).casefold()
@@ -134,15 +150,72 @@ class VehicleAddonPackageBuilder:
                 source_path, scan, payload,
             )
             payload_digest = _sha256(payload)
+            project = VehicleProjectResolver.inspect_scan(scan)
+            if catalog is None and authoring_workspace is not None:
+                catalog = authoring_workspace.distribution_catalog(
+                    selected_mod_id, selected_name, selected_pack,
+                )
+            if catalog is None:
+                entries = []
+                for item in project.models:
+                    category = normalized_vehicle_category(
+                        item.vehicle_class, item.vehicle_type,
+                    )
+                    entries.append(VehicleCatalogEntry(
+                        model=item.model.casefold(),
+                        display_name=item.display_name or item.model,
+                        manufacturer=item.make_name,
+                        category=category,
+                        price=0,
+                        storage=storage_for_category(category),
+                        source_pack=selected_pack,
+                        traffic=VehicleTrafficPolicy(),
+                    ))
+                catalog = VehicleCatalog.from_dict({
+                    "schema_version": 1,
+                    "id": selected_mod_id,
+                    "name": selected_name,
+                    "vehicles": [entry.to_dict() for entry in entries],
+                })
+            else:
+                catalog = VehicleCatalog.from_dict(catalog.to_dict())
+            if catalog.catalog_id != selected_mod_id:
+                raise ValueError("Vehicle catalog id must match the package id")
+            catalog.validate_package_ownership(
+                (selected_pack,), allow_traffic=True,
+            )
+            owned_models = {item.model.casefold() for item in project.models}
+            unknown_catalog_models = sorted(
+                item.model for item in catalog.vehicles
+                if item.model.casefold() not in owned_models
+            )
+            if unknown_catalog_models:
+                raise ValueError(
+                    "Vehicle catalog references models absent from the selected DLC "
+                    "source: " + ", ".join(unknown_catalog_models)
+                )
+            traffic_opt_in = any(item.traffic.enabled for item in catalog.vehicles)
+            catalog_path = stage / "payload" / "vehicles.json"
+            catalog_path.write_text(
+                json.dumps(catalog.to_dict(), indent=2) + "\n", encoding="utf-8",
+            )
+            catalog_digest = _sha256(catalog_path)
+            content_path = stage / "allin1.content.json"
+            content_path.write_text(
+                json.dumps(self._content_manifest(
+                    selected_mod_id, selected_name, selected_version,
+                    selected_pack, catalog, traffic_opt_in,
+                ), indent=2) + "\n",
+                encoding="utf-8",
+            )
             manifest = stage / "mod.toml"
             manifest.write_text(
                 self._manifest_text(
                     selected_pack, selected_mod_id, selected_name, selected_version,
-                    selected_editions, payload_digest,
+                    selected_editions, payload_digest, catalog_digest,
                 ),
                 encoding="utf-8",
             )
-            project = VehicleProjectResolver.inspect_scan(scan)
             report_payload = {
                 "schema_version": 1,
                 "operation": "vehicle_addon_package_build",
@@ -160,6 +233,7 @@ class VehicleAddonPackageBuilder:
                     "builder_validation": validation,
                 },
                 "vehicle_project": project.to_dict(),
+                "vehicle_catalog": catalog.to_dict(),
                 "safety": {
                     "source_unchanged": True,
                     "output_was_new": True,
@@ -185,6 +259,8 @@ class VehicleAddonPackageBuilder:
             mod_id=selected_mod_id,
             payload_sha256=payload_digest,
             source_mode=source_mode,
+            catalog=target / "payload" / "vehicles.json",
+            content_manifest=target / "allin1.content.json",
         )
 
     def _materialize_rpf(
@@ -289,21 +365,79 @@ class VehicleAddonPackageBuilder:
         version: str,
         editions: tuple[str, ...],
         payload_sha256: str,
+        catalog_sha256: str,
     ) -> str:
         return "\n".join((
-            "schema_version = 1",
+            "schema_version = 2",
             f"id = {json.dumps(mod_id)}",
             f"name = {json.dumps(name)}",
             f"version = {json.dumps(version)}",
-            'type = "rpf"',
+            'type = "mixed"',
             'description = "Vehicle DLC package built and validated by ALLIN1 SDK."',
             f"editions = {json.dumps(list(editions))}",
             'dependencies = ["openrpf"]',
+            "conflicts = []",
             f"dlc_packs = [{json.dumps(pack_name)}]",
+            "",
+            "[allin1]",
+            "api_version = 1",
+            'content = "allin1.content.json"',
+            'requires = ["allin1.online-content>=0.5.5"]',
             "",
             "[[files]]",
             'source = "payload/dlc.rpf"',
             f'destination = "mods/update/x64/dlcpacks/{pack_name}/dlc.rpf"',
             f"sha256 = {json.dumps(payload_sha256)}",
             "",
+            "[[files]]",
+            'source = "payload/vehicles.json"',
+            f'destination = "scripts/ALLIN1/Catalogs/{mod_id}/vehicles.json"',
+            f"sha256 = {json.dumps(catalog_sha256)}",
+            "",
         ))
+
+    @staticmethod
+    def _content_manifest(
+        mod_id: str, name: str, version: str, pack_name: str,
+        catalog: VehicleCatalog, traffic_opt_in: bool,
+    ) -> dict[str, Any]:
+        capabilities = ["gbay.catalogs"]
+        settings: list[dict[str, Any]] = []
+        if traffic_opt_in:
+            capabilities.extend(("launcher.settings", "traffic.catalog"))
+            settings.append({
+                "key": "traffic_enabled",
+                "label": "Ambient traffic",
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Allow eligible vehicles from this package to spawn in traffic."
+                ),
+                "group": "Traffic",
+            })
+        return {
+            "schema_version": 1,
+            "api_version": 1,
+            "id": mod_id,
+            "name": name,
+            "version": version,
+            "description": f"Managed vehicle add-on for DLC pack {pack_name}.",
+            "capabilities": capabilities,
+            "systems": [{
+                "id": f"{mod_id}.vehicles",
+                "name": f"{name} Vehicles",
+                "description": "Vehicle definitions: " + ", ".join(
+                    item.model for item in catalog.vehicles
+                ),
+                "category": "Vehicles",
+                "experimental": False,
+                "enabled_by_default": True,
+                "settings": settings,
+            }],
+            "gbay": {"sections": [], "catalogs": [{
+                "id": mod_id,
+                "kind": "vehicle",
+                "source": f"scripts/ALLIN1/Catalogs/{mod_id}/vehicles.json",
+            }]},
+            "runtime": {"assemblies": []},
+        }

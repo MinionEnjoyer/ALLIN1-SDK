@@ -7,23 +7,38 @@ import os
 import sys
 import tkinter as tk
 import webbrowser
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
-from PIL import Image, ImageTk
+from PIL import ImageTk
 
 from allin1_sdk import __version__
 from allin1_sdk.addon_importer import AddonDraftBuilder, AddonPackageInspector, PackageScan
-from allin1_sdk.branding import apply_sdk_window_icon
+from allin1_sdk.branding import apply_sdk_window_icon, load_sdk_banner_logo
 from allin1_sdk.collapsible_panes import CollapsibleSidePanes
 from allin1_sdk.sdk_console import SdkConsoleDialog
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.paths import user_data_root
 from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
-from allin1_sdk.ui_foundation import place_window
+from allin1_sdk.product_api_contract import (
+    RuntimeApiCall,
+    RuntimeContractReport,
+    RuntimeHostAudit,
+    RuntimeMemberAudit,
+    RuntimePackageAudit,
+)
+from allin1_sdk.ui_foundation import (
+    BODY_BACKGROUND,
+    BRAND_DEEP_GREEN,
+    SURFACE_BACKGROUND,
+    place_window,
+    shell_status_presentation,
+)
 from allin1_sdk.addon_sdk import (
     AddonInstallStep,
+    AddonIssue,
     AddonLinkReport,
     AddonLinker,
     AddonManifest,
@@ -37,11 +52,22 @@ from allin1_sdk.addon_sdk import (
 def _display_value(value: Any) -> str:
     if isinstance(value, dict):
         return "; ".join(f"{key} = {item}" for key, item in value.items())
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return ", ".join(str(item) for item in value)
     if value == "":
         return "(empty)"
     return str(value)
+
+
+@dataclass(frozen=True)
+class _ApiContractDetail:
+    """Present one canonical contract value in the existing field inspector."""
+
+    heading: str
+    description: str
+    source: str | None
+    line: int | None
+    fields: tuple[tuple[str, Any], ...]
 
 
 class AddonSdkDialog(tk.Toplevel):
@@ -51,6 +77,7 @@ class AddonSdkDialog(tk.Toplevel):
         ("linker", "Package Linker", "Ctrl+1"),
         ("assets", "Asset Viewer", "Ctrl+2"),
         ("workbench", "Content Workbench", "Ctrl+3"),
+        ("quick_import", "Quick Import", "Ctrl+I"),
         ("models", "Models & Materials", "Ctrl+4"),
         ("rpf", "RPF Archives", "Ctrl+5"),
         ("recipes", "Package Recipes", "Ctrl+6"),
@@ -73,10 +100,12 @@ class AddonSdkDialog(tk.Toplevel):
         self.package_scan: PackageScan | None = None
         self._selection: dict[str, object] = {}
         self.review_menus: list[tk.Menu] = []
+        self.package_tool_menus: list[tk.Menu] = []
         self._logo_photo: ImageTk.PhotoImage | None = None
         self._navigation_history: list[str] = []
         self.sidebar_visible = tk.BooleanVar(self, value=True)
         self.title("ALLIN1 SDK — Developer Workspace")
+        self.configure(background=BODY_BACKGROUND)
         place_window(self, preferred=(1320, 840), minimum=(980, 640))
         if not standalone:
             self.transient(parent)
@@ -92,18 +121,38 @@ class AddonSdkDialog(tk.Toplevel):
 
     def _build_menu(self) -> None:
         menu = tk.Menu(self, tearoff=False)
-        content = self._make_content_menu(menu)
-        menu.add_cascade(label="Packages", menu=content)
+
+        file_menu = self._make_content_menu(menu)
+        menu.add_cascade(label="File", menu=file_menu)
+        self.file_menu = file_menu
+
+        package_menu = tk.Menu(menu, tearoff=False)
         review = self._make_review_menu(menu)
-        menu.add_cascade(label="Inspect & Export", menu=review)
+        package_menu.add_cascade(label="Inspect & Export", menu=review)
         intelligence = self._make_intelligence_menu(menu)
-        menu.add_cascade(label="Package Tools", menu=intelligence)
+        package_menu.add_cascade(label="Authoring & Utilities", menu=intelligence)
+        menu.add_cascade(label="Package", menu=package_menu)
+        self.package_menu = package_menu
+
         view = tk.Menu(menu, tearoff=False)
+        view.add_command(
+            label="Back", accelerator="Alt+Left", command=self._go_back,
+        )
+        view.add_separator()
         for key, label, shortcut in self.NAVIGATION:
             view.add_command(
                 label=label, accelerator=shortcut,
                 command=lambda selected=key: self._select_workspace(selected),
             )
+        view.add_separator()
+        view.add_command(
+            label="Next workspace", accelerator="Ctrl+Tab",
+            command=self._cycle_workspace,
+        )
+        view.add_command(
+            label="Previous workspace", accelerator="Ctrl+Shift+Tab",
+            command=lambda: self._cycle_workspace(delta=-1),
+        )
         view.add_separator()
         view.add_checkbutton(
             label="Show workspace sidebar", accelerator="Ctrl+B",
@@ -117,12 +166,14 @@ class AddonSdkDialog(tk.Toplevel):
         # the first window is deterministic across themes/platform builds.
         self.sidebar_visible.set(True)
         menu.add_cascade(label="View", menu=view)
+        self.view_menu = view
         tools = tk.Menu(menu, tearoff=False)
         tools.add_command(
             label="Focus / expand SDK Console", accelerator="Ctrl+`",
             command=self._open_console,
         )
         menu.add_cascade(label="Tools", menu=tools)
+        self.tools_menu = tools
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(
             label="SDK Help Center", accelerator="F1",
@@ -132,14 +183,27 @@ class AddonSdkDialog(tk.Toplevel):
             label="RPF Archives Help",
             command=lambda: self._open_help("rpf-explorer"),
         )
+        help_menu.add_separator()
+        help_menu.add_command(
+            label="Keyboard shortcuts",
+            command=lambda: self._open_help("input"),
+        )
         menu.add_cascade(label="Help", menu=help_menu)
+        self.help_menu = help_menu
+        self.application_menu = menu
         self.configure(menu=menu)
         self.bind("<F1>", lambda _event: self._open_context_help())
+        self.bind("<F5>", lambda _event: self._refresh_audit())
+        self.bind("<Control-o>", lambda _event: self._open_manifest())
         self.bind("<Control-KeyPress-grave>", lambda _event: self._open_console())
 
     def _make_content_menu(self, parent: tk.Misc) -> tk.Menu:
         menu = tk.Menu(parent, tearoff=False)
-        menu.add_command(label="Open addon manifest…", command=self._open_manifest)
+        menu.add_command(
+            label="Open manifest or product workspace…",
+            accelerator="Ctrl+O",
+            command=self._open_manifest,
+        )
         menu.add_separator()
         menu.add_command(label="Import DLC folder…", command=self._import_folder)
         menu.add_command(label="Import package archive…", command=self._import_archive)
@@ -150,6 +214,11 @@ class AddonSdkDialog(tk.Toplevel):
         menu = tk.Menu(parent, tearoff=False)
         menu.add_command(label="Export link report…", command=self._export_report)
         menu.add_command(label="Open selected source", command=self._open_source)
+        menu.add_command(
+            label="Refresh current audit", accelerator="F5",
+            command=self._refresh_audit,
+            state="disabled",
+        )
         menu.add_separator()
         menu.add_command(
             label="Browse package assets…", command=self._open_asset_viewer,
@@ -171,6 +240,17 @@ class AddonSdkDialog(tk.Toplevel):
         self.review_menus.append(menu)
         return menu
 
+    def _set_audit_actions(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for menu in self.review_menus:
+            menu.entryconfigure("Refresh current audit", state=state)
+        if hasattr(self, "refresh_audit_button"):
+            self.refresh_audit_button.configure(state=state)
+            if enabled and not self.refresh_audit_button.winfo_manager():
+                self.refresh_audit_button.pack(side="right")
+            elif not enabled:
+                self.refresh_audit_button.pack_forget()
+
     def _make_intelligence_menu(self, parent: tk.Misc) -> tk.Menu:
         menu = tk.Menu(parent, tearoff=False)
         menu.add_command(label="Open Package Recipes", command=self._open_oiv_workbench)
@@ -181,6 +261,18 @@ class AddonSdkDialog(tk.Toplevel):
         menu.add_command(
             label="Validate META/XML round trip…", command=self._validate_meta_roundtrip,
         )
+        menu.add_separator()
+        menu.add_command(
+            label="Open vehicle in Quick Import — Legacy…",
+            command=lambda: self._export_managed_vehicle_package("legacy"),
+            state="disabled",
+        )
+        menu.add_command(
+            label="Open vehicle in Quick Import — Enhanced…",
+            command=lambda: self._export_managed_vehicle_package("enhanced"),
+            state="disabled",
+        )
+        self.package_tool_menus.append(menu)
         return menu
 
     def _set_package_actions(
@@ -201,6 +293,37 @@ class AddonSdkDialog(tk.Toplevel):
                 "Open in Models & Materials…",
                 state="normal" if assets else "disabled",
             )
+        editions = {
+            item.edition.casefold() for item in self.package_scan.rpf_archives
+        } if self.package_scan is not None and self.package_scan.vehicles else set()
+        for menu in self.package_tool_menus:
+            for edition in ("legacy", "enhanced"):
+                menu.entryconfigure(
+                    f"Open vehicle in Quick Import — {edition.title()}…",
+                    state="normal" if edition in editions else "disabled",
+                )
+
+    def _export_managed_vehicle_package(self, edition: str) -> None:
+        """Compatibility route from audited packages into guided Quick Import."""
+        if self.package_source is None or self.package_scan is None:
+            return
+        game = next(
+            (path for path in self.installation_roots if path.is_dir()), None,
+        )
+        if game is None:
+            messagebox.showerror(
+                "GTA V path required",
+                "Configure the matching GTA V installation before converting a "
+                "vehicle package.", parent=self,
+            )
+            return
+        self._select_workspace("quick_import")
+        self.quick_import_workspace.open_source(
+            self.package_source, preferred_edition=edition,
+        )
+        self.status.set(
+            f"Quick Import · {self.package_source.name} · {edition.title()}",
+        )
 
     def _open_console(self) -> None:
         self.console_workspace.expand_and_focus()
@@ -222,6 +345,7 @@ class AddonSdkDialog(tk.Toplevel):
         topic = {
             "linker": "sdk", "assets": "asset-viewer",
             "workbench": workbench_topic, "rpf": "rpf-explorer",
+            "quick_import": "quick-import",
             "models": "model-material-workbench",
             "recipes": "package-recipes", "help": "input",
         }.get(getattr(self, "current_workspace", "linker"), "sdk")
@@ -262,6 +386,10 @@ class AddonSdkDialog(tk.Toplevel):
         if workbench is not None and not workbench.confirm_navigation():
             self._select_workspace("workbench")
             return False
+        quick_import = getattr(self, "quick_import_workspace", None)
+        if quick_import is not None and not quick_import.confirm_navigation():
+            self._select_workspace("quick_import")
+            return False
         models = getattr(self, "model_material_workspace", None)
         if models is not None and models.has_active_work():
             self._select_workspace("models")
@@ -294,6 +422,13 @@ class AddonSdkDialog(tk.Toplevel):
                 and not workbench.confirm_navigation()
             ):
                 return False
+        if previous == "quick_import" and key != previous:
+            quick_import = getattr(self, "quick_import_workspace", None)
+            if (
+                quick_import is not None
+                and not quick_import.confirm_navigation()
+            ):
+                return False
         if remember and previous and previous != key:
             self._navigation_history.append(previous)
             self._navigation_history = self._navigation_history[-20:]
@@ -317,6 +452,9 @@ class AddonSdkDialog(tk.Toplevel):
 
     def _update_context_navigation(self) -> None:
         """Expose history as one compact header link, not a sidebar row."""
+        context = getattr(self, "workspace_context", None)
+        if context is not None:
+            context.set(self._workspace_label(self.current_workspace))
         button = getattr(self, "context_back_button", None)
         if button is None:
             return
@@ -399,16 +537,35 @@ class AddonSdkDialog(tk.Toplevel):
                 text="<",
                 command=lambda: self._set_sidebar_visible(False),
             )
+            self.sidebar_toggle_button.accessible_name = (
+                "Hide workspace sidebar (Ctrl+B)"
+            )
         else:
             self.workspace_sidebar.pack_forget()
             self.sidebar_toggle_button.configure(
                 text=">",
                 command=lambda: self._set_sidebar_visible(True),
             )
+            self.sidebar_toggle_button.accessible_name = (
+                "Show workspace sidebar (Ctrl+B)"
+            )
         return "break"
 
     def _toggle_sidebar(self, _event: object | None = None) -> str:
         return self._set_sidebar_visible(not self.sidebar_visible.get())
+
+    def _sync_status_presentation(self, *_args: object) -> None:
+        """Keep routine progress and errors visible without another popup."""
+
+        label = getattr(self, "activity_status_label", None)
+        indicator = getattr(self, "activity_status_indicator", None)
+        if label is None or indicator is None:
+            return
+        presentation = shell_status_presentation(self.status.get())
+        label.configure(style=presentation.label_style)
+        indicator.configure(
+            text=presentation.glyph, style=presentation.indicator_style,
+        )
 
     def _ensure_workspace(self, key: str) -> ttk.Frame | None:
         """Construct a specialist workspace only when the user first opens it."""
@@ -442,6 +599,17 @@ class AddonSdkDialog(tk.Toplevel):
             self.vehicle_workspace = workspace.vehicle_workspace
             self.weapon_workspace = workspace.weapon_workspace
             self.ped_workspace = workspace.ped_workspace
+        elif key == "quick_import":
+            from allin1_sdk.quick_import_ui import QuickImportFrame
+            workspace = QuickImportFrame(
+                page, self.project_root,
+                installation_roots=self.installation_roots,
+                on_help=self._open_help,
+                on_open_workbench=self._open_quick_import_workbench,
+                on_open_launcher=self._open_quick_import_launcher,
+            )
+            workspace.pack(fill="both", expand=True)
+            self.quick_import_workspace = workspace
         elif key == "models":
             from allin1_sdk.model_material_workbench import ModelMaterialWorkbenchFrame
             workspace = ModelMaterialWorkbenchFrame(
@@ -488,67 +656,86 @@ class AddonSdkDialog(tk.Toplevel):
     def _build(self) -> None:
         self._build_menu()
         outer = ttk.Frame(
-            self, padding=(12, 9, 12, 10), width=1, height=1,
+            self, padding=(16, 14, 16, 12), width=1, height=1,
         )
         # The header and hidden workspaces have intentionally generous
         # preferred widths. Do not let those requests keep the client at its
         # previous large geometry when the user shrinks the top-level window.
         outer.pack_propagate(False)
         outer.pack(fill="both", expand=True)
-        header = ttk.Frame(outer)
-        header.pack(fill="x", pady=(0, 10))
-        # Keep the developer application visually distinct from the launcher.
-        # The adjacent heading describes the workspace instead of repeating
-        # the product name already present in the supplied SDK badge.
-        logo = self.project_root / "assets" / "ALLIN1_SDK.png"
-        if logo.is_file():
-            try:
-                with Image.open(logo) as opened:
-                    image = opened.convert("RGBA")
-                    image.thumbnail((180, 88), Image.Resampling.LANCZOS)
-                    self._logo_photo = ImageTk.PhotoImage(image.copy())
-                ttk.Label(header, image=self._logo_photo).pack(
-                    side="left", padx=(0, 14), anchor="center",
-                )
-            except (OSError, tk.TclError):
-                self._logo_photo = None
-        # Reserve the fixed actions before packing the expanding heading.
-        # Otherwise a long localized description can push version/support
-        # controls outside the window even though the top-level itself fits.
-        header_actions = ttk.Frame(header)
+        header = tk.Frame(
+            outer, background=SURFACE_BACKGROUND, padx=0, pady=0,
+        )
+        header.pack(fill="x", pady=(0, 8))
+        self._logo_photo = load_sdk_banner_logo(
+            self, self.project_root, maximum=(180, 88),
+        )
+        if self._logo_photo is not None:
+            tk.Label(
+                header, image=self._logo_photo,
+                background=SURFACE_BACKGROUND, borderwidth=0,
+            ).pack(side="left", padx=(0, 16), anchor="center")
+
+        # Reserve the fixed actions before packing the expanding heading so
+        # the version and support affordances remain visible at minimum width.
+        header_actions = tk.Frame(header, background=SURFACE_BACKGROUND)
         header_actions.pack(side="right", padx=(18, 4), fill="y")
         self.version_badge = tk.Label(
             header_actions, text=f"v{__version__}",
-            background="#176b36", foreground="white",
+            background=BRAND_DEEP_GREEN, foreground="white",
             font=("Segoe UI Semibold", 10), padx=12, pady=5,
         )
         self.version_badge.pack(anchor="e")
-        self.support_button = ttk.Button(
-            header_actions, text="Support ALLIN1 ↗", style="Link.TButton",
-            cursor="hand2", command=lambda: webbrowser.open(
-                "https://buymeacoffee.com/minionenjoyer"
-            ),
+        support_url = "https://buymeacoffee.com/minionenjoyer"
+        self.support_button = tk.Label(
+            header_actions, text="Support ALLIN1 ↗",
+            background=SURFACE_BACKGROUND, foreground=BRAND_DEEP_GREEN,
+            cursor="hand2", takefocus=True,
+            font=("Segoe UI Semibold", 10, "underline"),
         )
         self.support_button.pack(anchor="e", pady=(10, 0))
-        header_text = ttk.Frame(header)
+        self.support_button.bind(
+            "<Button-1>", lambda _event: webbrowser.open(support_url),
+        )
+        self.support_button.bind(
+            "<Return>", lambda _event: webbrowser.open(support_url),
+        )
+        self.support_button.bind(
+            "<space>", lambda _event: webbrowser.open(support_url),
+        )
+
+        header_text = tk.Frame(header, background=SURFACE_BACKGROUND)
         header_text.pack(side="left", fill="x", expand=True, anchor="center")
-        header_title = ttk.Frame(header_text)
+        header_title = tk.Frame(header_text, background=SURFACE_BACKGROUND)
         header_title.pack(fill="x")
+        tk.Label(
+            header_title, text="ALLIN1 · GTA V SDK",
+            background=SURFACE_BACKGROUND, foreground="#173d32",
+            font=("Segoe UI Semibold", 18),
+        ).pack(side="left", anchor="w")
+        self.workspace_context = tk.StringVar(value="Package Linker")
+        tk.Label(
+            header_title, textvariable=self.workspace_context,
+            background=SURFACE_BACKGROUND, foreground="#52635c",
+            font=("Segoe UI Semibold", 9),
+        ).pack(side="right", padx=(8, 0))
+        tk.Label(
+            header_title, text="WORKSPACE",
+            background=SURFACE_BACKGROUND, foreground="#76847e",
+            font=("Segoe UI Semibold", 8),
+        ).pack(side="right", padx=(12, 0))
         self.context_back_button = ttk.Button(
-            header_title, text="", style="Link.TButton", cursor="hand2",
+            header_title, text="", style="HeaderLink.TButton", cursor="hand2",
             command=self._go_back,
         )
-        ttk.Label(
-            header_title, text="Developer Workspace",
-            font=("Segoe UI Semibold", 18), foreground="#173d32",
-        ).pack(side="left", anchor="w")
-        ttk.Label(
+        tk.Label(
             header_text,
             text=(
                 "Developer workspace for package integration, native assets, "
-                "archive inspection, compatibility, and safe authoring plans."
+                "archive inspection, and guarded authoring."
             ),
-            wraplength=760, justify="left",
+            background=SURFACE_BACKGROUND, foreground="#52635c",
+            font=("Segoe UI", 10), justify="left",
         ).pack(anchor="w", pady=(3, 0))
 
         shell = ttk.Frame(outer)
@@ -556,16 +743,27 @@ class AddonSdkDialog(tk.Toplevel):
         self.status = tk.StringVar(value="Loading SDK packages…")
         console_host = ttk.Frame(shell, style="Surface.TFrame")
         console_host.pack(side="bottom", fill="x", pady=(5, 0))
-        activity = ttk.Frame(shell, style="Surface.TFrame", padding=(9, 4))
+        activity = ttk.Frame(shell, style="StatusBar.TFrame", padding=(9, 5))
         activity.pack(side="bottom", fill="x")
         ttk.Label(
             activity, text="ACTIVITY", style="FieldLabel.TLabel",
-            background="#ffffff",
+            background=SURFACE_BACKGROUND,
         ).pack(side="left", padx=(0, 8))
+        self.activity_status_indicator = ttk.Label(
+            activity, text="◌", style="ActivityDot.Busy.TLabel",
+        )
+        self.activity_status_indicator.pack(side="left", padx=(0, 6))
+        self.activity_status_label = ttk.Label(
+            activity, textvariable=self.status, style="Activity.Busy.TLabel",
+            anchor="w", width=1,
+        )
+        self.activity_status_label.pack(side="left", fill="x", expand=True)
         ttk.Label(
-            activity, textvariable=self.status, style="Muted.TLabel",
-            background="#ffffff", anchor="w", width=1,
-        ).pack(side="left", fill="x", expand=True)
+            activity, text="F1 help  ·  Ctrl+` console",
+            style="StatusHint.TLabel",
+        ).pack(side="right", padx=(12, 0))
+        self.status.trace_add("write", self._sync_status_presentation)
+        self._sync_status_presentation()
         content_shell = ttk.Frame(shell)
         content_shell.pack(fill="both", expand=True)
         self.navigation_shell = ttk.Frame(
@@ -579,30 +777,40 @@ class AddonSdkDialog(tk.Toplevel):
         sidebar.pack(side="left", fill="y")
         self.sidebar_toggle_rail = tk.Frame(
             self.navigation_shell, width=16, background="#d5ded9",
-            highlightthickness=0, borderwidth=0,
+            highlightthickness=0, borderwidth=0, cursor="hand2",
         )
         self.sidebar_toggle_rail.pack(side="left", fill="y")
         self.sidebar_toggle_rail.pack_propagate(False)
-        tk.Frame(
+        self.sidebar_divider = tk.Frame(
             self.sidebar_toggle_rail, width=1, background="#aebdb5",
             highlightthickness=0, borderwidth=0,
-        ).place(relx=0.5, y=0, relheight=1, anchor="n")
+        )
+        self.sidebar_divider.place(relx=0.5, y=0, relheight=1, anchor="n")
         self.sidebar_toggle_button = tk.Button(
             self.sidebar_toggle_rail, text="<",
             background="#1f7f42", foreground="#ffffff",
             activebackground="#176b36", activeforeground="#ffffff",
-            relief="flat", borderwidth=0, highlightthickness=0,
+            relief="flat", borderwidth=0, highlightthickness=1,
+            highlightbackground="#1f7f42", highlightcolor="#ffffff",
             padx=0, pady=0, font=("Segoe UI Semibold", 9), cursor="hand2",
+            takefocus=True,
             command=lambda: self._set_sidebar_visible(False),
+        )
+        self.sidebar_toggle_button.accessible_name = (
+            "Hide workspace sidebar (Ctrl+B)"
         )
         self.sidebar_toggle_button.place(
             relx=0.5, rely=0.5, anchor="center", width=16, height=30,
         )
+        for toggle_target in (self.sidebar_toggle_rail, self.sidebar_divider):
+            toggle_target.bind("<Button-1>", self._toggle_sidebar)
         ttk.Label(
-            sidebar, text="DEVELOPER WORKSPACES", style="FieldLabel.TLabel",
-            background="#ffffff",
+            sidebar, text="WORKSPACES", style="FieldLabel.TLabel",
+            background=SURFACE_BACKGROUND,
         ).pack(anchor="w", padx=10, pady=(0, 7))
-        workspace = ttk.Frame(content_shell)
+        workspace = ttk.Frame(
+            content_shell, style="Workspace.TFrame", padding=(12, 0, 0, 0),
+        )
         self.workspace_host = workspace
         workspace.pack(side="left", fill="both", expand=True)
         workspace.rowconfigure(0, weight=1)
@@ -614,6 +822,7 @@ class AddonSdkDialog(tk.Toplevel):
         linker_page = ttk.Frame(workspace)
         assets_page = ttk.Frame(workspace)
         workbench_page = ttk.Frame(workspace)
+        quick_import_page = ttk.Frame(workspace)
         models_page = ttk.Frame(workspace)
         rpf_page = ttk.Frame(workspace)
         recipes_page = ttk.Frame(workspace)
@@ -622,26 +831,35 @@ class AddonSdkDialog(tk.Toplevel):
             "linker": linker_page,
             "assets": assets_page,
             "workbench": workbench_page,
+            "quick_import": quick_import_page,
             "models": models_page,
             "rpf": rpf_page,
             "recipes": recipes_page,
             "help": help_page,
         }
         self.workspace_buttons: dict[str, ttk.Button] = {}
-        for index, (key, label, _shortcut) in enumerate(self.NAVIGATION, start=1):
+        for key, label, shortcut in self.NAVIGATION:
             self.workspace_pages[key].grid(row=0, column=0, sticky="nsew")
+            if key in {"rpf", "help"}:
+                ttk.Separator(sidebar).pack(fill="x", padx=8, pady=(7, 5))
             button = ttk.Button(
-                sidebar, text=label, style="Nav.TButton", width=19,
+                sidebar, text=label, style="Nav.TButton", width=18,
                 command=lambda selected=key: self._select_workspace(selected),
             )
             button.pack(fill="x", pady=1)
             self.workspace_buttons[key] = button
+            key_name = shortcut.removeprefix("Ctrl+").casefold()
             self.bind(
-                f"<Control-Key-{index}>",
+                f"<Control-Key-{key_name}>",
                 lambda _event, selected=key: (
                     self._select_workspace(selected), "break"
                 )[1],
             )
+        ttk.Label(
+            sidebar, text="Ctrl+Tab switch  ·  Ctrl+B hide",
+            style="StatusHint.TLabel", background=SURFACE_BACKGROUND,
+            wraplength=175, justify="left",
+        ).pack(side="bottom", anchor="w", padx=10, pady=(10, 0))
         self.bind("<Alt-Left>", lambda _event: self._go_back())
         self.bind("<Control-b>", self._toggle_sidebar)
         self.bind("<Control-Tab>", self._cycle_workspace)
@@ -650,21 +868,43 @@ class AddonSdkDialog(tk.Toplevel):
             lambda event: self._cycle_workspace(event, -1),
         )
 
-        toolbar = ttk.Frame(linker_page)
+        linker_heading = ttk.Frame(linker_page)
+        linker_heading.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            linker_heading, text="Package Linker", style="PageTitle.TLabel",
+        ).pack(anchor="w")
+        ttk.Label(
+            linker_heading,
+            text=(
+                "Open a package or product workspace, trace its integration "
+                "contract, then export reviewable evidence."
+            ),
+            style="PageIntro.TLabel", wraplength=860, justify="left",
+        ).pack(anchor="w", pady=(2, 0))
+
+        toolbar = ttk.Frame(
+            linker_page, style="Surface.TFrame", padding=(8, 7),
+        )
         toolbar.pack(fill="x", pady=(0, 10))
         content_menu = self._make_content_menu(toolbar)
         ttk.Menubutton(
             toolbar, text="Import or audit package", menu=content_menu,
-            style="Accent.TButton",
+            style="Accent.TMenubutton",
         ).pack(side="left")
         self.review_menu = self._make_review_menu(toolbar)
         ttk.Menubutton(
             toolbar, text="Inspect or export", menu=self.review_menu,
+            style="Quiet.TMenubutton",
         ).pack(side="left", padx=(7, 0))
         intelligence_menu = self._make_intelligence_menu(toolbar)
         ttk.Menubutton(
             toolbar, text="Package tools", menu=intelligence_menu,
+            style="Quiet.TMenubutton",
         ).pack(side="left", padx=(7, 0))
+        self.refresh_audit_button = ttk.Button(
+            toolbar, text="Refresh audit", command=self._refresh_audit,
+            style="Quiet.TButton", state="disabled",
+        )
         panes = ttk.Panedwindow(linker_page, orient="horizontal")
         self.linker_panes = panes
         panes.pack(fill="both", expand=True)
@@ -838,8 +1078,7 @@ class AddonSdkDialog(tk.Toplevel):
                 self.installation_roots, include_external=True,
             )
         except (OSError, ValueError) as exc:
-            messagebox.showerror("SDK example error", str(exc), parent=self)
-            self.status.set("Could not load built-in examples")
+            self.status.set(f"Could not load SDK packages · {exc}")
             return
         self._populate_manifest_list(select_first=True)
         if not self.manifests:
@@ -903,34 +1142,38 @@ class AddonSdkDialog(tk.Toplevel):
 
     def _open_manifest(self) -> None:
         selected = filedialog.askopenfilename(
-            parent=self, title="Open ALLIN1 SDK manifest",
-            filetypes=(("ALLIN1 add-on manifest", "addon.json"), ("JSON", "*.json")),
+            parent=self, title="Open ALLIN1 manifest or product workspace",
+            filetypes=(
+                ("ALLIN1 manifests", "*.json"),
+                ("Add-on manifest", "addon.json"),
+            ),
         )
         if not selected:
             return
+        self.open_manifest_path(selected)
+
+    def open_manifest_path(
+        self, selected: str | Path, *, remember: bool = True,
+    ) -> None:
+        """Open a validated add-on or product workspace in the existing linker."""
         try:
             manifest = AddonManifest.load(selected)
         except (OSError, ValueError) as exc:
-            messagebox.showerror("Invalid add-on manifest", str(exc), parent=self)
+            messagebox.showerror("Invalid ALLIN1 manifest", str(exc), parent=self)
             return
-        try:
-            manifest = self.catalog.remember(selected)
-        except (OSError, ValueError) as exc:
-            messagebox.showerror("Could not remember manifest", str(exc), parent=self)
-            return
+        if remember:
+            try:
+                manifest = self.catalog.remember(selected)
+            except (OSError, ValueError) as exc:
+                messagebox.showerror("Could not remember manifest", str(exc), parent=self)
+                return
         self._append_manifest(manifest)
 
     def _append_manifest(self, manifest: AddonManifest) -> None:
-        identity = (
-            manifest.addon_id.casefold(), manifest.catalog_origin.casefold(),
-            str(manifest.package_source or manifest.manifest_path).casefold(),
-        )
+        identity = manifest.catalog_identity
         index = next((
             number for number, existing in enumerate(self.manifests)
-            if (
-                existing.addon_id.casefold(), existing.catalog_origin.casefold(),
-                str(existing.package_source or existing.manifest_path).casefold(),
-            ) == identity
+            if existing.catalog_identity == identity
         ), -1)
         if index >= 0:
             self.manifests[index] = manifest
@@ -988,11 +1231,8 @@ class AddonSdkDialog(tk.Toplevel):
             self.status.set("Package-folder audit failed")
             messagebox.showerror("Audit failed", detail, parent=self)
             return
-        self.status.set(f"Package audit written: {Path(destination).name}")
-        messagebox.showinfo(
-            "Package audit complete",
-            f"The review report was written to:\n{Path(destination).resolve()}",
-            parent=self,
+        self.status.set(
+            f"Package audit written · {Path(destination).resolve()}",
         )
 
     def _import_package(self, source: Path) -> None:
@@ -1042,14 +1282,9 @@ class AddonSdkDialog(tk.Toplevel):
             messagebox.showerror("Draft generation failed", str(exc), parent=self)
             return
         self._append_manifest(manifest)
-        messagebox.showinfo(
-            "SDK draft generated",
-            self._scan_summary(scan) +
-            f"\n\nDraft: {written}\n"
-            f"Linker: {report.error_count} errors and {report.warning_count} warnings.\n"
-            "Generated drafts are intentionally not installable until every "
-            "required link and rollback step is resolved.",
-            parent=self,
+        self.status.set(
+            f"SDK draft written · {written} · {report.error_count} errors · "
+            f"{report.warning_count} warnings",
         )
         self.package_source = source
         self.package_scan = scan
@@ -1079,6 +1314,27 @@ class AddonSdkDialog(tk.Toplevel):
                 self.status.set(
                     f"Content Workbench · {self.package_source.name}",
                 )
+
+    def _open_quick_import_workbench(self, category: str) -> None:
+        """Route a Quick Import category into the consolidated advanced tools."""
+        self._select_workspace("workbench")
+        self.workbench_workspace.select_category(category)
+        self.status.set(
+            f"Content Workbench · {category.replace('_', ' ').title()}",
+        )
+
+    def _open_quick_import_launcher(
+        self, package_id: str, traffic_requested: bool,
+    ) -> None:
+        """Hand a prepared package to Launcher's non-mutating review route."""
+        from allin1_sdk.launcher_bridge import open_launcher_packages
+
+        open_launcher_packages(
+            self.project_root,
+            package_id,
+            traffic_requested=traffic_requested,
+        )
+        self.status.set(f"Opened Launcher Packages · {package_id}")
 
     def _open_model_materials(self) -> None:
         """Route the current package into the integrated native model workspace."""
@@ -1246,11 +1502,8 @@ class AddonSdkDialog(tk.Toplevel):
             self.status.set("Package RPF inspection failed")
             messagebox.showerror("RPF inspection failed", detail, parent=self)
             return
-        self.status.set("Package RPF reports written")
-        messagebox.showinfo(
-            "RPF inspection complete",
-            f"Read-only reports were written to:\n{Path(destination).resolve()}",
-            parent=self,
+        self.status.set(
+            f"Package RPF reports written · {Path(destination).resolve()}",
         )
 
     def _inventory_dlc(self) -> None:
@@ -1276,11 +1529,9 @@ class AddonSdkDialog(tk.Toplevel):
         except (OSError, ValueError) as exc:
             messagebox.showerror("DLC inventory failed", str(exc), parent=self)
             return
-        self.status.set(f"Wrote {len(reports)} DLC inventory report(s)")
-        messagebox.showinfo(
-            "DLC inventory complete",
-            "Read-only Markdown and JSON reports were written to:\n"
-            f"{Path(destination).resolve()}", parent=self,
+        self.status.set(
+            f"Wrote {len(reports)} DLC inventory report(s) · "
+            f"{Path(destination).resolve()}",
         )
 
     def _compile_vehicle_data(self) -> None:
@@ -1308,12 +1559,8 @@ class AddonSdkDialog(tk.Toplevel):
             return
         self.status.set(
             f"Compiled {len(report.vehicles)} vehicle(s): "
-            f"{report.error_count} errors, {report.warning_count} warnings"
-        )
-        messagebox.showinfo(
-            "Vehicle data compiled",
-            "JSON, CSV, XLSX, and Markdown reports were written to:\n"
-            f"{Path(destination).resolve()}", parent=self,
+            f"{report.error_count} errors, {report.warning_count} warnings · "
+            f"{Path(destination).resolve()}",
         )
 
     def _compare_meta(self) -> None:
@@ -1342,11 +1589,8 @@ class AddonSdkDialog(tk.Toplevel):
         except (OSError, RuntimeError, ValueError) as exc:
             messagebox.showerror("META/XML comparison failed", str(exc), parent=self)
             return
-        self.status.set(f"Structured META/XML diff: {len(report.changes)} changes")
-        messagebox.showinfo(
-            "META/XML comparison complete",
-            f"Found {len(report.changes)} semantic change(s).\n\nReport: {written}",
-            parent=self,
+        self.status.set(
+            f"Structured META/XML diff · {len(report.changes)} changes · {written}",
         )
 
     def _validate_meta_roundtrip(self) -> None:
@@ -1371,11 +1615,9 @@ class AddonSdkDialog(tk.Toplevel):
         except (OSError, RuntimeError, ValueError) as exc:
             messagebox.showerror("META/XML round trip failed", str(exc), parent=self)
             return
-        self.status.set("META/XML round trip is semantically equivalent")
-        messagebox.showinfo(
-            "META/XML round trip passed",
-            f"The serialized document reparsed with the same canonical structure.\n\n"
-            f"Report: {Path(output).resolve()}", parent=self,
+        self.status.set(
+            "META/XML round trip is semantically equivalent · "
+            f"{Path(output).resolve()}",
         )
 
     @staticmethod
@@ -1408,16 +1650,179 @@ class AddonSdkDialog(tk.Toplevel):
             lines.append(f"- …and {len(scan.findings) - 10} more findings.")
         return "\n".join(lines)
 
-    def _show_manifest(self, manifest: AddonManifest) -> None:
-        self.package_source = manifest.package_source
+    def _insert_api_contracts(self, contracts: RuntimeContractReport) -> None:
+        """Render the canonical read-only API report in the existing graph."""
+        call_count = sum(len(item.api_calls) for item in contracts.packages)
+        verified_calls = sum(
+            call.status == "verified"
+            for item in contracts.packages for call in item.api_calls
+        )
+        root_id = "api:root"
+        self.graph.insert(
+            "", "end", iid=root_id, text="API contracts",
+            values=(
+                f"{len(contracts.hosts)} host · {len(contracts.packages)} packages",
+                f"{verified_calls}/{call_count} calls",
+            ),
+            open=True,
+        )
+        self._selection[root_id] = contracts
+
+        for host in contracts.hosts:
+            host_id = f"api:host:{host.component_id}"
+            self.graph.insert(
+                root_id, "end", iid=host_id,
+                text=f"{host.public_type} — API v{host.api_version}",
+                values=(host.component_id, host.status), open=False,
+            )
+            self._selection[host_id] = host
+            members_id = f"{host_id}:members"
+            self.graph.insert(
+                host_id, "end", iid=members_id, text="Public members",
+                values=("host surface", str(len(host.members))), open=False,
+            )
+            self._selection[members_id] = host
+            for index, member in enumerate(host.members, start=1):
+                member_id = f"{members_id}:{index}:{member.name}"
+                self.graph.insert(
+                    members_id, "end", iid=member_id, text=member.name,
+                    values=(member.kind, member.status),
+                )
+                self._selection[member_id] = member
+
+        for package in contracts.packages:
+            package_id = f"api:package:{package.component_id}"
+            api_label = (
+                f"API v{package.api_version}"
+                if package.api_version is not None else "API unresolved"
+            )
+            self.graph.insert(
+                root_id, "end", iid=package_id,
+                text=package.package_id or package.component_id,
+                values=(api_label, package.status), open=False,
+            )
+            self._selection[package_id] = package
+
+            groups: tuple[tuple[str, str, str, tuple[str, ...], str], ...] = (
+                ("assemblies", "Runtime assemblies", "Runtime assembly",
+                 package.runtime_assemblies,
+                 "Receipt-owned runtime assembly declared by the content package."),
+                ("entry-points", "Entry points", "Entry point", package.entry_points,
+                 "Runtime type declared by a receipt-owned assembly."),
+                ("capabilities", "Capabilities", "Capability", package.capabilities,
+                 "Capability declared by the content package."),
+                ("settings", "Settings", "Setting", package.settings,
+                 "Typed setting declared by the content package."),
+                ("interfaces", "Interfaces", "Interface", package.interfaces,
+                 "Host API interface found in bounded package source."),
+                ("requirements", "Package requirements", "Package requirement",
+                 package.requirements,
+                 "Managed package dependency required by this content package."),
+                ("workbench", "Workbench relationships", "Workbench relationship",
+                 package.workbench_relationships,
+                 "Authored relationship connecting runtime behavior to Workbench evidence."),
+                ("projects", "Project references", "Project reference",
+                 package.project_references,
+                 "Bounded project reference from the consumer to the shared runtime."),
+            )
+            for key, label, field_label, values, description in groups:
+                if not values:
+                    continue
+                group_id = f"{package_id}:{key}"
+                self.graph.insert(
+                    package_id, "end", iid=group_id, text=label,
+                    values=("contract details", str(len(values))), open=False,
+                )
+                self._selection[group_id] = package
+                for index, value in enumerate(values, start=1):
+                    source = package.manifest
+                    if key == "entry-points" and index <= len(
+                        package.entry_point_sources
+                    ):
+                        source = package.entry_point_sources[index - 1]
+                    detail = _ApiContractDetail(
+                        heading=value,
+                        description=description,
+                        source=source,
+                        line=None,
+                        fields=(
+                            ("Package", package.package_id or package.component_id),
+                            ("API provider", package.provider_component_id),
+                            (field_label, value),
+                            ("Contract status", package.status),
+                        ),
+                    )
+                    detail_id = f"{group_id}:{index}"
+                    self.graph.insert(
+                        group_id, "end", iid=detail_id, text=value,
+                        values=(label.casefold(), package.status),
+                    )
+                    self._selection[detail_id] = detail
+
+            if package.api_calls:
+                calls_id = f"{package_id}:calls"
+                self.graph.insert(
+                    package_id, "end", iid=calls_id, text="API calls",
+                    values=("bounded source", str(len(package.api_calls))),
+                    open=False,
+                )
+                self._selection[calls_id] = package
+                for index, call in enumerate(package.api_calls, start=1):
+                    call_id = f"{calls_id}:{index}:{call.member}"
+                    self.graph.insert(
+                        calls_id, "end", iid=call_id, text=call.member,
+                        values=(call.capability or "public", call.status),
+                    )
+                    self._selection[call_id] = call
+
+    def _show_manifest(
+        self, manifest: AddonManifest, *, preferred_selection: str | None = None,
+    ) -> None:
+        # Product workspaces are bounded source/evidence graphs, not content
+        # packages. Never offer an action that would recursively scan their
+        # repository root as though it were a mod payload.
+        self.package_source = (
+            None if manifest.is_product_workspace else manifest.package_source
+        )
         self.package_scan = None
         self._set_package_actions(
-            assets=self.package_source is not None, rpfs=False,
-            workbench=self.package_source is not None,
+            assets=(self.package_source is not None and not manifest.is_product_workspace),
+            rpfs=False,
+            workbench=(
+                self.package_source is not None and not manifest.is_product_workspace
+            ),
         )
         self.report = self.linker.link(manifest)
+        self._set_audit_actions(True)
         self._selection.clear()
         self.graph.delete(*self.graph.get_children())
+        if manifest.workspace_summary:
+            summary = dict(manifest.workspace_summary)
+            summary_id = "workspace:summary"
+            self.graph.insert(
+                "", "end", iid=summary_id, text="Workspace evidence",
+                values=(
+                    f"{summary.get('Coverage', 'n/a')} coverage",
+                    f"{summary.get('Tracked files', 0)} tracked files",
+                ),
+                open=True,
+            )
+            self._selection[summary_id] = summary
+        if self.report.issues:
+            diagnostics_root = self.graph.insert(
+                "", "end", text="Diagnostics", values=("validation", ""),
+                open=True,
+            )
+            for index, issue in enumerate(self.report.issues, start=1):
+                item_id = f"issue:{index}"
+                self.graph.insert(
+                    diagnostics_root, "end", iid=item_id,
+                    text=issue.code.replace("_", " ").title(),
+                    values=(issue.severity, issue.subject or "workspace"),
+                )
+                self._selection[item_id] = issue
+        if manifest.runtime_contracts is not None:
+            self._insert_api_contracts(manifest.runtime_contracts)
         content_root = self.graph.insert(
             "", "end", text="Content fields", values=("graph", ""), open=True,
         )
@@ -1442,35 +1847,84 @@ class AddonSdkDialog(tk.Toplevel):
             item_id = f"ref:{ref.reference_id}"
             self.graph.insert(
                 link_root, "end", iid=item_id,
-                text=f"{ref.source_field} → {ref.target_field}",
-                values=(ref.relationship, "resolved" if linked.valid else "error"),
+                text=(
+                    f"{ref.source} — {ref.relationship.replace('_', ' ')} "
+                    f"→ {ref.target}"
+                ),
+                values=("relationship", "resolved" if linked.valid else "error"),
             )
             self._selection[item_id] = ref
 
-        plan_root = self.graph.insert(
-            "", "end", text="Install plan", values=("ordered", ""), open=True,
-        )
-        for step in manifest.install_steps:
-            item_id = f"step:{step.step_id}"
-            self.graph.insert(
-                plan_root, "end", iid=item_id,
-                text=f"{step.order}. {step.title}",
-                values=(step.strategy, "read-only plan"),
+        if manifest.install_steps:
+            plan_root = self.graph.insert(
+                "", "end", text="Install plan", values=("ordered", ""), open=True,
             )
-            self._selection[item_id] = step
+            for step in manifest.install_steps:
+                item_id = f"step:{step.step_id}"
+                self.graph.insert(
+                    plan_root, "end", iid=item_id,
+                    text=f"{step.order}. {step.title}",
+                    values=(step.strategy, "read-only plan"),
+                )
+                self._selection[item_id] = step
 
         state = "PASS" if self.report.valid else "FAIL"
-        self.status.set(
-            f"{manifest.catalog_state} · {state} · {len(manifest.nodes)} nodes · "
-            f"{sum(item.valid for item in self.report.references)}/"
-            f"{len(self.report.references)} references · "
-            f"{self.report.error_count} errors · {self.report.warning_count} warnings"
+        if manifest.workspace_summary:
+            summary = manifest.workspace_summary
+            self.status.set(
+                f"{manifest.catalog_state} · {state} · "
+                f"{summary.get('Components', len(manifest.nodes))} components · "
+                f"{summary.get('Coverage', 'n/a')} coverage · "
+                f"{summary.get('Tracked files', 0)} tracked files · "
+                f"{summary.get('Unassigned files', 0)} unassigned · "
+                f"{self.report.error_count} errors · "
+                f"{self.report.warning_count} warnings"
+            )
+        else:
+            self.status.set(
+                f"{manifest.catalog_state} · {state} · {len(manifest.nodes)} nodes · "
+                f"{sum(item.valid for item in self.report.references)}/"
+                f"{len(self.report.references)} references · "
+                f"{self.report.error_count} errors · {self.report.warning_count} warnings"
+            )
+        first_node = next(
+            (key for key in self._selection if key.startswith("node:")), None,
         )
-        first_node = next((key for key in self._selection if key.startswith("node:")), None)
-        if first_node:
-            self.graph.selection_set(first_node)
-            self.graph.see(first_node)
+        target = (
+            preferred_selection
+            if preferred_selection in self._selection
+            else first_node
+        )
+        if target:
+            self.graph.selection_set(target)
+            self.graph.see(target)
             self._inspect_selection()
+
+    def _refresh_audit(self) -> None:
+        if self.report is None:
+            return
+        current = self.report.manifest
+        selection = self.graph.selection()
+        preferred = selection[0] if selection else None
+        try:
+            refreshed = AddonManifest.load(
+                current.manifest_path, source_root=current.source_root,
+            )
+            refreshed = replace(
+                refreshed,
+                catalog_state=current.catalog_state,
+                catalog_origin=current.catalog_origin,
+                package_source=current.package_source,
+            )
+        except (OSError, ValueError) as exc:
+            self.status.set(f"Audit refresh failed · {exc}")
+            return
+        for index, candidate in enumerate(self.manifests):
+            if candidate.manifest_path == current.manifest_path:
+                self.manifests[index] = refreshed
+                break
+        self._show_manifest(refreshed, preferred_selection=preferred)
+        self.status.set(f"Refreshed · {self.status.get()}")
 
     def _set_details(self, value: str) -> None:
         self.details.configure(state="normal")
@@ -1485,13 +1939,137 @@ class AddonSdkDialog(tk.Toplevel):
         item = self._selection.get(selection[0])
         self.fields.delete(*self.fields.get_children())
         self.field_help.set("Select a field to see why GTA V needs it.")
-        if isinstance(item, AddonNode):
+        if isinstance(item, RuntimeContractReport):
+            calls = sum(len(package.api_calls) for package in item.packages)
+            verified = sum(
+                call.status == "verified"
+                for package in item.packages for call in package.api_calls
+            )
+            self.heading.set("Runtime API contracts")
+            self._set_details(
+                "Checked-in host API declarations linked to bounded content "
+                "manifests and source evidence. Nothing is loaded or executed."
+            )
+            for field, value in (
+                ("Contract status", "verified" if item.valid else "review required"),
+                ("Hosts", len(item.hosts)),
+                ("Packages", len(item.packages)),
+                ("API calls", f"{verified}/{calls} verified"),
+                ("Errors", item.error_count),
+                ("Warnings", item.warning_count),
+            ):
+                self.fields.insert("", "end", text=field, values=(value,))
+        elif isinstance(item, RuntimeHostAudit):
+            self.heading.set(f"{item.public_type} — API v{item.api_version}")
+            self._set_details(
+                "Public Story Mode extension surface verified against its "
+                "checked-in source declaration."
+                f"\n\nSource: {item.source}"
+            )
+            for field, value in (
+                ("Component", item.component_id),
+                ("API version", item.api_version),
+                ("Assembly", item.assembly),
+                ("Public type", item.public_type),
+                ("Source", item.source),
+                ("Members", len(item.members)),
+                ("Contract status", item.status),
+            ):
+                self.fields.insert("", "end", text=field, values=(value,))
+        elif isinstance(item, RuntimeMemberAudit):
+            location = (
+                f"{item.evidence.path}:{item.evidence.line}"
+                if item.evidence else "No declaration evidence"
+            )
+            excerpt = item.evidence.excerpt if item.evidence else ""
+            self.heading.set(item.name)
+            self._set_details(
+                "Checked-in public API member."
+                + (f"\n\n{excerpt}" if excerpt else "")
+                + f"\n\nEvidence: {location}"
+            )
+            for field, value in (
+                ("Name", item.name),
+                ("Kind", item.kind),
+                ("Required capability", item.capability or "none"),
+                ("Required interfaces", item.requires or ("none",)),
+                ("Expected signature", item.expected_signature or "not applicable"),
+                ("Observed signature", item.actual_signature or "not found"),
+                ("Contract status", item.status),
+                ("Source line", location),
+            ):
+                self.fields.insert("", "end", text=field, values=(_display_value(value),))
+        elif isinstance(item, RuntimePackageAudit):
+            title = item.package_id or item.component_id
+            self.heading.set(title)
+            self._set_details(
+                "Content-package declarations and bounded runtime usage linked "
+                f"to {item.provider_component_id}.\n\nSource: {item.manifest}"
+            )
+            for field, value in (
+                ("Component", item.component_id),
+                ("Package", item.package_id or "unresolved"),
+                ("Version", item.version or "unresolved"),
+                ("API version", item.api_version if item.api_version is not None else "unresolved"),
+                ("API provider", item.provider_component_id),
+                ("Relationship", item.relation),
+                ("Capabilities", item.capabilities or ("none",)),
+                ("Runtime assemblies", item.runtime_assemblies or ("none",)),
+                ("Entry points", item.entry_points or ("none",)),
+                ("Settings", item.settings or ("none",)),
+                ("Interfaces", item.interfaces or ("none",)),
+                ("API calls", len(item.api_calls)),
+                ("Workbench relationships", item.workbench_relationships or ("none",)),
+                ("Package requirements", item.requirements or ("none",)),
+                ("Project references", item.project_references or ("none",)),
+                ("Contract status", item.status),
+            ):
+                self.fields.insert("", "end", text=field, values=(_display_value(value),))
+        elif isinstance(item, RuntimeApiCall):
+            self.heading.set(item.member)
+            self._set_details(
+                "Bounded package source call matched against the checked-in "
+                "host API contract."
+                f"\n\n{item.evidence.excerpt}"
+                f"\n\nEvidence: {item.evidence.path}:{item.evidence.line}"
+            )
+            for field, value in (
+                ("Member", item.member),
+                ("Required capability", item.capability or "none"),
+                ("Contract status", item.status),
+                ("Source", item.evidence.path),
+                ("Source line", item.evidence.line),
+            ):
+                self.fields.insert("", "end", text=field, values=(value,))
+        elif isinstance(item, _ApiContractDetail):
+            self.heading.set(item.heading)
+            location = (
+                f"\n\nSource: {item.source}"
+                + (f":{item.line}" if item.line is not None else "")
+                if item.source else ""
+            )
+            self._set_details(item.description + location)
+            for field, value in item.fields:
+                self.fields.insert(
+                    "", "end", text=field, values=(_display_value(value),),
+                )
+        elif isinstance(item, AddonNode):
             self.heading.set(item.label)
             source = f"\n\nSource: {item.source}" if item.source else ""
             self._set_details((item.description or "Integration content node.") + source)
             for field, value in item.fields.items():
                 self.fields.insert("", "end", iid=f"field:{field}", text=field,
                                    values=(_display_value(value),))
+        elif isinstance(item, dict):
+            self.heading.set("Workspace evidence")
+            self._set_details(
+                "Bounded tracked-file attribution for the selected product workspace."
+            )
+            for field, value in item.items():
+                self.fields.insert(
+                    "", "end", iid=f"field:{field}", text=field,
+                    values=(_display_value(value),),
+                )
         elif isinstance(item, AddonReference):
             self.heading.set(item.relationship.replace("_", " ").title())
             self._set_details(
@@ -1512,6 +2090,15 @@ class AddonSdkDialog(tk.Toplevel):
             for field, value in (
                 ("order", item.order), ("target", item.target),
                 ("strategy", item.strategy),
+            ):
+                self.fields.insert("", "end", text=field, values=(value,))
+        elif isinstance(item, AddonIssue):
+            self.heading.set(item.code.replace("_", " ").title())
+            subject = f"\n\nSubject: {item.subject}" if item.subject else ""
+            self._set_details(item.message + subject)
+            for field, value in (
+                ("severity", item.severity), ("code", item.code),
+                ("subject", item.subject or "workspace"),
             ):
                 self.fields.insert("", "end", text=field, values=(value,))
 
@@ -1539,7 +2126,20 @@ class AddonSdkDialog(tk.Toplevel):
             return None
         selection = self.graph.selection()
         item = self._selection.get(selection[0]) if selection else None
-        source = item.source if isinstance(item, (AddonNode, AddonInstallStep)) else None
+        if isinstance(item, (AddonNode, AddonInstallStep, AddonIssue)):
+            source = item.source
+        elif isinstance(item, RuntimeHostAudit):
+            source = item.source
+        elif isinstance(item, RuntimeMemberAudit):
+            source = item.evidence.path if item.evidence else None
+        elif isinstance(item, RuntimePackageAudit):
+            source = item.manifest
+        elif isinstance(item, RuntimeApiCall):
+            source = item.evidence.path
+        elif isinstance(item, _ApiContractDetail):
+            source = item.source
+        else:
+            source = None
         if source:
             return (self.report.manifest.source_root / source).resolve()
         return self.report.manifest.manifest_path

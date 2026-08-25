@@ -25,13 +25,15 @@ HELP_TOPICS: tuple[HelpTopic, ...] = (
     HelpTopic(
         "getting-started", "Start here", "Getting started",
         "Import or audit a package, resolve its links, and export a reviewable report.",
-        """1. Use Import or audit package to open an addon.json or scan a DLC folder/archive.
+        """1. Use Open manifest or product workspace to open an addon.json, an allin1.workspace.json, or scan a DLC folder/archive.
 2. Select a package and inspect every node in the Package Linker graph.
 3. Resolve missing fields, source files, references, edition tags, and rollback steps.
 4. Export the link report and keep it with the package's release artifacts.
 
+An allin1.workspace.json is a data-only map for a larger product repository. It keeps launcher hosts, shared runtimes, content packs, tools, examples, optional packages, tests, and documentation in distinct graph roles. The SDK inventories only Git-tracked declared paths (or a bounded declared-only fallback), never executes source, never follows links, and never turns test/documentation evidence into install candidates.
+
 The SDK audits and authors content. Its RPF workspace applies reviewed file and directory-tree plans to an exact mods copy or an explicitly isolated external workspace, including recursively nested entries up to eight archive levels. Full package installation, repair, and game launch remain the responsibility of the separate ALLIN1 Launcher.""",
-        ("first run", "import", "addon", "linker", "report"),
+        ("first run", "import", "addon", "linker", "report", "product workspace"),
     ),
     HelpTopic(
         "editions", "Start here", "Legacy and Enhanced installations",
@@ -40,6 +42,24 @@ The SDK audits and authors content. Its RPF workspace applies reviewed file and 
 
 Package scans label declared and inferred compatibility but never silently convert assets between editions. Treat an unresolved edition as a release blocker until it is tested against a specific build.""",
         ("gen9", "path", "target", "compatibility"),
+    ),
+    HelpTopic(
+        "product-workspace", "Inspectors", "Product workspace evidence",
+        "See which declared files belong to each product component and where coverage overlaps or has gaps.",
+        """Open an allin1.workspace.json when one repository contains a launcher host, shared runtime, built-in content, optional packages, tools, examples, tests, or documentation. The workspace is a data-only ownership map; the SDK never imports or executes the source it inventories.
+
+The graph distinguishes managed built-ins from installable packages. A managed built-in is content delivered through its product host and is not presented as a standalone package candidate. An installable package has its own declared package identity and lifecycle.
+
+Every component shows its declared paths, matched file/byte total, unique file/byte total, and shared file/byte total. Shared evidence identifies files claimed by more than one component. Unassigned evidence identifies bounded tracked files that match the workspace allowlist but no component. Both sample lists are bounded, while their full file and byte counts remain visible.
+
+When a Story Mode runtime declares a machine-readable API contract, the API contracts branch verifies the host surface against bounded C# source and connects package API versions, assemblies, entry points, calls, capabilities, interfaces, typed settings, project references, and Workbench relationships. API mismatches remain inspectable diagnostics; the SDK never loads either DLL or executes the source.
+
+Use inspect-product-workspace from the SDK Console or read-only Agent API for the same structured report. Its default JSON keeps the component coverage and bounded shared/unassigned samples while omitting the long global inventory. Add --include-files only when an authorized tool needs every bounded tracked inventory entry. No separate audit command is required, so desktop, console, and API results cannot drift.""",
+        (
+            "product workspace", "component evidence", "coverage", "ownership",
+            "shared files", "unassigned files", "managed built-in",
+            "installable package", "read-only", "source execution",
+        ),
     ),
     HelpTopic(
         "install-repair", "Environment", "SDK toolchain setup",
@@ -80,17 +100,19 @@ The host budgets context before model startup, preserves explicitly requested sy
 
 The transport never invokes a shell and cannot evaluate Python. Requests are written to the per-user agent-api-audit.jsonl log. Game/archive mutation commands are rejected by default. A user must explicitly start the process with --allow-game-writes, and the requested SDK command must still pass its normal acknowledgement, closed-game, authorized-target, checksum, lock, backup, and rollback checks. validate-package verifies a mod.toml and its payload hashes; inspect-package-receipt and verify-package-ownership provide read-only receipt evidence; list-installed-packages discovers receipt-backed installs; install-package validates and installs a package; uninstall-package removes one through its owned-file and backup receipt.
 
-The read-only assistant group is also available through execute requests: pass command assistant and args beginning with context or prompt. The host supplies focused repository, workspace, manifest, game-path, dirty-state, and live command evidence under a permanent ALLIN1 policy. A prompt response cannot approve or invoke another command. This API remains the stable foundation for later reviewed AI-assisted package inspection and approved package lifecycle actions. The ALLIN1 Launcher remains the user-facing owner of assistant installation, interactive package installation, and game launch.""",
+The read-only assistant group is also available through execute requests: pass command assistant and args beginning with context or prompt. Vehicle Quick Import is exposed as the read-only inspect-vehicle-quick-import command and the authoring-only prepare-vehicle-quick-import command; preparation may create a package in the shared library but never writes GTA V. The host supplies focused repository, workspace, manifest, game-path, dirty-state, and live command evidence under a permanent ALLIN1 policy. A prompt response cannot approve or invoke another command. This API remains the stable foundation for later reviewed AI-assisted package inspection and approved package lifecycle actions. The ALLIN1 Launcher remains the user-facing owner of assistant installation, interactive package installation, and game launch.""",
         ("ai", "agent", "api", "json", "jsonl", "stdio", "automation", "audit", "qwen", "assistant"),
     ),
     HelpTopic(
         "input", "Interface", "Navigating the SDK",
         "Use the integration graph, field inspector, menus, and search efficiently.",
-        """Package imports and audits are grouped under Import or audit package. Inspect or export applies to the selected package, and Package tools contains cross-package workflows.
+        """The white product header keeps the SDK identity, version, support link, and active-workspace marker in one consistent place. It exposes one compact contextual return link only when there is somewhere useful to go back to.
 
-Use the workspace sidebar to move between Package Linker, Asset Viewer, Content Workbench, Models & Materials, RPF Archives, Package Recipes, and Help Center. The slim arrow on its right edge points < while open to fold the sidebar in, then points > to expand it back out; Ctrl+B or View > Show workspace sidebar provides the same toggle from anywhere. Ctrl+1–7 selects those workspaces without opening another application window. A compact ‹ previous-workspace link appears in the header when there is somewhere useful to return; Alt+Left activates the same history route even while the sidebar is folded. Ctrl+Tab and Ctrl+Shift+Tab cycle between workspaces. The SDK Console remains available along the bottom in every context.
+File contains package and workspace entry points. Package groups inspection, export, authoring, and cross-package utilities. The Package Linker toolbar keeps the three common action groups—Import or audit package, Inspect or export, and Package tools—close to the work without duplicating specialist controls.
 
-Select an integration node to see its source, contract, and linked fields. Select a field for a plain-language explanation. Ctrl+` focuses or expands the console dock and F1 routes to contextual help.""",
+Use the workspace sidebar to move between Package Linker, Asset Viewer, Content Workbench, Quick Import, Models & Materials, RPF Archives, Package Recipes, and Help Center. The slim arrow on its right edge points < while open to fold the sidebar in, then points > to expand it back out; Ctrl+B or View > Show workspace sidebar provides the same toggle from anywhere. Ctrl+1–7 selects the numbered workspaces and Ctrl+I opens Quick Import without creating another application window. A compact ‹ previous-workspace link appears in the header when there is somewhere useful to return; Alt+Left activates the same history route even while the sidebar is folded. Ctrl+Tab and Ctrl+Shift+Tab cycle between workspaces. The SDK Console remains available along the bottom in every context.
+
+The activity strip uses neutral, busy, success, warning, and error tones so routine completion does not open another confirmation window. Its right edge keeps F1 Help and Ctrl+backtick Console visible. Select an integration node to see its source, contract, and linked fields. Select a field for a plain-language explanation. Ctrl+O opens a manifest or product workspace, F5 refreshes the active audit, Ctrl+` focuses or expands the console dock, and F1 routes to contextual help.""",
         ("navigation", "menus", "graph", "field", "keyboard"),
     ),
     HelpTopic(
@@ -117,9 +139,9 @@ Select the matching Legacy or Enhanced installation only when archive keys or na
     HelpTopic(
         "sdk", "Authoring", "Package Linker",
         "Trace game-facing fields and audit add-on integration before installation.",
-        """The Add-on SDK links authored package fields to metadata, native UI text, animations, runtime behavior, packaging, and rollback expectations.
+        """The Add-on SDK links authored package fields to metadata, native UI text, animations, runtime behavior, packaging, and rollback expectations. It also opens allin1.workspace.json product maps in the same graph so a multi-package repository can be reviewed without recursively scanning build outputs, caches, tools, or local artifacts.
 
-Import a DLC folder or archive, inspect its integration graph, then select nodes and fields for explanations. Workbench keeps vehicle, weapon, and ped projects in three tabs backed by the same package scan. Package Tools opens the persistent Package Recipes workspace alongside DLC inventory, vehicle-data compilation, and structured META/XML comparison and round-trip tools.
+Import a DLC folder or archive, inspect its integration graph, then select nodes and fields for explanations. Content Workbench keeps the advanced vehicle, weapon, and ped tools together in three tabs backed by the same package scan. Quick Import is a separate guided route for turning supported content into Launcher packages. Package Tools opens the persistent Package Recipes workspace alongside DLC inventory, vehicle-data compilation, and structured META/XML comparison and round-trip tools.
 
 Package Recipes recognizes official XML add/replace/remove, bounded line-oriented text, and native PSO grammar as compile workflows while keeping wildcard text masks, PSO edits in newly created archives, unbounded archive creation, ambiguous selectors, and unknown operations blocked. Select the matching outer RPF to compile supported recipes into verified payloads and a hash-bound inert plan; the source archive is not written. Native PSO targets are decoded with the selected game's keys, edited through bounded XPath, rebuilt against their immutable source, reparsed, and required to match the edited XML semantically. Text insert/replace/delete selectors use exact or prefix matching and must resolve to one line. Bounded createIfNotExist recipes replay declared adds, structured edits, and cleanup deletes in order before becoming exactly verified managed packages, while exact adds/replacements/deletes inside existing nested RPF trees can be exported as payload-backed batch manifests.""",
         ("authoring", "addon", "dlc", "audit", "linker", "developer"),
@@ -153,6 +175,23 @@ Console and Agent API commands expose the same contract: open-model-material-wor
         (
             "materials", "shader", "texture binding", "sampler", "ydr", "ydd",
             "yft", "render", "blender", "geometry", "lod", "authoring",
+        ),
+    ),
+    HelpTopic(
+        "quick-import", "Authoring", "Quick Import",
+        "Prepare a validated Launcher package or standalone Legacy OIV with fewer steps.",
+        """Quick Import is separate from the advanced Content Workbench. Its Vehicle, Weapon, and Ped tabs are designed for fast packaging, while Content Workbench remains the place for detailed metadata, native-asset, and authoring work.
+
+Vehicle Quick Import scans a package archive, shows only editions proven by its vehicle metadata and recursively inspected RPF branch, and lets you review each GBAY listing. Technical model labels are made readable when that can be done safely, known manufacturers may be recognized from an unambiguous package filename, and vehicle size is shown as Standard, Large, or Oversize while retaining the numeric package contract. A zero price requires explicit confirmation. Traffic is off by default and becomes eligible only when explicitly selected for a road vehicle. Aircraft and boats retain their specialized storage and cannot opt into normal road traffic.
+
+Prepare for Launcher writes a schema-2 package to the per-user ALLIN1 package library. It does not write GTA V. Re-preparing the same ID is allowed only when the existing folder proves it is the intact SDK-authored package being replaced; arbitrary folders are refused. Open in Launcher hands off the package and its traffic choice for normal user approval, validation, backup, receipt, and rollback handling, and never auto-installs. The GBAY placeholder is the clear preview default. Advanced users may instead choose a package-owned YTD candidate and enter a verified texture name; Quick Import never invents a texture or disguises an ordinary image as one.
+
+Export Legacy OIV is the standalone alternative for creators or players who do not use ALLIN1 Launcher. It requires an explicit author, revalidates the exact Legacy DLC archive, and creates a conventional OIV package containing the vehicle files and DLC-list registration only. It never writes GTA V and never overwrites an existing output. GBAY listings, ALLIN1 traffic controls, receipts, backups, and managed rollback are intentionally not included. Enhanced-only packages cannot be represented by this export and are refused.
+
+Weapon and Ped Quick Import remain clearly marked as upcoming guided pipelines. Their buttons route to the matching advanced Content Workbench tab rather than producing partial or misleading packages. Console and Agent API users can inspect and prepare vehicle quick imports, open a prepared package in Launcher, or author a Legacy OIV through explicit typed commands.""",
+        (
+            "quick import", "vehicle", "gbay", "traffic", "launcher package",
+            "weapon", "ped", "schema 2", "oiv export", "standalone",
         ),
     ),
     HelpTopic(
@@ -229,7 +268,9 @@ Create authoring workspace makes a verified copy of every visible package member
 
 Identity migration safely renames modelName and handlingId across owned metadata while renaming matching primary/high-detail YFT and YTD files in the same transaction. It rejects collisions and shared handling records, then verifies that the renamed model still resolves before retaining the edit. Tuning-kit names and numeric IDs stay locked because changing those IDs can collide with content outside the package. Additional guarded handling fields are available through set-vehicle-fields in the console and Agent API. Binary GXT2 labels and YTD textures continue through their dedicated validated workspaces rather than unsafe raw text edits. After metadata changes, package publication requires a rebuildable dlc.rpf.source; the SDK blocks an unchanged prebuilt dlc.rpf from silently discarding those edits.
 
-Export vehicle project writes a new portable vehicle-project.json plus a readable relationship report without copying or modifying the package. Build installable package accepts exactly one existing dlc.rpf, or compiles one reviewed dlc.rpf.source when a matching GTA path is available. It generates the standard mods/update/x64/dlcpacks destination, SHA-256 checksum, audit report, and validated mod.toml in a new atomic output folder; it never installs or changes the game. Console and Agent API commands create-vehicle-authoring, inspect-vehicle-authoring, set-vehicle-fields, set-vehicle-appearance, set-vehicle-tuning-kit, inspect-vehicle-tuning, add-vehicle-tuning-entry, set-vehicle-tuning-entry, remove-vehicle-tuning-entry, move-vehicle-tuning-entry, set-vehicle-light-profile, migrate-vehicle-identity, undo-vehicle-edit, inspect-vehicle-project, export-vehicle-project, and build-vehicle-package expose the same guarded implementation. Missing or opaque data stays visible as a finding rather than being guessed.""",
+Export vehicle project writes a new portable vehicle-project.json plus a readable relationship report without copying or modifying the package. Build installable package accepts exactly one existing dlc.rpf, or compiles one reviewed dlc.rpf.source when a matching GTA path is available. It generates the standard mods/update/x64/dlcpacks destination, SHA-256 checksum, audit report, and validated mod.toml in a new atomic output folder; it never installs or changes the game. For third-party archives that provide separate Legacy and Enhanced branches, plan-managed-vehicle-package requires one explicit edition and proves its recursively inspected vehicle definitions, DLC registration, source member, size, and SHA-256. export-managed-vehicle-package then copies only that exact branch into a new schema-2 review package, validates it through the shared launcher contract, and records shareable provenance without installing anything. publish-managed-vehicle-package streams only the manifest-owned payload, content descriptor, and review evidence into a deterministic ZIP, reopens the ZIP through the bounded package loader, and reports the distribution hash. Ambiguous branches, stale source bytes, missing registration, output overwrite, and destinations inside GTA V are blocked.
+
+Console and Agent API commands create-vehicle-authoring, inspect-vehicle-authoring, set-vehicle-fields, set-vehicle-appearance, set-vehicle-tuning-kit, inspect-vehicle-tuning, add-vehicle-tuning-entry, set-vehicle-tuning-entry, remove-vehicle-tuning-entry, move-vehicle-tuning-entry, set-vehicle-light-profile, migrate-vehicle-identity, undo-vehicle-edit, inspect-vehicle-project, export-vehicle-project, build-vehicle-package, plan-managed-vehicle-package, export-managed-vehicle-package, and publish-managed-vehicle-package expose the same guarded implementation. Missing or opaque data stays visible as a finding rather than being guessed.""",
         (
             "vehicle", "workbench", "yft", "ytd", "handling", "carvariations",
             "carcols", "tuning", "viewport", "zoom", "pan", "component",

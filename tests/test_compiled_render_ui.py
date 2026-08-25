@@ -149,6 +149,9 @@ def test_compiled_render_panel_discloses_advanced_controls_and_backend_setup(
         panel.resolution.set("4K UHD · 3840 × 2160")
         panel._resolution_changed()
         assert (panel.width.get(), panel.height.get()) == ("3840", "2160")
+        panel.resolution.set("16K UHD · 15360 × 8640")
+        panel._resolution_changed()
+        assert (panel.width.get(), panel.height.get()) == ("15360", "8640")
     finally:
         panel.destroy()
 

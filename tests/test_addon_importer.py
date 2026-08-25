@@ -5,6 +5,7 @@ import subprocess
 import zipfile
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -1250,6 +1251,121 @@ def test_sdk_inspect_package_rpfs_reports_index_failures(
     ])
     assert result.exit_code == 1
     assert "cannot index nested archive" in result.output
+
+
+def test_nested_rpf_vehicle_metadata_is_promoted_with_edition_provenance(
+    tmp_path, monkeypatch,
+):
+    package = tmp_path / "dual-edition-vehicle.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("Legacy/lunga/dlc.rpf", b"legacy-rpf")
+        archive.writestr("Enhanced/lunga/dlc.rpf", b"enhanced-rpf")
+
+    vehicle_xml = VEHICLES_META.replace("devcar", "lunga").replace(
+        "DEVCAR", "LUNGA",
+    )
+    handling_xml = HANDLING_META.replace("DEVCAR", "LUNGA")
+    variations_xml = VARIATIONS_META.replace("devcar", "lunga").replace(
+        "123_lunga_modkit", "0_default_modkit",
+    )
+    setup_xml = (
+        "<SSetupData><deviceName>dlc_lunga</deviceName>"
+        "<nameHash>lunga</nameHash></SSetupData>"
+    )
+    metadata = {
+        "vehicles.meta": vehicle_xml,
+        "handling.meta": handling_xml,
+        "carvariations.meta": variations_xml,
+        "setup2.xml": setup_xml,
+    }
+
+    def entry(path, *, archive_path="", kind="binary", size=None):
+        content = metadata.get(path, "").encode("utf-8")
+        logical_size = len(content) if size is None else size
+        return SimpleNamespace(
+            id=f"{archive_path}::{path}", archive_path=archive_path,
+            path=path, kind=kind, size=logical_size,
+            suffix=Path(path).suffix.casefold(),
+        )
+
+    class FakeIndex:
+        # Deliberately report the active parser edition for both archives. The
+        # package branch is the authoritative compatibility provenance.
+        edition = "Enhanced"
+        archives = (SimpleNamespace(path=""), SimpleNamespace(path="x64/vehicles.rpf"))
+        warnings = ()
+        entries = (
+            entry("vehicles.meta"), entry("handling.meta"),
+            entry("carvariations.meta"), entry("setup2.xml"),
+            entry("lunga.yft", archive_path="x64/vehicles.rpf", kind="resource", size=8),
+            entry("lunga_hi.yft", archive_path="x64/vehicles.rpf", kind="resource", size=8),
+            entry("lunga.ytd", archive_path="x64/vehicles.rpf", kind="resource", size=8),
+        )
+
+        @staticmethod
+        def suffix_counts():
+            return {".meta": 3, ".xml": 1, ".yft": 2, ".ytd": 1}
+
+    class FakeService:
+        def __init__(self, project_root, gta_path):
+            assert project_root == tmp_path
+            assert gta_path == tmp_path / "game"
+
+        def index(self, archive):
+            assert Path(archive).read_bytes() in {b"legacy-rpf", b"enhanced-rpf"}
+            return FakeIndex()
+
+        def extract_many(self, _index, selected, destination):
+            root = Path(destination)
+            root.mkdir()
+            paths = []
+            for number, item in enumerate(selected, start=1):
+                target = root / f"{number:04d}{item.suffix}"
+                target.write_bytes(metadata[item.path].encode("utf-8"))
+                paths.append(target)
+            return tuple(paths)
+
+    game = tmp_path / "game"
+    game.mkdir()
+    monkeypatch.setattr("allin1_sdk.rpf_tools.RpfExplorerService", FakeService)
+    monkeypatch.setattr(importer, "audit_material_progressions", lambda *_a, **_k: ())
+
+    scan = AddonPackageInspector(tmp_path, game).inspect(package)
+
+    assert [(item.model_name, item.edition) for item in scan.vehicles] == [
+        ("lunga", "legacy"), ("lunga", "enhanced"),
+    ]
+    assert {item.edition for item in scan.handlings} == {"legacy", "enhanced"}
+    assert {item.edition for item in scan.variations} == {"legacy", "enhanced"}
+    assert {item.edition for item in scan.rpf_archives} == {"legacy", "enhanced"}
+    assert len(scan.rpf_native_assets) == 6
+    assert "vehicle_addon" in scan.package_kinds
+    assert all("dlc.rpf!" in item.source for item in scan.vehicles)
+    codes = {item.code for item in scan.findings}
+    assert "rpf_metadata_promoted" in codes
+    assert "mixed_package_layout" not in codes
+    assert "vehicle_kit_not_found" not in codes
+    assert "vehicle_model_asset_not_found" not in codes
+    assert "vehicle_texture_asset_not_found" not in codes
+    assert "vehicle_registration_not_found" not in codes
+
+    draft = AddonDraftBuilder().build(scan).manifest
+    nodes = {item["id"]: item for item in draft["nodes"]}
+    assert nodes["vehicles.imported"]["fields"]["Editions"] == [
+        "legacy", "enhanced",
+    ]
+    assert nodes["streaming.imported"]["fields"]["ModelNames"] == [
+        "lunga", "lunga_hi",
+    ]
+    assert len(nodes["streaming.imported"]["fields"]["Assets"]) == 6
+    archives = [
+        item for item in draft["nodes"] if item["kind"] == "archive"
+    ]
+    assert {item["fields"]["Edition"] for item in archives} == {
+        "legacy", "enhanced",
+    }
+    assert all(item["label"].startswith("Inspected RPF:") for item in archives)
+    assert all(item["fields"]["Entries"] == 7 for item in archives)
 
 
 def test_sdk_audit_folder_reports_mixed_packages_and_partial_downloads(tmp_path):

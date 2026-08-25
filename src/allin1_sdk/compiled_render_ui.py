@@ -14,6 +14,11 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Callable, Mapping
 
+from allin1_sdk.compiled_render import (
+    MAX_COMPILED_PIXELS,
+    MAX_COMPILED_RESOLUTION,
+)
+
 
 RenderSettings = dict[str, object]
 BackendStatus = Mapping[str, object]
@@ -23,6 +28,8 @@ _RESOLUTIONS = {
     "Full HD · 1920 × 1080": (1920, 1080),
     "QHD · 2560 × 1440": (2560, 1440),
     "4K UHD · 3840 × 2160": (3840, 2160),
+    "8K UHD · 7680 × 4320": (7680, 4320),
+    "16K UHD · 15360 × 8640": (15360, 8640),
 }
 _ENGINES = ("Eevee · fast", "Cycles · path-traced")
 _QUALITIES = ("Preview", "Production", "Maximum")
@@ -478,8 +485,16 @@ class CompiledRenderPanel(tk.Frame):
             strength = float(self.light_strength.get())
         except ValueError as exc:
             raise ValueError("Resolution, samples, and lighting must be numeric.") from exc
-        if not (256 <= width <= 8_192 and 256 <= height <= 8_192):
-            raise ValueError("Resolution must be between 256 and 8,192 pixels per side.")
+        if not (
+            256 <= width <= MAX_COMPILED_RESOLUTION
+            and 256 <= height <= MAX_COMPILED_RESOLUTION
+        ):
+            raise ValueError(
+                "Resolution must be between 256 and "
+                f"{MAX_COMPILED_RESOLUTION:,} pixels per side."
+            )
+        if width * height > MAX_COMPILED_PIXELS:
+            raise ValueError("Resolution area may not exceed 16K UHD.")
         if samples not in {32, 64, 128, 256, 512}:
             raise ValueError("Choose a supported sample count.")
         raw_output = self.output_path.get().strip()

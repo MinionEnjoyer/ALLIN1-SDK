@@ -12,7 +12,7 @@ make weapons, vehicles, archives, and other add-ons work coherently.
 ALLIN1 SDK supports GTA V Legacy and GTA V Enhanced. Its inspection and planning
 workflows are designed for Story Mode mod development.
 
-> **Current public release:** **0.5.4**. Install it from ALLIN1 Launcher or
+> **Current public release:** **0.5.5**. Install it from ALLIN1 Launcher or
 > download the self-contained Windows package from
 > [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases).
 
@@ -20,6 +20,23 @@ workflows are designed for Story Mode mod development.
 
 If ALLIN1 Launcher and SDK are useful to you, project support is available through
 [Buy Me a Coffee](https://buymeacoffee.com/minionenjoyer).
+
+## What's new in 0.5.5
+
+- **Quick Import** turns a reviewed Legacy or Enhanced vehicle add-on into a
+  validated ALLIN1 package with GBAY metadata, specialized storage, preview
+  candidates, pricing, size tiers, and traffic disabled until explicitly chosen.
+- Prepared packages can open directly in ALLIN1 Launcher's Packages workspace;
+  the Launcher still shows its normal trust confirmation and owns every game write.
+- A standalone Legacy OIV exporter is available from the desktop SDK, console,
+  and typed Agent API for modders who do not use ALLIN1 Launcher. Export remains
+  deterministic and does not modify GTA while authoring.
+- Re-preparing an SDK-owned package now uses hash validation, staging, atomic
+  replacement, and rollback instead of overwriting arbitrary folders.
+- Vehicle catalogs now share one validated contract across the SDK, Launcher,
+  GBAY runtime, official Story Mode listings, package storage, and opt-in traffic.
+- Quick Import and Workbench navigation were consolidated and polished, with
+  clearer review states, safer defaults, and expanded real-package regressions.
 
 ## What's new in 0.5.4
 
@@ -55,6 +72,22 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   weapon, ammo, animation, native-text, HUD, storefront, vehicle, handling,
   tuning, streamed-asset, archive, and rollback fields, and export an ordered
   integration plan before changing the game.
+- **Product workspaces** — open a data-only `allin1.workspace.json` for a large
+  multi-package repository without treating the whole checkout as one mod. The
+  SDK inventories only declared Git-tracked sources, separates hosts, runtimes,
+  packages, tools, examples, and evidence into typed graph nodes, skips links
+  and build artifacts, and exposes the same report through the console and API.
+  Each component reports declared paths, matched and uniquely owned file/byte
+  coverage, while bounded shared/unassigned evidence reveals overlap or gaps.
+  Built-in content managed by the launcher is identified separately from a mod
+  package that can be installed on its own. Opening or auditing a workspace
+  never imports or executes any declared source file. A runtime component can
+  also expose a versioned, machine-readable API contract. The same report then
+  proves its public host surface and connects each consumer's API version,
+  assembly, entry point, calls, capabilities, interfaces, settings, project
+  reference, and authored Workbench relationships with exact source evidence.
+  Semantic contract failures remain visible in the Linker instead of making the
+  surrounding workspace impossible to inspect.
 - **Package inspection and tools** — inventory loose DLC folders and OIV/ZIP/RAR/7z
   packages, classify scripts, plug-ins, shaders, replacements, and add-on DLC,
   detect Legacy/Enhanced compatibility, and surface incomplete or ambiguous
@@ -124,6 +157,14 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   progression view graphs real texture alpha, luminance, emissive scalars, resolved
   shaders, topology consistency, missing bindings, monotonicity, and neighboring-tier
   visual differences.
+- **Quick Import** — use a separate guided workspace when the goal is packaging,
+  not deep authoring. Its Vehicle tab detects validated Legacy/Enhanced branches,
+  reviews typed GBAY listing fields for every model, keeps traffic disabled by
+  default, and prepares a schema-2 package in the Launcher's per-user package
+  library without writing GTA V. The Launcher remains responsible for the final
+  install, backup, receipt, and rollback. Weapon and Ped tabs currently route to
+  their advanced Content Workbench tools until equally complete guided importers
+  are available.
   The mature Vehicles tab works with each vehicle as one resolved project instead
   of unrelated files. It links primary and high-detail YFT fragments, YTD textures, handling, variations,
   tuning kits, labels, and DLC registration evidence; unresolved relationships stay
@@ -363,8 +404,8 @@ the checksum, extract the archive to a fresh directory, and run
 ## Desktop SDK
 
 The desktop application is one persistent developer window. Its sidebar moves
-between **Package Linker**, **Asset Viewer**, **Workbench**, **RPF Archives**,
-**Package Recipes**, and **Help Center**.
+between **Package Linker**, **Asset Viewer**, **Content Workbench**, **Quick Import**,
+**Models & Materials**, **RPF Archives**, **Package Recipes**, and **Help Center**.
 Pass `--rpf-graph <graph.json>` to the desktop executable to open a validated
 package graph directly; add `--gta-path <installation>` when its asset nodes need
 encrypted or edition-specific native previews.
@@ -397,6 +438,12 @@ commands are grouped by task:
   binds exact sources, revision, collisions, and a SHA-256 digest before the separate
   acknowledged clone can write. Unknown/raw schema, ordering, and text/value/ref
   representation stay copied and locked instead of being guessed from a partial form.
+- **Quick Import** keeps fast packaging separate from those advanced workbenches.
+  Prepare for Launcher creates a validated per-user package; it never installs into
+  the game directly. Creators who do not use ALLIN1 Launcher can instead export a
+  hash-verified **Legacy OIV package** containing only the vehicle DLC files and
+  DLC-list registration. That standalone export requires an explicit author and
+  intentionally excludes GBAY, traffic controls, receipts, backups, and rollback.
   The Peds tab exposes linked definitions, supporting metadata, assets, and
   readiness findings. Its guarded Author tab copies and verifies the source before
   enabling existing metadata fields, preserves unknown XML and scalar representation,
@@ -498,6 +545,7 @@ allin1-sdk inspect-log C:\Mods\Example\logs\latest.log --pattern error
 allin1-sdk compare-telemetry C:\Mods\Example\logs\baseline.txt C:\Mods\Example\logs\current.txt
 allin1-sdk list
 allin1-sdk validate sdk/examples/colored_smokes/addon.json
+allin1-sdk inspect-product-workspace C:\Code\ALLIN1
 allin1-sdk link sdk/examples/colored_smokes/addon.json -o integration.md
 allin1-sdk import-package C:\Mods\Example -o C:\Mods\Example\addon.json
 allin1-sdk audit-folder C:\Mods\TestMods -o package-audit.md
@@ -574,6 +622,11 @@ allin1-sdk set-vehicle-tuning-entry C:\Work\examplecar-authoring examplecar 123_
 allin1-sdk set-vehicle-light-profile C:\Work\examplecar-authoring examplecar 18 --set headLight.intensity=2.5 --acknowledge-edit
 allin1-sdk migrate-vehicle-identity C:\Work\examplecar-authoring examplecar --new-model examplecar2 --new-handling EXAMPLECAR2 --acknowledge-edit
 allin1-sdk build-vehicle-package C:\Mods\Example -o C:\Work\examplecar-package
+allin1-sdk plan-managed-vehicle-package C:\Mods\Pagani.rar --edition enhanced --gta-path "D:\Games\GTA V Enhanced"
+allin1-sdk export-managed-vehicle-package C:\Mods\Pagani.rar C:\Work\pagani-enhanced --edition enhanced --gta-path "D:\Games\GTA V Enhanced"
+allin1-sdk publish-managed-vehicle-package C:\Work\pagani-enhanced C:\Releases\pagani-enhanced.zip --gta-path "D:\Games\GTA V Enhanced"
+allin1-sdk inspect-vehicle-quick-import C:\Mods\Pagani.rar --gta-path "D:\Games\GTA V Enhanced" --preferred-edition enhanced
+allin1-sdk prepare-vehicle-quick-import C:\Mods\Pagani.rar --edition enhanced --gta-path "D:\Games\GTA V Enhanced" --set lunga.name="Huayra Codalunga" --set lunga.manufacturer=Pagani --set lunga.price=2350000
 allin1-sdk create-weapon-authoring C:\Mods\ExampleWeapon -o C:\Work\exampleweapon-authoring
 allin1-sdk inspect-weapon-authoring C:\Work\exampleweapon-authoring --weapon WEAPON_EXAMPLE
 allin1-sdk plan-weapon-clone C:\Work\exampleweapon-authoring WEAPON_EXAMPLE --weapon-name WEAPON_EXAMPLE2 --slot SLOT_EXAMPLE2 --ammo-info AMMO_EXAMPLE2 --model w_pi_example2 --human-name-hash WT_EXAMPLE2 --stat-name EXAMPLE2 --ammo-mode clone --ammo-name AMMO_EXAMPLE2
@@ -899,8 +952,8 @@ release assets automatically.
 
 ## Documentation
 
-The in-app Help Center documents the Package Linker, Content Workbench, package tools,
-asset previews, RPF Archives, replacement-plan boundary, and recovery paths.
+The in-app Help Center documents the Package Linker, Content Workbench, Quick Import,
+package tools, asset previews, RPF Archives, replacement-plan boundary, and recovery paths.
 The schema and complete colored-smoke example are maintained under [`sdk/`](sdk/).
 
 ALLIN1 SDK is licensed under the [GNU General Public License v3.0 or later](LICENSE).

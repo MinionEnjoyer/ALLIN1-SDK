@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -44,7 +45,8 @@ COMPILED_LIGHT_RIGS = frozenset({"studio", "outdoor", "dramatic", "neutral"})
 COMPILED_BACKGROUNDS = frozenset({
     "studio_dark", "studio_light", "transparent", "custom",
 })
-MAX_COMPILED_RESOLUTION = 8192
+MAX_COMPILED_RESOLUTION = 15360
+MAX_COMPILED_PIXELS = 15360 * 8640
 MAX_COMPILED_SAMPLES = 4096
 _BLENDER_VERSION = re.compile(r"Blender\s+(?P<version>\d+(?:\.\d+){1,3})", re.I)
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -86,6 +88,11 @@ class CompiledRenderSettings:
         if not 256 <= self.height <= MAX_COMPILED_RESOLUTION:
             raise ValueError(
                 f"Compiled render height must be between 256 and {MAX_COMPILED_RESOLUTION}"
+            )
+        if self.width * self.height > MAX_COMPILED_PIXELS:
+            raise ValueError(
+                "Compiled render area may not exceed 16K UHD "
+                f"({MAX_COMPILED_PIXELS:,} pixels)"
             )
         normalized_quality = _choice(self.quality, COMPILED_RENDER_QUALITIES, "quality")
         normalized_engine = _choice(self.engine, BLENDER_ENGINES, "engine")
@@ -259,32 +266,64 @@ def _default_process_runner(
     options.update(hidden_process_options())
     started = time.monotonic()
     process = subprocess.Popen([str(value) for value in command], **options)
+    captured: list[str] = ["", ""]
+    communication_error: list[BaseException] = []
+
+    def communicate() -> None:
+        try:
+            stdout, stderr = process.communicate()
+            captured[0] = stdout or ""
+            captured[1] = stderr or ""
+        except BaseException as exc:  # surfaced on the calling thread below
+            communication_error.append(exc)
+
+    # Blender can emit enough progress text to fill an undrained pipe during a
+    # high-resolution render.  Drain both streams while retaining the polling
+    # loop used for cancellation and the hard deadline.
+    communicator = threading.Thread(
+        target=communicate, name="allin1-blender-output", daemon=True,
+    )
+    communicator.start()
     try:
-        while process.poll() is None:
+        while communicator.is_alive():
             if cancel_event is not None and cancel_event.is_set():
                 process.terminate()
                 try:
                     process.wait(timeout=2.0)
                 except subprocess.TimeoutExpired:
                     process.kill()
+                    process.wait(timeout=10.0)
+                communicator.join(timeout=10.0)
                 raise CompiledRenderError(
                     "render_cancelled", "The compiled render was cancelled",
                 )
             if time.monotonic() - started > timeout:
                 process.kill()
+                try:
+                    process.wait(timeout=10.0)
+                except subprocess.TimeoutExpired:
+                    pass
+                communicator.join(timeout=10.0)
                 raise CompiledRenderError(
                     "render_timeout",
                     f"Blender did not finish within {timeout:.0f} seconds",
                 )
             time.sleep(0.05)
-        stdout, stderr = process.communicate()
+        communicator.join()
+        if communication_error:
+            raise communication_error[0]
         return subprocess.CompletedProcess(
             [str(value) for value in command], process.returncode,
-            stdout=stdout, stderr=stderr,
+            stdout=captured[0], stderr=captured[1],
         )
     finally:
         if process.poll() is None:
             process.kill()
+            try:
+                process.wait(timeout=10.0)
+            except subprocess.TimeoutExpired:
+                pass
+        communicator.join(timeout=10.0)
 
 
 def _candidate_blender_paths(explicit: str | Path | None) -> list[tuple[Path, str]]:
@@ -843,9 +882,14 @@ def compile_vehicle_render(
         _emit(progress, "launch", 0.22, "Starting isolated Blender render")
         _cancelled(cancel_event)
         try:
+            render_timeout = (
+                1800.0
+                if configured.width * configured.height > 7680 * 4320
+                else (900.0 if configured.quality == "maximum" else 420.0)
+            )
             completed = runner(
                 command, cwd=workspace,
-                timeout=900.0 if configured.quality == "maximum" else 420.0,
+                timeout=render_timeout,
                 cancel_event=cancel_event,
             )
         except CompiledRenderError:
@@ -880,15 +924,22 @@ def compile_vehicle_render(
         if not render_output.is_file() or render_output.stat().st_size <= 8:
             raise CompiledRenderError("missing_render", "Blender did not produce a PNG render")
         try:
-            with Image.open(render_output) as image:
-                image.verify()
-            with Image.open(render_output) as image:
-                if image.format != "PNG" or image.size != (configured.width, configured.height):
-                    raise CompiledRenderError(
-                        "invalid_render",
-                        "Blender produced a render with an unexpected format or resolution",
-                        {"format": image.format, "size": image.size},
-                    )
+            # The explicit dimension and pixel guards above make the supported
+            # 16K frame safe to inspect.  Pillow's generic decompression-bomb
+            # warning is intentionally lower than that bounded output size.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+                with Image.open(render_output) as image:
+                    image.verify()
+                with Image.open(render_output) as image:
+                    if image.format != "PNG" or image.size != (
+                        configured.width, configured.height,
+                    ):
+                        raise CompiledRenderError(
+                            "invalid_render",
+                            "Blender produced a render with an unexpected format or resolution",
+                            {"format": image.format, "size": image.size},
+                        )
         except CompiledRenderError:
             raise
         except (OSError, ValueError) as exc:
@@ -966,6 +1017,8 @@ __all__ = [
     "CompiledRenderProgress",
     "CompiledRenderResult",
     "CompiledRenderSettings",
+    "MAX_COMPILED_PIXELS",
+    "MAX_COMPILED_RESOLUTION",
     "ProgressCallback",
     "RenderInterchange",
     "compile_vehicle_render",

@@ -21,10 +21,37 @@ from allin1_sdk.ui_foundation import place_window
 
 BUILTINS = {
     "help": "Show every command or detailed help for one command.",
-    "clear": "Clear console output.",
-    "history": "Show commands used in this console.",
+    "clear": "Clear console output, or use 'clear history' to forget commands.",
+    "cls": "Clear console output (alias for clear).",
+    "clear-history": "Permanently clear saved console command history.",
+    "history": "Show recent commands, limit the list, or clear it.",
+    "copy": "Copy all visible console output to the clipboard.",
+    "pwd": "Show the active SDK workspace directory.",
+    "shortcuts": "Show console keyboard shortcuts.",
     "exit": "Close the SDK Console.",
 }
+
+BUILTIN_SYNTAX = {
+    "help": "help [command]",
+    "clear": "clear [console|history]",
+    "cls": "cls",
+    "clear-history": "clear-history",
+    "history": "history [count|clear]",
+    "copy": "copy",
+    "pwd": "pwd",
+    "shortcuts": "shortcuts",
+    "exit": "exit",
+}
+
+SHORTCUT_HELP = """Console shortcuts:
+  Ctrl+L         Clear visible console output
+  Ctrl+Shift+L   Clear saved command history
+  Ctrl+Space     Accept the selected completion
+  Tab            Accept the selected completion
+  Up / Down      Move through matches or command history
+  Ctrl+Up/Down   Move through command history
+  Escape         Clear the command; press again to close/collapse
+"""
 
 
 @dataclass(frozen=True)
@@ -84,7 +111,7 @@ def command_catalog() -> tuple[ConsoleCommand, ...]:
         for name in group.list_commands(context)
     ]
     commands.extend(
-        ConsoleCommand(name, name + (" [command]" if name == "help" else ""), help_text)
+        ConsoleCommand(name, BUILTIN_SYNTAX[name], help_text)
         for name, help_text in BUILTINS.items()
     )
     return tuple(sorted(commands, key=lambda item: item.name.casefold()))
@@ -184,11 +211,21 @@ def suggestions_for(
         command = _resolve_command(completed_tokens)
         if completed_tokens == ["help"]:
             for item in catalog:
-                if item.name in BUILTINS or not item.name.casefold().startswith(active.casefold()):
+                if not item.name.casefold().startswith(active.casefold()):
                     continue
                 results.append(ConsoleSuggestion(
                     head + item.name, item.syntax, item.description, "command",
                 ))
+        if completed_tokens == ["clear"] and "history".startswith(active.casefold()):
+            results.append(ConsoleSuggestion(
+                head + "history", "clear history",
+                "Permanently clear saved console command history.", "argument",
+            ))
+        if completed_tokens == ["history"] and "clear".startswith(active.casefold()):
+            results.append(ConsoleSuggestion(
+                head + "clear", "history clear",
+                "Permanently clear saved console command history.", "argument",
+            ))
         if command is not None:
             if isinstance(command, click.Group):
                 context = click.Context(command, info_name=completed_tokens[-1])
@@ -243,20 +280,85 @@ def suggestions_for(
     return tuple(unique)
 
 
-def execute_console_command(command_line: str, history: Iterable[str] = ()) -> ConsoleResult:
+def _usage_error(syntax: str) -> ConsoleResult:
+    return ConsoleResult(f"Usage: {syntax}\n", 2)
+
+
+def _builtin_help(name: str) -> ConsoleResult | None:
+    normalized = name.casefold()
+    if normalized not in BUILTINS:
+        return None
+    return ConsoleResult(
+        f"{BUILTIN_SYNTAX[normalized]}\n  {BUILTINS[normalized]}\n",
+    )
+
+
+def execute_console_command(
+    command_line: str, history: Iterable[str] = (), *, cwd: Path | None = None,
+) -> ConsoleResult:
     """Execute one in-process CLI command and capture its terminal output."""
     args = split_command_line(command_line.strip())
     if not args:
         return ConsoleResult()
     command = args[0].casefold()
+    if command == "clear-history":
+        return (
+            ConsoleResult("Command history cleared.\n", action="clear_history")
+            if len(args) == 1 else _usage_error(BUILTIN_SYNTAX[command])
+        )
     if command == "clear":
+        if len(args) == 2 and args[1].casefold() == "history":
+            return ConsoleResult("Command history cleared.\n", action="clear_history")
+        if len(args) > 2 or (len(args) == 2 and args[1].casefold() != "console"):
+            return _usage_error(BUILTIN_SYNTAX[command])
         return ConsoleResult(action="clear")
+    if command == "cls":
+        return ConsoleResult(action="clear") if len(args) == 1 else _usage_error(
+            BUILTIN_SYNTAX[command],
+        )
     if command == "exit":
-        return ConsoleResult(action="exit")
+        return ConsoleResult(action="exit") if len(args) == 1 else _usage_error(
+            BUILTIN_SYNTAX[command],
+        )
     if command == "history":
-        lines = [f"{number:>3}  {value}" for number, value in enumerate(history, 1)]
+        if len(args) == 2 and args[1].casefold() in {"clear", "delete", "reset"}:
+            return ConsoleResult("Command history cleared.\n", action="clear_history")
+        values = list(history)
+        start = 0
+        if len(args) > 2:
+            return _usage_error(BUILTIN_SYNTAX[command])
+        if len(args) == 2:
+            try:
+                count = int(args[1])
+            except ValueError:
+                return _usage_error(BUILTIN_SYNTAX[command])
+            if not 1 <= count <= 200:
+                return ConsoleResult("History count must be between 1 and 200.\n", 2)
+            start = max(0, len(values) - count)
+        lines = [
+            f"{number:>3}  {value}"
+            for number, value in enumerate(values[start:], start + 1)
+        ]
         return ConsoleResult("\n".join(lines) + ("\n" if lines else "No command history.\n"))
+    if command == "copy":
+        return ConsoleResult(action="copy_output") if len(args) == 1 else _usage_error(
+            BUILTIN_SYNTAX[command],
+        )
+    if command == "pwd":
+        if len(args) != 1:
+            return _usage_error(BUILTIN_SYNTAX[command])
+        return ConsoleResult(str((cwd or Path.cwd()).resolve()) + "\n")
+    if command == "shortcuts":
+        return ConsoleResult(SHORTCUT_HELP) if len(args) == 1 else _usage_error(
+            BUILTIN_SYNTAX[command],
+        )
     if command == "help":
+        if len(args) > 2:
+            return _usage_error(BUILTIN_SYNTAX[command])
+        if len(args) == 2:
+            builtin = _builtin_help(args[1])
+            if builtin is not None:
+                return builtin
         args = ([args[1], "--help"] if len(args) > 1 else ["--help"])
     result = CliRunner().invoke(
         _cli_group(), args, color=False, prog_name="allin1-sdk",
@@ -266,6 +368,12 @@ def execute_console_command(command_line: str, history: Iterable[str] = ()) -> C
         detail = str(result.exception).strip()
         if detail and detail not in output:
             output += f"ERROR: {detail}\n"
+    if command == "help" and len(args) == 1 and result.exit_code == 0:
+        output += "\nConsole commands:\n"
+        output += "\n".join(
+            f"  {BUILTIN_SYNTAX[name]:<27} {description}"
+            for name, description in BUILTINS.items()
+        ) + "\n"
     return ConsoleResult(output, result.exit_code)
 
 
@@ -302,7 +410,8 @@ class SdkConsoleDialog(ttk.Frame):
         self._append(
             "ALLIN1 SDK Console\n"
             "Type a command. Tab accepts the selected completion; Up/Down navigates "
-            "matches or history. Type help for the command catalog.\n\n",
+            "matches or history. Type help for the command catalog; clear or cls wipes "
+            "the window, and clear history forgets saved commands.\n\n",
             "system",
         )
         # The dock is part of every SDK workspace, but it should not take the
@@ -480,6 +589,7 @@ class SdkConsoleDialog(ttk.Frame):
         self.entry.bind("<Control-Down>", lambda event: self._history_move(1, event))
         self.entry.bind("<Control-space>", self._accept_suggestion)
         self.entry.bind("<Control-l>", self._clear)
+        self.entry.bind("<Control-Shift-L>", self._clear_history_shortcut)
         self.entry.bind("<Escape>", self._escape)
         self._refresh_suggestions()
         if self.docked:
@@ -587,7 +697,9 @@ class SdkConsoleDialog(ttk.Frame):
 
         def worker() -> None:
             try:
-                result = execute_console_command(value, self.history)
+                result = execute_console_command(
+                    value, self.history, cwd=self.project_root,
+                )
             except Exception as exc:  # Keep the command dock recoverable.
                 detail = str(exc).strip() or exc.__class__.__name__
                 result = ConsoleResult(
@@ -604,15 +716,31 @@ class SdkConsoleDialog(ttk.Frame):
     def _finish(self, result: ConsoleResult) -> None:
         if not self.winfo_exists():
             return
+        output = result.output
+        exit_code = result.exit_code
         try:
             if result.action == "clear":
                 self._clear_output()
-            elif result.action != "exit":
-                if result.output:
-                    self._append(result.output, "error" if result.exit_code else "")
-                    if not result.output.endswith("\n"):
+            elif result.action == "clear_history":
+                error = self._clear_history()
+                if error:
+                    output = f"ERROR: Could not remove saved command history: {error}\n"
+                    exit_code = 1
+            elif result.action == "copy_output":
+                try:
+                    visible = self.output.get("1.0", "end-1c")
+                    self.clipboard_clear()
+                    self.clipboard_append(visible)
+                    output = "Visible console output copied to the clipboard.\n"
+                except tk.TclError as exc:
+                    output = f"ERROR: Could not copy console output: {exc}\n"
+                    exit_code = 1
+            if result.action not in {"clear", "exit"}:
+                if output:
+                    self._append(output, "error" if exit_code else "")
+                    if not output.endswith("\n"):
                         self._append("\n")
-                self._append(f"[exit {result.exit_code}]\n\n", "system")
+                self._append(f"[exit {exit_code}]\n\n", "system")
         finally:
             # Every result path, including exit and unexpected rendering
             # failures, must leave the persistent command line usable.
@@ -630,8 +758,26 @@ class SdkConsoleDialog(ttk.Frame):
         self.output.delete("1.0", "end")
         self.output.configure(state="disabled")
 
+    def _clear_history(self) -> str:
+        self.history.clear()
+        self.history_index = 0
+        try:
+            self.history_path.unlink(missing_ok=True)
+        except OSError as exc:
+            return str(exc)
+        return ""
+
     def _clear(self, _event: object | None = None) -> str:
         self._clear_output()
+        return "break"
+
+    def _clear_history_shortcut(self, _event: object | None = None) -> str:
+        error = self._clear_history()
+        if error:
+            self._append(f"ERROR: Could not remove saved command history: {error}\n", "error")
+        else:
+            self._append("Command history cleared.\n\n", "system")
+        self._refresh_suggestions()
         return "break"
 
     def _escape(self, _event: object | None = None) -> str:

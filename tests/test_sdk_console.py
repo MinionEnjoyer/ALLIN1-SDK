@@ -37,6 +37,13 @@ def test_command_catalog_combines_cli_and_console_builtins():
     assert catalog["index-rpf"].syntax.startswith("index-rpf <ARCHIVE>")
     assert catalog["help"].syntax == "help [command]"
     assert "clear" in catalog
+    assert catalog["clear"].syntax == "clear [console|history]"
+    assert catalog["clear-history"].syntax == "clear-history"
+    assert catalog["history"].syntax == "history [count|clear]"
+    assert "cls" in catalog
+    assert "copy" in catalog
+    assert "pwd" in catalog
+    assert "shortcuts" in catalog
     assert "create-rpf-graph" in catalog
     assert "import-rpf-graph" in catalog
     assert "plan-rpf-graph-origin" in catalog
@@ -59,7 +66,7 @@ def test_command_catalog_combines_cli_and_console_builtins():
 
 
 def test_progressive_command_option_and_alias_suggestions(tmp_path):
-    commands = suggestions_for("ins", cwd=tmp_path)
+    commands = suggestions_for("ins", cwd=tmp_path, limit=30)
     assert [item.replacement for item in commands] == [
             "inspect-binary-workspace ", "inspect-log ",
             "inspect-material-workspace ", "inspect-model-materials ",
@@ -68,10 +75,13 @@ def test_progressive_command_option_and_alias_suggestions(tmp_path):
         "inspect-package-receipt ",
         "inspect-package-rpfs ",
         "inspect-ped-authoring ",
+        "inspect-product-workspace ",
         "inspect-rpf ", "inspect-rpf-change-set ", "inspect-rpf-graph ",
         "inspect-rpf-native-entry ",
         "inspect-rpf-program ", "inspect-source ", "inspect-vehicle-authoring ",
-        "inspect-vehicle-project ", "inspect-vehicle-tuning ",
+        "inspect-vehicle-distribution ",
+        "inspect-vehicle-project ", "inspect-vehicle-quick-import ",
+        "inspect-vehicle-tuning ",
         "inspect-weapon-animation ", "inspect-weapon-authoring ",
         "inspect-weapon-shop ",
         "inspect-workbench ",
@@ -93,6 +103,8 @@ def test_progressive_command_option_and_alias_suggestions(tmp_path):
 
     help_matches = suggestions_for("help can", cwd=tmp_path)
     assert help_matches[0].replacement == "help canary-rpf-transaction"
+    assert suggestions_for("clear h", cwd=tmp_path)[0].replacement == "clear history"
+    assert suggestions_for("history c", cwd=tmp_path)[0].replacement == "history clear"
 
 
 def test_path_and_history_suggestions_preserve_executable_command_text(tmp_path):
@@ -121,10 +133,39 @@ def test_console_execution_help_history_and_errors():
     assert "1  list" in history_result.output
     assert "2  validate addon.json" in history_result.output
 
+    recent = execute_console_command(
+        "history 2", ("one", "two", "three"),
+    )
+    assert "1  one" not in recent.output
+    assert "2  two" in recent.output
+    assert "3  three" in recent.output
+
+    assert execute_console_command("history clear").action == "clear_history"
+    assert execute_console_command("clear history").action == "clear_history"
+    assert execute_console_command("clear-history").action == "clear_history"
+    assert execute_console_command("clear-history now").exit_code == 2
+    assert execute_console_command("history 0").exit_code == 2
+    assert execute_console_command("history nope").exit_code == 2
+    assert "clear [console|history]" in execute_console_command("help clear").output
+    assert "Console commands:" in execute_console_command("help").output
+    workspace_help = execute_console_command("help inspect-product-workspace")
+    assert workspace_help.exit_code == 0
+    workspace_help_text = workspace_help.output.casefold()
+    assert "each component's source coverage" in workspace_help_text
+    assert "shared/unassigned evidence" in workspace_help_text
+    assert "never executed" in workspace_help_text
+    assert "Ctrl+L" in execute_console_command("shortcuts").output
+    assert execute_console_command("copy").action == "copy_output"
+    assert execute_console_command("pwd", cwd=Path(".")).output.strip() == str(
+        Path(".").resolve(),
+    )
+
     missing = execute_console_command("not-a-command")
     assert missing.exit_code != 0
     assert "No such command" in missing.output
     assert execute_console_command("clear").action == "clear"
+    assert execute_console_command("clear console").action == "clear"
+    assert execute_console_command("cls").action == "clear"
     assert execute_console_command("exit").action == "exit"
 
 
@@ -149,6 +190,7 @@ def test_collapsed_console_does_not_steal_focus_and_has_keyboard_completion(
 
     assert console.entry not in focus_calls
     assert console.entry.bind("<Control-space>")
+    assert console.entry.bind("<Control-Shift-L>")
     assert console.suggestions.cget("yscrollcommand")
     assert console.suggestion_scroll.winfo_manager() == "pack"
 
@@ -225,3 +267,44 @@ def test_finish_restores_command_state_when_output_rendering_fails(
 
     assert console.running is False
     assert str(console.entry.cget("state")) == "normal"
+
+
+def test_clear_history_action_removes_memory_and_persistent_file(
+    tmp_path, monkeypatch, tk_root,
+):
+    monkeypatch.setattr(sdk_console, "user_data_root", lambda: tmp_path / "state")
+    console = SdkConsoleDialog(
+        tk_root, tmp_path, embedded=True, docked=True,
+    )
+    console.history = ["list", "validate addon.json", "clear history"]
+    console._save_history()
+    assert console.history_path.is_file()
+    console.running = True
+    console.entry.configure(state="disabled")
+
+    console._finish(ConsoleResult("Command history cleared.\n", action="clear_history"))
+
+    assert console.history == []
+    assert console.history_index == 0
+    assert not console.history_path.exists()
+    assert console.running is False
+    assert str(console.entry.cget("state")) == "normal"
+    assert "Command history cleared." in console.output.get("1.0", "end")
+
+
+def test_copy_output_action_places_visible_console_text_on_clipboard(
+    tmp_path, monkeypatch, tk_root,
+):
+    monkeypatch.setattr(sdk_console, "user_data_root", lambda: tmp_path / "state")
+    console = SdkConsoleDialog(
+        tk_root, tmp_path, embedded=True, docked=True,
+    )
+    console._append("diagnostic evidence\n")
+    console.running = True
+    console.entry.configure(state="disabled")
+
+    console._finish(ConsoleResult(action="copy_output"))
+    tk_root.update()
+
+    assert "diagnostic evidence" in tk_root.clipboard_get()
+    assert "copied to the clipboard" in console.output.get("1.0", "end")

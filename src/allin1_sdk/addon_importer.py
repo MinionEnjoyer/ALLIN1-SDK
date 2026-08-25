@@ -11,7 +11,7 @@ import sys
 import tempfile
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 from xml.etree import ElementTree as ET
@@ -557,12 +557,14 @@ class VehicleRecord:
     layout: str
     vehicle_type: str
     vehicle_class: str
+    edition: str = ""
 
 
 @dataclass(frozen=True)
 class HandlingRecord:
     source: str
     name: str
+    edition: str = ""
 
 
 @dataclass(frozen=True)
@@ -571,6 +573,7 @@ class VehicleVariationRecord:
     model_name: str
     kits: tuple[str, ...]
     light_settings: str
+    edition: str = ""
 
 
 @dataclass(frozen=True)
@@ -579,6 +582,7 @@ class VehicleKitRecord:
     name: str
     kit_id: str
     model_names: tuple[str, ...]
+    edition: str = ""
 
 
 @dataclass(frozen=True)
@@ -633,6 +637,20 @@ class RpfNativeEntryRecord:
     kind: str
     suffix: str
     size: int
+
+
+@dataclass(frozen=True)
+class RpfPackageInspection:
+    """Structured facts promoted from package-owned RPF archives."""
+
+    archives: tuple[RpfPackageRecord, ...] = ()
+    native_assets: tuple[RpfNativeEntryRecord, ...] = ()
+    material_progressions: tuple[MaterialProgressionReport, ...] = ()
+    vehicles: tuple[VehicleRecord, ...] = ()
+    handlings: tuple[HandlingRecord, ...] = ()
+    variations: tuple[VehicleVariationRecord, ...] = ()
+    kits: tuple[VehicleKitRecord, ...] = ()
+    registrations: tuple[PackageRegistrationRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -918,6 +936,35 @@ class AddonPackageInspector:
                         match.group(0).strip().replace("\\", "/")
                     )
 
+        rpf_entries = [entry.path for entry in entries if entry.suffix == ".rpf"]
+        rpf_inspection = RpfPackageInspection()
+        if rpf_entries and self.project_root is not None and self.gta_path is not None:
+            rpf_inspection = self._inspect_package_rpfs(
+                path, entries, findings, weapon_enhancements,
+            )
+            vehicles.extend(rpf_inspection.vehicles)
+            handlings.extend(rpf_inspection.handlings)
+            variations.extend(rpf_inspection.variations)
+            kits.extend(rpf_inspection.kits)
+            registrations.extend(rpf_inspection.registrations)
+        else:
+            for rpf_path in rpf_entries[:20]:
+                findings.append(PackageFinding(
+                    "warning", "opaque_rpf",
+                    "Nested RPF content is inventoried but not inferred without a "
+                    "matching GTA path; reopen the Workbench with --gta-path.",
+                    rpf_path,
+                ))
+            if len(rpf_entries) > 20:
+                findings.append(PackageFinding(
+                    "warning", "opaque_rpf_summary",
+                    f"{len(rpf_entries) - 20} additional RPF archives were omitted "
+                    "from individual warnings.",
+                ))
+        rpf_archives = rpf_inspection.archives
+        rpf_native_assets = rpf_inspection.native_assets
+        material_progressions = rpf_inspection.material_progressions
+
         package_kinds: list[str] = []
         suffixes = {PurePosixPath(path).suffix.casefold() for path in binary_plugins}
         if ".asi" in suffixes:
@@ -976,11 +1023,19 @@ class AddonPackageInspector:
                 "Replacement assets require exact current-build archive targets, "
                 "per-entry backups, and edition-specific verification.",
             ))
-        if len(package_kinds) > 1:
+        content_addons = {
+            "vehicle_addon", "weapon_addon", "ped_addon",
+            "scripted_weapon_enhancement",
+        }.intersection(package_kinds)
+        integration_shapes = [
+            kind for kind in package_kinds
+            if kind != "dlc_archive" or not content_addons
+        ]
+        if len(integration_shapes) > 1:
             findings.append(PackageFinding(
                 "warning", "mixed_package_layout",
                 "Package combines multiple integration shapes: "
-                + ", ".join(package_kinds) + ".",
+                + ", ".join(integration_shapes) + ".",
             ))
         if not edition_hints:
             findings.append(PackageFinding(
@@ -1013,16 +1068,24 @@ class AddonPackageInspector:
             findings,
         )
         vehicles = self._dedupe_records(
-            vehicles, lambda item: item.model_name.casefold(), findings,
+            vehicles, lambda item: (
+                item.edition.casefold(), item.model_name.casefold(),
+            ), findings,
         )
         handlings = self._dedupe_records(
-            handlings, lambda item: item.name.casefold(), findings,
+            handlings, lambda item: (
+                item.edition.casefold(), item.name.casefold(),
+            ), findings,
         )
         variations = self._dedupe_records(
-            variations, lambda item: item.model_name.casefold(), findings,
+            variations, lambda item: (
+                item.edition.casefold(), item.model_name.casefold(),
+            ), findings,
         )
         kits = self._dedupe_records(
-            kits, lambda item: item.name.casefold(), findings,
+            kits, lambda item: (
+                item.edition.casefold(), item.name.casefold(),
+            ), findings,
         )
         peds = self._dedupe_records(
             peds, lambda item: item.name.casefold(), findings,
@@ -1098,10 +1161,18 @@ class AddonPackageInspector:
             PurePosixPath(entry.path).stem.casefold()
             for entry in entries if entry.suffix == ".yft"
         }
+        yft_models.update(
+            PurePosixPath(entry.path).stem.casefold()
+            for entry in rpf_native_assets if entry.suffix == ".yft"
+        )
         ytd_models = {
             PurePosixPath(entry.path).stem.casefold()
             for entry in entries if entry.suffix == ".ytd"
         }
+        ytd_models.update(
+            PurePosixPath(entry.path).stem.casefold()
+            for entry in rpf_native_assets if entry.suffix == ".ytd"
+        )
         scoped_loose_vehicle_models: set[str] = set()
         for vehicle in vehicles:
             if not vehicle.handling_id:
@@ -1148,6 +1219,8 @@ class AddonPackageInspector:
 
         for variation in variations:
             for kit in variation.kits:
+                if kit.casefold() in {"0_default_modkit", "default_modkit"}:
+                    continue
                 if kit.casefold() not in kit_names:
                     findings.append(PackageFinding(
                         "warning", "vehicle_kit_not_found",
@@ -1180,10 +1253,18 @@ class AddonPackageInspector:
             PurePosixPath(entry.path).stem.casefold()
             for entry in entries if entry.suffix == ".ydd"
         }
+        ydd_models.update(
+            PurePosixPath(entry.path).stem.casefold()
+            for entry in rpf_native_assets if entry.suffix == ".ydd"
+        )
         ydr_models = {
             PurePosixPath(entry.path).stem.casefold()
             for entry in entries if entry.suffix == ".ydr"
         }
+        ydr_models.update(
+            PurePosixPath(entry.path).stem.casefold()
+            for entry in rpf_native_assets if entry.suffix == ".ydr"
+        )
         for ped in peds:
             model = ped.name.casefold()
             has_related_loose_asset = (
@@ -1223,28 +1304,6 @@ class AddonPackageInspector:
                 "a FiveM resource manifest.",
             ))
 
-        rpf_entries = [entry.path for entry in entries if entry.suffix == ".rpf"]
-        rpf_archives: tuple[RpfPackageRecord, ...] = ()
-        rpf_native_assets: tuple[RpfNativeEntryRecord, ...] = ()
-        material_progressions: tuple[MaterialProgressionReport, ...] = ()
-        if rpf_entries and self.project_root is not None and self.gta_path is not None:
-            rpf_archives, rpf_native_assets, material_progressions = self._inspect_package_rpfs(
-                path, entries, findings, weapon_enhancements,
-            )
-        else:
-            for rpf_path in rpf_entries[:20]:
-                findings.append(PackageFinding(
-                    "warning", "opaque_rpf",
-                    "Nested RPF content is inventoried but not inferred without a "
-                    "matching GTA path; reopen the Workbench with --gta-path.",
-                    rpf_path,
-                ))
-            if len(rpf_entries) > 20:
-                findings.append(PackageFinding(
-                    "warning", "opaque_rpf_summary",
-                    f"{len(rpf_entries) - 20} additional RPF archives were omitted "
-                    "from individual warnings.",
-                ))
         nested_package_entries = [
             entry.path for entry in entries
             if entry.suffix in {".zip", ".oiv", ".rar", ".7z"}
@@ -1442,12 +1501,8 @@ class AddonPackageInspector:
         self, source: Path, entries: list[PackageEntry],
         findings: list[PackageFinding],
         weapon_enhancements: tuple[WeaponEnhancementContract, ...] = (),
-    ) -> tuple[
-        tuple[RpfPackageRecord, ...],
-        tuple[RpfNativeEntryRecord, ...],
-        tuple[MaterialProgressionReport, ...],
-    ]:
-        """Recursively index bounded package RPFs through the pinned helper."""
+    ) -> RpfPackageInspection:
+        """Recursively index RPFs and promote bounded metadata into the graph."""
         assert self.project_root is not None and self.gta_path is not None
         from allin1_sdk.rpf_tools import RpfExplorerService
 
@@ -1460,6 +1515,11 @@ class AddonPackageInspector:
         records: list[RpfPackageRecord] = []
         native: list[RpfNativeEntryRecord] = []
         material_reports: list[MaterialProgressionReport] = []
+        vehicles: list[VehicleRecord] = []
+        handlings: list[HandlingRecord] = []
+        variations: list[VehicleVariationRecord] = []
+        kits: list[VehicleKitRecord] = []
+        registrations: list[PackageRegistrationRecord] = []
         declarations = tuple(
             visual
             for enhancement in weapon_enhancements
@@ -1481,9 +1541,10 @@ class AddonPackageInspector:
                     extracted = root / f"member-{number}.rpf"
                     extracted.write_bytes(content.data)
                     index = service.index(extracted)
+                    edition = self._package_member_edition(member.path) or index.edition
                     records.append(RpfPackageRecord(
                         source=member.path,
-                        edition=index.edition,
+                        edition=edition,
                         archive_count=len(index.archives),
                         entry_count=len(index.entries),
                         suffix_counts=index.suffix_counts(),
@@ -1508,6 +1569,97 @@ class AddonPackageInspector:
                         f"and {len(index.entries)} entries.",
                         member.path,
                     ))
+                    metadata_entries = [
+                        item for item in index.entries
+                        if item.kind != "directory" and item.suffix in XML_SUFFIXES
+                    ]
+                    if len(metadata_entries) > 256:
+                        findings.append(PackageFinding(
+                            "warning", "rpf_metadata_inspection_limit",
+                            "Only the first 256 XML/META entries were considered "
+                            "for package relationships.", member.path,
+                        ))
+                    selected_metadata = []
+                    for item in metadata_entries[:256]:
+                        virtual_source = self._rpf_virtual_source(member.path, item)
+                        if item.size <= 0 or item.size > MAX_XML_BYTES:
+                            findings.append(PackageFinding(
+                                "warning", "rpf_metadata_size_unsupported",
+                                "Nested metadata is empty or exceeds the 16 MiB XML "
+                                "inspection limit.", virtual_source,
+                            ))
+                            continue
+                        selected_metadata.append(item)
+                    extracted_metadata: tuple[Path, ...] = ()
+                    if selected_metadata:
+                        try:
+                            extracted_metadata = service.extract_many(
+                                index, selected_metadata,
+                                root / f"metadata-{number}",
+                            )
+                        except (OSError, RuntimeError, ValueError) as exc:
+                            findings.append(PackageFinding(
+                                "warning", "rpf_metadata_extract_failed",
+                                f"Could not extract nested metadata as one verified "
+                                f"batch: {exc}", member.path,
+                            ))
+                    promoted = 0
+                    for item, destination in zip(
+                        selected_metadata, extracted_metadata,
+                    ):
+                        virtual_source = self._rpf_virtual_source(member.path, item)
+                        try:
+                            metadata = destination.read_bytes()
+                            if len(metadata) != item.size:
+                                raise ValueError(
+                                    "extracted metadata size does not match its RPF index"
+                                )
+                            xml_root = _parse_xml(metadata, virtual_source)
+                        except (ET.ParseError, OSError, RuntimeError, ValueError) as exc:
+                            findings.append(PackageFinding(
+                                "warning", "rpf_metadata_parse_failed",
+                                f"Could not promote nested XML metadata: {exc}",
+                                virtual_source,
+                            ))
+                            continue
+                        found_vehicles = self._vehicle_records(
+                            virtual_source, xml_root,
+                        )
+                        found_handlings = self._handling_records(
+                            virtual_source, xml_root,
+                        )
+                        found_variations = self._variation_records(
+                            virtual_source, xml_root,
+                        )
+                        found_kits = self._kit_records(virtual_source, xml_root)
+                        found_registrations = self._xml_registration_records(
+                            virtual_source, xml_root,
+                        )
+                        vehicles.extend(
+                            replace(item, edition=edition) for item in found_vehicles
+                        )
+                        handlings.extend(
+                            replace(item, edition=edition) for item in found_handlings
+                        )
+                        variations.extend(
+                            replace(item, edition=edition) for item in found_variations
+                        )
+                        kits.extend(
+                            replace(item, edition=edition) for item in found_kits
+                        )
+                        registrations.extend(found_registrations)
+                        promoted += sum((
+                            len(found_vehicles), len(found_handlings),
+                            len(found_variations), len(found_kits),
+                            len(found_registrations),
+                        ))
+                    if promoted:
+                        findings.append(PackageFinding(
+                            "info", "rpf_metadata_promoted",
+                            f"Promoted {promoted} vehicle and registration record(s) "
+                            "from nested RPF metadata into the package graph.",
+                            member.path,
+                        ))
                     try:
                         audited = audit_material_progressions(
                             service, index, root / f"material-{number}",
@@ -1534,7 +1686,29 @@ class AddonPackageInspector:
                         f"Could not recursively inspect this RPF: {exc}",
                         member.path,
                     ))
-        return tuple(records), tuple(native), tuple(material_reports)
+        return RpfPackageInspection(
+            archives=tuple(records), native_assets=tuple(native),
+            material_progressions=tuple(material_reports),
+            vehicles=tuple(vehicles), handlings=tuple(handlings),
+            variations=tuple(variations), kits=tuple(kits),
+            registrations=tuple(registrations),
+        )
+
+    @staticmethod
+    def _package_member_edition(path: str) -> str:
+        parts = {part.casefold() for part in PurePosixPath(path).parts}
+        found = [edition for edition in ("legacy", "enhanced") if edition in parts]
+        return found[0] if len(found) == 1 else ""
+
+    @staticmethod
+    def _rpf_virtual_source(member_path: str, entry: object) -> str:
+        archive_path = str(getattr(entry, "archive_path", "")).strip("/")
+        path = str(getattr(entry, "path", "")).strip("/")
+        segments = [member_path]
+        if archive_path:
+            segments.append(archive_path)
+        segments.append(path)
+        return "!".join(segments)
 
     def _read_external_archive(
         self, archive: Path,
@@ -2413,6 +2587,8 @@ class AddonDraftBuilder:
                     "Layout": [item.layout for item in scan.vehicles],
                     "Type": [item.vehicle_type for item in scan.vehicles],
                     "Class": [item.vehicle_class for item in scan.vehicles],
+                    "Editions": [item.edition or "unresolved" for item in scan.vehicles],
+                    "DefinitionSources": [item.source for item in scan.vehicles],
                     "TuningKits": _unique(
                         kit for vehicle in scan.vehicles
                         for kit in variation_kits.get(vehicle.model_name.casefold(), [])
@@ -2503,18 +2679,34 @@ class AddonDraftBuilder:
                 },
             }, scan.peds[0].source))
 
-        streamed_models = _unique(
-            PurePosixPath(entry.path).stem for entry in scan.entries
-            if entry.suffix in {".ydr", ".ydd", ".yft"}
-        )
-        streamed_textures = _unique(
-            PurePosixPath(entry.path).stem for entry in scan.entries
-            if entry.suffix == ".ytd"
-        )
+        nested_streamed_assets = [
+            self._virtual_asset_path(item) for item in scan.rpf_native_assets
+            if item.suffix in {".ydr", ".ydd", ".yft", ".ytd"}
+        ]
+        streamed_models = _unique_casefold([
+            *(
+                PurePosixPath(entry.path).stem for entry in scan.entries
+                if entry.suffix in {".ydr", ".ydd", ".yft"}
+            ),
+            *(
+                PurePosixPath(entry.path).stem for entry in scan.rpf_native_assets
+                if entry.suffix in {".ydr", ".ydd", ".yft"}
+            ),
+        ])
+        streamed_textures = _unique_casefold([
+            *(
+                PurePosixPath(entry.path).stem for entry in scan.entries
+                if entry.suffix == ".ytd"
+            ),
+            *(
+                PurePosixPath(entry.path).stem for entry in scan.rpf_native_assets
+                if entry.suffix == ".ytd"
+            ),
+        ])
         streamed_assets = [
             entry.path for entry in scan.entries
             if entry.suffix in {".ydr", ".ydd", ".yft", ".ytd"}
-        ]
+        ] + nested_streamed_assets
         if streamed_assets and (scan.vehicles or scan.kits or scan.peds):
             nodes.append({
                 "id": "streaming.imported", "kind": "streaming",
@@ -2583,18 +2775,34 @@ class AddonDraftBuilder:
                     source="vehicles.imported",
                 ))
 
+        inspected_archives = {
+            item.source.casefold(): item for item in scan.rpf_archives
+        }
         for index, entry in enumerate(
             (item for item in scan.entries if item.suffix == ".rpf"), start=1
         ):
             if index > 20:
                 break
+            inspected = inspected_archives.get(entry.path.casefold())
             nodes.append(sourced({
                 "id": f"archive.imported-{index}", "kind": "archive",
-                "label": f"Opaque RPF: {entry.path}",
+                "label": (
+                    f"Inspected RPF: {entry.path}" if inspected
+                    else f"Unresolved RPF: {entry.path}"
+                ),
                 "fields": {
                     "Path": entry.path,
-                    "Entry": "Inspect nested entries with RpfPatcher/CodeWalker",
-                    "MergeStrategy": "Unresolved; do not replace a current-build archive",
+                    "Inspection": (
+                        "Recursive read-only index complete" if inspected
+                        else "Recursive inspection required"
+                    ),
+                    "Edition": inspected.edition if inspected else "unresolved",
+                    "ArchiveLayers": inspected.archive_count if inspected else 0,
+                    "Entries": inspected.entry_count if inspected else 0,
+                    "AssetTypes": inspected.suffix_counts if inspected else {},
+                    "MergeStrategy": (
+                        "Edition-specific DLC archive; managed conversion required"
+                    ),
                     "Backup": "Exact originals and rollback plan required",
                 },
             }, entry.path))
@@ -2659,6 +2867,14 @@ class AddonDraftBuilder:
             "install_steps": steps,
         }
         return ImportedAddonDraft(scan, manifest)
+
+    @staticmethod
+    def _virtual_asset_path(item: RpfNativeEntryRecord) -> str:
+        segments = [item.source]
+        if item.archive_path:
+            segments.append(item.archive_path)
+        segments.append(item.path)
+        return "!".join(segments)
 
     @staticmethod
     def _reference(

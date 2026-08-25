@@ -13,6 +13,7 @@ from pathlib import Path
 
 import click
 
+from allin1_sdk import __version__
 from allin1_sdk.addon_importer import (
     AddonDraftBuilder, AddonPackageInspector, PackageAssetReader,
 )
@@ -31,9 +32,11 @@ from allin1_sdk.compiled_render import (
     compile_vehicle_render,
 )
 from allin1_sdk.gxt2_workspace import Gxt2Workspace
+from allin1_sdk.launcher_bridge import open_launcher_package
 from allin1_sdk.detector import detect_gta_path
 from allin1_sdk.dlc_inventory import DlcInventory
 from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
+from allin1_sdk.managed_package_conversion import ManagedVehiclePackageConverter
 from allin1_sdk.model_materials import (
     MaterialAuthoringWorkspace,
     inspect_model_file,
@@ -49,6 +52,9 @@ from allin1_sdk.package_relations import PackageRelationshipAnalyzer
 from allin1_sdk.paths import project_root
 from allin1_sdk.ped_authoring import PedAuthoringWorkspace
 from allin1_sdk.processes import run_hidden
+from allin1_sdk.product_workspace import (
+    ProductWorkspaceInspector, load_product_workspace,
+)
 from allin1_sdk.rage_data_compiler import RageVehicleDataCompiler
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.rpf_catalog import RpfCatalogService
@@ -61,6 +67,12 @@ from allin1_sdk.rpf_tools import RpfExplorerService, _running_gta_processes
 from allin1_sdk.texture_workspace import TextureDictionaryWorkspace
 from allin1_sdk.vehicle_project import VehicleProjectResolver
 from allin1_sdk.vehicle_package import VehicleAddonPackageBuilder
+from allin1_sdk.vehicle_catalog import STORAGE_KINDS, VEHICLE_CATEGORIES
+from allin1_sdk.vehicle_quick_import import (
+    VehicleQuickImportService,
+    parse_listing_assignments,
+)
+from allin1_sdk.vehicle_oiv_export import LegacyVehicleOivExporter
 from allin1_sdk.vehicle_authoring import (
     TUNING_COLLECTIONS,
     VehicleAuthoringWorkspace,
@@ -291,6 +303,34 @@ def _open_package_graph_window(
     )
 
 
+def _open_addon_manifest_window(source: Path) -> tuple[int, AddonManifest]:
+    """Validate and open one add-on/product manifest in the existing SDK shell."""
+    # This helper backs the product-workspace command specifically. Resolve a
+    # directory through the same canonical loader as the inspection command so
+    # it selects allin1.workspace.json rather than the add-on linker's addon.json.
+    resolved = load_product_workspace(source).descriptor
+    manifest = AddonManifest.load(resolved)
+    executable = Path(sys.executable).resolve()
+    if getattr(sys, "frozen", False):
+        desktop = _frozen_desktop_executable(executable)
+        command = [str(desktop), "--addon-manifest", str(resolved)]
+    else:
+        interpreter = executable
+        if os.name == "nt":
+            windowed = executable.with_name("pythonw.exe")
+            if windowed.is_file():
+                interpreter = windowed
+        command = [
+            str(interpreter), "-m", "allin1_sdk.app",
+            "--addon-manifest", str(resolved),
+        ]
+    options: dict[str, object] = {}
+    if os.name == "nt":
+        options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = subprocess.Popen(command, cwd=PROJECT_ROOT, **options)
+    return process.pid, manifest
+
+
 def _native_report_payload(
     report: NativeAssetReport, *, source: str, edition: str,
     binding: dict[str, object] | None = None,
@@ -364,6 +404,7 @@ def _publish_native_report(
 
 
 @click.group()
+@click.version_option(__version__, prog_name="ALLIN1 SDK")
 def main() -> None:
     """Author, audit, and inspect GTA V add-on content."""
     from allin1_sdk.console_entry import configure_utf8_stdio
@@ -953,6 +994,266 @@ def inspect_workbench(
     click.echo(json.dumps(payload, indent=2))
 
 
+def _managed_vehicle_plan(
+    source: Path,
+    edition: str,
+    gta_path: Path | None,
+    package_id: str | None,
+    package_name: str | None,
+    version: str,
+):
+    game = _game_path(gta_path)
+    converter = ManagedVehiclePackageConverter(PROJECT_ROOT, game)
+    plan = converter.plan(
+        source,
+        edition=edition,
+        package_id=package_id,
+        name=package_name,
+        version=version,
+    )
+    return converter, plan
+
+
+def _managed_vehicle_options(function):
+    function = click.option(
+        "--version", default="0.1.0", show_default=True,
+        help="Version written to the review package.",
+    )(function)
+    function = click.option(
+        "--package-name", help="Display name; inferred from the source when omitted.",
+    )(function)
+    function = click.option(
+        "--package-id", help="Safe package id; inferred from the DLC pack when omitted.",
+    )(function)
+    function = click.option(
+        "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+        help="Matching GTA installation; auto-detected when omitted.",
+    )(function)
+    function = click.option(
+        "--edition", required=True,
+        type=click.Choice(("legacy", "enhanced"), case_sensitive=False),
+        help="Select exactly one source branch for the managed package.",
+    )(function)
+    return function
+
+
+@main.command("plan-managed-vehicle-package")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@_managed_vehicle_options
+def plan_managed_vehicle_package(
+    source: Path,
+    edition: str,
+    gta_path: Path | None,
+    package_id: str | None,
+    package_name: str | None,
+    version: str,
+) -> None:
+    """Resolve one edition into a no-write managed-package conversion plan."""
+    try:
+        _converter, plan = _managed_vehicle_plan(
+            source, edition, gta_path, package_id, package_name, version,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(plan.to_dict(), indent=2))
+
+
+@main.command("export-managed-vehicle-package")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.argument("destination", type=click.Path(path_type=Path))
+@_managed_vehicle_options
+def export_managed_vehicle_package(
+    source: Path,
+    destination: Path,
+    edition: str,
+    gta_path: Path | None,
+    package_id: str | None,
+    package_name: str | None,
+    version: str,
+) -> None:
+    """Create a schema-2 review package without installing it into GTA V."""
+    try:
+        converter, plan = _managed_vehicle_plan(
+            source, edition, gta_path, package_id, package_name, version,
+        )
+        result = converter.export(plan, destination)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("publish-managed-vehicle-package")
+@click.argument(
+    "package_root", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("destination", type=click.Path(path_type=Path))
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation; auto-detected when omitted.",
+)
+def publish_managed_vehicle_package(
+    package_root: Path, destination: Path, gta_path: Path | None,
+) -> None:
+    """Publish a validated vehicle review folder as a deterministic ZIP."""
+    try:
+        converter = ManagedVehiclePackageConverter(
+            PROJECT_ROOT, _game_path(gta_path),
+        )
+        result = converter.publish(package_root, destination)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("export-legacy-vehicle-oiv")
+@click.argument(
+    "package_root", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("destination", type=click.Path(dir_okay=False, path_type=Path))
+@click.option(
+    "--author", required=True,
+    help="Printable author name shown by the OIV installer.",
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Optional GTA root used only to block exports inside the game folder.",
+)
+def export_legacy_vehicle_oiv(
+    package_root: Path,
+    destination: Path,
+    author: str,
+    gta_path: Path | None,
+) -> None:
+    """Export validated Legacy vehicle files as a deterministic OIV."""
+    try:
+        result = LegacyVehicleOivExporter(gta_path).export_prepared(
+            package_root, destination, author=author,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("inspect-vehicle-quick-import")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation; auto-detected when omitted.",
+)
+@click.option(
+    "--preferred-edition",
+    type=click.Choice(("legacy", "enhanced"), case_sensitive=False),
+    help="Prefer one detected edition without excluding the other.",
+)
+def inspect_vehicle_quick_import(
+    source: Path, gta_path: Path | None, preferred_edition: str | None,
+) -> None:
+    """Inspect a vehicle archive for a no-write guided import."""
+    try:
+        service = VehicleQuickImportService(PROJECT_ROOT, _game_path(gta_path))
+        inspection = service.inspect(
+            source, preferred_edition=preferred_edition,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(inspection.to_dict(), indent=2))
+
+
+@main.command("prepare-vehicle-quick-import")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--edition", required=True,
+    type=click.Choice(("legacy", "enhanced"), case_sensitive=False),
+    help="Select exactly one detected vehicle branch.",
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation; auto-detected when omitted.",
+)
+@click.option("--package-id", help="Package id; inferred when omitted.")
+@click.option("--package-name", help="Display name; inferred when omitted.")
+@click.option(
+    "--version", default="1.0.0", show_default=True,
+    help="Version written to the schema-2 launcher package.",
+)
+@click.option(
+    "--set", "listing_assignments", multiple=True,
+    metavar="MODEL.FIELD=VALUE",
+    help="Override one inferred GBAY listing field; repeat for more fields.",
+)
+@click.option(
+    "--destination", type=click.Path(file_okay=False, path_type=Path),
+    help=(
+        "Package folder; defaults to the shared ALLIN1 Launcher package library."
+    ),
+)
+@click.option(
+    "--publish-zip", type=click.Path(dir_okay=False, path_type=Path),
+    help="Also publish the validated package as a deterministic ZIP.",
+)
+def prepare_vehicle_quick_import(
+    source: Path,
+    edition: str,
+    gta_path: Path | None,
+    package_id: str | None,
+    package_name: str | None,
+    version: str,
+    listing_assignments: tuple[str, ...],
+    destination: Path | None,
+    publish_zip: Path | None,
+) -> None:
+    """Prepare a reviewed vehicle package without writing to GTA V."""
+    try:
+        service = VehicleQuickImportService(PROJECT_ROOT, _game_path(gta_path))
+        inspection = service.inspect(source, preferred_edition=edition)
+        review = service.plan(
+            inspection,
+            edition=edition,
+            package_id=package_id,
+            name=package_name,
+            version=version,
+        )
+        updates = parse_listing_assignments(listing_assignments)
+        if updates:
+            review = service.customize(review.plan, updates)
+        output = (
+            destination.expanduser().resolve(strict=False)
+            if destination is not None
+            else service.library_destination(review.plan)
+        )
+        prepared = service.prepare(
+            review, output, publish_zip=publish_zip,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(prepared.to_dict(), indent=2))
+
+
+@main.command("open-launcher-package")
+@click.argument("package_id")
+@click.option(
+    "--traffic/--no-traffic", default=None,
+    help="Carry the reviewed traffic choice into the Launcher's install confirmation.",
+)
+def open_launcher_package_command(
+    package_id: str, traffic: bool | None,
+) -> None:
+    """Reveal a prepared package in Launcher without installing it."""
+    try:
+        process = open_launcher_package(
+            package_id, traffic=traffic,
+        )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "open_launcher_package",
+        "package_id": package_id.strip().casefold(),
+        "traffic_requested": traffic,
+        "install_performed": False,
+        "pid": process.pid,
+    }, indent=2))
+
+
 @main.command("open-package-graph")
 @click.argument(
     "source", type=click.Path(exists=True, path_type=Path),
@@ -1162,6 +1463,59 @@ def validate(manifest: Path) -> None:
         click.echo(f"{issue.severity.upper()} {issue.code}{subject}: {issue.message}")
     if not report.valid:
         raise SystemExit(1)
+
+
+@main.command("inspect-product-workspace")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--include-files", is_flag=True,
+    help=(
+        "Include every bounded tracked inventory entry. Component coverage and "
+        "bounded shared/unassigned evidence are always included."
+    ),
+)
+def inspect_product_workspace(source: Path, include_files: bool) -> None:
+    """Audit a data-only product graph and each component's source coverage.
+
+    Reports managed built-ins separately from installable packages, including
+    per-component file/byte coverage plus bounded shared and unassigned source
+    evidence. Versioned runtime API contracts connect host members, package
+    calls, capabilities, entry points, interfaces, settings, and Workbench
+    relationships. Declared source is inventoried as data and is never executed.
+    """
+    try:
+        report = ProductWorkspaceInspector().inspect(source)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    payload = report.to_dict()
+    inventory = payload["inventory"]
+    if isinstance(inventory, dict):
+        entries = inventory.get("entries", [])
+        inventory["entries_included"] = bool(include_files)
+        inventory["entry_count"] = len(entries) if isinstance(entries, list) else 0
+        if not include_files:
+            inventory["entries"] = []
+    click.echo(json.dumps(payload, indent=2))
+    if not report.valid:
+        raise SystemExit(1)
+
+
+@main.command("open-product-workspace")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+def open_product_workspace(source: Path) -> None:
+    """Open a validated product workspace in the existing Package Linker UI."""
+    try:
+        pid, manifest = _open_addon_manifest_window(source)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "open_product_workspace",
+        "source": str(manifest.manifest_path),
+        "workspace_id": manifest.addon_id,
+        "nodes": len(manifest.nodes),
+        "references": len(manifest.references),
+        "pid": pid,
+    }, indent=2))
 
 
 @main.command("link")
@@ -1591,6 +1945,7 @@ def inspect_vehicle_authoring(workspace: Path, model: str | None) -> None:
         if model:
             payload["authoring"] = authoring.values(model).to_dict()
             payload["appearance"] = authoring.appearance(model).to_dict()
+            payload["distribution"] = authoring.distribution(model).to_dict()
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(payload, indent=2))
@@ -1938,6 +2293,83 @@ def inspect_ped_authoring(workspace: Path, ped: str | None) -> None:
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(payload, indent=2))
+
+
+@main.command("inspect-vehicle-distribution")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option("--model", help="Inspect one model; omit to inspect every model.")
+def inspect_vehicle_distribution(workspace: Path, model: str | None) -> None:
+    """Inspect package-owned GBAY and ambient-traffic authoring metadata."""
+    try:
+        authoring = VehicleAuthoringWorkspace(workspace)
+        models = [model] if model else [item.model for item in authoring.inspect().models]
+        values = [authoring.distribution(value).to_dict() for value in models]
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "inspect_vehicle_distribution",
+        "workspace": str(authoring.root),
+        "revision": authoring.revision,
+        "vehicles": values,
+        "traffic_opt_in": any(item["traffic_enabled"] for item in values),
+    }, indent=2))
+
+
+@main.command("set-vehicle-distribution")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("model")
+@click.option("--listed/--not-listed", default=None)
+@click.option("--name")
+@click.option("--manufacturer")
+@click.option("--category", type=click.Choice(tuple(sorted(VEHICLE_CATEGORIES))))
+@click.option("--price", type=click.IntRange(0, 2_000_000_000))
+@click.option("--storage", type=click.Choice(tuple(sorted(STORAGE_KINDS))))
+@click.option("--size-tier", type=click.IntRange(0, 2))
+@click.option("--preview-dictionary")
+@click.option("--preview-texture")
+@click.option("--traffic-enabled/--traffic-disabled", default=None)
+@click.option("--traffic-weight", type=click.FloatRange(0.1, 20.0))
+@click.option("--expected-revision", type=click.IntRange(min=0))
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def set_vehicle_distribution(
+    workspace: Path, model: str, listed: bool | None, name: str | None,
+    manufacturer: str | None, category: str | None, price: int | None,
+    storage: str | None, size_tier: int | None,
+    preview_dictionary: str | None, preview_texture: str | None,
+    traffic_enabled: bool | None, traffic_weight: float | None,
+    expected_revision: int | None,
+    acknowledge_edit: bool,
+) -> None:
+    """Author one vehicle's GBAY listing and independent traffic eligibility."""
+    del acknowledge_edit
+    updates = {
+        key: value for key, value in {
+            "listed": listed, "name": name, "manufacturer": manufacturer,
+            "category": category, "price": price, "storage": storage,
+            "size_tier": size_tier, "preview_dictionary": preview_dictionary,
+            "preview_texture": preview_texture,
+            "traffic_enabled": traffic_enabled, "traffic_weight": traffic_weight,
+        }.items() if value is not None
+    }
+    if not updates:
+        raise click.ClickException("Provide at least one distribution change")
+    try:
+        authoring = VehicleAuthoringWorkspace(workspace)
+        result = authoring.set_distribution(
+            model, updates, expected_revision=expected_revision,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "set_vehicle_distribution",
+        "workspace": str(authoring.root),
+        "revision": authoring.revision,
+        "distribution": result.to_dict(),
+    }, indent=2))
 
 
 @main.command("plan-ped-clone")
@@ -4872,11 +5304,14 @@ def sdk_compatibility_group() -> None:
 
 
 for _command in (
-    list_examples, validate, link, import_package, audit_folder, oiv_plan,
+    list_examples, validate, inspect_product_workspace, open_product_workspace,
+    link, import_package,
+    audit_folder, oiv_plan,
     compile_oiv_xml,
     inspect_rpf, dlc_inventory, compile_vehicle_data,
     inspect_vehicle_project, export_vehicle_project, build_vehicle_package,
     create_vehicle_authoring, inspect_vehicle_authoring,
+    inspect_vehicle_distribution, set_vehicle_distribution,
     set_vehicle_fields, undo_vehicle_edit,
     create_ped_authoring, inspect_ped_authoring,
     plan_ped_clone, clone_ped_bundle,

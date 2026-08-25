@@ -96,6 +96,10 @@ def test_compiled_render_settings_validate_ui_payload() -> None:
     assert settings.effective_samples == 512
 
     assert CompiledRenderSettings(background="custom_color").background == "custom"
+    sixteen_k = CompiledRenderSettings(width=15360, height=8640)
+    assert (sixteen_k.width, sixteen_k.height) == (15360, 8640)
+    with pytest.raises(ValueError, match="16K UHD"):
+        CompiledRenderSettings(width=15360, height=15360)
 
 
 @pytest.mark.parametrize(

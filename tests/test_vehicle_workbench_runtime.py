@@ -360,6 +360,7 @@ def test_vehicle_authoring_controls_follow_workspace_state_and_route_findings(
     assert all(str(button.cget("state")) == "disabled"
                for button in frame.appearance_edit_buttons)
     assert str(frame.tuning_primary_entry.cget("state")) == "disabled"
+    assert str(frame.save_distribution_button.cget("state")) == "disabled"
 
     workspace = VehicleAuthoringWorkspace.create(source, tmp_path / "workspace")
     frame.open_source(workspace.source, authoring_workspace=workspace)
@@ -368,6 +369,10 @@ def test_vehicle_authoring_controls_follow_workspace_state_and_route_findings(
     assert all(str(button.cget("state")) == "normal"
                for button in frame.appearance_edit_buttons)
     assert str(frame.tuning_primary_entry.cget("state")) == "normal"
+    assert str(frame.save_distribution_button.cget("state")) == "normal"
+    assert frame.distribution_values["listed"].get() is True
+    assert frame.distribution_values["traffic_enabled"].get() is False
+    assert frame.distribution_values["category"].get() == "sports"
 
     available = next(
         item_id for item_id, asset in frame._tuning_assets.items()
