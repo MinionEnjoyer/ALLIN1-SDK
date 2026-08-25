@@ -9,10 +9,10 @@ import re
 import shutil
 import tempfile
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterable
 
 from lxml import etree
 
@@ -31,6 +31,16 @@ from allin1_sdk.vehicle_catalog import (
     VehicleCatalogEntry,
     VehicleTrafficPolicy,
 )
+from allin1_sdk.axle_configurator import (
+    EXPORT_FIVEM_RUNTIME,
+    AxleConfiguration,
+    StockMetadataResult,
+    format_handling_flags,
+    parse_handling_flags,
+    stock_metadata_flags,
+    validate_axle_configuration,
+)
+from allin1_sdk.axle_prefabs import load_prefab_axle_configuration
 
 
 AUTHORING_SCHEMA_VERSION = 1
@@ -491,6 +501,7 @@ class VehicleAuthoringResult:
     changes: tuple[dict[str, str], ...]
     history: Path
     project: VehicleProject
+    warnings: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -501,6 +512,7 @@ class VehicleAuthoringResult:
             "changes": list(self.changes),
             "history": str(self.history),
             "validation": self.project.to_dict(),
+            "warnings": list(self.warnings),
         }
 
 
@@ -580,6 +592,7 @@ class VehicleAuthoringWorkspace:
                 "editable_fields": list(EDITABLE_FIELDS),
                 "identity_migration": "transactional",
                 "identity_fields_locked": ["kitName", "id"],
+                "axle_configurations": {},
                 "distribution": {
                     item.model.casefold(): {
                         "listed": True,
@@ -655,6 +668,162 @@ class VehicleAuthoringWorkspace:
 
     def inspect(self) -> VehicleProject:
         return self._scan_project()[1]
+
+    def _with_axle_configurations(self, project: VehicleProject) -> VehicleProject:
+        raw = self.manifest.get("axle_configurations", {})
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, dict):
+            raise ValueError("Vehicle axle configurations are invalid")
+        configurations = tuple(
+            load_prefab_axle_configuration(value).to_dict()
+            for _key, value in sorted(raw.items(), key=lambda item: str(item[0]).casefold())
+            if isinstance(value, dict)
+        )
+        if len(configurations) != len(raw):
+            raise ValueError("Vehicle axle configuration entry is invalid")
+        return replace(project, axle_configurations=configurations)
+
+    def axle_configuration(self, model: str) -> AxleConfiguration | None:
+        project_model = self.inspect().model(model)
+        raw = self.manifest.get("axle_configurations", {})
+        if not isinstance(raw, dict):
+            raise ValueError("Vehicle axle configurations are invalid")
+        payload = raw.get(project_model.model.casefold())
+        if payload is None:
+            return None
+        if not isinstance(payload, dict):
+            raise ValueError(f"Axle configuration is invalid: {project_model.model}")
+        configuration = load_prefab_axle_configuration(payload)
+        if configuration.vehicle_model != project_model.model.casefold():
+            raise ValueError("Axle configuration model does not match its project key")
+        return configuration
+
+    def set_axle_configuration(
+        self,
+        configuration: AxleConfiguration,
+        *,
+        bones: Iterable[Any] = (),
+        expected_revision: int | None = None,
+    ) -> VehicleAuthoringResult:
+        """Apply project config and handling changes as one guarded revision."""
+        if expected_revision is not None and expected_revision != self.revision:
+            raise ValueError(
+                f"Vehicle authoring revision changed (expected {expected_revision}, "
+                f"found {self.revision})"
+            )
+        scan, before_project = self._scan_project()
+        model = before_project.model(configuration.vehicle_model)
+        if model.model.casefold() != configuration.vehicle_model:
+            raise ValueError("Axle configuration model does not match the selected vehicle")
+        findings = validate_axle_configuration(
+            configuration, bones,
+            asset_names=(item.path for item in model.assets),
+        )
+        errors = [item for item in findings if item.severity == "error"]
+        if errors:
+            raise ValueError("Axle configuration failed validation: " + errors[0].message)
+
+        handling_matches = [
+            item for item in scan.handlings
+            if item.name.casefold() == model.handling_id.casefold()
+        ]
+        if len(handling_matches) != 1:
+            raise ValueError(f"Handling record was not found uniquely: {model.handling_id}")
+        handling_source = handling_matches[0].source
+        tree = self._read_tree(handling_source)
+        handling_item = self._handling_item(tree, model.handling_id)
+        flags_element = _direct_child(handling_item, "strHandlingFlags")
+        flags_text = _element_value(flags_element) or "00000000"
+        flags_result: StockMetadataResult = stock_metadata_flags(
+            configuration, parse_handling_flags(flags_text),
+        )
+        flags_after = format_handling_flags(flags_result.updated_flags, flags_text)
+
+        raw_configs = self.manifest.get("axle_configurations", {})
+        if raw_configs is None:
+            raw_configs = {}
+        if not isinstance(raw_configs, dict):
+            raise ValueError("Vehicle axle configurations are invalid")
+        model_key = configuration.vehicle_model.casefold()
+        previous_config = raw_configs.get(model_key)
+        next_config = configuration.to_dict()
+        changes: list[dict[str, str]] = []
+        if previous_config != next_config:
+            changes.append({
+                "field": "axles.configuration",
+                "before": json.dumps(previous_config, sort_keys=True) if previous_config else "",
+                "after": json.dumps(next_config, sort_keys=True),
+            })
+        trees: dict[str, etree._ElementTree] = {}
+        if flags_after != flags_text:
+            before, after = _set_element_value(
+                handling_item, "strHandlingFlags", flags_after,
+                attribute=bool(flags_element is not None and "value" in flags_element.attrib),
+            )
+            changes.append({"field": "handling.strHandlingFlags", "before": before, "after": after})
+            trees[handling_source] = tree
+
+        powered = {item.powered for item in configuration.axles}
+        if configuration.export_mode == EXPORT_FIVEM_RUNTIME and len(powered) > 1:
+            bias_element = _direct_child(handling_item, "fDriveBiasFront")
+            bias_before = _element_value(bias_element)
+            try:
+                usable_bias = 0.0 < float(bias_before) < 1.0
+            except ValueError:
+                usable_bias = False
+            if not usable_bias:
+                before, after = _set_element_value(
+                    handling_item, "fDriveBiasFront", "0.5", attribute=True,
+                )
+                changes.append({
+                    "field": "handling.fDriveBiasFront", "before": before, "after": after,
+                })
+                trees[handling_source] = tree
+        if not changes:
+            raise ValueError("Axle configuration update contains no changed values")
+
+        history = self._new_history(
+            model.model, trees, tuple(changes),
+            operation="vehicle_axle_configuration", snapshot_manifest=True,
+        )
+        previous_manifest = deepcopy(self.manifest)
+        try:
+            configs = self.manifest.setdefault("axle_configurations", {})
+            if not isinstance(configs, dict):
+                raise ValueError("Vehicle axle configurations are invalid")
+            configs[model_key] = next_config
+            if trees:
+                self._commit_trees(trees)
+            after_scan, after_project = self._scan_project()
+            self._reject_new_findings(before_project, after_project, model.model)
+            after_handling = next(
+                item for item in after_scan.handlings
+                if item.name.casefold() == model.handling_id.casefold()
+            )
+            roundtrip_tree = self._read_tree(after_handling.source)
+            roundtrip_item = self._handling_item(roundtrip_tree, model.handling_id)
+            roundtrip_flags = _element_value(
+                _direct_child(roundtrip_item, "strHandlingFlags")
+            ) or "00000000"
+            if parse_handling_flags(roundtrip_flags) != flags_result.updated_flags:
+                raise RuntimeError("Authored handling steering flags did not round-trip")
+            revision = self._finish_revision(history, after_project)
+        except Exception:
+            self.manifest = previous_manifest
+            self._restore_history(history)
+            shutil.rmtree(history, ignore_errors=True)
+            raise
+        warnings = tuple(
+            dict.fromkeys((
+                *(item.message for item in findings if item.severity != "error"),
+                *flags_result.warnings,
+            ))
+        )
+        return VehicleAuthoringResult(
+            self.root, revision, model.model, tuple(changes), history,
+            after_project, warnings,
+        )
 
     def distribution(self, model: str) -> VehicleDistributionValues:
         project_model = self.inspect().model(model)
@@ -769,7 +938,9 @@ class VehicleAuthoringWorkspace:
     def _scan_project(self) -> tuple[PackageScan, VehicleProject]:
         """Scan once when an operation needs inventory and resolved relationships."""
         scan = AddonPackageInspector().inspect(self.source)
-        return scan, VehicleProjectResolver.inspect_scan(scan)
+        return scan, self._with_axle_configurations(
+            VehicleProjectResolver.inspect_scan(scan)
+        )
 
     def publish_source(self) -> Path:
         """Return a source that can honestly include the workspace's current edits."""
@@ -1630,6 +1801,7 @@ class VehicleAuthoringWorkspace:
                 and (path / "edit.json").is_file()
                 and not path.name.endswith(".undone")
                 and not path.name.endswith(".undo-recovery")
+                and not path.name.endswith(".redo")
             ),
             key=lambda path: path.name,
             reverse=True,
@@ -1641,12 +1813,14 @@ class VehicleAuthoringWorkspace:
         record = self._history_record(history)
         model = str(record.get("model", ""))
         recovery = self._snapshot_current_for_undo(history, model)
-        previous_manifest = dict(self.manifest)
+        previous_manifest = deepcopy(self.manifest)
+        next_revision = self.revision + 1
         undone = history.with_name(f"{history.name}.undone")
+        redo = history.with_name(f"{history.name}.redo")
         try:
             self._restore_history(history)
             project = self.inspect()
-            revision = self.revision + 1
+            revision = next_revision
             self.manifest["revision"] = revision
             self.manifest["updated_utc"] = datetime.now(timezone.utc).isoformat()
             self.manifest["models"] = [item.model for item in project.models]
@@ -1659,13 +1833,94 @@ class VehicleAuthoringWorkspace:
             self._restore_history(recovery)
             shutil.rmtree(recovery, ignore_errors=True)
             raise
-        shutil.rmtree(recovery, ignore_errors=True)
+        recovery.rename(redo)
         return VehicleAuthoringResult(
             workspace=self.root,
             revision=revision,
             model=model,
             changes=tuple(record.get("changes", ())),
             history=undone,
+            project=project,
+        )
+
+    def axle_handling_evidence(self, model: str) -> dict[str, str]:
+        """Return the two non-editable handling fields axle authoring may touch.
+
+        Keeping this read-only evidence separate from ``values`` avoids exposing
+        ``strHandlingFlags`` as a generic free-form editor field while still
+        allowing the Axle Configurator to preview its exact transaction.
+        """
+        scan, project = self._scan_project()
+        project_model = project.model(model)
+        matches = [
+            item for item in scan.handlings
+            if item.name.casefold() == project_model.handling_id.casefold()
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"Handling record was not found uniquely: {project_model.handling_id}"
+            )
+        tree = self._read_tree(matches[0].source)
+        item = self._handling_item(tree, project_model.handling_id)
+        return {
+            "strHandlingFlags": _element_value(
+                _direct_child(item, "strHandlingFlags")
+            ) or "00000000",
+            "fDriveBiasFront": _element_value(
+                _direct_child(item, "fDriveBiasFront")
+            ),
+        }
+
+    def redo(self) -> VehicleAuthoringResult:
+        """Reapply the most recently undone guarded vehicle edit."""
+        history_root = self.root / "history"
+        states: dict[str, tuple[Path | None, Path | None]] = {}
+        for path in history_root.iterdir():
+            if not path.is_dir() or path.is_symlink() or not (path / "edit.json").is_file():
+                continue
+            if path.name.endswith(".redo") or path.name.endswith(".undo-recovery"):
+                continue
+            base = path.name.removesuffix(".undone")
+            active, undone = states.get(base, (None, None))
+            states[base] = (
+                path if not path.name.endswith(".undone") else active,
+                path if path.name.endswith(".undone") else undone,
+            )
+        if not states:
+            raise ValueError("Vehicle authoring workspace has no edit to redo")
+        latest = sorted(states, reverse=True)[0]
+        active, undone = states[latest]
+        redo = history_root / f"{latest}.redo"
+        if active is not None or undone is None or not redo.is_dir() or redo.is_symlink():
+            raise ValueError("Vehicle authoring workspace has no edit to redo")
+        self._verify_pre_edit_state(undone)
+        record = self._history_record(undone)
+        model = str(record.get("model", ""))
+        previous_manifest = deepcopy(self.manifest)
+        next_revision = self.revision + 1
+        restored = history_root / latest
+        try:
+            self._restore_history(redo)
+            project = self.inspect()
+            revision = next_revision
+            self.manifest["revision"] = revision
+            self.manifest["updated_utc"] = datetime.now(timezone.utc).isoformat()
+            self.manifest["models"] = [item.model for item in project.models]
+            undone.rename(restored)
+            self._write_manifest()
+        except Exception:
+            self.manifest = previous_manifest
+            if restored.exists() and not undone.exists():
+                restored.rename(undone)
+            self._restore_history(undone)
+            raise
+        shutil.rmtree(redo)
+        return VehicleAuthoringResult(
+            workspace=self.root,
+            revision=revision,
+            model=model,
+            changes=tuple(record.get("changes", ())),
+            history=restored,
             project=project,
         )
 
@@ -2276,6 +2531,7 @@ class VehicleAuthoringWorkspace:
         extra_files: tuple[str, ...] = (),
         operation: str = "vehicle_metadata_edit",
         renames: tuple[dict[str, str], ...] = (),
+        snapshot_manifest: bool = False,
     ) -> Path:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         history = self.root / "history" / f"{stamp}-edit"
@@ -2303,6 +2559,8 @@ class VehicleAuthoringWorkspace:
             "changes": list(changes),
             "renames": list(renames),
         }
+        if snapshot_manifest:
+            record["manifest_before"] = deepcopy(self.manifest)
         (history / "edit.json").write_text(
             json.dumps(record, indent=2) + "\n", encoding="utf-8",
         )
@@ -2329,6 +2587,7 @@ class VehicleAuthoringWorkspace:
         snapshot = self._new_history(
             model, {}, (), extra_files=paths, operation="vehicle_undo_recovery",
             renames=recovery_renames,
+            snapshot_manifest=isinstance(record.get("manifest_before"), dict),
         )
         recovery = snapshot.with_name(f"{snapshot.name}.undo-recovery")
         snapshot.rename(recovery)
@@ -2381,6 +2640,11 @@ class VehicleAuthoringWorkspace:
             destination = self._destination(relative)
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(backup, destination)
+        manifest_before = record.get("manifest_before")
+        if manifest_before is not None:
+            if not isinstance(manifest_before, dict):
+                raise ValueError("Vehicle authoring history has an invalid manifest snapshot")
+            self.manifest = deepcopy(manifest_before)
 
     def _record_post_edit_state(self, history: Path) -> None:
         record = self._history_record(history)
@@ -2412,7 +2676,36 @@ class VehicleAuthoringWorkspace:
             }
             for relative in files
         }
+        if isinstance(record.get("manifest_before"), dict):
+            record["manifest_after"] = self._history_manifest_state(self.manifest)
         self._write_history_record(history, record)
+
+    def _verify_pre_edit_state(self, history: Path) -> None:
+        """Verify undo output before a redo writes its retained post-edit copy."""
+        record = self._history_record(history)
+        files = record.get("files")
+        hashes = record.get("sha256")
+        if not isinstance(files, list) or not isinstance(hashes, dict):
+            raise ValueError("Vehicle authoring history has invalid pre-edit state")
+        for relative in files:
+            if not isinstance(relative, str) or not isinstance(hashes.get(relative), str):
+                raise ValueError("Vehicle authoring history has invalid pre-edit state")
+            try:
+                current = _sha256(self._member(relative))
+            except (OSError, ValueError) as exc:
+                raise ValueError(
+                    "Vehicle authoring member changed after undo: " + relative
+                ) from exc
+            if current != hashes[relative]:
+                raise ValueError("Vehicle authoring member changed after undo: " + relative)
+        manifest_before = record.get("manifest_before")
+        if manifest_before is not None:
+            if not isinstance(manifest_before, dict):
+                raise ValueError("Vehicle authoring history has invalid manifest snapshot")
+            if self._history_manifest_state(self.manifest) != self._history_manifest_state(
+                manifest_before
+            ):
+                raise ValueError("Vehicle authoring manifest changed after undo")
 
     def _verify_post_edit_state(self, history: Path) -> None:
         record = self._history_record(history)
@@ -2450,6 +2743,19 @@ class VehicleAuthoringWorkspace:
                     "Vehicle authoring member changed after its edit: "
                     + current_path
                 )
+        manifest_after = record.get("manifest_after")
+        if manifest_after is not None:
+            if not isinstance(manifest_after, dict):
+                raise ValueError("Vehicle authoring history has invalid post-edit manifest state")
+            if self._history_manifest_state(self.manifest) != manifest_after:
+                raise ValueError("Vehicle authoring manifest changed after its edit")
+
+    @staticmethod
+    def _history_manifest_state(manifest: dict[str, Any]) -> dict[str, Any]:
+        state = deepcopy(manifest)
+        state.pop("revision", None)
+        state.pop("updated_utc", None)
+        return state
 
     def _history_record(self, history: Path) -> dict[str, Any]:
         if history.parent != self.root / "history" or history.is_symlink():

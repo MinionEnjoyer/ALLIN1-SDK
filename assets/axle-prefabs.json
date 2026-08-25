@@ -1,0 +1,404 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "allin1.axle-prefabs",
+  "localization": {
+    "axleCategory.bus": "Bus and coach",
+    "axleCategory.truck": "Truck and tractor",
+    "axleCategory.utility": "Off-road and utility",
+    "axleCategory.heavy": "Heavy transport",
+    "axleCategory.trailer": "Trailer",
+    "axleRole.front": "Front steering",
+    "axleRole.drive": "Drive axle",
+    "axleRole.tag": "Tag axle",
+    "axleRole.pusher": "Pusher axle",
+    "axleRole.trailer": "Trailer carrier",
+    "axleCompatibility.stock": "Stock",
+    "axleCompatibility.fivemRuntime": "FiveM Runtime",
+    "axleCompatibility.storyAsi": "Story ASI",
+    "axleCompatibility.liftRuntime": "Lift Runtime",
+    "axleCompatibility.experimental": "Experimental",
+    "axleCompatibility.unsupported": "Unsupported",
+    "axleValidation.missingRequiredBone": "A required canonical wheel bone is missing.",
+    "axleValidation.physicalOrder": "Wheel bones are not in valid front-to-rear order.",
+    "axleValidation.axleCountMismatch": "The skeleton axle count does not match the selected prefab.",
+    "axleValidation.runtimeMapping": "The target runtime wheel-index mapping is invalid.",
+    "axleValidation.missingTargetCapability": "The target is missing a required axle capability.",
+    "axleValidation.sharedVisualTemplate": "Middle and rear axles share one stock wheel template.",
+    "axleValidation.innerAddonRequired": "This layout needs ordinary bone-bound inner-wheel geometry.",
+    "axleValidation.selectedAxlesRequired": "Select at least one axle for an axle-specific inner wheel.",
+    "axleValidation.selectedAxleRange": "A selected visual axle is outside this vehicle's axle array.",
+    "axleValidation.tandemDriveMissing": "This tyre package requires two driven axles.",
+    "axleValidation.mixedTagRoles": "This tyre package requires a middle drive and final tag axle.",
+    "axleValidation.visualRuntimeIndexChange": "Visual tyres cannot add physical wheel slots.",
+    "axleValidation.visualRuntimeMappingChange": "Visual tyres cannot change runtime wheel indices.",
+    "axleValidation.visualGeometryDesignOnly": "Required visual geometry is unavailable; the tyre choice is saved as design intent only.",
+    "axleValidation.visualGeometryUnsafe": "A visual geometry binding is missing, unsafe, or not a real file.",
+    "axlePrefab.4x2Standard": "4×2 Standard",
+    "axlePrefab.4x2Standard.use": "Bus, truck, or tractor",
+    "axlePrefab.4x4AllDrive": "4×4 All-Drive",
+    "axlePrefab.4x4AllDrive.use": "Off-road and utility vehicle",
+    "axlePrefab.6x2FixedTag": "6×2 Fixed Tag",
+    "axlePrefab.6x2FixedTag.use": "Coach, bus, or rigid truck",
+    "axlePrefab.6x2RearSteerBus": "6×2 Rear-Steer Tag",
+    "axlePrefab.6x2RearSteerBus.use": "Long bus or coach",
+    "axlePrefab.6x2LiftTag": "6×2 Lift Tag",
+    "axlePrefab.6x2LiftTag.use": "Variable-load truck",
+    "axlePrefab.6x2Pusher": "6×2 Pusher",
+    "axlePrefab.6x2Pusher.use": "Tractor or rigid truck",
+    "axlePrefab.6x2SteeredPusher": "6×2 Steered Pusher",
+    "axlePrefab.6x2SteeredPusher.use": "Heavy rigid truck",
+    "axlePrefab.6x2TwinSteer": "6×2 Twin Steer",
+    "axlePrefab.6x2TwinSteer.use": "Heavy rigid or crane",
+    "axlePrefab.6x4TandemDrive": "6×4 Tandem Drive",
+    "axlePrefab.6x4TandemDrive.use": "Dump truck or semi tractor",
+    "axlePrefab.6x6AllDrive": "6×6 All-Drive",
+    "axlePrefab.6x6AllDrive.use": "Military and off-road vehicle",
+    "axlePrefab.8x2TwinSteerTag": "8×2 Twin-Steer Tag",
+    "axlePrefab.8x2TwinSteerTag.use": "Heavy rigid truck",
+    "axlePrefab.8x2MultiSteer": "8×2 Multi-Steer",
+    "axlePrefab.8x2MultiSteer.use": "Large delivery or crane chassis",
+    "axlePrefab.8x4TwinSteer": "8×4 Twin-Steer Tandem",
+    "axlePrefab.8x4TwinSteer.use": "Tipper or concrete mixer",
+    "axlePrefab.8x4FixedTag": "8×4 Tandem with Tag",
+    "axlePrefab.8x4FixedTag.use": "Heavy rigid truck",
+    "axlePrefab.8x4RearSteer": "8×4 Rear-Steer",
+    "axlePrefab.8x4RearSteer.use": "Crane and construction chassis",
+    "axlePrefab.8x6HeavyTraction": "8×6 Heavy Traction",
+    "axlePrefab.8x6HeavyTraction.use": "Heavy haul and construction",
+    "axlePrefab.8x8AllDrive": "8×8 All-Drive",
+    "axlePrefab.8x8AllDrive.use": "Military and extreme off-road vehicle",
+    "axlePrefab.10x4MultiSteer": "10×4 Multi-Steer",
+    "axlePrefab.10x4MultiSteer.use": "Mobile crane and heavy rigid",
+    "axlePrefab.10x6HeavyHaul": "10×6 Heavy Haul",
+    "axlePrefab.10x6HeavyHaul.use": "Heavy transport",
+    "axlePrefab.10x6RearSteer": "10×6 Rear-Steer",
+    "axlePrefab.10x6RearSteer.use": "Long construction chassis",
+    "axlePrefab.10x8HeavyHaul": "10×8 Heavy Haul",
+    "axlePrefab.10x8HeavyHaul.use": "Heavy recovery or mobile crane",
+    "axlePrefab.10x10AllDrive": "10×10 All-Drive",
+    "axlePrefab.10x10AllDrive.use": "Specialized military vehicle",
+    "axlePrefab.trailerTandem": "Tandem Trailer",
+    "axlePrefab.trailerTandem.use": "Two-axle trailer",
+    "axlePrefab.trailerTridem": "Tridem Trailer",
+    "axlePrefab.trailerTridem.use": "Three-axle trailer",
+    "axlePrefab.trailerSteeredTag": "Steered Tag Trailer",
+    "axlePrefab.trailerSteeredTag.use": "Trailer with a rear-steered tag",
+    "axlePrefab.trailerMultiSteer": "Multi-Steer Trailer",
+    "axlePrefab.trailerMultiSteer.use": "Trailer with multiple steering axles",
+    "axlePrefab.trailerLiftFront": "Lift-Axle Tridem",
+    "axlePrefab.trailerLiftFront.use": "Tridem trailer with a liftable front axle"
+  },
+  "prefabs": [
+    {
+      "id": "4x2_standard", "localizationKey": "axlePrefab.4x2Standard", "displayName": "4×2 Standard",
+      "commonUseLocalizationKey": "axlePrefab.4x2Standard.use", "commonUse": "Bus, truck, or tractor",
+      "nominalLayout": "4x2", "category": "truck", "axleCount": 2, "pattern": "S-D",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false}
+      ],
+      "tags": ["bus", "truck", "tractor"], "requiredCapabilities": [], "experimental": false
+    },
+    {
+      "id": "4x4_all_drive", "localizationKey": "axlePrefab.4x4AllDrive", "displayName": "4×4 All-Drive",
+      "commonUseLocalizationKey": "axlePrefab.4x4AllDrive.use", "commonUse": "Off-road and utility vehicle",
+      "nominalLayout": "4x4", "category": "utility", "axleCount": 2, "pattern": "SD-D",
+      "axles": [
+        {"order": 0, "steered": true, "powered": true, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false}
+      ],
+      "tags": ["off-road", "utility", "all-drive"], "requiredCapabilities": [], "experimental": false
+    },
+    {
+      "id": "6x2_fixed_tag", "localizationKey": "axlePrefab.6x2FixedTag", "displayName": "6×2 Fixed Tag",
+      "commonUseLocalizationKey": "axlePrefab.6x2FixedTag.use", "commonUse": "Coach, bus, or rigid truck",
+      "nominalLayout": "6x2", "category": "truck", "axleCount": 3, "pattern": "S-D-T",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 2, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "tag", "liftable": false}
+      ],
+      "tags": ["coach", "bus", "rigid"], "requiredCapabilities": ["selectiveDrive"], "experimental": false
+    },
+    {
+      "id": "6x2_rear_steer_bus", "localizationKey": "axlePrefab.6x2RearSteerBus", "displayName": "6×2 Rear-Steer Tag",
+      "commonUseLocalizationKey": "axlePrefab.6x2RearSteerBus.use", "commonUse": "Long bus or coach",
+      "nominalLayout": "6x2", "category": "bus", "axleCount": 3, "pattern": "S-D-RS",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 2, "steered": true, "powered": false, "steeringRole": "rear", "carrierRole": "tag", "liftable": false}
+      ],
+      "tags": ["bus", "coach", "rear-steer"], "requiredCapabilities": ["selectiveSteering", "selectiveDrive"], "experimental": false
+    },
+    {
+      "id": "6x2_lift_tag", "localizationKey": "axlePrefab.6x2LiftTag", "displayName": "6×2 Lift Tag",
+      "commonUseLocalizationKey": "axlePrefab.6x2LiftTag.use", "commonUse": "Variable-load truck",
+      "nominalLayout": "6x2", "category": "truck", "axleCount": 3, "pattern": "S-D-LT",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 2, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "tag", "liftable": true}
+      ],
+      "tags": ["truck", "tag", "lift"], "requiredCapabilities": ["selectiveDrive", "liftAxle"], "experimental": false
+    },
+    {
+      "id": "6x2_pusher", "localizationKey": "axlePrefab.6x2Pusher", "displayName": "6×2 Pusher",
+      "commonUseLocalizationKey": "axlePrefab.6x2Pusher.use", "commonUse": "Tractor or rigid truck",
+      "nominalLayout": "6x2", "category": "truck", "axleCount": 3, "pattern": "S-LT-D",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "pusher", "liftable": true},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false}
+      ],
+      "tags": ["tractor", "rigid", "pusher", "lift"], "requiredCapabilities": ["selectiveDrive", "liftAxle"], "experimental": false
+    },
+    {
+      "id": "6x2_steered_pusher", "localizationKey": "axlePrefab.6x2SteeredPusher", "displayName": "6×2 Steered Pusher",
+      "commonUseLocalizationKey": "axlePrefab.6x2SteeredPusher.use", "commonUse": "Heavy rigid truck",
+      "nominalLayout": "6x2", "category": "truck", "axleCount": 3, "pattern": "S-LS-D",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "pusher", "liftable": true},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false}
+      ],
+      "tags": ["heavy", "rigid", "pusher", "lift", "multi-steer"], "requiredCapabilities": ["selectiveSteering", "selectiveDrive", "liftAxle"], "experimental": false
+    },
+    {
+      "id": "6x2_twin_steer", "localizationKey": "axlePrefab.6x2TwinSteer", "displayName": "6×2 Twin Steer",
+      "commonUseLocalizationKey": "axlePrefab.6x2TwinSteer.use", "commonUse": "Heavy rigid or crane",
+      "nominalLayout": "6x2", "category": "heavy", "axleCount": 3, "pattern": "S-S-D",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false}
+      ],
+      "tags": ["heavy", "rigid", "crane", "multi-steer"], "requiredCapabilities": ["selectiveSteering", "selectiveDrive"], "experimental": false
+    },
+    {
+      "id": "6x4_tandem_drive", "localizationKey": "axlePrefab.6x4TandemDrive", "displayName": "6×4 Tandem Drive",
+      "commonUseLocalizationKey": "axlePrefab.6x4TandemDrive.use", "commonUse": "Dump truck or semi tractor",
+      "nominalLayout": "6x4", "category": "truck", "axleCount": 3, "pattern": "S-D-D",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false}
+      ],
+      "tags": ["dump", "tractor", "tandem", "truck"], "requiredCapabilities": ["selectiveDrive"], "experimental": false
+    },
+    {
+      "id": "6x6_all_drive", "localizationKey": "axlePrefab.6x6AllDrive", "displayName": "6×6 All-Drive",
+      "commonUseLocalizationKey": "axlePrefab.6x6AllDrive.use", "commonUse": "Military and off-road vehicle",
+      "nominalLayout": "6x6", "category": "utility", "axleCount": 3, "pattern": "SD-D-D",
+      "axles": [
+        {"order": 0, "steered": true, "powered": true, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false}
+      ],
+      "tags": ["military", "off-road", "all-drive"], "requiredCapabilities": [], "experimental": false
+    },
+    {
+      "id": "8x2_twin_steer_tag", "localizationKey": "axlePrefab.8x2TwinSteerTag", "displayName": "8×2 Twin-Steer Tag",
+      "commonUseLocalizationKey": "axlePrefab.8x2TwinSteerTag.use", "commonUse": "Heavy rigid truck",
+      "nominalLayout": "8x2", "category": "heavy", "axleCount": 4, "pattern": "S-S-D-T",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 3, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "tag", "liftable": false}
+      ],
+      "tags": ["heavy", "rigid", "multi-steer", "tag"], "requiredCapabilities": ["selectiveSteering", "selectiveDrive"], "experimental": false
+    },
+    {
+      "id": "8x2_multi_steer", "localizationKey": "axlePrefab.8x2MultiSteer", "displayName": "8×2 Multi-Steer",
+      "commonUseLocalizationKey": "axlePrefab.8x2MultiSteer.use", "commonUse": "Large delivery or crane chassis",
+      "nominalLayout": "8x2", "category": "heavy", "axleCount": 4, "pattern": "S-S-D-RS",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 3, "steered": true, "powered": false, "steeringRole": "rear", "carrierRole": "tag", "liftable": false}
+      ],
+      "tags": ["delivery", "crane", "multi-steer", "rear-steer"], "requiredCapabilities": ["selectiveSteering", "selectiveDrive"], "experimental": false
+    },
+    {
+      "id": "8x4_twin_steer", "localizationKey": "axlePrefab.8x4TwinSteer", "displayName": "8×4 Twin-Steer Tandem",
+      "commonUseLocalizationKey": "axlePrefab.8x4TwinSteer.use", "commonUse": "Tipper or concrete mixer",
+      "nominalLayout": "8x4", "category": "heavy", "axleCount": 4, "pattern": "S-S-D-D",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 3, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false}
+      ],
+      "tags": ["tipper", "mixer", "tandem", "multi-steer"], "requiredCapabilities": ["selectiveSteering", "selectiveDrive"], "experimental": false
+    },
+    {
+      "id": "8x4_fixed_tag", "localizationKey": "axlePrefab.8x4FixedTag", "displayName": "8×4 Tandem with Tag",
+      "commonUseLocalizationKey": "axlePrefab.8x4FixedTag.use", "commonUse": "Heavy rigid truck",
+      "nominalLayout": "8x4", "category": "heavy", "axleCount": 4, "pattern": "S-D-D-T",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 3, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "tag", "liftable": false}
+      ],
+      "tags": ["heavy", "rigid", "tandem", "tag"], "requiredCapabilities": ["selectiveDrive"], "experimental": false
+    },
+    {
+      "id": "8x4_rear_steer", "localizationKey": "axlePrefab.8x4RearSteer", "displayName": "8×4 Rear-Steer",
+      "commonUseLocalizationKey": "axlePrefab.8x4RearSteer.use", "commonUse": "Crane and construction chassis",
+      "nominalLayout": "8x4", "category": "heavy", "axleCount": 4, "pattern": "S-D-D-RS",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 3, "steered": true, "powered": false, "steeringRole": "rear", "carrierRole": "tag", "liftable": false}
+      ],
+      "tags": ["crane", "construction", "rear-steer", "tandem"], "requiredCapabilities": ["selectiveSteering", "selectiveDrive"], "experimental": false
+    },
+    {
+      "id": "8x6_heavy_traction", "localizationKey": "axlePrefab.8x6HeavyTraction", "displayName": "8×6 Heavy Traction",
+      "commonUseLocalizationKey": "axlePrefab.8x6HeavyTraction.use", "commonUse": "Heavy haul and construction",
+      "nominalLayout": "8x6", "category": "heavy", "axleCount": 4, "pattern": "SD-S-D-D",
+      "axles": [
+        {"order": 0, "steered": true, "powered": true, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 3, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false}
+      ],
+      "tags": ["heavy-haul", "construction", "traction", "multi-steer"], "requiredCapabilities": ["selectiveSteering", "selectiveDrive"], "experimental": false
+    },
+    {
+      "id": "8x8_all_drive", "localizationKey": "axlePrefab.8x8AllDrive", "displayName": "8×8 All-Drive",
+      "commonUseLocalizationKey": "axlePrefab.8x8AllDrive.use", "commonUse": "Military and extreme off-road vehicle",
+      "nominalLayout": "8x8", "category": "utility", "axleCount": 4, "pattern": "SD-D-D-D",
+      "axles": [
+        {"order": 0, "steered": true, "powered": true, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 3, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false}
+      ],
+      "tags": ["military", "extreme", "off-road", "all-drive"], "requiredCapabilities": [], "experimental": false
+    },
+    {
+      "id": "10x4_multi_steer", "localizationKey": "axlePrefab.10x4MultiSteer", "displayName": "10×4 Multi-Steer",
+      "commonUseLocalizationKey": "axlePrefab.10x4MultiSteer.use", "commonUse": "Mobile crane and heavy rigid",
+      "nominalLayout": "10x4", "category": "heavy", "axleCount": 5, "pattern": "S-S-D-D-RS",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 3, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 4, "steered": true, "powered": false, "steeringRole": "rear", "carrierRole": "tag", "liftable": false}
+      ],
+      "tags": ["mobile-crane", "heavy", "multi-steer", "rear-steer"], "requiredCapabilities": ["selectiveSteering", "selectiveDrive"], "experimental": false
+    },
+    {
+      "id": "10x6_heavy_haul", "localizationKey": "axlePrefab.10x6HeavyHaul", "displayName": "10×6 Heavy Haul",
+      "commonUseLocalizationKey": "axlePrefab.10x6HeavyHaul.use", "commonUse": "Heavy transport",
+      "nominalLayout": "10x6", "category": "heavy", "axleCount": 5, "pattern": "S-S-D-D-D",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 3, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 4, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false}
+      ],
+      "tags": ["heavy-haul", "transport", "multi-steer"], "requiredCapabilities": ["selectiveSteering", "selectiveDrive"], "experimental": false
+    },
+    {
+      "id": "10x6_rear_steer", "localizationKey": "axlePrefab.10x6RearSteer", "displayName": "10×6 Rear-Steer",
+      "commonUseLocalizationKey": "axlePrefab.10x6RearSteer.use", "commonUse": "Long construction chassis",
+      "nominalLayout": "10x6", "category": "heavy", "axleCount": 5, "pattern": "S-D-D-D-RS",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 3, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 4, "steered": true, "powered": false, "steeringRole": "rear", "carrierRole": "tag", "liftable": false}
+      ],
+      "tags": ["construction", "long-chassis", "rear-steer"], "requiredCapabilities": ["selectiveSteering", "selectiveDrive"], "experimental": false
+    },
+    {
+      "id": "10x8_heavy_haul", "localizationKey": "axlePrefab.10x8HeavyHaul", "displayName": "10×8 Heavy Haul",
+      "commonUseLocalizationKey": "axlePrefab.10x8HeavyHaul.use", "commonUse": "Heavy recovery or mobile crane",
+      "nominalLayout": "10x8", "category": "heavy", "axleCount": 5, "pattern": "S-SD-D-D-D",
+      "axles": [
+        {"order": 0, "steered": true, "powered": false, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": true, "powered": true, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 3, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 4, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false}
+      ],
+      "tags": ["heavy-recovery", "mobile-crane", "multi-steer"], "requiredCapabilities": ["selectiveSteering", "selectiveDrive"], "experimental": false
+    },
+    {
+      "id": "10x10_all_drive", "localizationKey": "axlePrefab.10x10AllDrive", "displayName": "10×10 All-Drive",
+      "commonUseLocalizationKey": "axlePrefab.10x10AllDrive.use", "commonUse": "Specialized military vehicle",
+      "nominalLayout": "10x10", "category": "utility", "axleCount": 5, "pattern": "SD-SD-D-D-D",
+      "axles": [
+        {"order": 0, "steered": true, "powered": true, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 1, "steered": true, "powered": true, "steeringRole": "front", "carrierRole": "primary", "liftable": false},
+        {"order": 2, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 3, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false},
+        {"order": 4, "steered": false, "powered": true, "steeringRole": "none", "carrierRole": "drive", "liftable": false}
+      ],
+      "tags": ["military", "specialized", "all-drive", "multi-steer"], "requiredCapabilities": ["selectiveSteering"], "experimental": false
+    },
+    {
+      "id": "trailer_tandem", "localizationKey": "axlePrefab.trailerTandem", "displayName": "Tandem Trailer",
+      "commonUseLocalizationKey": "axlePrefab.trailerTandem.use", "commonUse": "Two-axle trailer",
+      "nominalLayout": "trailer", "category": "trailer", "axleCount": 2, "pattern": "T-T",
+      "axles": [
+        {"order": 0, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "trailer", "liftable": false},
+        {"order": 1, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "trailer", "liftable": false}
+      ],
+      "tags": ["trailer", "tandem"], "requiredCapabilities": [], "experimental": false
+    },
+    {
+      "id": "trailer_tridem", "localizationKey": "axlePrefab.trailerTridem", "displayName": "Tridem Trailer",
+      "commonUseLocalizationKey": "axlePrefab.trailerTridem.use", "commonUse": "Three-axle trailer",
+      "nominalLayout": "trailer", "category": "trailer", "axleCount": 3, "pattern": "T-T-T",
+      "axles": [
+        {"order": 0, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "trailer", "liftable": false},
+        {"order": 1, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "trailer", "liftable": false},
+        {"order": 2, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "trailer", "liftable": false}
+      ],
+      "tags": ["trailer", "tridem"], "requiredCapabilities": [], "experimental": false
+    },
+    {
+      "id": "trailer_steered_tag", "localizationKey": "axlePrefab.trailerSteeredTag", "displayName": "Steered Tag Trailer",
+      "commonUseLocalizationKey": "axlePrefab.trailerSteeredTag.use", "commonUse": "Trailer with a rear-steered tag",
+      "nominalLayout": "trailer", "category": "trailer", "axleCount": 3, "pattern": "T-T-RS",
+      "axles": [
+        {"order": 0, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "trailer", "liftable": false},
+        {"order": 1, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "trailer", "liftable": false},
+        {"order": 2, "steered": true, "powered": false, "steeringRole": "rear", "carrierRole": "trailer", "liftable": false}
+      ],
+      "tags": ["trailer", "rear-steer", "experimental"], "requiredCapabilities": ["trailerSteering"], "experimental": true
+    },
+    {
+      "id": "trailer_multi_steer", "localizationKey": "axlePrefab.trailerMultiSteer", "displayName": "Multi-Steer Trailer",
+      "commonUseLocalizationKey": "axlePrefab.trailerMultiSteer.use", "commonUse": "Trailer with multiple steering axles",
+      "nominalLayout": "trailer", "category": "trailer", "axleCount": 3, "pattern": "T-RS-RS",
+      "axles": [
+        {"order": 0, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "trailer", "liftable": false},
+        {"order": 1, "steered": true, "powered": false, "steeringRole": "rear", "carrierRole": "trailer", "liftable": false},
+        {"order": 2, "steered": true, "powered": false, "steeringRole": "rear", "carrierRole": "trailer", "liftable": false}
+      ],
+      "tags": ["trailer", "multi-steer", "experimental"], "requiredCapabilities": ["selectiveSteering", "trailerSteering"], "experimental": true
+    },
+    {
+      "id": "trailer_lift_front", "localizationKey": "axlePrefab.trailerLiftFront", "displayName": "Lift-Axle Tridem",
+      "commonUseLocalizationKey": "axlePrefab.trailerLiftFront.use", "commonUse": "Tridem trailer with a liftable front axle",
+      "nominalLayout": "trailer", "category": "trailer", "axleCount": 3, "pattern": "LT-T-T",
+      "axles": [
+        {"order": 0, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "trailer", "liftable": true},
+        {"order": 1, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "trailer", "liftable": false},
+        {"order": 2, "steered": false, "powered": false, "steeringRole": "none", "carrierRole": "trailer", "liftable": false}
+      ],
+      "tags": ["trailer", "tridem", "lift"], "requiredCapabilities": ["liftAxle"], "experimental": false
+    }
+  ]
+}

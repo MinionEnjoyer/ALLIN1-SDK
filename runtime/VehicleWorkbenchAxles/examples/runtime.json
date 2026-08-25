@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "discoveryIntervalMs": 250,
+  "recoveryIntervalMs": 2000,
+  "restoreOnUnload": true,
+  "logFile": "logs/VehicleWorkbenchAxles.log"
+}

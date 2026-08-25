@@ -79,6 +79,7 @@ def test_catalog_is_structured_and_classifies_risk():
     ):
         assert catalog[command]["risk"] == "authoring_write"
     assert catalog["open-vehicle-workbench"]["risk"] == "read_only"
+    assert catalog["open-axle-configurator"]["risk"] == "read_only"
     assert catalog["open-model-material-workbench"]["risk"] == "read_only"
     assert catalog["open-package-graph"]["risk"] == "authoring_write"
     assert catalog["import-package-graph"]["risk"] == "authoring_write"
@@ -171,6 +172,34 @@ def test_execute_uses_cli_without_shell_and_audits(tmp_path):
     record = json.loads(audit.read_text(encoding="utf-8").splitlines()[0])
     assert record["request_id"] == "list-1"
     assert record["command"] == "list"
+
+
+def test_agent_api_opens_axle_configurator_through_typed_read_only_route(
+    tmp_path, monkeypatch,
+):
+    workspace = tmp_path / "vehicle-authoring"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        sdk_cli, "_open_axle_configurator_window",
+        lambda selected, model, game: (9751, "demobus"),
+    )
+    audit = tmp_path / "audit.jsonl"
+    result = execute_request({
+        "id": "axle-open", "action": "execute",
+        "command": "open-axle-configurator",
+        "args": [str(workspace), "--model", "demobus"],
+    }, audit_path=audit)
+    assert result["ok"] is True
+    assert result["risk"] == "read_only"
+    assert result["result"]["exit_code"] == 0
+    payload = json.loads(result["result"]["output"])
+    assert payload["operation"] == "open_axle_configurator"
+    assert payload["vehicle_model"] == "demobus"
+    assert payload["pid"] == 9751
+    record = json.loads(audit.read_text(encoding="utf-8"))
+    assert record["command"] == "open-axle-configurator"
+    assert record["allowed"] is True
+    assert record["risk"] == "read_only"
 
 
 def test_agent_api_authors_and_inspects_rpf_node_graph(tmp_path):

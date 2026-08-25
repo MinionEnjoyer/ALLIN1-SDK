@@ -1,0 +1,54 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "core-debug",
+      "displayName": "Platform-neutral core (Debug)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/core-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "VWA_BUILD_ASI_SKELETONS": "OFF",
+        "VWA_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Windows ASI skeletons (Release)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/windows-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "VWA_BUILD_ASI_SKELETONS": "ON",
+        "VWA_BUILD_TESTS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "core-debug",
+      "configurePreset": "core-debug"
+    },
+    {
+      "name": "windows-release",
+      "configurePreset": "windows-release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "core-debug",
+      "configurePreset": "core-debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "windows-release",
+      "configurePreset": "windows-release",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

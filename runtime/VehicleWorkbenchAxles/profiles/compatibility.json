@@ -1,0 +1,24 @@
+{
+  "manifestVersion": 1,
+  "runtimeVersion": "1.0.0",
+  "profiles": {
+    "story-legacy": {
+      "status": "implemented-awaiting-validation",
+      "supportedGameBuilds": [],
+      "reason": "No validated Legacy wheel-access signature profile is shipped. The adapter disables before memory access."
+    },
+    "story-enhanced": {
+      "status": "implemented-awaiting-validation",
+      "supportedGameBuilds": [],
+      "reason": "No validated Enhanced wheel-access signature profile is shipped. The adapter disables before memory access."
+    }
+  },
+  "policy": {
+    "permanentOffsetsAllowed": false,
+    "exactBuildMatchRequired": true,
+    "signatureAndExecutablePageValidationRequired": true,
+    "packageEligibleReceiptRequired": true,
+    "x64PeExportInspectionRequired": true,
+    "onlineSessionsAllowed": false
+  }
+}

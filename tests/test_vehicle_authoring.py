@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import json
@@ -10,6 +11,17 @@ from allin1_sdk.agent_api import command_catalog, execute_request
 from allin1_sdk.addon_importer import AddonPackageInspector
 from allin1_sdk.cli import main
 from allin1_sdk.vehicle_authoring import VehicleAuthoringWorkspace
+from allin1_sdk.axle_configurator import (
+    EXPORT_FIVEM_RUNTIME,
+    PRESET_STEER_DRIVE_REAR,
+    detect_axle_configuration,
+    parse_handling_flags,
+)
+from allin1_sdk.axle_prefabs import (
+    PrefabAxleConfiguration,
+    apply_visual_package,
+    persist_visual_design,
+)
 
 
 VEHICLES = """<CVehicleModelInfo__InitDataList><InitDatas><Item>
@@ -21,6 +33,7 @@ VEHICLES = """<CVehicleModelInfo__InitDataList><InitDatas><Item>
 </Item></InitDatas></CVehicleModelInfo__InitDataList>"""
 HANDLING = """<CHandlingDataMgr><HandlingData><Item>
 <handlingName>AUTHORHAND</handlingName><fMass value="1500.0" />
+<fDriveBiasFront value="0.0"/><strHandlingFlags>440010</strHandlingFlags>
 <nInitialDriveGears value="6"/><fInitialDriveForce value="0.30"/>
 <fInitialDriveMaxFlatVel value="160.0"/><fBrakeForce value="0.8"/>
 <fSteeringLock value="40.0"/>
@@ -50,6 +63,20 @@ CARCOLS = """<CVehicleModelInfoVarGlobal><Kits><Item>
 CONTENT = """<CDataFileMgr__ContentsOfDataFileXml><dataFiles><Item>
 <filename>dlc_authorcar:/common/data/vehicles.meta</filename>
 </Item></dataFiles></CDataFileMgr__ContentsOfDataFileXml>"""
+
+
+def _axle_skeleton():
+    return tuple(
+        SimpleNamespace(
+            name=name, position=(x, y, 0.0), rotation=(0.0, 0.0, 0.0, 1.0),
+            scale=(1.0, 1.0, 1.0),
+        )
+        for name, x, y in (
+            ("wheel_lf", -1.0, 3.0), ("wheel_rf", 1.0, 3.0),
+            ("wheel_lm1", -1.0, 0.0), ("wheel_rm1", 1.0, 0.0),
+            ("wheel_lr", -1.0, -3.0), ("wheel_rr", 1.0, -3.0),
+        )
+    )
 
 
 def _source(root: Path, *, rpf_source: bool = False) -> Path:
@@ -86,6 +113,10 @@ def test_vehicle_authoring_workspace_copies_edits_validates_and_undoes(tmp_path)
     assert values.values["variation.lightSettings"] == "1"
     assert values.values["variation.sirenSettings"] == "0"
     assert values.values["variation.kits"] == "123_authorkit"
+    assert workspace.axle_handling_evidence("authorcar") == {
+        "strHandlingFlags": "440010",
+        "fDriveBiasFront": "0.0",
+    }
 
     result = workspace.update("authorcar", {
         "vehicle.gameName": "AUTHORCAR2",
@@ -115,6 +146,63 @@ def test_vehicle_authoring_workspace_copies_edits_validates_and_undoes(tmp_path)
         path.name.endswith(".undo-recovery")
         for path in (workspace.root / "history").iterdir()
     )
+
+
+def test_axle_configuration_updates_flags_bias_and_manifest_with_undo_redo(tmp_path):
+    workspace = VehicleAuthoringWorkspace.create(
+        _source(tmp_path), tmp_path / "axle-workspace",
+    )
+    config = detect_axle_configuration(
+        "authorcar", _axle_skeleton(), preset=PRESET_STEER_DRIVE_REAR,
+        export_mode=EXPORT_FIVEM_RUNTIME,
+    )
+    original_flags = parse_handling_flags("440010")
+    result = workspace.set_axle_configuration(
+        config, bones=_axle_skeleton(), expected_revision=0,
+    )
+    assert result.revision == 1
+    assert workspace.axle_configuration("authorcar").to_dict() == config.to_dict()
+    handling = (workspace.source / "handling.meta").read_text("utf-8")
+    assert "fDriveBiasFront value=\"0.5\"" in handling
+    assert parse_handling_flags(
+        handling.split("<strHandlingFlags>", 1)[1].split("</strHandlingFlags>", 1)[0]
+    ) & ~0xE0 == original_flags & ~0xE0
+    assert workspace.inspect().axle_configurations[0]["vehicle_model"] == "authorcar"
+
+    undone = workspace.undo()
+    assert undone.revision == 2
+    assert workspace.axle_configuration("authorcar") is None
+    assert "fDriveBiasFront value=\"0.0\"" in (
+        workspace.source / "handling.meta"
+    ).read_text("utf-8")
+
+    redone = workspace.redo()
+    assert redone.revision == 3
+    assert workspace.axle_configuration("authorcar").to_dict() == config.to_dict()
+    assert "fDriveBiasFront value=\"0.5\"" in (
+        workspace.source / "handling.meta"
+    ).read_text("utf-8")
+
+
+def test_visual_tyre_selection_round_trips_through_authoring_manifest(tmp_path):
+    workspace = VehicleAuthoringWorkspace.create(
+        _source(tmp_path), tmp_path / "visual-axle-workspace",
+    )
+    config = detect_axle_configuration("authorcar", _axle_skeleton())
+    preview = apply_visual_package("all_singles", config)
+    authored = persist_visual_design(preview, confirmed=True)
+
+    workspace.set_axle_configuration(
+        authored, bones=_axle_skeleton(), expected_revision=0,
+    )
+    loaded = workspace.axle_configuration("authorcar")
+
+    assert isinstance(loaded, PrefabAxleConfiguration)
+    assert loaded.visual_tyre_selection is not None
+    assert loaded.visual_tyre_selection.package_id == "all_singles"
+    assert workspace.inspect().axle_configurations[0]["visual_tyre_package"][
+        "packageId"
+    ] == "all_singles"
 
 
 def test_vehicle_distribution_is_typed_traffic_opt_in_and_agent_accessible(tmp_path):

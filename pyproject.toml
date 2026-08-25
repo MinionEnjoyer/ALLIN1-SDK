@@ -30,6 +30,42 @@ release = ["pyinstaller>=6.0"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Keep the source/wheel contract aligned with the packaged desktop build.  The
+# catalogs are runtime inputs; the remaining files are authoring references and
+# the auditable, fail-closed Story runtime source—not prebuilt game binaries.
+[tool.setuptools.data-files]
+"share/allin1-sdk/assets" = [
+    "assets/axle-prefabs.json",
+    "assets/visual-tyre-packages.json",
+]
+"share/allin1-sdk/docs" = ["docs/*.md"]
+"share/allin1-sdk/docs/adr" = ["docs/adr/*.md"]
+"share/allin1-sdk/examples/axle-prefabs" = ["examples/axle-prefabs/*"]
+"share/allin1-sdk/examples/oiv-axle-bundles" = ["examples/oiv-axle-bundles/*"]
+"share/allin1-sdk/runtime/VehicleWorkbenchAxles" = [
+    "runtime/VehicleWorkbenchAxles/*.md",
+    "runtime/VehicleWorkbenchAxles/CMakeLists.txt",
+    "runtime/VehicleWorkbenchAxles/CMakePresets.json",
+]
+"share/allin1-sdk/runtime/VehicleWorkbenchAxles/examples" = [
+    "runtime/VehicleWorkbenchAxles/examples/*",
+]
+"share/allin1-sdk/runtime/VehicleWorkbenchAxles/include/vehicle_workbench_axles" = [
+    "runtime/VehicleWorkbenchAxles/include/vehicle_workbench_axles/*.hpp",
+]
+"share/allin1-sdk/runtime/VehicleWorkbenchAxles/profiles" = [
+    "runtime/VehicleWorkbenchAxles/profiles/*",
+]
+"share/allin1-sdk/runtime/VehicleWorkbenchAxles/schemas" = [
+    "runtime/VehicleWorkbenchAxles/schemas/*",
+]
+"share/allin1-sdk/runtime/VehicleWorkbenchAxles/src" = [
+    "runtime/VehicleWorkbenchAxles/src/*",
+]
+"share/allin1-sdk/runtime/VehicleWorkbenchAxles/tests" = [
+    "runtime/VehicleWorkbenchAxles/tests/*",
+]
+
 [tool.pytest.ini_options]
 addopts = "--strict-markers --strict-config"
 testpaths = ["tests"]

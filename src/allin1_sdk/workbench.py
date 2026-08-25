@@ -8,6 +8,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from allin1_sdk.addon_importer import AddonPackageInspector, PackageScan
 from allin1_sdk.ped_workbench import PedWorkbenchFrame
+from allin1_sdk.vehicle_authoring import VehicleAuthoringWorkspace
 from allin1_sdk.vehicle_workbench import VehicleWorkbenchFrame
 from allin1_sdk.weapon_workbench import WeaponWorkbenchFrame
 
@@ -35,6 +36,7 @@ class WorkbenchFrame(ttk.Frame):
         self._on_open_asset = on_open_asset
         self.source: Path | None = None
         self.scan: PackageScan | None = None
+        self.vehicle_authoring_workspace: VehicleAuthoringWorkspace | None = None
         self.status = tk.StringVar(
             value="Open a package once, then inspect its vehicles, weapons, and peds."
         )
@@ -128,6 +130,7 @@ class WorkbenchFrame(ttk.Frame):
     def open_source(
         self, source: str | Path, scan: PackageScan | None = None,
         *, category: str = "auto",
+        vehicle_authoring_workspace: VehicleAuthoringWorkspace | None = None,
     ) -> bool:
         """Inspect a package once and route the shared result to all three tabs."""
         if self.source is not None and not self.confirm_navigation():
@@ -145,7 +148,11 @@ class WorkbenchFrame(ttk.Frame):
             return False
         self.source = resolved
         self.scan = loaded_scan
-        self.vehicle_workspace.open_source(resolved, loaded_scan)
+        self.vehicle_authoring_workspace = vehicle_authoring_workspace
+        self.vehicle_workspace.open_source(
+            resolved, loaded_scan,
+            authoring_workspace=vehicle_authoring_workspace,
+        )
         self.weapon_workspace.open_source(resolved, loaded_scan)
         self.ped_workspace.open_source(resolved, loaded_scan)
         counts = {
@@ -189,7 +196,10 @@ class WorkbenchFrame(ttk.Frame):
         if self.source is None:
             return False
         current = self.current_category()
-        return self.open_source(self.source, category=current)
+        return self.open_source(
+            self.source, category=current,
+            vehicle_authoring_workspace=self.vehicle_authoring_workspace,
+        )
 
     def current_category(self) -> str:
         selected = self.tabs.select()

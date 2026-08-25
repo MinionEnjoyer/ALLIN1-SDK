@@ -1,0 +1,20 @@
+{
+  "fixtureVersion": 1,
+  "vehicleModel": "allin1_acceptance_crane",
+  "prefabId": "10x4_multi_steer",
+  "target": "fivem-enhanced",
+  "exportMode": "fivem_runtime",
+  "reportedWheelCount": 10,
+  "bones": [
+    {"name": "wheel_lf", "position": [-1.25, 8.0, 0.0]},
+    {"name": "wheel_rf", "position": [1.25, 8.0, 0.0]},
+    {"name": "wheel_lm1", "position": [-1.25, 4.0, 0.0]},
+    {"name": "wheel_rm1", "position": [1.25, 4.0, 0.0]},
+    {"name": "wheel_lm2", "position": [-1.25, 0.0, 0.0]},
+    {"name": "wheel_rm2", "position": [1.25, 0.0, 0.0]},
+    {"name": "wheel_lm3", "position": [-1.25, -4.0, 0.0]},
+    {"name": "wheel_rm3", "position": [1.25, -4.0, 0.0]},
+    {"name": "wheel_lr", "position": [-1.25, -8.0, 0.0]},
+    {"name": "wheel_rr", "position": [1.25, -8.0, 0.0]}
+  ]
+}

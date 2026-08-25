@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://allin1.local/schemas/vehicle-workbench-axles/v1.json",
+  "title": "Vehicle Workbench axle configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "configurationId",
+    "modelName",
+    "modelHash",
+    "expectedWheelCount",
+    "minimumRuntimeVersion",
+    "axles"
+  ],
+  "anyOf": [
+    { "required": ["wheelIndexMap"] },
+    { "required": ["wheelIndexMapping"] }
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "configurationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "modelName": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "modelHash": { "type": ["string", "integer"] },
+    "expectedWheelCount": { "type": "integer", "enum": [4, 6, 8, 10] },
+    "minimumRuntimeVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "wheelIndexMap": {
+      "type": "object",
+      "minProperties": 4,
+      "maxProperties": 10,
+      "propertyNames": {
+        "enum": [
+          "wheel_lf", "wheel_rf", "wheel_lm1", "wheel_rm1",
+          "wheel_lm2", "wheel_rm2", "wheel_lm3", "wheel_rm3",
+          "wheel_lr", "wheel_rr"
+        ]
+      },
+      "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 9 }
+    },
+    "wheelIndexMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "reported_wheel_count", "by_bone"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "reported_wheel_count": { "type": "integer", "enum": [4, 6, 8, 10] },
+        "by_bone": {
+          "type": "object",
+          "minProperties": 4,
+          "maxProperties": 10,
+          "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 9 }
+        }
+      }
+    },
+    "axles": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["order", "role", "leftBone", "rightBone", "steered", "powered"],
+        "properties": {
+          "order": { "type": "integer", "minimum": 0, "maximum": 4 },
+          "role": { "type": "string", "enum": ["front", "middle", "rear", "tag"] },
+          "leftBone": { "type": "string" },
+          "rightBone": { "type": "string" },
+          "wheelIndices": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": { "type": "integer", "minimum": 0, "maximum": 9 }
+          },
+          "steered": { "type": "boolean" },
+          "powered": { "type": "boolean" },
+          "serviceBrake": { "type": "boolean" },
+          "handbrake": { "type": "boolean" },
+          "visualFamily": { "type": "string" }
+        }
+      }
+    },
+    "handling": { "type": "object" },
+    "dualTyreGeometry": { "type": "array", "items": { "type": "string" } },
+    "dualTyresConsumePhysicalSlots": { "const": false },
+    "compatibility": { "type": "object" }
+  }
+}

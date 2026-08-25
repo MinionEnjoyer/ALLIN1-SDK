@@ -10,6 +10,7 @@ import sys
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any, Mapping
 
 import click
 
@@ -43,7 +44,7 @@ from allin1_sdk.model_materials import (
 )
 from allin1_sdk.native_assets import (
     MAX_NATIVE_PREVIEW_BYTES, MODEL_PREVIEW_SUFFIXES,
-    NativeAssetInspector, NativeAssetReport,
+    NativeAssetInspector, NativeAssetReport, load_native_model_scene,
 )
 from allin1_sdk.mods import ModIntegrationService, open_mod_package
 from allin1_sdk.oiv_workbench import OivWorkbench
@@ -77,10 +78,250 @@ from allin1_sdk.vehicle_authoring import (
     TUNING_COLLECTIONS,
     VehicleAuthoringWorkspace,
 )
+from allin1_sdk.axle_configurator import (
+    EXPORT_MODES,
+    AxleConfiguration,
+    retarget_axle_configuration,
+    validate_axle_configuration,
+    write_fivem_resource,
+)
+from allin1_sdk.axle_prefabs import (
+    AxlePrefabCatalog,
+    VisualTyreCatalog,
+    apply_prefab,
+    apply_visual_package,
+    load_prefab_axle_configuration,
+)
+from allin1_sdk.axle_runtime_bundler import (
+    TARGET_IDS,
+    AxleRuntimeBundleBuilder,
+    AxleRuntimeBundlePlanner,
+    StoryRuntimeProfile,
+    VehicleAxleBuildInput,
+    story_runtime_profile_report,
+)
+from allin1_sdk.axle_oiv_export import (
+    EnhancedOivTargetProfile,
+    JsonOivIdentityStore,
+    LegacyOivTargetProfile,
+    OivContentPlanner,
+    OivExportRequest,
+    OivPackageBuilder,
+    OivPackageMetadata,
+    StagedAxleConfiguration,
+    StagedRuntime,
+    StagedVehicleDlc,
+)
 from allin1_sdk.weapon_authoring import WeaponAuthoringWorkspace
 
 
 PROJECT_ROOT = project_root()
+
+
+def _json_object(path: Path, label: str, *, maximum_bytes: int = 2 * 1024 * 1024) -> dict[str, Any]:
+    source = path.expanduser().resolve(strict=False)
+    if not source.is_file() or source.is_symlink():
+        raise ValueError(f"{label} is missing or unsafe")
+    if source.stat().st_size > maximum_bytes:
+        raise ValueError(f"{label} exceeds the guarded size limit")
+    try:
+        payload = json.loads(source.read_text("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} root must be an object")
+    return payload
+
+
+def _axle_configuration_file(path: Path) -> AxleConfiguration:
+    return load_prefab_axle_configuration(
+        _json_object(path, "Axle configuration")
+    )
+
+
+def _axle_build_inputs(paths: tuple[Path, ...]) -> tuple[VehicleAxleBuildInput, ...]:
+    if not paths:
+        raise ValueError("At least one axle configuration JSON is required")
+    result = []
+    for path in paths:
+        configuration = _axle_configuration_file(path)
+        result.append(VehicleAxleBuildInput(
+            configuration=configuration,
+            configuration_id=configuration.configuration_id,
+            model_hash=configuration.model_hash,
+            minimum_runtime_version=configuration.minimum_runtime_version,
+        ))
+    return tuple(result)
+
+
+def _story_runtime_profiles(
+    paths: tuple[Path, ...],
+) -> dict[str, StoryRuntimeProfile]:
+    profiles: dict[str, StoryRuntimeProfile] = {}
+    for path in paths:
+        profile = StoryRuntimeProfile.load(path)
+        target = profile.target_id.casefold()
+        if target not in {"story-legacy", "story-enhanced"}:
+            raise ValueError("Story runtime profiles must target Story Legacy or Enhanced")
+        if target in profiles:
+            raise ValueError(f"Duplicate Story runtime profile for {target}")
+        profiles[target] = profile
+    return profiles
+
+
+def _target_build_assignments(values: tuple[str, ...]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for raw in values:
+        target, separator, build = str(raw).partition("=")
+        target = target.strip().casefold()
+        build = build.strip()
+        if separator != "=" or target not in TARGET_IDS or not build:
+            raise ValueError(
+                "Game build mappings must use a supported TARGET=BUILD value"
+            )
+        if target in result:
+            raise ValueError(f"Duplicate game build mapping for {target}")
+        if len(build) > 96 or any(character in build for character in "\r\n"):
+            raise ValueError(f"Invalid game build identifier for {target}")
+        result[target] = build
+    return result
+
+
+def _oiv_request_file(path: Path) -> OivExportRequest:
+    payload = _json_object(path, "OIV export request")
+    staging_root = Path(str(payload.get("staging_root", ""))).expanduser().resolve(
+        strict=False,
+    )
+    target = str(payload.get("target", "")).casefold()
+    if target == "story-legacy":
+        profile = LegacyOivTargetProfile()
+    elif target == "story-enhanced":
+        profile = EnhancedOivTargetProfile()
+    else:
+        raise ValueError("OIV target must be story-legacy or story-enhanced")
+    metadata_payload = payload.get("metadata")
+    if not isinstance(metadata_payload, Mapping):
+        raise ValueError("OIV metadata must be an object")
+    metadata = OivPackageMetadata(
+        project_id=str(metadata_payload.get("project_id", "")),
+        package_id=str(metadata_payload.get("package_id", "")),
+        name=str(metadata_payload.get("name", "")),
+        version=str(metadata_payload.get("version", "")),
+        author=str(metadata_payload.get("author", "")),
+        description=str(metadata_payload.get("description", "")),
+        workbench_version=str(metadata_payload.get("workbench_version", __version__)),
+        support_url=(
+            str(metadata_payload["support_url"])
+            if metadata_payload.get("support_url") else None
+        ),
+        license_name=(
+            str(metadata_payload["license"])
+            if metadata_payload.get("license") else None
+        ),
+        package_guid=(
+            str(metadata_payload["package_guid"])
+            if metadata_payload.get("package_guid") else None
+        ),
+    )
+    raw_dlcs = payload.get("vehicle_dlcs", [])
+    raw_configs = payload.get("axle_configurations", [])
+    if not isinstance(raw_dlcs, list) or not isinstance(raw_configs, list):
+        raise ValueError("OIV vehicle_dlcs and axle_configurations must be arrays")
+    dlcs = tuple(StagedVehicleDlc(
+        dlc_pack_name=str(item.get("dlc_pack_name", "")),
+        archive_path=str(item.get("archive_path", "")),
+        vehicle_models=tuple(str(value) for value in item.get("vehicle_models", [])),
+        asset_edition=str(item.get("asset_edition", "legacy")),
+    ) for item in raw_dlcs if isinstance(item, Mapping))
+    configs = tuple(StagedAxleConfiguration(
+        model_name=str(item.get("model_name", "")),
+        model_hash=str(item.get("model_hash", "")),
+        source_path=str(item.get("source_path", "")),
+        schema_version=int(item.get("schema_version", 1)),
+        minimum_runtime_version=str(item.get("minimum_runtime_version", "1.0.0")),
+    ) for item in raw_configs if isinstance(item, Mapping))
+    if len(dlcs) != len(raw_dlcs) or len(configs) != len(raw_configs):
+        raise ValueError("OIV staged vehicle/configuration entries must be objects")
+    runtime = None
+    runtime_payload = payload.get("runtime")
+    if runtime_payload is not None:
+        if not isinstance(runtime_payload, Mapping):
+            raise ValueError("OIV runtime must be an object")
+        allowed_runtime_fields = {
+            "profile_path", "build_date", "required_scripthook_version",
+        }
+        unknown = sorted(set(runtime_payload) - allowed_runtime_fields)
+        if unknown:
+            raise ValueError(
+                "OIV runtime accepts a validated profile, not caller-authored "
+                "binary claims; unsupported fields: " + ", ".join(unknown)
+            )
+        profile_value = str(runtime_payload.get("profile_path", "")).strip()
+        if not profile_value:
+            raise ValueError("OIV runtime requires profile_path")
+        profile_path = Path(profile_value).expanduser()
+        if not profile_path.is_absolute():
+            profile_path = path.resolve().parent / profile_path
+        dependency = StoryRuntimeProfile.load(profile_path).runtime_dependency()
+        dependency.validate()
+        binary = Path(dependency.binary_path).resolve()
+        receipt = Path(dependency.validation_receipt_path).resolve()
+        try:
+            binary_relative = binary.relative_to(staging_root).as_posix()
+            receipt_relative = receipt.relative_to(staging_root).as_posix()
+        except ValueError as exc:
+            raise ValueError(
+                "OIV runtime profile binary and receipt must already be inside "
+                "the declared staging_root"
+            ) from exc
+        runtime = StagedRuntime(
+            asi_path=binary_relative,
+            version=dependency.version,
+            target_id=dependency.target_id,
+            supported_game_builds=dependency.supported_game_builds,
+            maximum_schema_version=dependency.maximum_schema_version,
+            binary_sha256=dependency.checksum() or "",
+            build_date=str(
+                runtime_payload.get(
+                    "build_date", "validated by pinned acceptance receipt",
+                )
+            ),
+            profile_id=dependency.profile_id or "",
+            validation_receipt_path=receipt_relative,
+            validation_receipt_sha256=dependency.validation_receipt_sha256 or "",
+            package_eligible=dependency.package_eligible,
+            redistribution_allowed=dependency.redistribution_allowed,
+            license_name=dependency.license_name,
+            architecture="x64",
+            required_scripthook_version=str(
+                runtime_payload.get("required_scripthook_version", "current compatible release")
+            ),
+        )
+    icon_value = payload.get("icon_path")
+    diagnostic_value = payload.get("diagnostic_report_path")
+    diagnostic_path = None
+    if diagnostic_value:
+        diagnostic_path = Path(str(diagnostic_value)).expanduser()
+        if not diagnostic_path.is_absolute():
+            diagnostic_path = path.resolve().parent / diagnostic_path
+    return OivExportRequest(
+        staging_root=staging_root,
+        target_profile=profile,
+        mode=str(payload.get("mode", "")),
+        metadata=metadata,
+        vehicle_dlcs=dlcs,
+        axle_configurations=configs,
+        runtime=runtime,
+        include_documentation=bool(payload.get("include_documentation", True)),
+        icon_path=Path(str(icon_value)).expanduser() if icon_value else None,
+        compression=str(payload.get("compression", "deflated")),
+        confirm_self_contained=bool(payload.get("confirm_self_contained", False)),
+        known_existing_runtime_version=(
+            str(payload["known_existing_runtime_version"])
+            if payload.get("known_existing_runtime_version") else None
+        ),
+        diagnostic_report_path=diagnostic_path,
+    )
 
 
 def _manifest(path: Path) -> AddonManifest:
@@ -194,6 +435,54 @@ def _open_vehicle_workbench_window(
     """Compatibility wrapper for the Vehicles tab of the unified Workbench."""
     pid, counts = _open_workbench_window(source, "vehicles", gta_path)
     return pid, counts["vehicles"]
+
+
+def _open_axle_configurator_window(
+    workspace_root: Path, model: str | None = None,
+    gta_path: Path | None = None,
+) -> tuple[int, str]:
+    """Validate an authoring workspace and deep-link the normal SDK desktop."""
+    from allin1_sdk.vehicle_authoring import VehicleAuthoringWorkspace
+
+    workspace = VehicleAuthoringWorkspace(workspace_root)
+    available = tuple(item.model for item in workspace.inspect().models)
+    if not available:
+        raise ValueError("Vehicle authoring workspace contains no models")
+    requested = model or available[0]
+    selected = next(
+        (item for item in available if item.casefold() == requested.casefold()),
+        None,
+    )
+    if selected is None:
+        raise ValueError(
+            f"Vehicle model is not present in this authoring workspace: {requested}"
+        )
+    selected_game = gta_path.expanduser().resolve(strict=True) if gta_path else None
+    executable = Path(sys.executable).resolve()
+    if getattr(sys, "frozen", False):
+        desktop = _frozen_desktop_executable(executable)
+        command = [
+            str(desktop), "--axle-workspace", str(workspace.root),
+            "--axle-model", selected,
+        ]
+    else:
+        interpreter = executable
+        if os.name == "nt":
+            windowed = executable.with_name("pythonw.exe")
+            if windowed.is_file():
+                interpreter = windowed
+        command = [
+            str(interpreter), "-m", "allin1_sdk.app",
+            "--axle-workspace", str(workspace.root),
+            "--axle-model", selected,
+        ]
+    if selected_game is not None:
+        command.extend(("--gta-path", str(selected_game)))
+    options: dict[str, object] = {}
+    if os.name == "nt":
+        options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = subprocess.Popen(command, cwd=PROJECT_ROOT, **options)
+    return process.pid, selected
 
 
 def _frozen_desktop_executable(executable: Path | None = None) -> Path:
@@ -860,6 +1149,34 @@ def open_vehicle_workbench(source: Path, gta_path: Path | None) -> None:
         "operation": "open_vehicle_workbench",
         "source": str(source.resolve()),
         "vehicle_models": model_count,
+        "pid": pid,
+    }, indent=2))
+
+
+@main.command("open-axle-configurator")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option(
+    "--model",
+    help="Vehicle model to select; defaults to the workspace's first model.",
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation for encrypted/native asset previews.",
+)
+def open_axle_configurator(
+    workspace: Path, model: str | None, gta_path: Path | None,
+) -> None:
+    """Open the normal SDK desktop directly in a vehicle's Axle Configurator."""
+    try:
+        pid, selected = _open_axle_configurator_window(workspace, model, gta_path)
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "operation": "open_axle_configurator",
+        "workspace": str(workspace.resolve()),
+        "vehicle_model": selected,
         "pid": pid,
     }, indent=2))
 
@@ -2251,6 +2568,21 @@ def undo_vehicle_edit(workspace: Path, acknowledge_edit: bool) -> None:
     click.echo(json.dumps(result.to_dict(), indent=2))
 
 
+@main.command("redo-vehicle-edit")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def redo_vehicle_edit(workspace: Path, acknowledge_edit: bool) -> None:
+    """Reapply the most recently undone guarded vehicle edit."""
+    del acknowledge_edit
+    try:
+        result = VehicleAuthoringWorkspace(workspace).redo()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
 @main.command("create-ped-authoring")
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.option(
@@ -2293,6 +2625,387 @@ def inspect_ped_authoring(workspace: Path, ped: str | None) -> None:
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(payload, indent=2))
+
+
+@main.command("list-axle-prefabs")
+@click.option("--axle-count", type=click.IntRange(2, 5))
+@click.option("--layout")
+@click.option("--category")
+@click.option("--steering-type", type=click.Choice(("none", "front", "rear", "multi", "all")))
+@click.option("--drive-type", type=click.Choice(("none", "single", "multiple", "all")))
+@click.option("--lift-axle/--no-lift-axle", default=None)
+@click.option("--target", type=click.Choice(TARGET_IDS))
+@click.option("--experimental/--not-experimental", default=None)
+def list_axle_prefabs(
+    axle_count: int | None, layout: str | None, category: str | None,
+    steering_type: str | None, drive_type: str | None, lift_axle: bool | None,
+    target: str | None, experimental: bool | None,
+) -> None:
+    """List compatible behavior prefabs and independent tyre packages."""
+    try:
+        catalog = AxlePrefabCatalog.load_builtin(PROJECT_ROOT)
+        prefabs = catalog.list_prefabs(
+            axle_count=axle_count, nominal_layout=layout, category=category,
+            steering_type=steering_type, drive_type=drive_type,
+            lift_axle=lift_axle, target=target, experimental=experimental,
+        )
+        tyres = VisualTyreCatalog.load_builtin(PROJECT_ROOT).list_packages()
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "schema_version": 1,
+        "prefabs": [item.to_dict() for item in prefabs],
+        "visual_tyre_packages": [item.to_dict() for item in tyres],
+    }, indent=2))
+
+
+@main.command("preview-axle-prefab")
+@click.argument("prefab_id")
+@click.argument("model")
+@click.option(
+    "--skeleton-xml", required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option("--target", required=True, type=click.Choice(TARGET_IDS))
+@click.option("--export-mode", default="fivem_runtime", type=click.Choice(EXPORT_MODES))
+@click.option(
+    "--base-config", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option("--reported-wheel-count", type=click.IntRange(1, 10))
+def preview_axle_prefab(
+    prefab_id: str, model: str, skeleton_xml: Path, target: str,
+    export_mode: str, base_config: Path | None, reported_wheel_count: int | None,
+) -> None:
+    """Preview canonical mapping and target compatibility without writing."""
+    try:
+        scene, _metadata, warning = load_native_model_scene(skeleton_xml)
+        if scene is None:
+            raise ValueError(warning or "Skeleton XML did not contain a model scene")
+        preview = apply_prefab(
+            prefab_id, model, scene.bones, target, export_mode,
+            _axle_configuration_file(base_config) if base_config else None,
+            project_root=PROJECT_ROOT,
+            reported_wheel_count=reported_wheel_count,
+        )
+    except (OSError, TypeError, ValueError, KeyError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(preview.to_dict(), indent=2))
+
+
+@main.command("preview-axle-tyres")
+@click.argument("package_id")
+@click.argument(
+    "config_json", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option("--axle", "selected_axles", multiple=True, type=click.IntRange(1, 5))
+def preview_axle_tyres(
+    package_id: str, config_json: Path, selected_axles: tuple[int, ...],
+) -> None:
+    """Preview visual tyres without adding runtime wheel indices."""
+    try:
+        preview = apply_visual_package(
+            package_id, _axle_configuration_file(config_json),
+            catalog=VisualTyreCatalog.load_builtin(PROJECT_ROOT),
+            selected_axles=selected_axles,
+        )
+    except (OSError, TypeError, ValueError, KeyError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(preview.to_dict(), indent=2))
+
+
+@main.command("plan-axle-runtime-bundle")
+@click.argument(
+    "config_json", nargs=-1, required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option("--target", "targets", multiple=True, type=click.Choice(TARGET_IDS))
+@click.option(
+    "--story-profile", "story_profile_files", multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Verified Story runtime profile JSON; repeat once per Story target.",
+)
+@click.option(
+    "--game-build", "target_build_values", multiple=True, metavar="TARGET=BUILD",
+    help="Map a requested target to an exact runtime/game build.",
+)
+def plan_axle_runtime_bundle(
+    config_json: tuple[Path, ...], targets: tuple[str, ...],
+    story_profile_files: tuple[Path, ...], target_build_values: tuple[str, ...],
+) -> None:
+    """Plan cross-edition runtime outputs without creating files."""
+    try:
+        profiles = _story_runtime_profiles(story_profile_files)
+        builds = _target_build_assignments(target_build_values)
+        plan = AxleRuntimeBundlePlanner().plan(
+            _axle_build_inputs(config_json), targets=targets or TARGET_IDS,
+            story_profiles=profiles, requested_game_builds=builds,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(plan.to_dict(), indent=2))
+
+
+@main.command("build-axle-runtime-bundle")
+@click.argument(
+    "config_json", nargs=-1, required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option("--target", "targets", multiple=True, type=click.Choice(TARGET_IDS))
+@click.option(
+    "--story-profile", "story_profile_files", multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Verified Story runtime profile JSON; repeat once per Story target.",
+)
+@click.option(
+    "--game-build", "target_build_values", multiple=True, metavar="TARGET=BUILD",
+    help="Map a requested target to an exact runtime/game build.",
+)
+@click.option(
+    "--output-dir", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def build_axle_runtime_bundle(
+    config_json: tuple[Path, ...], targets: tuple[str, ...],
+    story_profile_files: tuple[Path, ...], target_build_values: tuple[str, ...],
+    output_dir: Path, acknowledge_edit: bool,
+) -> None:
+    """Build ready runtime targets into a new atomic staging directory."""
+    del acknowledge_edit
+    try:
+        profiles = _story_runtime_profiles(story_profile_files)
+        builds = _target_build_assignments(target_build_values)
+        plan = AxleRuntimeBundlePlanner().plan(
+            _axle_build_inputs(config_json), targets=targets or TARGET_IDS,
+            story_profiles=profiles, requested_game_builds=builds,
+        )
+        result = AxleRuntimeBundleBuilder().build(plan, output_dir)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("inspect-story-axle-runtimes")
+@click.option(
+    "--story-profile", "story_profile_files", multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Story runtime profile JSON to verify; no profiles are loaded implicitly.",
+)
+@click.option(
+    "--game-build", "target_build_values", multiple=True, metavar="TARGET=BUILD",
+    help="Map story-legacy or story-enhanced to an exact game build.",
+)
+def inspect_story_axle_runtimes(
+    story_profile_files: tuple[Path, ...], target_build_values: tuple[str, ...],
+) -> None:
+    """Verify explicit Story runtime profiles and target/build mappings."""
+    try:
+        profiles = _story_runtime_profiles(story_profile_files)
+        builds = _target_build_assignments(target_build_values)
+        report = story_runtime_profile_report(
+            profiles.values(), requested_game_builds=builds,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(report, indent=2))
+
+
+@main.command("plan-axle-oiv")
+@click.argument(
+    "request_json", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--identity-store", required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+def plan_axle_oiv(request_json: Path, identity_store: Path) -> None:
+    """Validate and preview a staged Story installer request."""
+    try:
+        request = _oiv_request_file(request_json)
+        planner = OivContentPlanner(JsonOivIdentityStore(identity_store))
+        enhanced_fallback = request.target_profile.target_id == "story-enhanced"
+        plan = (
+            planner.plan_enhanced_fallback(request)
+            if enhanced_fallback else planner.plan(request)
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "schema_version": 1,
+        "format": (
+            "openrpf-ready-manual" if enhanced_fallback else "oiv-2.2"
+        ),
+        "warning": (
+            "Enhanced OIV export is not validated. Export an OpenRPF-ready ZIP instead."
+            if enhanced_fallback else None
+        ),
+        "package_guid": plan.package_guid,
+        "installation_preview": plan.installation_preview(),
+        "manifest": plan.package_manifest,
+    }, indent=2))
+
+
+@main.command("build-axle-oiv")
+@click.argument(
+    "request_json", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--identity-store", required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+@click.option("--output", "-o", required=True, type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def build_axle_oiv(
+    request_json: Path, identity_store: Path, output: Path,
+    acknowledge_edit: bool,
+) -> None:
+    """Build a verified Legacy OIV or Enhanced OpenRPF fallback archive."""
+    del acknowledge_edit
+    try:
+        request = _oiv_request_file(request_json)
+        builder = OivPackageBuilder(JsonOivIdentityStore(identity_store))
+        if request.target_profile.target_id == "story-enhanced":
+            artifact = builder.build_enhanced_fallback(request, output)
+            payload: dict[str, object] = {
+                "schema_version": 1, "format": "openrpf-ready-manual",
+                "artifact": str(artifact), "target": "story-enhanced",
+            }
+        else:
+            payload = builder.build(request, output).to_dict()
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(payload, indent=2))
+
+
+@main.command("inspect-vehicle-axles")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("model")
+@click.option(
+    "--skeleton-xml", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Optional CodeWalker YFT XML used for spatial bone validation.",
+)
+@click.option(
+    "--target", type=click.Choice((
+        "fivem-legacy", "fivem-enhanced", "story-legacy", "story-enhanced",
+    )),
+)
+def inspect_vehicle_axles(
+    workspace: Path, model: str, skeleton_xml: Path | None, target: str | None,
+) -> None:
+    """Inspect one saved axle configuration and its current evidence."""
+    try:
+        authoring = VehicleAuthoringWorkspace(workspace)
+        configuration = authoring.axle_configuration(model)
+        bones = ()
+        skeleton_warning = None
+        if skeleton_xml is not None:
+            scene, _metadata, skeleton_warning = load_native_model_scene(skeleton_xml)
+            if scene is None:
+                raise ValueError(skeleton_warning or "Skeleton XML did not contain a model scene")
+            bones = scene.bones
+        findings = (
+            validate_axle_configuration(configuration, bones, target=target)
+            if configuration is not None else ()
+        )
+        payload = {
+            "schema_version": 1,
+            "workspace": str(authoring.root),
+            "revision": authoring.revision,
+            "model": model.casefold(),
+            "configuration": configuration.to_dict() if configuration else None,
+            "skeleton_bones": len(bones),
+            "skeleton_warning": skeleton_warning,
+            "findings": [item.to_dict() for item in findings],
+        }
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(payload, indent=2))
+
+
+@main.command("set-vehicle-axles")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("config_json", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--skeleton-xml", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Optional CodeWalker YFT XML used for spatial validation.",
+)
+@click.option("--expected-revision", type=click.IntRange(min=0), required=True)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def set_vehicle_axles(
+    workspace: Path, config_json: Path, skeleton_xml: Path | None,
+    expected_revision: int, acknowledge_edit: bool,
+) -> None:
+    """Apply a versioned axle configuration in the guarded vehicle workspace."""
+    del acknowledge_edit
+    try:
+        if config_json.stat().st_size > 2 * 1024 * 1024:
+            raise ValueError("Axle configuration JSON exceeds the guarded 2 MiB limit")
+        payload = json.loads(config_json.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Axle configuration JSON must contain an object")
+        configuration = load_prefab_axle_configuration(payload)
+        bones = ()
+        if skeleton_xml is not None:
+            scene, _metadata, warning = load_native_model_scene(skeleton_xml)
+            if scene is None:
+                raise ValueError(warning or "Skeleton XML did not contain a model scene")
+            bones = scene.bones
+        result = VehicleAuthoringWorkspace(workspace).set_axle_configuration(
+            configuration, bones=bones, expected_revision=expected_revision,
+        )
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("export-vehicle-axles")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("model")
+@click.option(
+    "--output-dir", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+@click.option(
+    "--target", required=True,
+    type=click.Choice(("fivem-legacy", "fivem-enhanced")),
+    help="Resolve and validate the resource's explicit FiveM target.",
+)
+@click.option("--update", is_flag=True, help="Update only a matching SDK-owned resource.")
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def export_vehicle_axles(
+    workspace: Path, model: str, output_dir: Path, target: str,
+    update: bool, acknowledge_edit: bool,
+) -> None:
+    """Publish the model-specific FiveM axle runtime resource."""
+    del acknowledge_edit
+    try:
+        configuration = VehicleAuthoringWorkspace(workspace).axle_configuration(model)
+        if configuration is None:
+            raise ValueError(f"No axle configuration is saved for {model}")
+        configuration = retarget_axle_configuration(configuration, target)
+        errors = [
+            item for item in validate_axle_configuration(configuration, target=target)
+            if item.severity == "error"
+        ]
+        if errors:
+            raise ValueError("FiveM axle export failed validation: " + errors[0].message)
+        output = write_fivem_resource(configuration, output_dir, update=update)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "schema_version": 1,
+        "operation": "export_vehicle_axles",
+        "model": configuration.vehicle_model,
+        "target": target,
+        "output": str(output),
+        "files": sorted(item.name for item in output.iterdir() if item.is_file()),
+    }, indent=2))
 
 
 @main.command("inspect-vehicle-distribution")

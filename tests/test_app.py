@@ -1,6 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from allin1_sdk.app import _launch_arguments
 
 
@@ -66,6 +68,60 @@ def test_frozen_workbench_launcher_targets_packaged_desktop_sibling(tmp_path, mo
         "--workbench-package", str(package.resolve()),
         "--workbench-category", "vehicles",
     ]
+
+
+def test_frozen_axle_configurator_targets_normal_desktop_sibling(tmp_path, monkeypatch):
+    import json
+
+    import allin1_sdk.cli as cli
+
+    agent = tmp_path / "ALLIN1-SDK-Agent.exe"
+    desktop = tmp_path / "ALLIN1-SDK-Desktop.exe"
+    workspace = tmp_path / "vehicle-authoring"
+    source = workspace / "source"
+    agent.write_bytes(b"MZagent")
+    desktop.write_bytes(b"MZdesktop")
+    source.mkdir(parents=True)
+    (source / "vehicles.meta").write_text(
+        "<CVehicleModelInfo__InitDataList><InitDatas><Item>"
+        "<modelName>demobus</modelName><txdName>demobus</txdName>"
+        "<handlingId>DEMOBUS</handlingId><gameName>DEMOBUS</gameName>"
+        "<vehicleMakeName>DEMO</vehicleMakeName><audioNameHash>BUS</audioNameHash>"
+        "<layout>LAYOUT_BUS</layout><type>VEHICLE_TYPE_CAR</type>"
+        "<vehicleClass>VC_SERVICE</vehicleClass>"
+        "</Item></InitDatas></CVehicleModelInfo__InitDataList>",
+        encoding="utf-8",
+    )
+    (workspace / "vehicle-authoring.json").write_text(json.dumps({
+        "schema_version": 1,
+        "content_root": "source",
+        "models": ["stale_manifest_model"],
+    }), encoding="utf-8")
+    launched = []
+
+    monkeypatch.setattr(cli.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(cli.sys, "executable", str(agent))
+    monkeypatch.setattr(
+        cli.subprocess, "Popen",
+        lambda command, **options: (
+            launched.append((command, options)) or SimpleNamespace(pid=4103)
+        ),
+    )
+
+    pid, model = cli._open_axle_configurator_window(
+        workspace, "DEMOBUS",
+    )
+    assert pid == 4103
+    assert model == "demobus"
+    assert Path(launched[0][0][0]) == desktop.resolve()
+    assert launched[0][0][1:] == [
+        "--axle-workspace", str(workspace.resolve()),
+        "--axle-model", "demobus",
+    ]
+    with pytest.raises(ValueError, match="not present"):
+        cli._open_axle_configurator_window(
+            workspace, "stale_manifest_model",
+        )
 
 
 def test_open_graph_cli_launches_desktop_through_shared_arguments(tmp_path, monkeypatch):
@@ -138,6 +194,32 @@ def test_open_vehicle_workbench_cli_launches_desktop(tmp_path, monkeypatch):
     assert launched == [(package, None)]
 
 
+def test_open_axle_configurator_cli_launches_selected_demo(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    import allin1_sdk.cli as cli
+    from allin1_sdk.cli import main
+
+    workspace = tmp_path / "vehicle-authoring"
+    workspace.mkdir()
+    launched = []
+    monkeypatch.setattr(
+        cli, "_open_axle_configurator_window",
+        lambda selected, model, game: (
+            launched.append((selected, model, game)) or (8453, "demobus")
+        ),
+    )
+
+    result = CliRunner().invoke(main, [
+        "open-axle-configurator", str(workspace), "--model", "demobus",
+    ])
+    assert result.exit_code == 0
+    assert '"operation": "open_axle_configurator"' in result.output
+    assert '"vehicle_model": "demobus"' in result.output
+    assert '"pid": 8453' in result.output
+    assert launched == [(workspace, "demobus", None)]
+
+
 def test_desktop_accepts_direct_vehicle_workbench_launch_arguments(tmp_path):
     package = tmp_path / "vehicle.rar"
     game = tmp_path / "game"
@@ -147,6 +229,20 @@ def test_desktop_accepts_direct_vehicle_workbench_launch_arguments(tmp_path):
     assert parsed.vehicle_package == Path(package)
     assert parsed.rpf_graph is None
     assert parsed.gta_path == Path(game)
+
+
+def test_desktop_accepts_direct_axle_configurator_arguments(tmp_path):
+    workspace = tmp_path / "vehicle-authoring"
+    parsed = _launch_arguments([
+        "--axle-workspace", str(workspace), "--axle-model", "demobus",
+    ])
+    assert parsed.axle_workspace == workspace
+    assert parsed.axle_model == "demobus"
+    assert parsed.vehicle_package is None
+    assert parsed.workbench_package is None
+
+    with pytest.raises(SystemExit):
+        _launch_arguments(["--axle-model", "demobus"])
 
 
 def test_open_unified_workbench_cli_routes_category_and_counts(tmp_path, monkeypatch):

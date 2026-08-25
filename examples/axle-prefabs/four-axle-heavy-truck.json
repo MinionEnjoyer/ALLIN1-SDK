@@ -1,0 +1,21 @@
+{
+  "fixtureVersion": 1,
+  "vehicleModel": "allin1_acceptance_truck",
+  "prefabId": "8x4_twin_steer",
+  "visualTyrePackageId": "dual_tandem",
+  "visualTyreParameters": {},
+  "visualStatus": "design_only_until_geometry_is_bound",
+  "target": "story-legacy",
+  "exportMode": "fivem_runtime",
+  "reportedWheelCount": 8,
+  "bones": [
+    {"name": "wheel_lf", "position": [-1.25, 8.0, 0.0]},
+    {"name": "wheel_rf", "position": [1.25, 8.0, 0.0]},
+    {"name": "wheel_lm1", "position": [-1.25, 4.0, 0.0]},
+    {"name": "wheel_rm1", "position": [1.25, 4.0, 0.0]},
+    {"name": "wheel_lm2", "position": [-1.25, 0.0, 0.0]},
+    {"name": "wheel_rm2", "position": [1.25, 0.0, 0.0]},
+    {"name": "wheel_lr", "position": [-1.25, -4.0, 0.0]},
+    {"name": "wheel_rr", "position": [1.25, -4.0, 0.0]}
+  ]
+}

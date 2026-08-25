@@ -1,0 +1,22 @@
+{
+  "staging_root": "<STORY_STAGING_ROOT>",
+  "target": "story-legacy",
+  "mode": "runtime-only",
+  "metadata": {
+    "project_id": "vehicle-workbench-axle-runtime",
+    "package_id": "vehicle-workbench-axle-runtime",
+    "name": "Vehicle Workbench Axle Runtime",
+    "version": "1.0.0",
+    "author": "<AUTHOR>",
+    "description": "Installs the shared Story Legacy axle runtime.",
+    "workbench_version": "0.5.5",
+    "license": "<VERIFIED_RUNTIME_LICENSE>"
+  },
+  "runtime": {
+    "profile_path": "<VALIDATED_STORY_RUNTIME_PROFILE_JSON>",
+    "build_date": "<BUILD_DATE>",
+    "required_scripthook_version": "<COMPATIBILITY_RANGE>"
+  },
+  "include_documentation": true,
+  "compression": "deflated"
+}

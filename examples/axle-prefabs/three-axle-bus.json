@@ -1,0 +1,19 @@
+{
+  "fixtureVersion": 1,
+  "vehicleModel": "allin1_acceptance_bus",
+  "prefabId": "6x2_rear_steer_bus",
+  "visualTyrePackageId": "mixed_tag",
+  "visualTyreParameters": {},
+  "visualStatus": "design_only_until_geometry_is_bound",
+  "target": "fivem-legacy",
+  "exportMode": "fivem_runtime",
+  "reportedWheelCount": 6,
+  "bones": [
+    {"name": "wheel_lf", "position": [-1.25, 8.0, 0.0]},
+    {"name": "wheel_rf", "position": [1.25, 8.0, 0.0]},
+    {"name": "wheel_lm1", "position": [-1.25, 4.0, 0.0]},
+    {"name": "wheel_rm1", "position": [1.25, 4.0, 0.0]},
+    {"name": "wheel_lr", "position": [-1.25, 0.0, 0.0]},
+    {"name": "wheel_rr", "position": [1.25, 0.0, 0.0]}
+  ]
+}

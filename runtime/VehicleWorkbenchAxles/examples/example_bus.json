@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "configurationId": "bus-steer-drive-rear-steer",
+  "modelName": "example_bus",
+  "modelHash": "0x12345678",
+  "expectedWheelCount": 6,
+  "minimumRuntimeVersion": "1.0.0",
+  "wheelIndexMapping": {
+    "source": "story-legacy_canonical_semantics_v1",
+    "reported_wheel_count": 6,
+    "by_bone": {
+      "wheel_lf": 0,
+      "wheel_rf": 1,
+      "wheel_lm1": 2,
+      "wheel_rm1": 3,
+      "wheel_lr": 4,
+      "wheel_rr": 5
+    }
+  },
+  "axles": [
+    {
+      "order": 0,
+      "role": "front",
+      "leftBone": "wheel_lf",
+      "rightBone": "wheel_rf",
+      "wheelIndices": [0, 1],
+      "steered": true,
+      "powered": false
+    },
+    {
+      "order": 1,
+      "role": "middle",
+      "leftBone": "wheel_lm1",
+      "rightBone": "wheel_rm1",
+      "wheelIndices": [2, 3],
+      "steered": false,
+      "powered": true
+    },
+    {
+      "order": 2,
+      "role": "rear",
+      "leftBone": "wheel_lr",
+      "rightBone": "wheel_rr",
+      "wheelIndices": [4, 5],
+      "steered": true,
+      "powered": false
+    }
+  ],
+  "compatibility": {
+    "story-legacy": true,
+    "story-enhanced": true
+  }
+}

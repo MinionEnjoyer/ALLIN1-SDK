@@ -100,6 +100,10 @@ def _launch_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="Compatibility alias for opening the Vehicles Workbench tab.",
     )
     direct_open.add_argument(
+        "--axle-workspace", type=Path,
+        help="Open a vehicle authoring workspace directly in the Axle Configurator.",
+    )
+    direct_open.add_argument(
         "--workbench-package", type=Path,
         help="Open an add-on package directly in the unified Workbench.",
     )
@@ -123,7 +127,14 @@ def _launch_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         "--graph-node",
         help="Node id selected when opening a package graph directly.",
     )
-    return parser.parse_args(sys.argv[1:] if argv is None else argv)
+    parser.add_argument(
+        "--axle-model",
+        help="Vehicle model selected when opening the Axle Configurator.",
+    )
+    parsed = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if parsed.axle_model is not None and parsed.axle_workspace is None:
+        parser.error("--axle-model requires --axle-workspace")
+    return parsed
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -137,6 +148,7 @@ def main(argv: list[str] | None = None) -> None:
     if (
         arguments.rpf_graph is None
         and arguments.vehicle_package is None
+        and arguments.axle_workspace is None
         and arguments.workbench_package is None
         and arguments.model_material_source is None
         and arguments.addon_manifest is None
@@ -195,6 +207,12 @@ def main(argv: list[str] | None = None) -> None:
     elif arguments.vehicle_package is not None:
         package = arguments.vehicle_package
         dialog.after_idle(lambda: dialog.open_vehicle_package(package))
+    elif arguments.axle_workspace is not None:
+        workspace = arguments.axle_workspace
+        model = arguments.axle_model
+        dialog.after_idle(
+            lambda: dialog.open_axle_configurator(workspace, model),
+        )
     elif arguments.model_material_source is not None:
         source = arguments.model_material_source
         dialog.after_idle(lambda: dialog.open_model_material_source(source))

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
 import queue
+import shutil
 import tempfile
 import threading
 import tkinter as tk
@@ -14,6 +16,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk, UnidentifiedImageError
+
+from allin1_sdk import __version__
 
 from allin1_sdk.addon_importer import (
     AddonPackageInspector,
@@ -42,6 +46,33 @@ from allin1_sdk.vehicle_project import (
     VehicleProjectResolver,
 )
 from allin1_sdk.vehicle_package import VehicleAddonPackageBuilder
+from allin1_sdk.axle_configurator import (
+    AxleConfiguration,
+    parse_handling_flags,
+    write_fivem_resource,
+)
+from allin1_sdk.axle_prefabs import load_prefab_axle_configuration
+from allin1_sdk.vehicle_axles_ui import VehicleAxlesPanel
+from allin1_sdk.vehicle_oiv_ui import VehicleOivExportDialog, VehicleOivForm
+from allin1_sdk.axle_oiv_export import (
+    MODE_RUNTIME_ONLY,
+    MODE_SELF_CONTAINED,
+    EnhancedOivTargetProfile,
+    JsonOivIdentityStore,
+    LegacyOivTargetProfile,
+    OivContentPlanner,
+    OivExportRequest,
+    OivPackageBuilder,
+    OivPackageMetadata,
+    StagedAxleConfiguration,
+    StagedRuntime,
+    StagedVehicleDlc,
+)
+from allin1_sdk.axle_runtime_bundler import (
+    StoryRuntimeProfile,
+    VehicleAxleBuildInput,
+    compatibility_configuration,
+)
 from allin1_sdk.viewport_rendering import (
     LatestOnlyRenderWorker,
     ViewportRenderKey,
@@ -49,6 +80,7 @@ from allin1_sdk.viewport_rendering import (
     encoded_image_weight,
 )
 from allin1_sdk.paths import user_data_root
+from allin1_sdk.rpf_tools import RpfExplorerService
 from allin1_sdk.vehicle_authoring import (
     TUNING_COLLECTIONS,
     TUNING_FIELDS,
@@ -95,6 +127,41 @@ class _PreparedViewportFrame:
     metadata: dict[str, object]
     display_image: Image.Image | None = None
     display_zoom: float | None = None
+
+
+class _PreparedStoryExport:
+    """Own temporary staging until a preview is built or discarded."""
+
+    def __init__(
+        self,
+        temporary: tempfile.TemporaryDirectory[str],
+        builder: OivPackageBuilder,
+        request: OivExportRequest,
+        output: Path,
+        *,
+        enhanced_fallback: bool,
+    ) -> None:
+        self.temporary = temporary
+        self.builder = builder
+        self.request = request
+        self.output = output
+        self.enhanced_fallback = enhanced_fallback
+
+    def __call__(self) -> Path:
+        try:
+            if self.enhanced_fallback:
+                return self.builder.build_enhanced_fallback(
+                    self.request, self.output,
+                )
+            return self.builder.build(self.request, self.output).archive
+        finally:
+            self.temporary.cleanup()
+
+    def __del__(self) -> None:
+        try:
+            self.temporary.cleanup()
+        except (OSError, PermissionError):
+            pass
 
 
 def _model_render_view_box(
@@ -272,6 +339,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.authoring_workspace: VehicleAuthoringWorkspace | None = None
         self.authoring_values: dict[str, tk.StringVar] = {}
         self.authoring_inputs: dict[str, ttk.Entry] = {}
+        self.author_view = tk.StringVar(value="general")
         self.distribution_values: dict[str, tk.Variable] = {}
         self.distribution_inputs: list[tk.Widget] = []
         self.appearance_edit_inputs: list[ttk.Entry] = []
@@ -635,6 +703,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
         inspector_tabs.pack(fill="both", expand=True)
         overview_tab = ttk.Frame(inspector_tabs, padding=7)
         author_tab = ttk.Frame(inspector_tabs, padding=7)
+        self.author_tab = author_tab
         distribution_tab = ttk.Frame(inspector_tabs, padding=7)
         appearance_tab = ttk.Frame(inspector_tabs, padding=7)
         tuning_builder_tab = ttk.Frame(inspector_tabs, padding=7)
@@ -655,6 +724,17 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.details.pack(fill="both", expand=True)
         self.details.configure(state="disabled")
 
+        author_switch = ttk.Frame(author_tab)
+        author_switch.pack(fill="x", pady=(0, 6))
+        for label, value in (("General", "general"), ("Axles", "axles")):
+            ttk.Radiobutton(
+                author_switch, text=label, value=value, variable=self.author_view,
+                command=self._show_author_view, style="Toolbutton",
+            ).pack(side="left", padx=(0, 4))
+        self.author_general_page = ttk.Frame(author_tab)
+        self.author_axles_page = ttk.Frame(author_tab)
+        self.author_general_page.pack(fill="both", expand=True)
+
         author_fields = (
             ("Display label", "vehicle.gameName"),
             ("Make label", "vehicle.vehicleMakeName"),
@@ -672,7 +752,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
             ("Light settings", "variation.lightSettings"),
             ("Tuning kits", "variation.kits"),
         )
-        field_grid = ttk.Frame(author_tab)
+        field_grid = ttk.Frame(self.author_general_page)
         field_grid.pack(fill="x")
         for index, (label, key) in enumerate(author_fields):
             group = 0 if index < 8 else 1
@@ -693,7 +773,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
             self.authoring_inputs[key] = entry
         field_grid.columnconfigure(1, weight=1)
         field_grid.columnconfigure(3, weight=1)
-        author_actions = ttk.Frame(author_tab)
+        author_actions = ttk.Frame(self.author_general_page)
         author_actions.pack(fill="x", pady=(8, 4))
         self.save_author_button = ttk.Button(
             author_actions, text="Apply + validate", state="disabled",
@@ -709,11 +789,13 @@ class VehicleWorkbenchFrame(ttk.Frame):
             value="Create an authoring workspace before editing package metadata."
         )
         ttk.Label(
-            author_tab, textvariable=self.authoring_status,
+            self.author_general_page, textvariable=self.authoring_status,
             foreground="#52635c", wraplength=320, justify="left",
         ).pack(fill="x", anchor="w", pady=(4, 0))
 
-        identity = ttk.LabelFrame(author_tab, text="Identity migration", padding=6)
+        identity = ttk.LabelFrame(
+            self.author_general_page, text="Identity migration", padding=6,
+        )
         identity.pack(fill="x", pady=(8, 0))
         self.identity_model = tk.StringVar()
         self.identity_handling = tk.StringVar()
@@ -734,6 +816,15 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.identity_button.grid(row=0, column=4)
         identity.columnconfigure(1, weight=1)
         identity.columnconfigure(3, weight=1)
+
+        self.axles_panel = VehicleAxlesPanel(
+            self.author_axles_page,
+            on_apply=self._apply_axle_configuration,
+            on_undo=self._undo_authoring_edit,
+            on_redo=self._redo_authoring_edit,
+            on_export=self._export_axle_configuration,
+        )
+        self.axles_panel.pack(fill="both", expand=True)
 
         distribution = ttk.LabelFrame(
             distribution_tab, text="GBAY vehicle listing", padding=8,
@@ -1287,7 +1378,18 @@ class VehicleWorkbenchFrame(ttk.Frame):
             return
 
     def _inspector_tab_changed(self, _event: object | None = None) -> None:
-        compact = self.inspector_tabs.select() == str(self.tuning_builder_tab)
+        selected = self.inspector_tabs.select()
+        axle_compact = (
+            selected == str(self.author_tab)
+            and self.author_view.get() == "axles"
+        )
+        compact = selected == str(self.tuning_builder_tab) or axle_compact
+        if axle_compact:
+            self.vehicle_toolbar.pack_forget()
+        elif not self.vehicle_toolbar.winfo_manager():
+            self.vehicle_toolbar.pack(
+                fill="x", pady=(0, 10), before=self.primary_panes,
+            )
         if compact:
             self.model_heading_label.pack_forget()
             self.model_summary_label.pack_forget()
@@ -1397,6 +1499,17 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.model_tree.focus(match)
         self.model_tree.see(match)
         return self._select_model()
+
+    def show_axle_configurator(self, model_name: str | None = None) -> bool:
+        """Open the Author/Axles work zone for a selected vehicle model."""
+        if model_name is not None and not self.select_model(model_name):
+            return False
+        if self.selected_model is None:
+            return False
+        self.inspector_tabs.select(self.author_tab)
+        self.author_view.set("axles")
+        self._show_author_view()
+        return True
 
     def _select_model(self, _event: object | None = None) -> bool:
         if self._restoring_model_selection:
@@ -1520,6 +1633,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.identity_handling_entry.configure(state="disabled")
         self.identity_button.configure(state="disabled")
         self._clear_appearance()
+        self.axles_panel.clear()
         self.authoring_status.set("Select a vehicle before editing package metadata.")
         self.save_author_button.configure(state="disabled")
         self.undo_author_button.configure(state="disabled")
@@ -1550,6 +1664,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
             self.appearance_kits.get(), self.appearance_light.get(),
             self.appearance_siren.get(), colors,
             tuple((key, variable.get()) for key, variable in self.distribution_values.items()),
+            self.axles_panel.snapshot(),
         )
 
     def confirm_navigation(self) -> bool:
@@ -1689,6 +1804,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
         )
         self.component.set("All")
         self._update_component_summary()
+        self.axles_panel.set_scene(scene)
         self.viewport_message.set(path)
         self._render_model_scene(fit=True)
 
@@ -1881,6 +1997,20 @@ class VehicleWorkbenchFrame(ttk.Frame):
         )
         self.status.set(f"Authoring workspace active: {workspace.root}")
 
+    def _show_author_view(self) -> None:
+        """Switch authoring work zones without adding another crowded main tab."""
+        self.author_general_page.pack_forget()
+        self.author_axles_page.pack_forget()
+        page = (
+            self.author_axles_page
+            if self.author_view.get() == "axles" else self.author_general_page
+        )
+        page.pack(fill="both", expand=True)
+        # The Axles editor owns its own selected-model context and status. Give
+        # it the same compact inspector treatment as Tuning Builder instead of
+        # spending most of a 680 px window on duplicated heading/summary rows.
+        self._inspector_tab_changed()
+
     def _load_authoring_fields(self, model: VehicleProjectModel) -> None:
         workspace = self.authoring_workspace
         if workspace is None:
@@ -1909,6 +2039,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
             self.identity_button.configure(state="disabled")
             self._load_distribution(model, editable=False)
             self._load_appearance(model, editable=False)
+            self._load_axle_fields(model, editable=False)
             return
         try:
             authored = workspace.values(model.model)
@@ -1921,6 +2052,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
             self.authoring_status.set(f"Authoring unavailable: {exc}")
             self._load_distribution(model, editable=False)
             self._clear_appearance()
+            self._load_axle_fields(model, editable=False)
             return
         for key, variable in self.authoring_values.items():
             variable.set(authored.values.get(key, ""))
@@ -1943,6 +2075,46 @@ class VehicleWorkbenchFrame(ttk.Frame):
         )
         self._load_distribution(model, editable=True)
         self._load_appearance(model, editable=True)
+        self._load_axle_fields(model, editable=True)
+
+    def _load_axle_fields(
+        self, model: VehicleProjectModel, *, editable: bool,
+    ) -> None:
+        """Project saved axle state into the draft editor without mutating it."""
+        configuration: AxleConfiguration | None = None
+        flags: int | None = None
+        drive_bias: float | None = None
+        workspace = self.authoring_workspace
+        try:
+            if workspace is not None:
+                configuration = workspace.axle_configuration(model.model)
+                evidence = workspace.axle_handling_evidence(model.model)
+                raw_flags = evidence.get("strHandlingFlags", "")
+                if raw_flags:
+                    flags = parse_handling_flags(raw_flags)
+                raw_bias = evidence.get("fDriveBiasFront", "")
+                try:
+                    drive_bias = float(raw_bias)
+                except (TypeError, ValueError):
+                    drive_bias = None
+            elif self.project is not None:
+                payload = next((
+                    item for item in self.project.axle_configurations
+                    if str(item.get("vehicle_model", "")).casefold()
+                    == model.model.casefold()
+                ), None)
+                if payload is not None:
+                    configuration = load_prefab_axle_configuration(payload)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            configuration = None
+        asset_names = tuple(
+            entry.path for entry in self.scan.entries
+        ) if self.scan is not None else ()
+        self.axles_panel.load(
+            model.model, configuration, editable=editable,
+            asset_names=asset_names, handling_flags=flags,
+            drive_bias_front=drive_bias,
+        )
 
     def _load_distribution(
         self, model: VehicleProjectModel, *, editable: bool,
@@ -2786,6 +2958,381 @@ class VehicleWorkbenchFrame(ttk.Frame):
             return
         self._reload_authoring_model(result.model)
         self.status.set(f"Restored latest vehicle edit · revision {result.revision}")
+
+    def _redo_authoring_edit(self) -> None:
+        workspace = self.authoring_workspace
+        model = self.selected_model
+        if workspace is None or model is None:
+            return
+        try:
+            result = workspace.redo()
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("Vehicle redo failed", str(exc), parent=self)
+            self.authoring_status.set(f"Redo failed: {exc}")
+            return
+        self._reload_authoring_model(result.model)
+        self.status.set(f"Reapplied vehicle edit · revision {result.revision}")
+
+    def _apply_axle_configuration(self, configuration: AxleConfiguration) -> None:
+        workspace = self.authoring_workspace
+        model = self.selected_model
+        if workspace is None or model is None:
+            return
+        try:
+            result = workspace.set_axle_configuration(
+                configuration,
+                bones=self._model_scene.bones if self._model_scene is not None else (),
+                expected_revision=workspace.revision,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            messagebox.showerror("Axle configuration rejected", str(exc), parent=self)
+            self.axles_panel.status.set(f"Edit rejected and rolled back: {exc}")
+            return
+        self._reload_authoring_model(result.model)
+        self.author_view.set("axles")
+        self._show_author_view()
+        self.status.set(
+            f"Applied {len(configuration.axles)} axle pairs · revision {result.revision} · "
+            f"{len(result.changes)} reviewed file/manifest changes"
+        )
+        if result.warnings:
+            self.axles_panel.status.set(
+                "Applied with warnings: " + " · ".join(result.warnings[:3])
+            )
+
+    def _export_axle_configuration(self, configuration: AxleConfiguration) -> None:
+        target = self.axles_panel.target_key()
+        if target.startswith("fivem-"):
+            parent = filedialog.askdirectory(
+                parent=self, title="Select parent folder for the FiveM axle resource",
+            )
+            if not parent:
+                return
+            destination = Path(parent) / (
+                f"allin1-{configuration.vehicle_model}-axles-{target}"
+            )
+            try:
+                output = write_fivem_resource(configuration, destination)
+            except (OSError, RuntimeError, ValueError) as exc:
+                messagebox.showerror("Axle export failed", str(exc), parent=self)
+                return
+            self.status.set(f"Exported target-validated FiveM axle resource: {output}")
+            return
+        if self.authoring_workspace is None or self.selected_model is None:
+            messagebox.showinfo(
+                "Authoring workspace required",
+                "Create an authoring workspace before building a Story package. "
+                "That workspace owns the stable OIV identity and reviewed staging output.",
+                parent=self,
+            )
+            return
+        default_target = (
+            "story-enhanced"
+            if self.project is not None and self.project.edition.casefold() == "enhanced"
+            else "story-legacy"
+        )
+        VehicleOivExportDialog(
+            self,
+            model=configuration.vehicle_model,
+            default_name=(
+                self.selected_model.display_name or configuration.vehicle_model
+            ),
+            default_target=default_target,
+            on_preview=lambda form: self._prepare_story_export(configuration, form),
+        )
+
+    def _prepare_story_export(
+        self,
+        configuration: AxleConfiguration,
+        form: VehicleOivForm,
+    ) -> tuple[dict[str, object], _PreparedStoryExport]:
+        workspace = self.authoring_workspace
+        project = self.project
+        if workspace is None or project is None:
+            raise ValueError("A reviewed vehicle authoring workspace is required")
+        edition = project.edition.casefold()
+        requested_edition = form.target_id.removeprefix("story-")
+        if edition == "legacy + enhanced":
+            raise ValueError("Select one edition-specific vehicle source before Story export")
+        if edition in {"legacy", "enhanced"} and edition != requested_edition:
+            raise ValueError(
+                f"{project.edition} vehicle assets cannot be exported as {form.target_id}"
+            )
+        if form.mode == MODE_SELF_CONTAINED and not form.confirm_self_contained:
+            raise ValueError("Self-contained export requires the explicit overwrite acknowledgement")
+        if form.output_path.exists() or form.output_path.is_symlink():
+            raise FileExistsError(f"Export output already exists: {form.output_path}")
+
+        temporary = tempfile.TemporaryDirectory(prefix="allin1-story-oiv-")
+        stage = Path(temporary.name).resolve()
+        try:
+            compatibility_manifest: dict[str, object] = {
+                "schema_version": 1,
+                "target": form.target_id,
+                "source_edition": project.edition,
+                "game_write_performed": False,
+                "vehicle_artifacts": [],
+            }
+            vehicle_dlcs: tuple[StagedVehicleDlc, ...] = ()
+            axle_configs: tuple[StagedAxleConfiguration, ...] = ()
+            if form.mode != MODE_RUNTIME_ONLY:
+                package = VehicleAddonPackageBuilder(
+                    self.project_root, self._native_game_path(),
+                ).build(
+                    workspace.root,
+                    stage / "vehicle-package",
+                    pack_name=form.dlc_pack_name,
+                    mod_id=f"vehicle.{form.dlc_pack_name}",
+                    name=form.package_name,
+                    version=form.package_version,
+                    editions=(requested_edition,),
+                )
+                resolved_configs: dict[str, AxleConfiguration] = {
+                    configuration.vehicle_model: configuration,
+                }
+                for project_model in project.models:
+                    if project_model.model.casefold() == configuration.vehicle_model:
+                        continue
+                    saved = workspace.axle_configuration(project_model.model)
+                    if saved is not None:
+                        resolved_configs[saved.vehicle_model] = saved
+                staged_configs = []
+                for item in sorted(
+                    resolved_configs.values(), key=lambda value: value.vehicle_model,
+                ):
+                    config_path = stage / "configs" / f"{item.vehicle_model}.json"
+                    config_path.parent.mkdir(parents=True, exist_ok=True)
+                    runtime_payload = compatibility_configuration(
+                        VehicleAxleBuildInput(
+                            configuration=item,
+                            configuration_id=item.configuration_id,
+                            model_hash=item.model_hash,
+                            minimum_runtime_version=item.minimum_runtime_version,
+                            dual_tyre_geometry=tuple(
+                                addon.asset
+                                for axle in item.axles
+                                for addon in axle.addon_geometry
+                            ),
+                        ),
+                        form.target_id,
+                    )
+                    config_path.write_text(
+                        json.dumps(runtime_payload, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    staged_configs.append(StagedAxleConfiguration(
+                        model_name=item.vehicle_model,
+                        model_hash=item.model_hash,
+                        source_path=config_path.relative_to(stage).as_posix(),
+                        schema_version=item.schema_version,
+                        minimum_runtime_version=item.minimum_runtime_version,
+                    ))
+                vehicle_dlcs = (StagedVehicleDlc(
+                    dlc_pack_name=package.pack_name,
+                    archive_path=package.payload.relative_to(stage).as_posix(),
+                    vehicle_models=tuple(item.model for item in project.models),
+                    asset_edition=requested_edition,
+                ),)
+                axle_configs = tuple(staged_configs)
+                native_index = RpfExplorerService(
+                    self.project_root, self._native_game_path(),
+                ).index(package.payload)
+                entry_names = {
+                    item.name.casefold() for item in native_index.entries
+                    if item.kind != "directory"
+                }
+                model_assets = {
+                    model.model.casefold(): {
+                        "yft": f"{model.model.casefold()}.yft" in entry_names,
+                        "ytd": f"{model.model.casefold()}.ytd" in entry_names,
+                    }
+                    for model in project.models
+                }
+                required_metadata = {
+                    name: name in entry_names
+                    for name in (
+                        "vehicles.meta", "handling.meta", "carvariations.meta",
+                    )
+                }
+                missing_assets = [
+                    model for model, evidence in model_assets.items()
+                    if not evidence["yft"] or not evidence["ytd"]
+                ]
+                missing_metadata = [
+                    name for name, present in required_metadata.items() if not present
+                ]
+                if missing_assets or missing_metadata:
+                    details = []
+                    if missing_assets:
+                        details.append("missing YFT/YTD for " + ", ".join(missing_assets))
+                    if missing_metadata:
+                        details.append("missing metadata " + ", ".join(missing_metadata))
+                    raise ValueError(
+                        "Native RPF validation failed: " + "; ".join(details)
+                    )
+                native_report = stage / "vehicle-package" / "native-rpf-validation.json"
+                native_report.write_text(json.dumps({
+                    "schema_version": 1,
+                    "operation": "validate_story_vehicle_rpf",
+                    "status": "validated",
+                    "archive_sha256": package.payload_sha256,
+                    "edition": native_index.edition.casefold(),
+                    "archive_count": len(native_index.archives),
+                    "entry_count": len(native_index.entries),
+                    "model_assets": model_assets,
+                    "required_metadata": required_metadata,
+                    "warnings": list(native_index.warnings),
+                    "game_write_performed": False,
+                }, indent=2) + "\n", encoding="utf-8")
+                compatibility_manifest["vehicle_artifacts"] = [{
+                    "path": package.payload.relative_to(stage).as_posix(),
+                    "sha256": package.payload_sha256,
+                    "asset_edition": requested_edition,
+                    "asset_format": (
+                        "legacy-rpf7-gen8"
+                        if form.target_id == "story-legacy" else "gen9-required"
+                    ),
+                    "validation_status": "validated",
+                    "validation_report": package.report.relative_to(stage).as_posix(),
+                    "validation_report_sha256": hashlib.sha256(
+                        package.report.read_bytes()
+                    ).hexdigest(),
+                    "native_validation_report": native_report.relative_to(stage).as_posix(),
+                    "native_validation_report_sha256": hashlib.sha256(
+                        native_report.read_bytes()
+                    ).hexdigest(),
+                }]
+
+            runtime = self._stage_story_runtime(stage, form)
+            (stage / "compatibility-manifest.json").write_text(
+                json.dumps(compatibility_manifest, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            project_id, package_id = self._story_oiv_package_ids(form)
+            profile = (
+                LegacyOivTargetProfile()
+                if form.target_id == "story-legacy" else EnhancedOivTargetProfile()
+            )
+            metadata = OivPackageMetadata(
+                project_id=project_id,
+                package_id=package_id,
+                name=form.package_name,
+                version=form.package_version,
+                author=form.author,
+                description=form.description,
+                workbench_version=__version__,
+                license_name="User-supplied vehicle assets; see package documentation",
+            )
+            request = OivExportRequest(
+                staging_root=stage,
+                target_profile=profile,
+                mode=form.mode,
+                metadata=metadata,
+                vehicle_dlcs=vehicle_dlcs,
+                axle_configurations=axle_configs,
+                runtime=runtime,
+                include_documentation=form.include_documentation,
+                icon_path=form.icon_path,
+                confirm_self_contained=form.confirm_self_contained,
+            )
+            identity_store = JsonOivIdentityStore(
+                (
+                    user_data_root() / "vehicle-workbench-axle-runtime-identities.json"
+                    if form.mode == MODE_RUNTIME_ONLY
+                    else workspace.root / "oiv-package-identities.json"
+                )
+            )
+            builder = OivPackageBuilder(identity_store)
+            enhanced_fallback = form.target_id == "story-enhanced"
+            preview_request = request
+            if enhanced_fallback:
+                preview_request = OivExportRequest(**{
+                    **request.__dict__,
+                    "target_profile": EnhancedOivTargetProfile(
+                        installer_name="OpenRPF manual import",
+                        integration_validated=True,
+                        supported_game_builds=("manual-validation-required",),
+                        archive_paths=("manual-review",),
+                        installation_rules=("manual OpenRPF import",),
+                        runtime_profile_id="manual-preview-only",
+                        acceptance_receipt_sha256="0" * 64,
+                    ),
+                })
+            preview = OivContentPlanner(identity_store).plan(
+                preview_request
+            ).installation_preview()
+            if enhanced_fallback:
+                preview["warnings"] = [
+                    "Enhanced OIV export is not validated. Export will be an OpenRPF-ready ZIP.",
+                    *preview.get("warnings", []),
+                ]
+            prepared = _PreparedStoryExport(
+                temporary, builder, request, form.output_path,
+                enhanced_fallback=enhanced_fallback,
+            )
+            return preview, prepared
+        except Exception:
+            temporary.cleanup()
+            raise
+
+    @staticmethod
+    def _story_oiv_package_ids(form: VehicleOivForm) -> tuple[str, str]:
+        """Keep shared-runtime identity independent from the open vehicle project."""
+        if form.mode == MODE_RUNTIME_ONLY:
+            return (
+                "vehicle-workbench-axle-runtime",
+                "vehicle-workbench-axle-runtime",
+            )
+        project_id = f"vehicle.{form.dlc_pack_name}"
+        if form.mode == MODE_SELF_CONTAINED:
+            return project_id, f"{project_id}.self-contained"
+        return project_id, project_id
+
+    @staticmethod
+    def _stage_story_runtime(
+        stage: Path, form: VehicleOivForm,
+    ) -> StagedRuntime | None:
+        if form.mode not in {MODE_RUNTIME_ONLY, MODE_SELF_CONTAINED}:
+            return None
+        if form.runtime_path is None:
+            raise ValueError(
+                "The selected package mode requires a validated runtime profile JSON"
+            )
+        profile = StoryRuntimeProfile.load(form.runtime_path)
+        dependency = profile.runtime_dependency()
+        dependency.validate()
+        source = Path(dependency.binary_path).resolve()
+        receipt = Path(dependency.validation_receipt_path).resolve()
+        target = dependency.target_id
+        version = dependency.version
+        if target != form.target_id:
+            raise ValueError("Generic axle runtime edition does not match the export target")
+        if version != form.runtime_version:
+            raise ValueError("Runtime version field does not match the verified runtime metadata")
+        digest = dependency.checksum()
+        assert digest is not None
+        destination = stage / "runtime" / "VehicleWorkbenchAxles.asi"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        receipt_destination = stage / "runtime" / "validation-receipt.json"
+        shutil.copyfile(receipt, receipt_destination)
+        return StagedRuntime(
+            asi_path=destination.relative_to(stage).as_posix(),
+            version=version,
+            target_id=target,
+            supported_game_builds=dependency.supported_game_builds,
+            maximum_schema_version=dependency.maximum_schema_version,
+            binary_sha256=digest,
+            build_date="validated by pinned acceptance receipt",
+            profile_id=dependency.profile_id or "",
+            validation_receipt_path=receipt_destination.relative_to(stage).as_posix(),
+            validation_receipt_sha256=dependency.validation_receipt_sha256 or "",
+            package_eligible=dependency.package_eligible,
+            redistribution_allowed=dependency.redistribution_allowed,
+            license_name=dependency.license_name,
+            architecture="x64",
+            required_scripthook_version="current compatible release",
+        )
 
     def _reload_authoring_model(self, model_name: str) -> None:
         workspace = self.authoring_workspace

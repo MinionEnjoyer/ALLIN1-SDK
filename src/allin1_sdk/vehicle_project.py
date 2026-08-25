@@ -103,6 +103,7 @@ class VehicleProject:
     inventory_fingerprint: str
     models: tuple[VehicleProjectModel, ...]
     findings: tuple[VehicleDataFinding, ...]
+    axle_configurations: tuple[dict[str, Any], ...] = ()
 
     @property
     def error_count(self) -> int:
@@ -136,6 +137,7 @@ class VehicleProject:
             },
             "models": [item.to_dict() for item in self.models],
             "findings": [asdict(item) for item in self.findings],
+            "axle_configurations": list(self.axle_configurations),
         }
 
     def to_markdown(self) -> str:
@@ -176,6 +178,13 @@ class VehicleProject:
                     f"- **{finding.severity.upper()} `{finding.code}`**{model}: "
                     f"{finding.message}"
                 )
+        if self.axle_configurations:
+            lines.extend(["", "## Axle configurations", ""])
+            for configuration in self.axle_configurations:
+                model = str(configuration.get("vehicle_model", "unknown"))
+                preset = str(configuration.get("preset", "Custom"))
+                mode = str(configuration.get("export_mode", "unknown"))
+                lines.append(f"- `{model}`: **{preset}** (`{mode}`)")
         lines.append("")
         return "\n".join(lines)
 

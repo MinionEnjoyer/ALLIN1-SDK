@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://allin1.local/schemas/vehicle-workbench-axles/story-runtime-receipt-v1.json",
+  "title": "Vehicle Workbench Story runtime validation receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "profile_id",
+    "runtime_name",
+    "target_id",
+    "runtime_version",
+    "binary_sha256",
+    "binary_architecture",
+    "supported_game_builds",
+    "maximum_axle_schema",
+    "descriptor_abi_version",
+    "required_exports",
+    "validated_profile_export_result",
+    "acceptance_tests",
+    "validation_authority",
+    "accepted_at",
+    "package_eligible",
+    "redistribution_allowed",
+    "license"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "receipt_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,95}$" },
+    "profile_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+    "runtime_name": { "const": "VehicleWorkbenchAxles" },
+    "target_id": { "enum": ["story-legacy", "story-enhanced"] },
+    "runtime_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "binary_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "binary_architecture": { "const": "x64" },
+    "supported_game_builds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 96 }
+    },
+    "maximum_axle_schema": { "type": "integer", "minimum": 1 },
+    "descriptor_abi_version": { "const": 1 },
+    "required_exports": {
+      "type": "array",
+      "allOf": [
+        { "contains": { "const": "VehicleWorkbenchAxles_GetDescriptor" } },
+        { "contains": { "const": "VehicleWorkbenchAxles_HasValidatedProfile" } }
+      ],
+      "uniqueItems": true,
+      "items": { "type": "string" }
+    },
+    "validated_profile_export_result": { "const": true },
+    "acceptance_tests": {
+      "type": "object",
+      "required": [
+        "front_steer",
+        "selective_drive",
+        "rear_steer",
+        "unrelated_flags_preserved",
+        "repair_reapplication",
+        "unsupported_build_fail_closed",
+        "online_session_guard"
+      ],
+      "properties": {
+        "front_steer": { "const": "passed" },
+        "selective_drive": { "const": "passed" },
+        "rear_steer": { "const": "passed" },
+        "unrelated_flags_preserved": { "const": "passed" },
+        "repair_reapplication": { "const": "passed" },
+        "unsupported_build_fail_closed": { "const": "passed" },
+        "online_session_guard": { "const": "passed" }
+      }
+    },
+    "validation_authority": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "accepted_at": { "type": "string", "format": "date-time" },
+    "package_eligible": { "const": true },
+    "redistribution_allowed": { "const": true },
+    "license": { "type": "string", "minLength": 1 }
+  }
+}

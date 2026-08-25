@@ -180,7 +180,20 @@ signing provided by SignPath.io, certificate by SignPath Foundation.**
   and guarded package builder. **Create authoring workspace** first copies every visible
   package member into a new project, preserving the download. The embedded Author tab can
   edit labels, texture links, class/type/layout/audio, common driving values, light
-  settings, and tuning-kit selection. The dedicated **Tuning Builder** inventories
+  settings, and tuning-kit selection. Its **Axles** work zone detects and validates
+  two through five canonical axle pairs without moving or renaming bones. Steering,
+  drive, braking intent, visual wheel families, and explicit target wheel indices
+  remain separate. A versioned library supplies 27 behavior prefabs and 8 independent
+  tyre packages; filters, generated schematics, compatibility badges, draft previews,
+  validation, and undo/redo use the same authoring transaction boundary. Dual tyres
+  are cosmetic geometry on an existing physical slot, never extra runtime wheels.
+  Four-target planning keeps FiveM resource output, Legacy Story runtime output, and
+  Enhanced conversion/profile requirements isolated. Story packages can be exported
+  as verified OIV 2.2 vehicle-only, runtime-only, or explicitly confirmed
+  self-contained transports around the already staged DLC. Enhanced OIV remains
+  disabled pending an acceptance-tested profile and instead produces an
+  OpenRPF-ready manual ZIP. ScriptHookV and third-party loaders are not redistributed.
+  The dedicated **Tuning Builder** inventories
   streamed part assets and edits visible parts, linked companion parts, performance
   upgrades, category labels, arrays, booleans, and existing package-specific scalar
   fields. It can add, duplicate, remove, and reorder entries while identifying missing
@@ -613,6 +626,7 @@ allin1-sdk compile-vehicle-data C:\Mods\Example -o compiled-vehicle-data
 allin1-sdk inspect-vehicle-project C:\Mods\Example --model examplecar
 allin1-sdk export-vehicle-project C:\Mods\Example -o C:\Work\examplecar-project
 allin1-sdk create-vehicle-authoring C:\Mods\Example -o C:\Work\examplecar-authoring
+allin1-sdk open-axle-configurator C:\Work\examplecar-authoring --model examplecar
 allin1-sdk set-vehicle-fields C:\Work\examplecar-authoring examplecar --set handling.fMass=1600 --acknowledge-edit
 allin1-sdk set-vehicle-appearance C:\Work\examplecar-authoring examplecar --colors-json C:\Work\colors.json --light-settings 18 --acknowledge-edit
 allin1-sdk set-vehicle-tuning-kit C:\Work\examplecar-authoring examplecar 123_example_modkit --kit-type MKT_SPORT --acknowledge-edit

@@ -179,6 +179,26 @@ class NativeModelComponent:
 
 
 @dataclass(frozen=True)
+class NativeModelBone:
+    """One guarded CodeWalker skeleton bone in vehicle-local bind pose.
+
+    The workbenches intentionally expose both authored local transform values
+    and the resolved world position.  Axle tooling can therefore reason about
+    physical placement without renaming bones or confusing a child drawable's
+    placement matrix with the skeleton that drives it.
+    """
+
+    name: str
+    index: int
+    tag: int
+    parent_index: int
+    local_position: tuple[float, float, float]
+    position: tuple[float, float, float]
+    rotation: tuple[float, float, float, float]
+    scale: tuple[float, float, float]
+
+
+@dataclass(frozen=True)
 class NativeModelScene:
     """Bounded decoded geometry that can be rendered from multiple camera views."""
 
@@ -186,6 +206,7 @@ class NativeModelScene:
     geometries: tuple[_ModelGeometry, ...]
     metadata: dict[str, Any] = field(default_factory=dict)
     materials: tuple[NativeModelMaterial, ...] = ()
+    bones: tuple[NativeModelBone, ...] = ()
     _render_bounds_cache: dict[tuple[str, str], _ModelRenderBounds] = field(
         default_factory=dict, init=False, repr=False, compare=False,
     )
@@ -677,42 +698,8 @@ def _multiply_model_matrices(
 
 def _model_trs_matrix(bone: etree._Element) -> _ModelMatrix:
     """Return one CodeWalker skeleton bone's local column-vector transform."""
-    translation = next((
-        item for item in bone
-        if isinstance(item.tag, str) and _local_name(item) == "Translation"
-    ), None)
-    rotation = next((
-        item for item in bone
-        if isinstance(item.tag, str) and _local_name(item) == "Rotation"
-    ), None)
-    scale = next((
-        item for item in bone
-        if isinstance(item.tag, str) and _local_name(item) == "Scale"
-    ), None)
-    try:
-        tx, ty, tz = tuple(
-            float(translation.get(axis, "0")) if translation is not None else 0.0
-            for axis in ("x", "y", "z")
-        )
-        qx, qy, qz, qw = tuple(
-            float(rotation.get(axis, "0" if axis != "w" else "1"))
-            if rotation is not None else (1.0 if axis == "w" else 0.0)
-            for axis in ("x", "y", "z", "w")
-        )
-        sx, sy, sz = tuple(
-            float(scale.get(axis, "1")) if scale is not None else 1.0
-            for axis in ("x", "y", "z")
-        )
-    except ValueError as exc:
-        raise ValueError("A fragment skeleton bone has a non-numeric transform") from exc
-    values = (tx, ty, tz, qx, qy, qz, qw, sx, sy, sz)
-    if not all(math.isfinite(value) for value in values):
-        raise ValueError("A fragment skeleton bone has a non-finite transform")
-    magnitude = math.sqrt((qx * qx) + (qy * qy) + (qz * qz) + (qw * qw))
-    if magnitude <= 1e-12:
-        raise ValueError("A fragment skeleton bone has a zero quaternion")
-    qx, qy, qz, qw = (
-        qx / magnitude, qy / magnitude, qz / magnitude, qw / magnitude,
+    (tx, ty, tz), (qx, qy, qz, qw), (sx, sy, sz) = (
+        _model_bone_transform_values(bone)
     )
     xx, yy, zz = qx * qx, qy * qy, qz * qz
     xy, xz, yz = qx * qy, qx * qz, qy * qz
@@ -726,6 +713,119 @@ def _model_trs_matrix(bone: etree._Element) -> _ModelMatrix:
          (1.0 - (2.0 * (xx + yy))) * sz, tz),
         (0.0, 0.0, 0.0, 1.0),
     )
+
+
+def _model_bone_transform_values(
+    bone: etree._Element,
+) -> tuple[
+    tuple[float, float, float],
+    tuple[float, float, float, float],
+    tuple[float, float, float],
+]:
+    """Return finite, normalized local TRS values for diagnostics."""
+    translation = next((
+        item for item in bone
+        if isinstance(item.tag, str) and _local_name(item) == "Translation"
+    ), None)
+    rotation = next((
+        item for item in bone
+        if isinstance(item.tag, str) and _local_name(item) == "Rotation"
+    ), None)
+    scale = next((
+        item for item in bone
+        if isinstance(item.tag, str) and _local_name(item) == "Scale"
+    ), None)
+    try:
+        position = tuple(
+            float(translation.get(axis, "0")) if translation is not None else 0.0
+            for axis in ("x", "y", "z")
+        )
+        quaternion = tuple(
+            float(rotation.get(axis, "0" if axis != "w" else "1"))
+            if rotation is not None else (1.0 if axis == "w" else 0.0)
+            for axis in ("x", "y", "z", "w")
+        )
+        authored_scale = tuple(
+            float(scale.get(axis, "1")) if scale is not None else 1.0
+            for axis in ("x", "y", "z")
+        )
+    except ValueError as exc:
+        raise ValueError("A fragment skeleton bone has a non-numeric transform") from exc
+    values = (*position, *quaternion, *authored_scale)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("A fragment skeleton bone has a non-finite transform")
+    magnitude = math.sqrt(sum(value * value for value in quaternion))
+    if magnitude <= 1e-12:
+        raise ValueError("A fragment skeleton bone has a zero quaternion")
+    normalized = tuple(value / magnitude for value in quaternion)
+    return (
+        position,  # type: ignore[return-value]
+        normalized,  # type: ignore[return-value]
+        authored_scale,  # type: ignore[return-value]
+    )
+
+
+def _fragment_skeleton_bones(root: etree._Element) -> tuple[NativeModelBone, ...]:
+    """Resolve a fragment skeleton once for read-only workbench consumers."""
+    if _local_name(root) != "Fragment":
+        return ()
+    nodes = root.xpath(
+        "./*[local-name()='Drawable']/*[local-name()='Skeleton']"
+        "/*[local-name()='Bones']/*[local-name()='Item']"
+    )
+    by_index: dict[int, etree._Element] = {}
+    parents: dict[int, int] = {}
+    tags: dict[int, int] = {}
+    for bone in nodes:
+        try:
+            index = int(_direct_model_text(bone, "Index"), 10)
+            tag = int(_direct_model_text(bone, "Tag"), 10)
+            parent = int(_direct_model_text(bone, "ParentIndex"), 10)
+        except ValueError as exc:
+            raise ValueError("A fragment skeleton bone index is invalid") from exc
+        if index in by_index:
+            raise ValueError("A fragment skeleton contains duplicate bone indices")
+        by_index[index] = bone
+        parents[index] = parent
+        tags[index] = tag
+
+    world_cache: dict[int, _ModelMatrix] = {}
+    resolving: set[int] = set()
+
+    def world_matrix(index: int) -> _ModelMatrix:
+        cached = world_cache.get(index)
+        if cached is not None:
+            return cached
+        if index in resolving:
+            raise ValueError("A fragment skeleton contains a bone-parent cycle")
+        resolving.add(index)
+        local = _model_trs_matrix(by_index[index])
+        parent_index = parents[index]
+        result = (
+            _multiply_model_matrices(world_matrix(parent_index), local)
+            if parent_index >= 0 and parent_index in by_index else local
+        )
+        resolving.remove(index)
+        world_cache[index] = result
+        return result
+
+    records: list[NativeModelBone] = []
+    for index in sorted(by_index):
+        bone = by_index[index]
+        name = _direct_model_text(bone, "Name")
+        local_position, rotation, scale = _model_bone_transform_values(bone)
+        world = world_matrix(index)
+        records.append(NativeModelBone(
+            name=name,
+            index=index,
+            tag=tags[index],
+            parent_index=parents[index],
+            local_position=local_position,
+            position=(world[0][3], world[1][3], world[2][3]),
+            rotation=rotation,
+            scale=scale,
+        ))
+    return tuple(records)
 
 
 def _model_drawable_matrix(drawable: etree._Element) -> _ModelMatrix:
@@ -860,7 +960,13 @@ def _fragment_child_geometry_placements(
         and _direct_model_text(drawable.getparent(), "BoneTag")
     }
     placements: dict[etree._Element, _FragmentGeometryPlacement] = {}
-    wheel_pairs = {"wheel_lf": "wheel_rf", "wheel_lr": "wheel_rr"}
+    wheel_pairs = {
+        "wheel_lf": "wheel_rf",
+        "wheel_lm1": "wheel_rm1",
+        "wheel_lm2": "wheel_rm2",
+        "wheel_lm3": "wheel_rm3",
+        "wheel_lr": "wheel_rr",
+    }
     for drawable in child_drawables:
         owner = drawable.getparent()
         raw_tag = "" if owner is None else _direct_model_text(owner, "BoneTag")
@@ -1907,6 +2013,7 @@ def _model_scene_from_xml(
         tree = _safe_codewalker_xml(xml)
         root = tree.getroot()
         materials = _model_materials(root)
+        bones = _fragment_skeleton_bones(root)
         fragment_placements = _fragment_child_geometry_placements(root)
         geometries: list[_ModelGeometry] = []
         total_vertices = 0
@@ -1961,6 +2068,11 @@ def _model_scene_from_xml(
         metadata["model_material_binding_count"] = sum(
             item.material_index is not None for item in geometries
         )
+        if bones:
+            metadata["model_skeleton_bone_count"] = len(bones)
+            metadata["model_skeleton_wheel_bones"] = ", ".join(
+                item.name for item in bones if item.name.casefold().startswith("wheel_")
+            )
         if transformed_fragment_geometries:
             metadata["model_fragment_child_transformed_geometry_count"] = (
                 transformed_fragment_geometries
@@ -1974,7 +2086,7 @@ def _model_scene_from_xml(
         if skipped_layouts:
             metadata["model_skipped_buffers"] = skipped_layouts
         scene = NativeModelScene(
-            name, tuple(geometries), metadata, materials=materials,
+            name, tuple(geometries), metadata, materials=materials, bones=bones,
         )
         return scene, metadata, None
     except (OSError, ValueError, etree.XMLSyntaxError, OverflowError) as exc:

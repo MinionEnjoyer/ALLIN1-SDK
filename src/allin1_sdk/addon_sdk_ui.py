@@ -1425,6 +1425,57 @@ class AddonSdkDialog(tk.Toplevel):
         """Compatibility alias for direct vehicle Workbench launches."""
         return self.open_workbench_package(source, "vehicles")
 
+    def open_axle_configurator(
+        self, workspace_root: str | Path, model: str | None = None,
+    ) -> bool:
+        """Open a vehicle authoring workspace directly in its Axles editor."""
+        from allin1_sdk.vehicle_authoring import VehicleAuthoringWorkspace
+
+        try:
+            workspace = VehicleAuthoringWorkspace(workspace_root)
+            available = tuple(item.model for item in workspace.inspect().models)
+            if not available:
+                raise ValueError("Vehicle authoring workspace contains no models")
+            selected = model or available[0]
+            canonical = next(
+                (item for item in available if item.casefold() == selected.casefold()),
+                None,
+            )
+            if canonical is None:
+                raise ValueError(
+                    f"Vehicle model is not present in this authoring workspace: {selected}"
+                )
+            scan = self._package_inspector().inspect(workspace.source)
+        except (OSError, TypeError, ValueError) as exc:
+            messagebox.showerror(
+                "Could not open Axle Configurator", str(exc), parent=self,
+            )
+            return False
+        self.package_source = workspace.source
+        self.package_scan = scan
+        self._set_package_actions(
+            assets=True,
+            rpfs=any(entry.suffix == ".rpf" for entry in scan.entries),
+            workbench=True,
+        )
+        self._select_workspace("workbench")
+        opened = self.workbench_workspace.open_source(
+            workspace.source, scan, category="vehicles",
+            vehicle_authoring_workspace=workspace,
+        )
+        if not opened:
+            return False
+        vehicle = self.workbench_workspace.vehicle_workspace
+        if not vehicle.show_axle_configurator(canonical):
+            messagebox.showerror(
+                "Could not open Axle Configurator",
+                f"Vehicle model could not be selected: {canonical}",
+                parent=self,
+            )
+            return False
+        self.status.set(f"Axle Configurator · {canonical} · {workspace.root.name}")
+        return True
+
     def _open_workbench_asset(self, path: str) -> None:
         if self.package_source is None:
             return

@@ -1,0 +1,33 @@
+{
+  "staging_root": "<STORY_STAGING_ROOT>",
+  "target": "story-legacy",
+  "mode": "vehicle-only",
+  "metadata": {
+    "project_id": "com.example.mybus-project",
+    "package_id": "com.example.mybus",
+    "name": "My Bus",
+    "version": "1.0.0",
+    "author": "<AUTHOR>",
+    "description": "Installs My Bus and its axle configuration.",
+    "workbench_version": "0.5.5"
+  },
+  "vehicle_dlcs": [
+    {
+      "dlc_pack_name": "vwb_mybus",
+      "archive_path": "vehicle-package/payload/dlc.rpf",
+      "vehicle_models": ["mybus"],
+      "asset_edition": "legacy"
+    }
+  ],
+  "axle_configurations": [
+    {
+      "model_name": "mybus",
+      "model_hash": "<JOAAT_HEX>",
+      "source_path": "configs/mybus.json",
+      "schema_version": 1,
+      "minimum_runtime_version": "1.0.0"
+    }
+  ],
+  "include_documentation": true,
+  "compression": "deflated"
+}

@@ -10,6 +10,12 @@ import pytest
 import allin1_sdk.addon_sdk_ui as sdk_ui
 from allin1_sdk.app import _configure_style
 from allin1_sdk.vehicle_authoring import VehicleAuthoringWorkspace
+from allin1_sdk.axle_oiv_export import (
+    MODE_RUNTIME_ONLY,
+    MODE_SELF_CONTAINED,
+    MODE_VEHICLE_ONLY,
+)
+from allin1_sdk.vehicle_oiv_ui import VehicleOivForm
 from allin1_sdk.vehicle_workbench import VehicleWorkbenchFrame
 
 
@@ -63,6 +69,50 @@ def _source(root: Path) -> Path:
     ):
         (stream / name).write_bytes(name.encode("ascii"))
     return source
+
+
+def _oiv_form(tmp_path: Path, mode: str, pack: str) -> VehicleOivForm:
+    return VehicleOivForm(
+        target_id="story-legacy",
+        mode=mode,
+        package_name="Fixture",
+        package_version="1.0.0",
+        author="Fixture",
+        description="Fixture",
+        dlc_pack_name=pack,
+        include_documentation=True,
+        icon_path=None,
+        runtime_path=None,
+        runtime_version="1.0.0",
+        output_path=tmp_path / "fixture.oiv",
+        confirm_self_contained=mode == MODE_SELF_CONTAINED,
+    )
+
+
+def test_story_oiv_runtime_identity_is_global_not_vehicle_scoped(
+    tmp_path: Path,
+) -> None:
+    runtime_a = VehicleWorkbenchFrame._story_oiv_package_ids(
+        _oiv_form(tmp_path, MODE_RUNTIME_ONLY, "vwb_first"),
+    )
+    runtime_b = VehicleWorkbenchFrame._story_oiv_package_ids(
+        _oiv_form(tmp_path, MODE_RUNTIME_ONLY, "vwb_second"),
+    )
+    vehicle = VehicleWorkbenchFrame._story_oiv_package_ids(
+        _oiv_form(tmp_path, MODE_VEHICLE_ONLY, "vwb_first"),
+    )
+    self_contained = VehicleWorkbenchFrame._story_oiv_package_ids(
+        _oiv_form(tmp_path, MODE_SELF_CONTAINED, "vwb_first"),
+    )
+
+    assert runtime_a == runtime_b == (
+        "vehicle-workbench-axle-runtime",
+        "vehicle-workbench-axle-runtime",
+    )
+    assert vehicle == ("vehicle.vwb_first", "vehicle.vwb_first")
+    assert self_contained == (
+        "vehicle.vwb_first", "vehicle.vwb_first.self-contained",
+    )
 
 
 @pytest.fixture
@@ -200,6 +250,133 @@ def test_context_return_link_survives_sidebar_collapse_and_cancelled_guard(
         dialog.update()
         assert dialog.current_workspace == "linker"
         assert not dialog.context_back_button.winfo_ismapped()
+    finally:
+        dialog.destroy()
+
+
+def test_axle_deep_link_opens_editable_selected_model_and_survives_reload(
+    tmp_path, monkeypatch, tk_root,
+):
+    source = _source(tmp_path)
+    workspace = VehicleAuthoringWorkspace.create(source, tmp_path / "workspace")
+    monkeypatch.setattr(sdk_ui, "user_data_root", lambda: tmp_path / "state")
+    dialog = sdk_ui.AddonSdkDialog(
+        tk_root, Path(__file__).resolve().parents[1], standalone=True,
+    )
+    try:
+        assert dialog.open_axle_configurator(workspace.root, "RUNTIMECAR")
+        dialog.update()
+        workbench = dialog.workbench_workspace
+        vehicle = workbench.vehicle_workspace
+        assert dialog.current_workspace == "workbench"
+        assert workbench.current_category() == "vehicles"
+        assert vehicle.selected_model.model == "runtimecar"
+        assert vehicle.authoring_workspace.root == workspace.root
+        assert vehicle.author_view.get() == "axles"
+        assert vehicle.inspector_tabs.tab(
+            vehicle.inspector_tabs.select(), "text",
+        ) == "Author"
+        assert vehicle.author_axles_page.winfo_ismapped()
+        assert vehicle.axles_panel._editable is True
+        assert not vehicle.vehicle_toolbar.winfo_ismapped()
+        assert not vehicle.model_heading_label.winfo_ismapped()
+        assert not vehicle.model_summary_label.winfo_ismapped()
+
+        panel = vehicle.axles_panel
+        for width, height in ((1320, 840), (1020, 680)):
+            dialog.geometry(f"{width}x{height}+0+0")
+            dialog.update()
+            canvas_top = panel.editor_canvas.winfo_rooty()
+            canvas_bottom = canvas_top + panel.editor_canvas.winfo_height()
+            footer_top = panel.footer.winfo_rooty()
+            footer_bottom = footer_top + panel.footer.winfo_height()
+            window_bottom = dialog.winfo_rooty() + dialog.winfo_height()
+            assert panel.editor_canvas.winfo_ismapped(), (
+                f"axle editor unmapped at {width}x{height}: "
+                f"panel={panel.winfo_geometry()}/mapped{panel.winfo_ismapped()}, "
+                f"page={vehicle.author_axles_page.winfo_geometry()}/"
+                f"mapped{vehicle.author_axles_page.winfo_ismapped()}, "
+                f"author={vehicle.author_tab.winfo_geometry()}/"
+                f"mapped{vehicle.author_tab.winfo_ismapped()}, "
+                f"tabs={vehicle.inspector_tabs.winfo_geometry()}/"
+                f"mapped{vehicle.inspector_tabs.winfo_ismapped()}, "
+                f"inspector={vehicle.integration_panel.winfo_geometry()}/"
+                f"mapped{vehicle.integration_panel.winfo_ismapped()}"
+            )
+            assert panel.editor_canvas.winfo_height() >= 90, (
+                f"axle editor viewport is too short at {width}x{height}: "
+                f"panel={panel.winfo_geometry()}, "
+                f"requested={panel.winfo_reqwidth()}x{panel.winfo_reqheight()}, "
+                f"canvas={panel.editor_canvas.winfo_geometry()}, "
+                f"footer={panel.footer.winfo_geometry()}, "
+                f"actions={panel.actions.winfo_geometry()}, "
+                f"status={panel.status_label.winfo_geometry()}, "
+                f"author={vehicle.author_tab.winfo_geometry()}, "
+                f"tabs={vehicle.inspector_tabs.winfo_geometry()}"
+            )
+            assert panel.footer.winfo_ismapped()
+            assert canvas_bottom <= footer_top <= footer_bottom <= window_bottom
+            assert panel.editor_content.winfo_height() > panel.editor_canvas.winfo_height()
+            # The axle table keeps its actual rows instead of being squeezed
+            # into the dark one-line heading seen in the compact inspector.
+            assert panel.tree.winfo_height() >= 140
+            assert panel.finding_tree.winfo_height() >= 110
+
+            canvas_left = panel.editor_canvas.winfo_rootx()
+            canvas_right = canvas_left + panel.editor_canvas.winfo_width()
+            panel_left = panel.winfo_rootx()
+            panel_right = panel_left + panel.winfo_width()
+            visible_actions = [
+                panel.filter_button, panel.prefab_button, panel.visual_button,
+                panel.apply_button, panel.undo_button, panel.redo_button,
+                panel.export_button, panel.more_button,
+            ]
+            assert panel.apply_button.winfo_ismapped()
+            assert panel.more_button.winfo_ismapped()
+            for control in (item for item in visible_actions if item.winfo_ismapped()):
+                assert panel_left <= control.winfo_rootx()
+                assert control.winfo_rootx() + control.winfo_width() <= panel_right
+            assert canvas_left <= panel.prefab_actions.winfo_rootx()
+            assert (
+                panel.prefab_actions.winfo_rootx()
+                + panel.prefab_actions.winfo_width()
+                <= canvas_right
+            )
+
+            axle_fraction = (
+                panel.axle_section.winfo_y()
+                / max(1, panel.editor_content.winfo_height())
+            )
+            panel.editor_canvas.yview_moveto(axle_fraction)
+            dialog.update()
+            tree_top = panel.tree.winfo_rooty()
+            assert canvas_top <= tree_top < canvas_bottom
+            pinned_footer_y = panel.footer.winfo_rooty()
+
+            panel.editor_canvas.yview_moveto(1.0)
+            dialog.update()
+            findings_top = panel.finding_tree.winfo_rooty()
+            findings_bottom = findings_top + panel.finding_tree.winfo_height()
+            assert findings_top < canvas_bottom
+            assert canvas_top < findings_bottom <= canvas_bottom
+            assert panel.footer.winfo_rooty() == pinned_footer_y
+            panel.editor_canvas.yview_moveto(0.0)
+
+        vehicle.author_view.set("general")
+        vehicle._show_author_view()
+        dialog.update()
+        assert vehicle.vehicle_toolbar.winfo_ismapped()
+        assert vehicle.model_heading_label.winfo_ismapped()
+        assert vehicle.model_summary_label.winfo_ismapped()
+        vehicle.author_view.set("axles")
+        vehicle._show_author_view()
+        dialog.update()
+
+        assert workbench.reload()
+        dialog.update()
+        assert workbench.vehicle_authoring_workspace.root == workspace.root
+        assert vehicle.authoring_workspace.root == workspace.root
+        assert vehicle.axles_panel._editable is True
     finally:
         dialog.destroy()
 

@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "allin1.visual-tyre-packages",
+  "localization": {
+    "tyrePackage.allSingles": "Singles All Around",
+    "tyrePackage.allSingles.description": "One visible tyre per side on every axle.",
+    "tyrePackage.dualDrive": "Dual Drive Axle",
+    "tyrePackage.dualDrive.description": "Singles on steering and tag axles; duals on driven axles.",
+    "tyrePackage.dualTandem": "Dual Tandem Drive",
+    "tyrePackage.dualTandem.description": "Dual tyres on both tandem drive axles.",
+    "tyrePackage.busSingles": "Bus Super-Singles",
+    "tyrePackage.busSingles.description": "Wide singles on drive and tag axles.",
+    "tyrePackage.mixedTag": "Dual Drive + Single Tag",
+    "tyrePackage.mixedTag.description": "Dual middle drive axle and a single rear tag.",
+    "tyrePackage.offroadSingles": "Off-Road Singles",
+    "tyrePackage.offroadSingles.description": "Wide single tyres on every axle.",
+    "tyrePackage.heavyDuals": "Heavy-Duty Duals",
+    "tyrePackage.heavyDuals.description": "Dual tyres on every supported non-steering axle.",
+    "tyrePackage.axleAddonInner": "Axle-Specific Inner Wheel",
+    "tyrePackage.axleAddonInner.description": "Bone-bound inner wheels on explicitly selected axles."
+  },
+  "packages": [
+    {
+      "id": "all_singles", "localizationKey": "tyrePackage.allSingles", "displayName": "Singles All Around",
+      "descriptionLocalizationKey": "tyrePackage.allSingles.description", "description": "One visible tyre per side on every axle.",
+      "rule": "all_singles", "tags": ["single", "stock-template"], "requiresSelectedAxles": false,
+      "requiredGeometryKeys": [], "designOnlyWithoutGeometry": false
+    },
+    {
+      "id": "dual_drive", "localizationKey": "tyrePackage.dualDrive", "displayName": "Dual Drive Axle",
+      "descriptionLocalizationKey": "tyrePackage.dualDrive.description", "description": "Singles on steering and tag axles; duals on driven axles.",
+      "rule": "dual_driven", "tags": ["dual", "drive"], "requiresSelectedAxles": false,
+      "requiredGeometryKeys": ["inner_left", "inner_right"], "designOnlyWithoutGeometry": true
+    },
+    {
+      "id": "dual_tandem", "localizationKey": "tyrePackage.dualTandem", "displayName": "Dual Tandem Drive",
+      "descriptionLocalizationKey": "tyrePackage.dualTandem.description", "description": "Dual tyres on both tandem drive axles.",
+      "rule": "dual_tandem", "tags": ["dual", "tandem", "drive"], "requiresSelectedAxles": false,
+      "requiredGeometryKeys": ["inner_left", "inner_right"], "designOnlyWithoutGeometry": true
+    },
+    {
+      "id": "bus_singles", "localizationKey": "tyrePackage.busSingles", "displayName": "Bus Super-Singles",
+      "descriptionLocalizationKey": "tyrePackage.busSingles.description", "description": "Wide singles on drive and tag axles.",
+      "rule": "super_single_drive_tag", "tags": ["bus", "wide", "single"], "requiresSelectedAxles": false,
+      "requiredGeometryKeys": [], "designOnlyWithoutGeometry": false
+    },
+    {
+      "id": "mixed_tag", "localizationKey": "tyrePackage.mixedTag", "displayName": "Dual Drive + Single Tag",
+      "descriptionLocalizationKey": "tyrePackage.mixedTag.description", "description": "Dual middle drive axle and a single rear tag.",
+      "rule": "dual_middle_drive_single_tag", "tags": ["dual", "drive", "tag"], "requiresSelectedAxles": false,
+      "requiredGeometryKeys": ["inner_left", "inner_right"], "designOnlyWithoutGeometry": true
+    },
+    {
+      "id": "offroad_singles", "localizationKey": "tyrePackage.offroadSingles", "displayName": "Off-Road Singles",
+      "descriptionLocalizationKey": "tyrePackage.offroadSingles.description", "description": "Wide single tyres on every axle.",
+      "rule": "wide_all", "tags": ["off-road", "wide", "single"], "requiresSelectedAxles": false,
+      "requiredGeometryKeys": [], "designOnlyWithoutGeometry": false
+    },
+    {
+      "id": "heavy_duals", "localizationKey": "tyrePackage.heavyDuals", "displayName": "Heavy-Duty Duals",
+      "descriptionLocalizationKey": "tyrePackage.heavyDuals.description", "description": "Dual tyres on every supported non-steering axle.",
+      "rule": "dual_non_steering", "tags": ["heavy", "dual"], "requiresSelectedAxles": false,
+      "requiredGeometryKeys": ["inner_left", "inner_right"], "designOnlyWithoutGeometry": true
+    },
+    {
+      "id": "axle_addon_inner", "localizationKey": "tyrePackage.axleAddonInner", "displayName": "Axle-Specific Inner Wheel",
+      "descriptionLocalizationKey": "tyrePackage.axleAddonInner.description", "description": "Bone-bound inner wheels on explicitly selected axles.",
+      "rule": "selected_inner_addon", "tags": ["addon", "inner", "advanced"], "requiresSelectedAxles": true,
+      "requiredGeometryKeys": ["inner_left", "inner_right"], "designOnlyWithoutGeometry": true
+    }
+  ]
+}
