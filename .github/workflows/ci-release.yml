@@ -77,6 +77,18 @@ jobs:
           & build/app/ALLIN1-SDK-Desktop/allin1-sdk.exe assistant status | Out-File -FilePath build/frozen-cli-status.json -Encoding utf8
           if ($LASTEXITCODE -ne 0) { throw 'Frozen allin1-sdk console smoke test failed.' }
           Get-Content build/frozen-cli-status.json | ConvertFrom-Json | Out-Null
+          New-Item -ItemType Directory -Force build/app/ALLIN1-SDK-Desktop/assets | Out-Null
+          Copy-Item -Path assets/* -Destination build/app/ALLIN1-SDK-Desktop/assets -Recurse -Force
+          & build/app/ALLIN1-SDK-Desktop/allin1-sdk.exe list-axle-prefabs --axle-count 3 | Out-File -FilePath build/frozen-axle-catalog.json -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen axle-catalog smoke test failed.' }
+          $axleCatalog = Get-Content build/frozen-axle-catalog.json -Raw | ConvertFrom-Json
+          $prefabIds = @($axleCatalog.prefabs | ForEach-Object { $_.id })
+          if ($prefabIds -notcontains '6x2_rear_steer_bus') {
+            throw 'Frozen axle catalog is missing required prefab 6x2_rear_steer_bus.'
+          }
+          if (@($axleCatalog.visual_tyre_packages).Count -eq 0) {
+            throw 'Frozen axle catalog contains no visual tyre packages.'
+          }
 
       - name: Package checksum-verifiable unsigned build
         shell: pwsh
@@ -128,6 +140,28 @@ jobs:
           python -m PyInstaller --noconfirm --clean --windowed --onedir --name ALLIN1-SDK-Desktop --icon "${{ github.workspace }}/assets/favicon.ico" --add-data "${{ github.workspace }}/assets;assets" --distpath build/app --workpath build/pyinstaller --specpath build src/allin1_sdk/app.py
           python -m PyInstaller --noconfirm --clean --console --onefile --name allin1-sdk --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK-Desktop --workpath build/pyinstaller-cli --specpath build src/allin1_sdk/console_entry.py
           python -m PyInstaller --noconfirm --clean --console --onefile --name ALLIN1-SDK-Agent --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK-Desktop --workpath build/pyinstaller-agent --specpath build src/allin1_sdk/agent_host.py
+
+      - name: Smoke test frozen console entry point
+        shell: pwsh
+        run: |
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'allin1-sdk-smoke'
+          New-Item -ItemType Directory -Force (Join-Path $env:LOCALAPPDATA 'ALLIN1\Assistant') | Out-Null
+          '{"schema":1,"mode":"disabled","workflow":"installer","profile":"disabled","endpoint":"","model_name":"","api_key_env":"","runtime_path":"","model_path":"","context_tokens":8192,"temperature":0.1}' | Set-Content (Join-Path $env:LOCALAPPDATA 'ALLIN1\Assistant\config.json') -Encoding utf8
+          & build/app/ALLIN1-SDK-Desktop/allin1-sdk.exe assistant status | Out-File -FilePath build/frozen-cli-status.json -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen allin1-sdk console smoke test failed.' }
+          Get-Content build/frozen-cli-status.json | ConvertFrom-Json | Out-Null
+          New-Item -ItemType Directory -Force build/app/ALLIN1-SDK-Desktop/assets | Out-Null
+          Copy-Item -Path assets/* -Destination build/app/ALLIN1-SDK-Desktop/assets -Recurse -Force
+          & build/app/ALLIN1-SDK-Desktop/allin1-sdk.exe list-axle-prefabs --axle-count 3 | Out-File -FilePath build/frozen-axle-catalog.json -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen axle-catalog smoke test failed.' }
+          $axleCatalog = Get-Content build/frozen-axle-catalog.json -Raw | ConvertFrom-Json
+          $prefabIds = @($axleCatalog.prefabs | ForEach-Object { $_.id })
+          if ($prefabIds -notcontains '6x2_rear_steer_bus') {
+            throw 'Frozen axle catalog is missing required prefab 6x2_rear_steer_bus.'
+          }
+          if (@($axleCatalog.visual_tyre_packages).Count -eq 0) {
+            throw 'Frozen axle catalog contains no visual tyre packages.'
+          }
 
       - name: Build unsigned PE signing catalog
         shell: pwsh

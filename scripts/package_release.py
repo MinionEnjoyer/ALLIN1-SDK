@@ -12,6 +12,46 @@ import zipfile
 from pathlib import Path
 
 
+_AUTHORING_RESOURCE_TREES = (
+    Path("docs"),
+    Path("examples"),
+    Path("runtime") / "VehicleWorkbenchAxles",
+)
+_AUTHORING_RESOURCE_IGNORED_PARTS = {
+    ".git",
+    ".pytest_cache",
+    "__pycache__",
+    "bin",
+    "build",
+    "dist",
+    "obj",
+    "out",
+}
+_AUTHORING_RESOURCE_IGNORED_SUFFIXES = {
+    ".asi",
+    ".dll",
+    ".exe",
+    ".pdb",
+    ".pyc",
+}
+_REQUIRED_AUTHORING_RESOURCES = (
+    Path("assets") / "axle-prefabs.json",
+    Path("assets") / "visual-tyre-packages.json",
+    Path("docs") / "axle-prefabs.md",
+    Path("docs") / "oiv-story-packages.md",
+    Path("examples") / "axle-prefabs" / "three-axle-bus.json",
+    Path("examples") / "oiv-axle-bundles" / "vehicle-only-request.template.json",
+    Path("runtime") / "VehicleWorkbenchAxles" / "CMakeLists.txt",
+    Path("runtime") / "VehicleWorkbenchAxles" / "README.md",
+    Path("runtime") / "VehicleWorkbenchAxles" / "include"
+    / "vehicle_workbench_axles" / "types.hpp",
+    Path("runtime") / "VehicleWorkbenchAxles" / "profiles" / "compatibility.json",
+    Path("runtime") / "VehicleWorkbenchAxles" / "schemas" / "axle-config.schema.json",
+    Path("runtime") / "VehicleWorkbenchAxles" / "src" / "runtime.cpp",
+    Path("runtime") / "VehicleWorkbenchAxles" / "tests" / "core_tests.cpp",
+)
+
+
 def _version(value: str) -> str:
     normalized = value.lstrip("vV")
     if not re.fullmatch(r"\d+(?:\.\d+){1,3}", normalized):
@@ -62,6 +102,41 @@ def _validate_example_sources(root: Path) -> None:
         )
 
 
+def _copy_authoring_resources(root: Path, app_dir: Path) -> None:
+    """Copy auditable authoring resources without generated runtime binaries."""
+    missing = [
+        relative.as_posix()
+        for relative in _REQUIRED_AUTHORING_RESOURCES
+        if not (root / relative).is_file()
+    ]
+    if missing:
+        raise ValueError(
+            "Required SDK authoring resources are missing:\n- "
+            + "\n- ".join(missing)
+        )
+
+    for relative_root in _AUTHORING_RESOURCE_TREES:
+        source_root = root / relative_root
+        if not source_root.is_dir():
+            raise ValueError(f"SDK authoring resource tree is missing: {source_root}")
+        for source in sorted(source_root.rglob("*")):
+            relative = source.relative_to(source_root)
+            if any(
+                part.casefold() in _AUTHORING_RESOURCE_IGNORED_PARTS
+                for part in relative.parts
+            ):
+                continue
+            if source.is_symlink():
+                raise ValueError(f"SDK authoring resource may not be a symlink: {source}")
+            if not source.is_file():
+                continue
+            if source.suffix.casefold() in _AUTHORING_RESOURCE_IGNORED_SUFFIXES:
+                continue
+            target = app_dir / relative_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+
 def _copy_runtime(root: Path, app_dir: Path, rpf_dir: Path) -> None:
     for name in (
         "ALLIN1-SDK-Desktop.exe", "allin1-sdk.exe", "ALLIN1-SDK-Agent.exe",
@@ -77,6 +152,7 @@ def _copy_runtime(root: Path, app_dir: Path, rpf_dir: Path) -> None:
         raise ValueError(f"RpfPatcher runtime is missing: {rpf_dir}")
     shutil.copytree(root / "sdk", app_dir / "sdk", dirs_exist_ok=True)
     shutil.copytree(root / "assets", app_dir / "assets", dirs_exist_ok=True)
+    _copy_authoring_resources(root, app_dir)
     shutil.copytree(rpf_dir, app_dir / "tools" / "RpfPatcher", dirs_exist_ok=True)
     for name in ("README.md", "LICENSE"):
         shutil.copy2(root / name, app_dir / name)
