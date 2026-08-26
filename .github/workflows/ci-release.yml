@@ -106,7 +106,9 @@ jobs:
           retention-days: 14
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Signed publishing is opt-in until the Azure trust relationship exists.
+    # Unsigned, checksum-verifiable builds remain available through manual-build.
+    if: startsWith(github.ref, 'refs/tags/v') && vars.AZURE_SIGNING_ENABLED == 'true'
     needs: windows
     runs-on: windows-latest
     environment: release-signing
