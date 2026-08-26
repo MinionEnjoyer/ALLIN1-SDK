@@ -45,13 +45,17 @@ def test_frozen_workbench_launcher_targets_packaged_desktop_sibling(tmp_path, mo
     desktop.write_bytes(b"MZdesktop")
     package.mkdir()
     launched = []
-    scan = SimpleNamespace(vehicles=(object(),), weapons=(), peds=())
+    scan = SimpleNamespace(
+        vehicles=(object(),), weapons=(), weapon_enhancements=(),
+        scripted_weapon_systems=(), peds=(),
+    )
 
     monkeypatch.setattr(cli.sys, "frozen", True, raising=False)
     monkeypatch.setattr(cli.sys, "executable", str(agent))
+    monkeypatch.setattr(cli, "detect_gta_path", lambda: None)
     monkeypatch.setattr(
         cli, "AddonPackageInspector",
-        lambda: SimpleNamespace(inspect=lambda _source: scan),
+        lambda *_args: SimpleNamespace(inspect=lambda _source: scan),
     )
     monkeypatch.setattr(
         cli.subprocess, "Popen",

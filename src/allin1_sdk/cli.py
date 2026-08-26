@@ -16,7 +16,10 @@ import click
 
 from allin1_sdk import __version__
 from allin1_sdk.addon_importer import (
-    AddonDraftBuilder, AddonPackageInspector, PackageAssetReader,
+    MAX_RECURSIVE_RPF_MEMBERS,
+    AddonDraftBuilder,
+    AddonPackageInspector,
+    PackageAssetReader,
 )
 from allin1_sdk.addon_sdk import AddonLinker, AddonManifest, AddonSdkCatalog
 from allin1_sdk.binary_workspace import BinaryPatchWorkspace
@@ -40,6 +43,7 @@ from allin1_sdk.meta_tools import diff_meta, validate_meta_roundtrip
 from allin1_sdk.managed_package_conversion import ManagedVehiclePackageConverter
 from allin1_sdk.model_materials import (
     MaterialAuthoringWorkspace,
+    inspect_model_bytes,
     inspect_model_file,
 )
 from allin1_sdk.native_assets import (
@@ -363,6 +367,14 @@ def _game_path(value: Path | None) -> Path:
     return game
 
 
+def _inspection_game_path(source: Path, value: Path | None) -> Path | None:
+    """Use GTA context when available and require it only for a direct RPF."""
+    game = value.expanduser().resolve(strict=True) if value else detect_gta_path()
+    if source.suffix.casefold() == ".rpf" and game is None:
+        raise ValueError("Direct RPF inspection requires --gta-path.")
+    return game
+
+
 def _entry(service: RpfExplorerService, archive: Path, archive_path: str, path: str):
     index = service.index(archive)
     normalized = path.replace("\\", "/").strip("/").casefold()
@@ -528,10 +540,19 @@ def _open_workbench_window(
 ) -> tuple[int, dict[str, int]]:
     """Validate common add-on content and open it in the desktop Workbench."""
     resolved = source.expanduser().resolve(strict=True)
-    scan = AddonPackageInspector().inspect(resolved)
+    selected_game = _inspection_game_path(resolved, gta_path)
+    inspector = (
+        AddonPackageInspector(PROJECT_ROOT, selected_game)
+        if selected_game is not None
+        else AddonPackageInspector()
+    )
+    scan = inspector.inspect(resolved)
     counts = {
         "vehicles": len(scan.vehicles),
-        "weapons": len(scan.weapons),
+        "weapons": (
+            len(scan.weapons) + len(scan.weapon_enhancements)
+            + len(scan.scripted_weapon_systems)
+        ),
         "peds": len(scan.peds),
     }
     if category not in {"auto", *counts}:
@@ -542,8 +563,6 @@ def _open_workbench_window(
         )
     if category != "auto" and not counts[category]:
         raise ValueError(f"The selected package does not contain {category} metadata.")
-    selected_game = gta_path.expanduser().resolve(strict=True) if gta_path else None
-
     executable = Path(sys.executable).resolve()
     if getattr(sys, "frozen", False):
         desktop = _frozen_desktop_executable(executable)
@@ -573,16 +592,17 @@ def _open_model_material_window(
 ) -> tuple[int, int]:
     """Validate a model/package and open the dedicated desktop workspace."""
     resolved = source.expanduser().resolve(strict=True)
+    selected_game = _inspection_game_path(resolved, gta_path)
     if resolved.is_file() and resolved.suffix.casefold() in MODEL_PREVIEW_SUFFIXES:
         model_count = 1
     else:
-        scan = AddonPackageInspector().inspect(resolved)
+        scan = AddonPackageInspector(PROJECT_ROOT, selected_game).inspect(resolved)
         model_count = sum(
-            entry.suffix in MODEL_PREVIEW_SUFFIXES for entry in scan.entries
+            entry.suffix in MODEL_PREVIEW_SUFFIXES
+            for entry in scan.workbench_entries
         )
     if not model_count:
         raise ValueError("The selected source does not contain a YDR, YDD, or YFT model.")
-    selected_game = gta_path.expanduser().resolve(strict=True) if gta_path else None
     executable = Path(sys.executable).resolve()
     if getattr(sys, "frozen", False):
         desktop = _frozen_desktop_executable(executable)
@@ -1277,7 +1297,7 @@ def inspect_workbench(
     try:
         resolved = source.expanduser().resolve(strict=True)
         scan = AddonPackageInspector(
-            PROJECT_ROOT, _game_path(gta_path),
+            PROJECT_ROOT, _inspection_game_path(resolved, gta_path),
         ).inspect(resolved)
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -1286,6 +1306,11 @@ def inspect_workbench(
         "operation": "inspect_workbench",
         "source": str(resolved),
         "source_kind": scan.source_kind,
+        "inspection_target_edition": scan.inspection_target_edition or None,
+        "edition_compatibility": (
+            "selected decoder target; not proven compatibility"
+            if scan.source_kind == "rpf" else scan.edition_tag
+        ),
         "category": selected,
         "summary": {
             "vehicles": len(scan.vehicles),
@@ -1295,6 +1320,8 @@ def inspect_workbench(
             "scripted_weapon_systems": len(scan.scripted_weapon_systems),
             "peds": len(scan.peds),
             "rpf_archives": len(scan.rpf_archives),
+            "indexed_files": len(scan.workbench_entries),
+            "rpf_indexed_entries": len(scan.rpf_indexed_entries),
             "rpf_native_assets": len(scan.rpf_native_assets),
             "material_progressions": len(scan.material_progressions),
             "errors": scan.error_count,
@@ -2157,10 +2184,19 @@ def dlc_inventory(gta_path: Path, output: Path) -> None:
 @main.command("compile-vehicle-data")
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.option("--output-dir", "-o", required=True, type=click.Path(file_okay=False, path_type=Path))
-def compile_vehicle_data(source: Path, output_dir: Path) -> None:
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation when SOURCE is a direct RPF.",
+)
+def compile_vehicle_data(
+    source: Path, output_dir: Path, gta_path: Path | None,
+) -> None:
     """Join vehicle metadata, assets, and registration data."""
     try:
-        report = RageVehicleDataCompiler().compile(source)
+        scan = AddonPackageInspector(
+            PROJECT_ROOT, _inspection_game_path(source, gta_path),
+        ).inspect(source)
+        report = RageVehicleDataCompiler.compile_scan(scan)
         written = report.write_bundle(output_dir)
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -2170,10 +2206,19 @@ def compile_vehicle_data(source: Path, output_dir: Path) -> None:
 @main.command("inspect-vehicle-project")
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.option("--model", help="Return one vehicle model instead of the full project.")
-def inspect_vehicle_project(source: Path, model: str | None) -> None:
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation when SOURCE is a direct RPF.",
+)
+def inspect_vehicle_project(
+    source: Path, model: str | None, gta_path: Path | None,
+) -> None:
     """Resolve a package's vehicle models, assets, and metadata links."""
     try:
-        project = VehicleProjectResolver().inspect(source)
+        project = VehicleProjectResolver().inspect(
+            source, project_root=PROJECT_ROOT,
+            gta_path=_inspection_game_path(source, gta_path),
+        )
         payload: dict[str, object] = project.to_dict()
         if model:
             payload = {
@@ -2195,10 +2240,19 @@ def inspect_vehicle_project(source: Path, model: str | None) -> None:
     "--output-dir", "-o", required=True,
     type=click.Path(file_okay=False, path_type=Path),
 )
-def export_vehicle_project(source: Path, output_dir: Path) -> None:
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation when SOURCE is a direct RPF.",
+)
+def export_vehicle_project(
+    source: Path, output_dir: Path, gta_path: Path | None,
+) -> None:
     """Publish a portable vehicle asset project and relationship report."""
     try:
-        project = VehicleProjectResolver().inspect(source)
+        project = VehicleProjectResolver().inspect(
+            source, project_root=PROJECT_ROOT,
+            gta_path=_inspection_game_path(source, gta_path),
+        )
         manifest = project.write(output_dir)
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -3077,7 +3131,7 @@ def preview_axle_steering(
     "--skeleton-xml", type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help=(
         "CodeWalker YFT XML used for spatial validation; required for signed "
-        "schema-2 steering."
+        "schema-2 steering or a custom physical axle order."
     ),
 )
 @click.option("--expected-revision", type=click.IntRange(min=0), required=True)
@@ -5402,17 +5456,59 @@ def export_native_workspace(
     "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
     help="Matching GTA installation for native decoding; never written.",
 )
+@click.option(
+    "--asset",
+    help="Exact RPF entry id or unique inner model filename; defaults to the first model.",
+)
 def inspect_model_materials(
-    source: Path, edition: str, gta_path: Path | None,
+    source: Path, edition: str, gta_path: Path | None, asset: str | None,
 ) -> None:
     """Inspect model hierarchy, shader usage, and typed texture bindings."""
     try:
-        project = inspect_model_file(
-            PROJECT_ROOT, source, edition=edition, gta_path=gta_path,
-        )
+        resolved = source.expanduser().resolve(strict=True)
+        if resolved.suffix.casefold() == ".rpf":
+            game = _inspection_game_path(resolved, gta_path)
+            scan = AddonPackageInspector(PROJECT_ROOT, game).inspect(resolved)
+            models = tuple(
+                item for item in scan.workbench_entries
+                if item.suffix in MODEL_PREVIEW_SUFFIXES
+            )
+            if not models:
+                raise ValueError("The direct RPF contains no YDR, YDD, or YFT model")
+            if asset:
+                matches = tuple(
+                    item for item in models
+                    if item.path.casefold() == asset.casefold()
+                    or item.name.casefold() == asset.casefold()
+                )
+                if len(matches) != 1:
+                    raise ValueError(
+                        "--asset must match one exact RPF entry id or unique filename"
+                    )
+                selected = matches[0]
+            else:
+                selected = sorted(models, key=lambda item: item.path.casefold())[0]
+            content = PackageAssetReader(
+                resolved, project_root=PROJECT_ROOT, gta_path=game,
+            ).read(selected.path, limit=MAX_NATIVE_PREVIEW_BYTES)
+            if content.truncated:
+                raise ValueError("Selected RPF model exceeds the guarded decode limit")
+            project = inspect_model_bytes(
+                PROJECT_ROOT, selected.name, content.data,
+                edition=scan.inspection_target_edition or edition,
+                gta_path=game, source=f"{resolved}!/{selected.path}",
+            )
+            payload = project.to_dict()
+            payload["source_container"] = str(resolved)
+            payload["selected_asset"] = selected.path
+        else:
+            project = inspect_model_file(
+                PROJECT_ROOT, resolved, edition=edition, gta_path=gta_path,
+            )
+            payload = project.to_dict()
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(json.dumps(project.to_dict(), indent=2))
+    click.echo(json.dumps(payload, indent=2))
 
 
 @main.command("create-material-workspace")
@@ -6132,16 +6228,26 @@ def inspect_package_rpfs(source: Path, output_dir: Path, gta_path: Path | None) 
     """Index every loose RPF member of a package using temporary extraction."""
     try:
         game = _game_path(gta_path)
-        scan = AddonPackageInspector().inspect(source)
-        reader = PackageAssetReader(source)
+        resolved = source.expanduser().resolve(strict=True)
+        scan = AddonPackageInspector(PROJECT_ROOT, game).inspect(resolved)
         members = [entry for entry in scan.entries if entry.suffix == ".rpf"]
         if not members:
             raise ValueError("Package contains no loose RPF members")
-        if len(members) > 20:
-            raise ValueError("Package contains more than 20 RPF members")
+        if len(members) > MAX_RECURSIVE_RPF_MEMBERS:
+            raise ValueError(
+                "Package contains more than "
+                f"{MAX_RECURSIVE_RPF_MEMBERS} RPF members"
+            )
         destination = output_dir.resolve()
         destination.mkdir(parents=True, exist_ok=True)
         service = RpfExplorerService(PROJECT_ROOT, game)
+        if scan.source_kind == "rpf":
+            service.index(resolved).export(destination / resolved.stem)
+            click.echo(f"Indexed direct RPF: {destination}")
+            return
+        reader = PackageAssetReader(
+            resolved, project_root=PROJECT_ROOT, gta_path=game,
+        )
         with tempfile.TemporaryDirectory(prefix="allin1-sdk-rpf-") as temporary:
             for number, member in enumerate(members, start=1):
                 if member.size > 512 * 1024 * 1024:

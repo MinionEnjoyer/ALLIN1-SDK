@@ -535,15 +535,19 @@ class PedWorkbenchFrame(ttk.Frame):
         self.author_button.configure(
             state=(
                 "disabled"
-                if authoring_workspace is not None or not scan.peds else "normal"
+                if authoring_workspace is not None
+                or not scan.peds
+                or scan.source_kind == "rpf"
+                else "normal"
             ),
             text=(
                 "Authoring workspace active" if authoring_workspace is not None
+                else "Extract RPF before authoring" if scan.source_kind == "rpf"
                 else "Create authoring workspace…"
             ),
         )
         self.status.set(
-            f"{len(scan.peds)} peds · {sum(entry.suffix in {'.ydd', '.ydr', '.ytd'} for entry in scan.entries)} "
+            f"{len(scan.peds)} peds · {sum(entry.suffix in {'.ydd', '.ydr', '.ytd'} for entry in scan.workbench_entries)} "
             f"visible model assets · {scan.warning_count} package warnings"
         )
         if self.ped_tree.get_children():
@@ -583,8 +587,8 @@ class PedWorkbenchFrame(ttk.Frame):
             return
         query = self.search.get().strip().casefold()
         entry_stems = {
-            PurePosixPath(entry.path).stem.casefold()
-            for entry in self.scan.entries
+            entry.stem.casefold()
+            for entry in self.scan.workbench_entries
             if entry.suffix in {".ydd", ".ydr", ".ytd"}
         }
         restored: str | None = None
@@ -690,13 +694,13 @@ class PedWorkbenchFrame(ttk.Frame):
         }
         tokens.discard("")
         matches: list[PackageEntry] = []
-        for entry in self.scan.entries:
+        for entry in self.scan.workbench_entries:
             if entry.suffix not in {
                 ".ydd", ".ydr", ".ytd", ".ymt", ".ycd", ".meta", ".xml",
             }:
                 continue
-            stem = PurePosixPath(entry.path).stem.casefold()
-            name = PurePosixPath(entry.path).name.casefold()
+            stem = entry.stem.casefold()
+            name = entry.name.casefold()
             if entry.path == ped.source or any(
                 token == stem or (len(token) >= 5 and token in name)
                 for token in tokens
@@ -706,7 +710,7 @@ class PedWorkbenchFrame(ttk.Frame):
 
     @staticmethod
     def _asset_role(entry: PackageEntry, ped: PedRecord) -> str:
-        stem = PurePosixPath(entry.path).stem.casefold()
+        stem = entry.stem.casefold()
         if entry.path == ped.source:
             return "Ped metadata"
         if entry.suffix in {".ydd", ".ydr"}:
@@ -734,7 +738,7 @@ class PedWorkbenchFrame(ttk.Frame):
         stems_by_suffix: dict[str, set[str]] = {}
         for entry in assets:
             stems_by_suffix.setdefault(entry.suffix, set()).add(
-                PurePosixPath(entry.path).stem.casefold()
+                entry.stem.casefold()
             )
         model = ped.name.casefold()
         drawables = stems_by_suffix.get(".ydd", set()) | stems_by_suffix.get(".ydr", set())
@@ -1079,18 +1083,18 @@ class PedWorkbenchFrame(ttk.Frame):
             return
         model_matches = sorted(
             (
-                entry for entry in scan.entries
+                entry for entry in scan.workbench_entries
                 if entry.suffix in {".ydd", ".ydr"}
-                and PurePosixPath(entry.path).stem.casefold()
+                and entry.stem.casefold()
                 == ped.name.casefold()
             ),
             key=lambda item: (item.suffix != ".ydd", item.path.casefold()),
         )
         texture_matches = sorted(
             (
-                entry for entry in scan.entries
+                entry for entry in scan.workbench_entries
                 if entry.suffix == ".ytd"
-                and PurePosixPath(entry.path).stem.casefold()
+                and entry.stem.casefold()
                 == ped.name.casefold()
             ),
             key=lambda item: item.path.casefold(),
@@ -1114,7 +1118,7 @@ class PedWorkbenchFrame(ttk.Frame):
             f"{model.path}:{model.size}" if model else "no-model",
             f"{texture.path}:{texture.size}" if texture else "no-texture",
         )
-        edition = scan.edition_tag
+        edition = scan.inspection_target_edition or scan.edition_tag
         game_path = self.installation_roots[0] if self.installation_roots else None
         self.preview_status.set("Loading native ped preview in the background…")
         self._preview_worker.submit(
@@ -1134,7 +1138,9 @@ class PedWorkbenchFrame(ttk.Frame):
         edition: str,
         game_path: Path | None,
     ) -> tuple[bytes | None, bytes | None, str]:
-        reader = PackageAssetReader(source)
+        reader = PackageAssetReader(
+            source, project_root=self.project_root, gta_path=game_path,
+        )
         inspector = NativeAssetInspector(self.project_root, game_path)
         images: list[bytes | None] = []
         notes: list[str] = []
@@ -1147,7 +1153,7 @@ class PedWorkbenchFrame(ttk.Frame):
                 entry.path, limit=native_preview_limit(entry.path, entry.size),
             )
             report = inspector.inspect_bytes(
-                entry.path, content.data,
+                entry.name, content.data,
                 edition=edition, truncated=content.truncated,
             )
             images.append(report.image_png)

@@ -38,6 +38,8 @@ MAX_XML_BYTES = 16 * 1024 * 1024
 MAX_PREVIEW_BYTES = 8 * 1024 * 1024
 MAX_BINARY_HEADER_BYTES = 1024 * 1024
 MAX_FOLDER_READ_WORKERS = 8
+MAX_RECURSIVE_RPF_MEMBERS = 64
+MAX_DIRECT_RPF_BYTES = 4 * 1024 * 1024 * 1024
 XML_SUFFIXES = frozenset({".xml", ".meta"})
 EXTERNAL_ARCHIVE_SUFFIXES = frozenset({".rar", ".7z"})
 MANIFEST_TEXT_SUFFIXES = frozenset({".lua"})
@@ -166,7 +168,31 @@ def _parse_xml(content: bytes, path: str) -> ET.Element:
     uppercase = content[:4096].upper()
     if b"<!DOCTYPE" in uppercase or b"<!ENTITY" in uppercase:
         raise ValueError(f"DTD/entity declarations are not allowed in {path}")
-    return ET.fromstring(content)
+    try:
+        return ET.fromstring(content)
+    except ET.ParseError:
+        # A handful of shipped GTA metadata files declare UTF-16 while their
+        # payload is actually UTF-8/ASCII.  Treat that narrowly defined header
+        # mismatch as recoverable; genuine malformed XML still fails closed.
+        declared_utf16 = re.search(
+            br"encoding\s*=\s*(['\"])utf-16(?:le|be)?\1",
+            content[:512],
+            flags=re.IGNORECASE,
+        )
+        has_utf16_bytes = (
+            content.startswith((b"\xff\xfe", b"\xfe\xff"))
+            or b"\x00" in content[:512]
+        )
+        if not declared_utf16 or has_utf16_bytes:
+            raise
+        repaired = re.sub(
+            br"encoding\s*=\s*(['\"])utf-16(?:le|be)?\1",
+            br"encoding=\1UTF-8\1",
+            content,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        return ET.fromstring(repaired)
 
 
 def _slug(value: str) -> str:
@@ -322,6 +348,16 @@ def asset_preview_kind(path: str) -> str:
     return "binary"
 
 
+def package_member_path(path: str) -> PurePosixPath:
+    """Return the logical member path for a package or recursive RPF entry id.
+
+    RPF indexes use stable ids such as ``x64/vehicles.rpf::model.yft``.  Those
+    ids are required when extracting the entry, but their archive prefix must
+    not become part of filename/stem matching in the specialist workbenches.
+    """
+    return PurePosixPath(path.rsplit("::", 1)[-1])
+
+
 def decode_text_preview(content: bytes) -> str:
     """Decode authored text without failing the viewer on legacy encodings."""
     if content.startswith((b"\xff\xfe", b"\xfe\xff")):
@@ -358,7 +394,15 @@ class PackageEntry:
 
     @property
     def suffix(self) -> str:
-        return PurePosixPath(self.path).suffix.lower()
+        return package_member_path(self.path).suffix.lower()
+
+    @property
+    def name(self) -> str:
+        return package_member_path(self.path).name
+
+    @property
+    def stem(self) -> str:
+        return package_member_path(self.path).stem
 
     @property
     def category(self) -> str:
@@ -382,9 +426,15 @@ class PackageAssetContent:
 class PackageAssetReader:
     """Read one bounded package member without extraction or path traversal."""
 
-    def __init__(self, source: str | Path) -> None:
+    def __init__(
+        self, source: str | Path, *,
+        project_root: str | Path | None = None,
+        gta_path: str | Path | None = None,
+    ) -> None:
         self.source = Path(source).expanduser().resolve()
         self._external_entries: dict[str, tuple[str, int]] | None = None
+        self._rpf_service = None
+        self._rpf_index = None
         if self.source.is_dir():
             self.source_kind = "folder"
         elif self.source.is_file() and self.source.suffix.lower() in {".oiv", ".zip"}:
@@ -400,9 +450,21 @@ class PackageAssetReader:
                     raise ValueError(f"Ambiguous package asset: {path}")
                 entries[key] = (path, size)
             self._external_entries = entries
+        elif self.source.is_file() and self.source.suffix.lower() == ".rpf":
+            if project_root is None or gta_path is None:
+                raise ValueError(
+                    "Direct RPF access requires the SDK project and a matching "
+                    "GTA V installation path"
+                )
+            from allin1_sdk.rpf_tools import RpfExplorerService
+
+            self.source_kind = "rpf"
+            self._rpf_service = RpfExplorerService(project_root, gta_path)
+            self._rpf_index = self._rpf_service.index(self.source)
         else:
             raise ValueError(
-                "Asset viewer requires a package folder or .oiv/.zip/.rar/.7z"
+                "Asset viewer requires a package folder, .rpf, or "
+                ".oiv/.zip/.rar/.7z"
             )
 
     def read(
@@ -410,12 +472,39 @@ class PackageAssetReader:
     ) -> PackageAssetContent:
         if limit <= 0:
             raise ValueError("Asset preview limit must be positive")
+        if self.source_kind == "rpf":
+            return self._read_rpf(entry_path, limit)
         relative = _safe_member_path(entry_path).as_posix()
         if self.source_kind == "folder":
             return self._read_folder(relative, limit)
         if self.source_kind == "external_archive":
             return self._read_external_archive(relative, limit)
         return self._read_archive(relative, limit)
+
+    def _read_rpf(self, entry_path: str, limit: int) -> PackageAssetContent:
+        """Read the direct archive itself or one exact recursively indexed entry."""
+        if entry_path.casefold() == self.source.name.casefold():
+            size = self.source.stat().st_size
+            with self.source.open("rb") as stream:
+                data = stream.read(min(size, limit))
+            return self._content(entry_path, size, data, size > limit)
+        if self._rpf_service is None or self._rpf_index is None:
+            raise ValueError("Direct RPF reader was not initialized")
+        try:
+            entry = self._rpf_index.entry(entry_path)
+        except KeyError as exc:
+            raise FileNotFoundError(f"RPF asset not found: {entry_path}") from exc
+        if entry.kind == "directory":
+            raise ValueError(f"RPF directories cannot be read as assets: {entry_path}")
+        with tempfile.TemporaryDirectory(prefix="allin1-package-rpf-read-") as temporary:
+            destination = Path(temporary) / f"entry{entry.suffix or '.bin'}"
+            extracted = self._rpf_service.extract(
+                self._rpf_index, entry, destination,
+            )
+            size = extracted.stat().st_size
+            with extracted.open("rb") as stream:
+                data = stream.read(min(size, limit))
+        return self._content(entry_path, size, data, size > limit)
 
     def _read_folder(self, relative: str, limit: int) -> PackageAssetContent:
         root = self.source.resolve()
@@ -644,6 +733,7 @@ class RpfPackageInspection:
     """Structured facts promoted from package-owned RPF archives."""
 
     archives: tuple[RpfPackageRecord, ...] = ()
+    indexed_entries: tuple[PackageEntry, ...] = ()
     native_assets: tuple[RpfNativeEntryRecord, ...] = ()
     material_progressions: tuple[MaterialProgressionReport, ...] = ()
     vehicles: tuple[VehicleRecord, ...] = ()
@@ -651,6 +741,13 @@ class RpfPackageInspection:
     variations: tuple[VehicleVariationRecord, ...] = ()
     kits: tuple[VehicleKitRecord, ...] = ()
     registrations: tuple[PackageRegistrationRecord, ...] = ()
+    weapons: tuple[WeaponRecord, ...] = ()
+    ammo: tuple[AmmoRecord, ...] = ()
+    weapon_components: tuple[WeaponComponentRecord, ...] = ()
+    weapon_component_links: tuple[WeaponComponentLink, ...] = ()
+    weapon_animation_records: tuple[WeaponAnimationRecord, ...] = ()
+    weapon_shop_records: tuple[WeaponShopRecord, ...] = ()
+    peds: tuple[PedRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -696,6 +793,7 @@ class PackageScan:
     weapon_enhancements: tuple[WeaponEnhancementContract, ...] = ()
     scripted_weapon_systems: tuple[ScriptedWeaponSystemRecord, ...] = ()
     rpf_archives: tuple[RpfPackageRecord, ...] = ()
+    rpf_indexed_entries: tuple[PackageEntry, ...] = ()
     rpf_native_assets: tuple[RpfNativeEntryRecord, ...] = ()
     material_progressions: tuple[MaterialProgressionReport, ...] = ()
 
@@ -716,6 +814,18 @@ class PackageScan:
         return sum(entry.size for entry in self.entries)
 
     @property
+    def workbench_entries(self) -> tuple[PackageEntry, ...]:
+        """Return directly readable assets visible to specialist workbenches.
+
+        Normal packages keep their authored inventory. A directly opened RPF
+        additionally exposes its recursively indexed entries by stable entry id;
+        PackageAssetReader resolves those ids without extracting the archive first.
+        """
+        if self.source_kind != "rpf":
+            return self.entries
+        return self.entries + self.rpf_indexed_entries
+
+    @property
     def edition_tag(self) -> str:
         editions = set(self.edition_hints)
         if editions == {"legacy", "enhanced"}:
@@ -725,6 +835,20 @@ class PackageScan:
         if editions == {"enhanced"}:
             return "Enhanced"
         return "Unresolved"
+
+    @property
+    def inspection_target_edition(self) -> str:
+        """Return the decoder target without claiming authored compatibility."""
+        if self.edition_tag in {"Legacy", "Enhanced"}:
+            return self.edition_tag
+        if self.source_kind == "rpf":
+            targets = {
+                item.edition.casefold() for item in self.rpf_archives
+                if item.edition.casefold() in {"legacy", "enhanced"}
+            }
+            if len(targets) == 1:
+                return targets.pop().title()
+        return ""
 
 
 @dataclass(frozen=True)
@@ -744,7 +868,7 @@ class ImportedAddonDraft:
 
 
 class AddonPackageInspector:
-    """Read a loose DLC folder or OIV/ZIP/RAR/7z without installing it."""
+    """Read a loose DLC folder, direct RPF, or packaged add-on without installing it."""
 
     def __init__(
         self, project_root: str | Path | None = None,
@@ -770,9 +894,21 @@ class AddonPackageInspector:
         elif path.is_file() and path.suffix.lower() in EXTERNAL_ARCHIVE_SUFFIXES:
             source_kind = path.suffix.lower().lstrip(".")
             entries, findings = self._read_external_archive(path)
+        elif path.is_file() and path.suffix.lower() == ".rpf":
+            if self.project_root is None or self.gta_path is None:
+                raise ValueError(
+                    "Opening a direct .rpf requires a matching GTA V path so the "
+                    "SDK can index encrypted and native entries safely"
+                )
+            size = path.stat().st_size
+            if size <= 0 or size > MAX_DIRECT_RPF_BYTES:
+                raise ValueError("Direct RPF is empty or exceeds the 4 GiB inspection limit")
+            source_kind = "rpf"
+            entries = [PackageEntry(path.name, size)]
+            findings = []
         else:
             raise ValueError(
-                "Select a DLC folder or an .oiv/.zip/.rar/.7z package"
+                "Select a DLC folder, direct .rpf, or an .oiv/.zip/.rar/.7z package"
             )
 
         managed_manifests = [
@@ -947,6 +1083,15 @@ class AddonPackageInspector:
             variations.extend(rpf_inspection.variations)
             kits.extend(rpf_inspection.kits)
             registrations.extend(rpf_inspection.registrations)
+            weapons.extend(rpf_inspection.weapons)
+            ammo.extend(rpf_inspection.ammo)
+            weapon_components.extend(rpf_inspection.weapon_components)
+            weapon_component_links.extend(rpf_inspection.weapon_component_links)
+            weapon_animation_records.extend(
+                rpf_inspection.weapon_animation_records
+            )
+            weapon_shop_records.extend(rpf_inspection.weapon_shop_records)
+            peds.extend(rpf_inspection.peds)
         else:
             for rpf_path in rpf_entries[:20]:
                 findings.append(PackageFinding(
@@ -962,6 +1107,7 @@ class AddonPackageInspector:
                     "from individual warnings.",
                 ))
         rpf_archives = rpf_inspection.archives
+        rpf_indexed_entries = rpf_inspection.indexed_entries
         rpf_native_assets = rpf_inspection.native_assets
         material_progressions = rpf_inspection.material_progressions
 
@@ -1043,7 +1189,14 @@ class AddonPackageInspector:
                 "The package contains no trustworthy Legacy/Enhanced declaration. "
                 "Choose an edition only after inspecting its resources or author notes.",
             ))
-        if source_kind != "folder" and not managed_manifests:
+        if source_kind == "rpf":
+            findings.append(PackageFinding(
+                "info", "direct_rpf_inspection_source",
+                "A loose RPF is a sealed inspection source, not a complete managed "
+                "package. Use Quick Import or extract an authoring workspace before "
+                "packaging changes.",
+            ))
+        elif source_kind != "folder" and not managed_manifests:
             findings.append(PackageFinding(
                 "warning", "managed_manifest_not_found",
                 "No reviewed mod.toml was found. This archive can be inspected, "
@@ -1337,6 +1490,37 @@ class AddonPackageInspector:
                 "will describe the detected plug-in, replacement, shader, archive, "
                 "or generic package shape instead.",
             ))
+        if source_kind == "rpf":
+            externally_resolvable = {
+                "ammo_definition_not_found",
+                "animation_mapping_not_found",
+                "handling_definition_not_found",
+                "ped_model_asset_not_found",
+                "ped_texture_asset_not_found",
+                "tuning_model_asset_not_found",
+                "vehicle_handling_reference_missing",
+                "vehicle_kit_not_found",
+                "vehicle_model_asset_not_found",
+                "vehicle_registration_not_found",
+                "vehicle_texture_asset_not_found",
+                "vehicle_variation_not_found",
+                "weapon_component_definition_not_found",
+            }
+            findings = [
+                replace(
+                    finding,
+                    severity="info",
+                    message=(
+                        finding.message
+                        + " The reference is not present in this selected RPF; "
+                        "it may resolve through base-game or shared DLC content."
+                    ),
+                )
+                if finding.severity == "warning"
+                and finding.code in externally_resolvable else finding
+                for finding in findings
+            ]
+
         return PackageScan(
             source=path,
             source_kind=source_kind,
@@ -1368,6 +1552,7 @@ class AddonPackageInspector:
             weapon_enhancements=weapon_enhancements,
             scripted_weapon_systems=scripted_weapon_systems,
             rpf_archives=rpf_archives,
+            rpf_indexed_entries=rpf_indexed_entries,
             rpf_native_assets=rpf_native_assets,
             material_progressions=material_progressions,
         )
@@ -1507,12 +1692,14 @@ class AddonPackageInspector:
         from allin1_sdk.rpf_tools import RpfExplorerService
 
         members = [entry for entry in entries if entry.suffix == ".rpf"]
-        if len(members) > 20:
+        if len(members) > MAX_RECURSIVE_RPF_MEMBERS:
             findings.append(PackageFinding(
                 "warning", "rpf_inspection_limit",
-                "Only the first 20 package RPF members were recursively inspected.",
+                "Only the first "
+                f"{MAX_RECURSIVE_RPF_MEMBERS} package RPF members were recursively inspected.",
             ))
         records: list[RpfPackageRecord] = []
+        indexed_entries: list[PackageEntry] = []
         native: list[RpfNativeEntryRecord] = []
         material_reports: list[MaterialProgressionReport] = []
         vehicles: list[VehicleRecord] = []
@@ -1520,26 +1707,45 @@ class AddonPackageInspector:
         variations: list[VehicleVariationRecord] = []
         kits: list[VehicleKitRecord] = []
         registrations: list[PackageRegistrationRecord] = []
+        weapons: list[WeaponRecord] = []
+        ammo: list[AmmoRecord] = []
+        weapon_components: list[WeaponComponentRecord] = []
+        weapon_component_links: list[WeaponComponentLink] = []
+        weapon_animation_records: list[WeaponAnimationRecord] = []
+        weapon_shop_records: list[WeaponShopRecord] = []
+        peds: list[PedRecord] = []
         declarations = tuple(
             visual
             for enhancement in weapon_enhancements
             for visual in enhancement.visual_assets
         )
-        reader = PackageAssetReader(source)
+        direct_rpf = source.is_file() and source.suffix.casefold() == ".rpf"
+        reader = None if direct_rpf else PackageAssetReader(source)
         service = RpfExplorerService(self.project_root, self.gta_path)
         with tempfile.TemporaryDirectory(prefix="allin1-workbench-rpf-") as temporary:
             root = Path(temporary)
-            for number, member in enumerate(members[:20], start=1):
+            for number, member in enumerate(
+                members[:MAX_RECURSIVE_RPF_MEMBERS], start=1,
+            ):
                 try:
-                    if member.size <= 0 or member.size > 512 * 1024 * 1024:
+                    inspection_limit = (
+                        MAX_DIRECT_RPF_BYTES if direct_rpf else 512 * 1024 * 1024
+                    )
+                    if member.size <= 0 or member.size > inspection_limit:
                         raise ValueError(
-                            "RPF is empty or exceeds the 512 MiB inspection limit"
+                            "RPF is empty or exceeds the guarded inspection limit"
                         )
-                    content = reader.read(member.path, limit=member.size + 1)
-                    if content.truncated or len(content.data) != member.size:
-                        raise ValueError("RPF could not be read completely")
-                    extracted = root / f"member-{number}.rpf"
-                    extracted.write_bytes(content.data)
+                    if direct_rpf:
+                        if number != 1 or member.path.casefold() != source.name.casefold():
+                            raise ValueError("Direct RPF inventory did not match its source")
+                        extracted = source
+                    else:
+                        assert reader is not None
+                        content = reader.read(member.path, limit=member.size + 1)
+                        if content.truncated or len(content.data) != member.size:
+                            raise ValueError("RPF could not be read completely")
+                        extracted = root / f"member-{number}.rpf"
+                        extracted.write_bytes(content.data)
                     index = service.index(extracted)
                     edition = self._package_member_edition(member.path) or index.edition
                     records.append(RpfPackageRecord(
@@ -1550,6 +1756,21 @@ class AddonPackageInspector:
                         suffix_counts=index.suffix_counts(),
                         warnings=index.warnings,
                     ))
+                    if direct_rpf:
+                        findings.append(PackageFinding(
+                            "info", "direct_rpf_target_edition",
+                            f"The direct RPF was decoded against the selected "
+                            f"{edition.title()} GTA installation. This identifies "
+                            "the inspection target, not proven cross-edition "
+                            "compatibility.",
+                            member.path,
+                        ))
+                    if direct_rpf:
+                        indexed_entries.extend(
+                            PackageEntry(item.id, item.size)
+                            for item in index.entries
+                            if item.kind != "directory"
+                        )
                     native.extend(
                         RpfNativeEntryRecord(
                             source=member.path,
@@ -1581,7 +1802,10 @@ class AddonPackageInspector:
                         ))
                     selected_metadata = []
                     for item in metadata_entries[:256]:
-                        virtual_source = self._rpf_virtual_source(member.path, item)
+                        virtual_source = (
+                            item.id if direct_rpf
+                            else self._rpf_virtual_source(member.path, item)
+                        )
                         if item.size <= 0 or item.size > MAX_XML_BYTES:
                             findings.append(PackageFinding(
                                 "warning", "rpf_metadata_size_unsupported",
@@ -1607,13 +1831,12 @@ class AddonPackageInspector:
                     for item, destination in zip(
                         selected_metadata, extracted_metadata,
                     ):
-                        virtual_source = self._rpf_virtual_source(member.path, item)
+                        virtual_source = (
+                            item.id if direct_rpf
+                            else self._rpf_virtual_source(member.path, item)
+                        )
                         try:
                             metadata = destination.read_bytes()
-                            if len(metadata) != item.size:
-                                raise ValueError(
-                                    "extracted metadata size does not match its RPF index"
-                                )
                             xml_root = _parse_xml(metadata, virtual_source)
                         except (ET.ParseError, OSError, RuntimeError, ValueError) as exc:
                             findings.append(PackageFinding(
@@ -1635,6 +1858,22 @@ class AddonPackageInspector:
                         found_registrations = self._xml_registration_records(
                             virtual_source, xml_root,
                         )
+                        found_weapons, found_ammo = self._metadata_records(
+                            virtual_source, xml_root,
+                        )
+                        found_components = self._weapon_component_records(
+                            virtual_source, xml_root,
+                        )
+                        found_component_links = self._weapon_component_links(
+                            virtual_source, xml_root,
+                        )
+                        found_animations = self._animation_records(
+                            virtual_source, xml_root,
+                        )
+                        found_shop_records = self._shop_records(
+                            virtual_source, xml_root,
+                        )
+                        found_peds = self._ped_records(virtual_source, xml_root)
                         vehicles.extend(
                             replace(item, edition=edition) for item in found_vehicles
                         )
@@ -1648,10 +1887,20 @@ class AddonPackageInspector:
                             replace(item, edition=edition) for item in found_kits
                         )
                         registrations.extend(found_registrations)
+                        weapons.extend(found_weapons)
+                        ammo.extend(found_ammo)
+                        weapon_components.extend(found_components)
+                        weapon_component_links.extend(found_component_links)
+                        weapon_animation_records.extend(found_animations)
+                        weapon_shop_records.extend(found_shop_records)
+                        peds.extend(found_peds)
                         promoted += sum((
                             len(found_vehicles), len(found_handlings),
                             len(found_variations), len(found_kits),
-                            len(found_registrations),
+                            len(found_registrations), len(found_weapons),
+                            len(found_ammo), len(found_components),
+                            len(found_component_links), len(found_animations),
+                            len(found_shop_records), len(found_peds),
                         ))
                     if promoted:
                         findings.append(PackageFinding(
@@ -1687,11 +1936,18 @@ class AddonPackageInspector:
                         member.path,
                     ))
         return RpfPackageInspection(
-            archives=tuple(records), native_assets=tuple(native),
+            archives=tuple(records), indexed_entries=tuple(indexed_entries),
+            native_assets=tuple(native),
             material_progressions=tuple(material_reports),
             vehicles=tuple(vehicles), handlings=tuple(handlings),
             variations=tuple(variations), kits=tuple(kits),
             registrations=tuple(registrations),
+            weapons=tuple(weapons), ammo=tuple(ammo),
+            weapon_components=tuple(weapon_components),
+            weapon_component_links=tuple(weapon_component_links),
+            weapon_animation_records=tuple(weapon_animation_records),
+            weapon_shop_records=tuple(weapon_shop_records),
+            peds=tuple(peds),
         )
 
     @staticmethod
@@ -1720,7 +1976,10 @@ class AddonPackageInspector:
             )
         total = sum(size for _, size in listed)
         if total > MAX_PACKAGE_BYTES:
-            raise ValueError("Package exceeds the 2 GiB inspection limit")
+            raise ValueError(
+                "Package exceeds the 2 GiB inspection limit. If this is a DLC "
+                "archive, open its dlc.rpf directly instead of zipping it."
+            )
         entries: list[PackageEntry] = []
         findings: list[PackageFinding] = []
         seen_paths: set[str] = set()
@@ -1781,7 +2040,10 @@ class AddonPackageInspector:
                     f"Package contains more than {MAX_PACKAGE_FILES:,} files"
                 )
             if total > MAX_PACKAGE_BYTES:
-                raise ValueError("Package exceeds the 2 GiB inspection limit")
+                raise ValueError(
+                    "Package exceeds the 2 GiB inspection limit. If this is a DLC "
+                    "archive, open its dlc.rpf directly instead of zipping it."
+                )
             content = None
             if candidate.suffix.lower() in INSPECTION_TEXT_SUFFIXES:
                 if size <= MAX_XML_BYTES:
@@ -1828,7 +2090,10 @@ class AddonPackageInspector:
                     )
                 total = sum(item.file_size for item in members)
                 if total > MAX_PACKAGE_BYTES:
-                    raise ValueError("Package exceeds the 2 GiB inspection limit")
+                    raise ValueError(
+                        "Package exceeds the 2 GiB inspection limit. If this is a "
+                        "DLC archive, open its dlc.rpf directly instead of zipping it."
+                    )
                 seen_paths: set[str] = set()
                 for member in members:
                     relative = _safe_member_path(member.filename).as_posix()
@@ -2078,6 +2343,7 @@ class AddonPackageInspector:
         cls, source: str, root: ET.Element,
     ) -> list[VehicleRecord]:
         records: list[VehicleRecord] = []
+        vehicle_document = "vehiclemodelinfo" in _local_name(root.tag).casefold()
         for container in root.iter():
             if _local_name(container.tag) != "InitDatas":
                 continue
@@ -2087,6 +2353,18 @@ class AddonPackageInspector:
                 model = cls._direct_value(item, "modelName")
                 if not model:
                     continue
+                # weaponarchetypes.meta also contains an InitDatas/modelName
+                # shape.  Only promote canonical vehicle documents, or a
+                # structurally complete vehicle entry from a wrapper document.
+                vehicle_type = cls._direct_value(item, "type")
+                if not vehicle_document:
+                    handling = cls._direct_value(item, "handlingId")
+                    vehicle_shape = (
+                        cls._direct_value(item, "vehicleClass")
+                        or vehicle_type.casefold().startswith("vehicle_type_")
+                    )
+                    if not handling or not vehicle_shape:
+                        continue
                 records.append(VehicleRecord(
                     source, model, cls._direct_value(item, "txdName"),
                     cls._direct_value(item, "handlingId"),
@@ -2094,7 +2372,7 @@ class AddonPackageInspector:
                     cls._direct_value(item, "vehicleMakeName"),
                     cls._direct_value(item, "audioNameHash"),
                     cls._direct_value(item, "layout"),
-                    cls._direct_value(item, "type"),
+                    vehicle_type,
                     cls._direct_value(item, "vehicleClass"),
                 ))
         return records

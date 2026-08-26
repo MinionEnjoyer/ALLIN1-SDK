@@ -92,7 +92,8 @@ class QuickImportFrame(ttk.Frame):
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
 
         self.status = tk.StringVar(
-            value="Open a vehicle folder or archive to begin. GTA V will not be changed."
+            value="Open a vehicle DLC RPF, package archive, or extracted folder. "
+            "GTA V will not be changed."
         )
         self.validation = tk.StringVar()
         self.source_summary = tk.StringVar(value="No package selected")
@@ -216,13 +217,16 @@ class QuickImportFrame(ttk.Frame):
         toolbar.pack(fill="x", pady=(0, 6))
         open_menu = tk.Menu(toolbar, tearoff=False)
         open_menu.add_command(
+            label="Open DLC RPF…", command=self._choose_rpf,
+        )
+        open_menu.add_command(
             label="Open package archive…", command=self._choose_archive,
         )
         open_menu.add_command(
             label="Open loose package folder…", command=self._choose_folder,
         )
         self.open_button = ttk.Menubutton(
-            toolbar, text="Open package…", menu=open_menu, style="Accent.TButton",
+            toolbar, text="Open content…", menu=open_menu, style="Accent.TButton",
         )
         self.open_button.pack(side="left")
         ttk.Label(
@@ -286,7 +290,7 @@ class QuickImportFrame(ttk.Frame):
 
         body = ttk.Panedwindow(self.vehicle_page, orient="horizontal")
         body.pack(fill="both", expand=True)
-        catalog = ttk.LabelFrame(body, text="Detected vehicles", padding=7, width=230)
+        catalog = ttk.LabelFrame(body, text="Vehicle records", padding=7, width=230)
         editor = ttk.Frame(body)
         body.add(catalog, weight=2)
         body.add(editor, weight=5)
@@ -567,6 +571,14 @@ class QuickImportFrame(ttk.Frame):
         if selected:
             self.open_source(selected)
 
+    def _choose_rpf(self) -> None:
+        selected = filedialog.askopenfilename(
+            parent=self, title="Select a vehicle DLC RPF",
+            filetypes=(("GTA V RPF", "*.rpf"), ("All files", "*.*")),
+        )
+        if selected:
+            self.open_source(selected)
+
     def _choose_folder(self) -> None:
         selected = filedialog.askdirectory(
             parent=self, title="Select a loose vehicle add-on folder",
@@ -619,8 +631,13 @@ class QuickImportFrame(ttk.Frame):
             self._loading_form = False
         self.source_summary.set(
             f"{inspection.source.name} · "
-            f"{len(inspection.available_editions)} edition branch(es) · "
-            f"{inspection.scan.error_count} errors / "
+            + (
+                f"target: {inspection.suggested_edition.title()} · "
+                if getattr(inspection, "edition_basis", "package_branches")
+                == "selected_decoder_target"
+                else f"{len(inspection.available_editions)} edition branch(es) · "
+            )
+            + f"{inspection.scan.error_count} errors / "
             f"{inspection.scan.warning_count} warnings"
         )
         self._load_edition(inspection.suggested_edition)

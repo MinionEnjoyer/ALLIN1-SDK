@@ -15,6 +15,7 @@ from typing import Any
 
 from allin1_sdk.addon_importer import (
     AddonPackageInspector,
+    MAX_DIRECT_RPF_BYTES,
     PackageAssetReader,
     PackageScan,
 )
@@ -262,8 +263,14 @@ class ManagedVehiclePackageConverter:
                 f"found {len(members)}"
             )
         member = members[0]
-        if not 0 < member.size <= MAX_CONVERTED_RPF_BYTES:
-            raise ValueError("Selected dlc.rpf is empty or exceeds the 512 MiB limit")
+        member_limit = (
+            MAX_DIRECT_RPF_BYTES
+            if scan.source_kind == "rpf" else MAX_CONVERTED_RPF_BYTES
+        )
+        if not 0 < member.size <= member_limit:
+            raise ValueError(
+                "Selected dlc.rpf is empty or exceeds the guarded conversion limit"
+            )
         inspected = [
             item for item in scan.rpf_archives
             if item.source.casefold() == member.path.casefold()
@@ -274,14 +281,52 @@ class ManagedVehiclePackageConverter:
                 "Selected edition branch did not complete recursive RPF inspection"
             )
 
+        direct_rpf = scan.source_kind == "rpf"
+
+        def belongs_to_selected_archive(record_source: str) -> bool:
+            return direct_rpf or record_source.casefold().startswith(
+                member.path.casefold() + "!"
+            )
+
+        branch_registrations = tuple(
+            item for item in scan.registrations
+            if belongs_to_selected_archive(item.source)
+        )
+        declared_packs = tuple(dict.fromkeys(
+            normalized
+            for item in branch_registrations
+            for value in item.package_names
+            if (normalized := _registration_name(value))
+            and _PACK_PATTERN.fullmatch(normalized)
+        ))
         parent = PurePosixPath(member.path).parent.name
-        if not _PACK_PATTERN.fullmatch(parent):
-            raise ValueError("Selected DLC branch has an unsafe or missing pack name")
-        dlc_pack = parent
+        if direct_rpf:
+            directory_hint = resolved.parent.name
+            if len(declared_packs) == 1:
+                dlc_pack = declared_packs[0]
+            elif (
+                _PACK_PATTERN.fullmatch(directory_hint)
+                and directory_hint.casefold() in {
+                    value.casefold() for value in declared_packs
+                }
+            ):
+                dlc_pack = directory_hint
+            else:
+                raise ValueError(
+                    "Direct dlc.rpf has no unambiguous registered pack name. "
+                    "Open the containing DLC folder or correct its setup/content "
+                    "registration before Quick Import."
+                )
+        else:
+            if not _PACK_PATTERN.fullmatch(parent):
+                raise ValueError(
+                    "Selected DLC branch has an unsafe or missing pack name"
+                )
+            dlc_pack = parent
         selected_vehicles = tuple(dict.fromkeys(
             item.model_name for item in scan.vehicles
             if item.edition.casefold() == selected_edition
-            and item.source.casefold().startswith(member.path.casefold() + "!")
+            and belongs_to_selected_archive(item.source)
         ))
         if not selected_vehicles:
             raise ValueError(
@@ -294,7 +339,7 @@ class ManagedVehiclePackageConverter:
         ))
         registration_records = tuple(
             item for item in scan.registrations
-            if item.source.casefold().startswith(member.path.casefold() + "!")
+            if belongs_to_selected_archive(item.source)
             and any(
                 _registration_name(value) == dlc_pack.casefold()
                 for value in item.package_names
@@ -312,13 +357,21 @@ class ManagedVehiclePackageConverter:
             if _registration_name(value) == dlc_pack.casefold()
         ))
 
-        reader = PackageAssetReader(resolved)
-        content = reader.read(member.path, limit=member.size + 1)
-        if (
-            content.truncated or len(content.data) != member.size
-            or content.sha256 is None
-        ):
-            raise ValueError("Selected dlc.rpf could not be read and hashed exactly")
+        if direct_rpf:
+            member_sha256 = _sha256_file(resolved)
+        else:
+            reader = PackageAssetReader(
+                resolved, project_root=self.project_root, gta_path=self.gta_path,
+            )
+            content = reader.read(member.path, limit=member.size + 1)
+            if (
+                content.truncated or len(content.data) != member.size
+                or content.sha256 is None
+            ):
+                raise ValueError(
+                    "Selected dlc.rpf could not be read and hashed exactly"
+                )
+            member_sha256 = content.sha256
 
         default_id = f"imported.{_slug(dlc_pack)}.{selected_edition}"
         normalized_id = (package_id or default_id).strip().casefold()
@@ -340,7 +393,7 @@ class ManagedVehiclePackageConverter:
             records = {
                 item.model_name.casefold(): item for item in scan.vehicles
                 if item.edition.casefold() == selected_edition
-                and item.source.casefold().startswith(member.path.casefold() + "!")
+                and belongs_to_selected_archive(item.source)
             }
             entries: list[VehicleCatalogEntry] = []
             for model in selected_vehicles:
@@ -390,7 +443,7 @@ class ManagedVehiclePackageConverter:
             edition=selected_edition,
             source_member=member.path,
             source_member_size=member.size,
-            source_member_sha256=content.sha256,
+            source_member_sha256=member_sha256,
             package_id=normalized_id,
             name=normalized_name,
             version=normalized_version,
@@ -424,16 +477,31 @@ class ManagedVehiclePackageConverter:
                 "Review packages may not be exported inside the source package"
             )
 
-        reader = PackageAssetReader(plan.source)
-        content = reader.read(
-            plan.source_member, limit=plan.source_member_size + 1,
-        )
-        if (
-            content.truncated
-            or len(content.data) != plan.source_member_size
-            or content.sha256 != plan.source_member_sha256
-        ):
-            raise ValueError("Source dlc.rpf changed after the conversion plan was made")
+        direct_rpf = plan.source_kind == "rpf"
+        content = None
+        if direct_rpf:
+            if (
+                plan.source.stat().st_size != plan.source_member_size
+                or _sha256_file(plan.source) != plan.source_member_sha256
+            ):
+                raise ValueError(
+                    "Source dlc.rpf changed after the conversion plan was made"
+                )
+        else:
+            reader = PackageAssetReader(
+                plan.source, project_root=self.project_root, gta_path=self.gta_path,
+            )
+            content = reader.read(
+                plan.source_member, limit=plan.source_member_size + 1,
+            )
+            if (
+                content.truncated
+                or len(content.data) != plan.source_member_size
+                or content.sha256 != plan.source_member_sha256
+            ):
+                raise ValueError(
+                    "Source dlc.rpf changed after the conversion plan was made"
+                )
 
         staging = Path(tempfile.mkdtemp(
             prefix=f".{output.name}-", dir=output_parent,
@@ -441,7 +509,11 @@ class ManagedVehiclePackageConverter:
         try:
             payload = staging / "payload" / "dlc.rpf"
             payload.parent.mkdir(parents=True)
-            payload.write_bytes(content.data)
+            if direct_rpf:
+                shutil.copy2(plan.source, payload)
+            else:
+                assert content is not None
+                payload.write_bytes(content.data)
             if _sha256_file(payload) != plan.source_member_sha256:
                 raise ValueError("Staged dlc.rpf failed its exact SHA-256 check")
 

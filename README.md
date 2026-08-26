@@ -12,7 +12,7 @@ make weapons, vehicles, archives, and other add-ons work coherently.
 ALLIN1 SDK supports GTA V Legacy and GTA V Enhanced. Its inspection and planning
 workflows are designed for Story Mode mod development.
 
-> **Current public release:** **0.5.7**. Install it from ALLIN1 Launcher or
+> **Current public release:** **0.5.8**. Install it from ALLIN1 Launcher or
 > download the self-contained Windows package from
 > [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases).
 
@@ -20,6 +20,23 @@ workflows are designed for Story Mode mod development.
 
 If ALLIN1 Launcher and SDK are useful to you, project support is available through
 [Buy Me a Coffee](https://buymeacoffee.com/minionenjoyer).
+
+## What's new in 0.5.8
+
+- **Direct RPF workbench input** lets authors open a `dlc.rpf` directly instead
+  of wrapping it in a ZIP first. Vehicle, weapon, ped, model/material, asset,
+  Quick Import, CLI, and Agent API paths share the same bounded reader.
+- Large or multi-vehicle archives are indexed once and surfaced as selectable
+  content, with clearer read-only states, size limits, validation errors, and a
+  straightforward path from inspection to authoring.
+- **Custom physical axle order** records an explicit, skeleton-bound override
+  for vehicles that deliberately arrange canonical wheel families out of
+  physical front-to-rear order. The SDK never infers or silently applies it.
+- VehicleWorkbenchAxles 2.1.0 enforces that override contract across authoring,
+  bundle selection, native parsing, validation, and restoration; older 2.0.0
+  runtimes are rejected for custom layouts.
+- Expanded package/RPF regression coverage verifies direct archives, nested
+  assets, per-workbench input parity, safe limits, and custom-layout behavior.
 
 ## What's new in 0.5.7
 

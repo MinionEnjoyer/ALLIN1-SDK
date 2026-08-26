@@ -13,8 +13,10 @@ from allin1_sdk.agent_api import execute_request
 from allin1_sdk.axle_configurator import (
     AXLE_SCHEMA_VERSION,
     LATEST_AXLE_SCHEMA_VERSION,
+    INTENTIONAL_LAYOUT_RUNTIME_VERSION,
     SIGNED_STEERING_RUNTIME_VERSION,
     STEERING_CALCULATION_MANUAL,
+    EXPORT_FIVEM_RUNTIME,
     EXPORT_STOCK_METADATA,
     PRESET_CUSTOM,
     VISUAL_FRONT,
@@ -22,6 +24,7 @@ from allin1_sdk.axle_configurator import (
     AxleConfiguration,
     SteeringCalculationProvenance,
     VehicleAxle,
+    apply_intentional_layout_override,
     joaat_hex,
 )
 from allin1_sdk.axle_runtime_bundler import (
@@ -443,6 +446,56 @@ def test_six_wheel_fixture_exports_steer_drive_rear_steer_without_index_formula(
     assert all("0x08" not in json.dumps(axle) for axle in payload["axles"])
 
 
+def test_custom_physical_order_is_evidence_bound_and_clears_global_steering_flags() -> None:
+    bones = tuple(
+        Bone(name, (x, y, 0.0))
+        for left, right, y in (
+            ("wheel_lm1", "wheel_rm1", 8.0),
+            ("wheel_lf", "wheel_rf", 0.0),
+            ("wheel_lr", "wheel_rr", -2.0),
+        )
+        for name, x in ((left, -1.25), (right, 1.25))
+    )
+    base = replace(_config(), export_mode=EXPORT_FIVEM_RUNTIME)
+    remapped = apply_intentional_layout_override(
+        base,
+        bones,
+        physical_bone_pairs=(
+            ("wheel_lm1", "wheel_rm1"),
+            ("wheel_lf", "wheel_rf"),
+            ("wheel_lr", "wheel_rr"),
+        ),
+        reason="Author-reviewed single/dual/single wheel-family layout",
+    )
+    vehicle = VehicleAxleBuildInput(
+        configuration=remapped,
+        configuration_id="example-bus-remapped",
+        model_hash=joaat_hex(remapped.vehicle_model),
+        minimum_runtime_version=remapped.minimum_runtime_version,
+        steering_evidence_bones=bones,
+    )
+
+    payload = compatibility_configuration(vehicle, TARGET_FIVEM_LEGACY)
+
+    assert [row["leftBone"] for row in payload["axles"]] == [
+        "wheel_lm1", "wheel_lf", "wheel_lr",
+    ]
+    assert [row["wheelIndices"] for row in payload["axles"]] == [
+        [2, 3], [0, 1], [4, 5],
+    ]
+    assert payload["intentionalLayoutOverride"]["physicalBonePairs"] == [
+        ["wheel_lm1", "wheel_rm1"],
+        ["wheel_lf", "wheel_rf"],
+        ["wheel_lr", "wheel_rr"],
+    ]
+    assert payload["handling"]["setHandlingFlags"] == []
+    assert payload["handling"]["clearHandlingFlags"] == [
+        "HF_STEER_REARWHEELS", "HF_STEER_ALL_WHEELS",
+        "HF_HANDBRAKE_REARWHEELSTEER",
+    ]
+    assert payload["minimumRuntimeVersion"] == INTENTIONAL_LAYOUT_RUNTIME_VERSION
+
+
 def test_story_runtime_payload_declares_only_its_exact_native_target() -> None:
     payload = compatibility_configuration(_vehicle(), TARGET_STORY_LEGACY)
     assert payload["compatibility"] == {TARGET_STORY_LEGACY: True}
@@ -764,6 +817,37 @@ def test_runtime_dependency_selection_deduplicates_to_newest_compatible() -> Non
             candidates,
             target_id=TARGET_FIVEM_LEGACY,
             minimum_version="2.0.0",
+            schema_version=1,
+        )
+
+
+def test_custom_layout_runtime_floor_excludes_version_2_0() -> None:
+    candidates = tuple(
+        RuntimeDependency(
+            name=FIVEM_RUNTIME_NAME,
+            version=version,
+            maximum_schema_version=1,
+            target_id=TARGET_FIVEM_LEGACY,
+            supported_game_builds=("fivem-current",),
+            configuration_destination="axle-runtime/configs",
+        )
+        for version in ("2.0.0", INTENTIONAL_LAYOUT_RUNTIME_VERSION)
+    )
+
+    selected = select_newest_compatible_runtime(
+        candidates,
+        target_id=TARGET_FIVEM_LEGACY,
+        minimum_version=INTENTIONAL_LAYOUT_RUNTIME_VERSION,
+        schema_version=1,
+        requested_game_build="fivem-current",
+    )
+
+    assert selected.version == INTENTIONAL_LAYOUT_RUNTIME_VERSION
+    with pytest.raises(ValueError, match="No compatible"):
+        select_newest_compatible_runtime(
+            candidates[:1],
+            target_id=TARGET_FIVEM_LEGACY,
+            minimum_version=INTENTIONAL_LAYOUT_RUNTIME_VERSION,
             schema_version=1,
         )
 

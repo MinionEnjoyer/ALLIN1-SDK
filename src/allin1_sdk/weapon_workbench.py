@@ -879,10 +879,14 @@ class WeaponWorkbenchFrame(ttk.Frame):
         self.author_button.configure(
             state=(
                 "disabled"
-                if authoring_workspace is not None or not scan.weapons else "normal"
+                if authoring_workspace is not None
+                or not scan.weapons
+                or scan.source_kind == "rpf"
+                else "normal"
             ),
             text=(
                 "Authoring workspace active" if authoring_workspace is not None
+                else "Extract RPF before authoring" if scan.source_kind == "rpf"
                 else "Create authoring workspace…"
             ),
         )
@@ -1201,13 +1205,13 @@ class WeaponWorkbenchFrame(ttk.Frame):
             }
         )
         matches: list[PackageEntry] = []
-        for entry in self.scan.entries:
+        for entry in self.scan.workbench_entries:
             if entry.suffix not in {
                 ".ydr", ".ydd", ".yft", ".ytd", ".ybn", ".meta", ".xml",
             }:
                 continue
-            stem = PurePosixPath(entry.path).stem.casefold()
-            name = PurePosixPath(entry.path).name.casefold()
+            stem = entry.stem.casefold()
+            name = entry.name.casefold()
             if entry.path in source_paths or any(
                 token == stem or (len(token) >= 6 and token in name)
                 for token in tokens

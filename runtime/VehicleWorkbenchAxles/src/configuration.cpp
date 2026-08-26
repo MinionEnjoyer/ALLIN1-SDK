@@ -248,6 +248,80 @@ ValidateConfiguration(const AxleConfiguration& configuration,
                  source_name);
     }
 
+    bool layout_override_valid = false;
+    if (configuration.intentional_layout_override.has_value()) {
+        const auto& layout = *configuration.intentional_layout_override;
+        bool valid = true;
+        if (!RuntimeSatisfies(configuration.minimum_runtime_version,
+                              kIntentionalLayoutMinimumRuntime)) {
+            AddIssue(issues, "layout-override-runtime-version-too-old",
+                     "intentionalLayoutOverride requires minimumRuntimeVersion 2.1.0 or newer",
+                     source_name);
+            valid = false;
+        }
+        if (layout.mode != "visual_instancing_remap") {
+            AddIssue(issues, "invalid-layout-override-mode",
+                     "intentionalLayoutOverride mode must be visual_instancing_remap",
+                     source_name);
+            valid = false;
+        }
+        if (!IsSha256(layout.bone_position_sha256)) {
+            AddIssue(issues, "invalid-layout-override-digest",
+                     "intentionalLayoutOverride requires a valid wheel-position SHA-256",
+                     source_name);
+            valid = false;
+        }
+        if (layout.reason.size() < 8U || layout.reason.size() > 240U ||
+            layout.reason.find_first_of("\r\n") != std::string::npos) {
+            AddIssue(issues, "invalid-layout-override-reason",
+                     "intentionalLayoutOverride reason must be a single line of 8 to 240 characters",
+                     source_name);
+            valid = false;
+        }
+        if (layout.physical_bone_pairs.size() != axle_count) {
+            AddIssue(issues, "incomplete-layout-override",
+                     "intentionalLayoutOverride must map every physical axle pair exactly once",
+                     source_name);
+            valid = false;
+        } else {
+            std::set<std::pair<std::string, std::string>> unique_pairs;
+            for (std::size_t position = 0; position < axle_count; ++position) {
+                const auto& pair = layout.physical_bone_pairs[position];
+                if (!IsCanonicalPair(pair.first, pair.second) ||
+                    !unique_pairs.insert(pair).second) {
+                    AddIssue(issues, "invalid-layout-override-pair",
+                             "intentionalLayoutOverride contains a duplicate or noncanonical pair",
+                             source_name);
+                    valid = false;
+                }
+                if (pair.first != configuration.axles[position].left_bone ||
+                    pair.second != configuration.axles[position].right_bone) {
+                    AddIssue(issues, "layout-override-order-mismatch",
+                             "intentionalLayoutOverride no longer matches the axle array order",
+                             source_name);
+                    valid = false;
+                }
+            }
+        }
+        if (valid) {
+            bool canonical_order = true;
+            for (std::size_t position = 0; position < axle_count; ++position) {
+                const auto& expected = position + 1U == axle_count
+                    ? kCanonicalPairs.back() : kCanonicalPairs[position];
+                const auto& actual = layout.physical_bone_pairs[position];
+                canonical_order = canonical_order &&
+                    actual.first == expected.first && actual.second == expected.second;
+            }
+            if (canonical_order) {
+                AddIssue(issues, "unnecessary-layout-override",
+                         "intentionalLayoutOverride is only valid for a noncanonical physical order",
+                         source_name);
+                valid = false;
+            }
+        }
+        layout_override_valid = valid;
+    }
+
     std::set<std::uint32_t> orders;
     std::set<std::string> configured_bones;
     for (std::size_t position = 0; position < axle_count; ++position) {
@@ -300,19 +374,19 @@ ValidateConfiguration(const AxleConfiguration& configuration,
                      "position",
                      source_name);
         }
-        if (axle_count >= 2 && position == 0 &&
+        if (!layout_override_valid && axle_count >= 2 && position == 0 &&
             (axle.left_bone != "wheel_lf" || axle.right_bone != "wheel_rf")) {
             AddIssue(issues, "missing-front-pair",
                      "The first physical axle must use wheel_lf / wheel_rf",
                      source_name);
         }
-        if (axle_count >= 2 && position + 1 == axle_count &&
+        if (!layout_override_valid && axle_count >= 2 && position + 1 == axle_count &&
             (axle.left_bone != "wheel_lr" || axle.right_bone != "wheel_rr")) {
             AddIssue(issues, "missing-rear-pair",
                      "The final physical axle must use wheel_lr / wheel_rr",
                      source_name);
         }
-        if (position > 0 && position + 1 < axle_count) {
+        if (!layout_override_valid && position > 0 && position + 1 < axle_count) {
             const auto& expected = kCanonicalPairs[position];
             if (axle.left_bone != expected.first ||
                 axle.right_bone != expected.second) {
@@ -599,6 +673,29 @@ ParseConfigurationJson(const std::string& json_text,
                 evidence.position_epsilon = epsilon->AsNumber();
             }
             result.steering_calculation = std::move(evidence);
+        }
+
+        if (const auto* authored_override =
+                root.Find("intentionalLayoutOverride")) {
+            authored_override->AsObject();
+            IntentionalLayoutOverride layout;
+            layout.mode = RequiredString(*authored_override, "mode");
+            layout.bone_position_sha256 = RequiredString(
+                *authored_override, "bonePositionSha256");
+            layout.reason = RequiredString(*authored_override, "reason");
+            const auto& pairs = Required(
+                *authored_override, "physicalBonePairs").AsArray();
+            layout.physical_bone_pairs.reserve(pairs.size());
+            for (const auto& pair_value : pairs) {
+                const auto& pair = pair_value.AsArray();
+                if (pair.size() != 2U) {
+                    throw json::Error(
+                        "intentionalLayoutOverride physicalBonePairs entries must contain left and right bones");
+                }
+                layout.physical_bone_pairs.emplace_back(
+                    pair[0].AsString(), pair[1].AsString());
+            }
+            result.intentional_layout_override = std::move(layout);
         }
 
         if (result.wheel_index_map.empty()) {

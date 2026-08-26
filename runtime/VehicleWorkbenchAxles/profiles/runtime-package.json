@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "runtime": {
     "name": "VehicleWorkbenchAxles",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "maximumAxleSchemaVersion": 2,
     "settingsSchemaVersion": 1,
     "binaryFileName": "VehicleWorkbenchAxles.asi",

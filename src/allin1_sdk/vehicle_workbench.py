@@ -23,6 +23,7 @@ from allin1_sdk.addon_importer import (
     AddonPackageInspector,
     PackageAssetReader,
     PackageScan,
+    package_member_path,
 )
 from allin1_sdk.collapsible_panes import CollapsibleSidePanes
 from allin1_sdk.compiled_render_ui import CompiledRenderPanel, RenderSettings
@@ -184,12 +185,19 @@ def _decode_native_model_scene(
     project_root: Path, game_path: Path | None, edition: str,
 ) -> _DecodedNativeModel:
     """Read and decode one package model without depending on Tk state."""
-    loaded_reader = reader or PackageAssetReader(source)
+    loaded_reader = reader or (
+        PackageAssetReader(
+            source, project_root=project_root, gta_path=game_path,
+        )
+        if source.suffix.casefold() == ".rpf"
+        else PackageAssetReader(source)
+    )
     content = loaded_reader.read(
         path, limit=native_preview_limit(path, entry_size),
     )
     report = NativeAssetInspector(project_root, game_path).inspect_bytes(
-        path, content.data, edition=edition, truncated=content.truncated,
+        package_member_path(path).name, content.data,
+        edition=edition, truncated=content.truncated,
     )
     if report.model_scene is None:
         warning = "; ".join(report.warnings) or "No renderable geometry was found."
@@ -1410,6 +1418,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
 
     def _open_menu(self, parent: tk.Misc) -> tk.Menu:
         menu = tk.Menu(parent, tearoff=False)
+        menu.add_command(label="Open DLC RPF…", command=self._choose_rpf)
         menu.add_command(label="Open package folder…", command=self._choose_folder)
         menu.add_command(label="Open package archive…", command=self._choose_archive)
         return menu
@@ -1430,6 +1439,14 @@ class VehicleWorkbenchFrame(ttk.Frame):
         if selected:
             self.open_source(selected)
 
+    def _choose_rpf(self) -> None:
+        selected = filedialog.askopenfilename(
+            parent=self, title="Select a vehicle DLC RPF",
+            filetypes=(("GTA V RPF", "*.rpf"), ("All files", "*.*")),
+        )
+        if selected:
+            self.open_source(selected)
+
     def open_source(
         self, source: str | Path, scan: PackageScan | None = None,
         *, authoring_workspace: VehicleAuthoringWorkspace | None = None,
@@ -1439,7 +1456,9 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.status.set("Resolving vehicle project…")
         self.update_idletasks()
         try:
-            loaded_scan = scan or AddonPackageInspector().inspect(source)
+            loaded_scan = scan or AddonPackageInspector(
+                self.project_root, self._inspection_game_path(),
+            ).inspect(source)
             project = VehicleProjectResolver.inspect_scan(loaded_scan)
         except (OSError, ValueError) as exc:
             messagebox.showerror("Could not open vehicle package", str(exc), parent=self)
@@ -1468,17 +1487,26 @@ class VehicleWorkbenchFrame(ttk.Frame):
             state = "Ready" if model.complete else "Review"
             self.model_tree.insert("", "end", iid=item_id, text=model.model, values=(state,))
         self.export_button.configure(state="normal")
+        sealed_rpf = loaded_scan.source_kind == "rpf"
         self.author_button.configure(
-            state="disabled" if authoring_workspace is not None else "normal",
+            state="disabled" if authoring_workspace is not None or sealed_rpf else "normal",
             text=(
                 "Authoring workspace active" if authoring_workspace is not None
+                else "Extract RPF before authoring" if sealed_rpf
                 else "Create authoring workspace…"
             ),
         )
-        self.package_button.configure(state="normal")
+        self.package_button.configure(
+            state="disabled" if sealed_rpf else "normal",
+            text=(
+                "Use Quick Import for RPF" if sealed_rpf
+                else "Build installable package…"
+            ),
+        )
         self.status.set(
             f"{len(project.models)} vehicles · {project.error_count} errors · "
             f"{project.warning_count} warnings"
+            + (" · direct RPF inspection" if sealed_rpf else "")
         )
         if project.models:
             self.model_tree.selection_set("model:0")
@@ -1701,8 +1729,9 @@ class VehicleWorkbenchFrame(ttk.Frame):
         if cached is not None:
             self._activate_scene(path, cached)
             return
+        inventory = getattr(self.scan, "workbench_entries", self.scan.entries)
         entry = next(
-            (item for item in self.scan.entries if item.path.casefold() == path.casefold()),
+            (item for item in inventory if item.path.casefold() == path.casefold()),
             None,
         )
         if entry is None:
@@ -1946,6 +1975,10 @@ class VehicleWorkbenchFrame(ttk.Frame):
             return "Legacy"
         return "Enhanced"
 
+    def _inspection_game_path(self) -> Path | None:
+        """Return a configured GTA root before the opened RPF reveals its edition."""
+        return next((root for root in self.installation_roots if root.is_dir()), None)
+
     def _native_game_path(self) -> Path | None:
         executable = "GTA5.exe" if self._native_edition() == "Legacy" else "GTA5_Enhanced.exe"
         matches = tuple(
@@ -2108,7 +2141,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
         except (OSError, RuntimeError, TypeError, ValueError):
             configuration = None
         asset_names = tuple(
-            entry.path for entry in self.scan.entries
+            entry.path for entry in self.scan.workbench_entries
         ) if self.scan is not None else ()
         self.axles_panel.load(
             model.model, configuration, editable=editable,

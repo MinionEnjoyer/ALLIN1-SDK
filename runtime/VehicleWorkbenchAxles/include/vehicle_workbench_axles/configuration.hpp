@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace vwa {
@@ -25,6 +26,7 @@ inline constexpr double kMinimumSteeringGain = -1.0;
 inline constexpr double kMaximumSteeringGain = 1.0;
 inline constexpr double kSteeringGainEpsilon = 1.0e-9;
 inline constexpr const char* kSignedSteeringMinimumRuntime = "2.0.0";
+inline constexpr const char* kIntentionalLayoutMinimumRuntime = "2.1.0";
 
 struct SteeringCalculationEvidence {
     std::string mode;
@@ -37,6 +39,13 @@ struct SteeringCalculationEvidence {
     std::optional<double> reference_lock_degrees;
     std::optional<double> pair_position_tolerance;
     std::optional<double> position_epsilon;
+};
+
+struct IntentionalLayoutOverride {
+    std::string mode;
+    std::vector<std::pair<std::string, std::string>> physical_bone_pairs;
+    std::string bone_position_sha256;
+    std::string reason;
 };
 
 struct AxleDefinition {
@@ -61,6 +70,10 @@ struct AxleConfiguration {
     std::map<std::string, std::uint32_t> wheel_index_map;
     std::vector<AxleDefinition> axles;
     std::optional<SteeringCalculationEvidence> steering_calculation;
+    // Explicit, SDK-validated exception for vehicles which reuse GTA's two
+    // visual wheel families in a noncanonical physical order. Runtime wheel
+    // indices remain independently mapped by canonical bone name.
+    std::optional<IntentionalLayoutOverride> intentional_layout_override;
     // A configuration is never enabled for an edition by omission.  Parsing
     // must observe an exact, recognized Story compatibility key set to true.
     bool story_legacy{false};

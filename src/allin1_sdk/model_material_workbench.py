@@ -18,6 +18,7 @@ from allin1_sdk.addon_importer import (
     PackageAssetReader,
     PackageScan,
     RpfNativeEntryRecord,
+    package_member_path,
 )
 from allin1_sdk.collapsible_panes import CollapsibleSidePanes
 from allin1_sdk.compiled_render import (
@@ -75,6 +76,7 @@ class ModelMaterialWorkbenchFrame(ttk.Frame):
         self.scan: PackageScan | None = None
         self.reader: PackageAssetReader | None = None
         self.asset_paths: dict[str, str] = {}
+        self.context_asset_paths: dict[str, str] = {}
         self.rpf_asset_paths: dict[str, RpfNativeEntryRecord] = {}
         self.project: ModelMaterialProject | None = None
         self.authoring_workspace: MaterialAuthoringWorkspace | None = None
@@ -437,7 +439,7 @@ class ModelMaterialWorkbenchFrame(ttk.Frame):
         selected = filedialog.askopenfilename(
             parent=self, title="Open model or add-on package",
             filetypes=(
-                ("Models and packages", "*.ydr *.ydd *.yft *.zip *.oiv *.rar *.7z"),
+                ("Models, packages, and RPFs", "*.ydr *.ydd *.yft *.rpf *.zip *.oiv *.rar *.7z"),
                 ("All files", "*.*"),
             ),
         )
@@ -455,13 +457,16 @@ class ModelMaterialWorkbenchFrame(ttk.Frame):
         if selected:
             self.open_workspace(Path(selected))
 
-    def open_source(self, source: str | Path) -> None:
+    def open_source(
+        self, source: str | Path, scan: PackageScan | None = None,
+    ) -> None:
         path = Path(source).expanduser().resolve()
         self.authoring_workspace = None
         self.source = path
         self.scan = None
         self.reader = None
         self.asset_paths.clear()
+        self.context_asset_paths.clear()
         self.rpf_asset_paths.clear()
         self.selected_asset = ""
         self._clear_trees()
@@ -477,30 +482,42 @@ class ModelMaterialWorkbenchFrame(ttk.Frame):
             self._load_loose_model(path)
             return
         try:
-            scan = AddonPackageInspector(
+            loaded_scan = scan or AddonPackageInspector(
                 self.project_root, self._native_game_path(),
             ).inspect(path)
         except (OSError, ValueError) as exc:
             messagebox.showerror("Could not open package", str(exc), parent=self)
             self.status.set("Package was not opened.")
             return
+        scan = loaded_scan
         self.scan = scan
-        self.reader = PackageAssetReader(path)
-        if scan.edition_tag in {"Legacy", "Enhanced"}:
-            self.edition.set(scan.edition_tag)
-        model_entries = [item for item in scan.entries if item.suffix in _MODEL_SUFFIXES]
-        context_entries = [item for item in scan.entries if item.suffix in _CONTEXT_SUFFIXES]
+        self.reader = PackageAssetReader(
+            path, project_root=self.project_root,
+            gta_path=self._native_game_path(),
+        )
+        target_edition = scan.inspection_target_edition
+        if target_edition in {"Legacy", "Enhanced"}:
+            self.edition.set(target_edition)
+        model_entries = [
+            item for item in scan.workbench_entries
+            if item.suffix in _MODEL_SUFFIXES
+        ]
+        context_entries = [
+            item for item in scan.workbench_entries
+            if item.suffix in _CONTEXT_SUFFIXES
+        ]
         for entry in model_entries:
             item = self.asset_tree.insert(
-                "", "end", text=PurePosixPath(entry.path).name,
+                "", "end", text=entry.name,
                 values=(entry.suffix[1:].upper(), f"{entry.size / 1024:.0f} KiB"),
             )
             self.asset_paths[item] = entry.path
         for number, entry in enumerate(
-            item for item in scan.rpf_native_assets if item.suffix in _MODEL_SUFFIXES
+            item for item in scan.rpf_native_assets
+            if scan.source_kind != "rpf" and item.suffix in _MODEL_SUFFIXES
         ):
             item = self.asset_tree.insert(
-                "", "end", text=PurePosixPath(entry.path).name,
+                "", "end", text=entry.name,
                 values=(f"RPF {entry.suffix[1:].upper()}", f"{entry.size / 1024:.0f} KiB"),
             )
             token = f"rpf-model:{number}:{entry.entry_id}"
@@ -509,29 +526,45 @@ class ModelMaterialWorkbenchFrame(ttk.Frame):
         for entry in context_entries:
             role = {".ytd": "Textures", ".ybn": "Collision", ".ytyp": "Archetypes"}[entry.suffix]
             item = self.context_tree.insert(
-                "", "end", text=PurePosixPath(entry.path).name, values=(role,),
+                "", "end", text=entry.name, values=(role,),
             )
             self.context_tree.set(item, "kind", role)
-            self.asset_paths[item] = entry.path
+            self.context_asset_paths[item] = entry.path
         for number, entry in enumerate(
-            item for item in scan.rpf_native_assets if item.suffix in _CONTEXT_SUFFIXES
+            item for item in scan.rpf_native_assets
+            if scan.source_kind != "rpf" and item.suffix in _CONTEXT_SUFFIXES
         ):
             role = {".ytd": "RPF textures", ".ybn": "RPF collision", ".ytyp": "RPF archetypes"}[entry.suffix]
             item = self.context_tree.insert(
                 "", "end", text=PurePosixPath(entry.path).name, values=(role,),
             )
             token = f"rpf-context:{number}:{entry.entry_id}"
-            self.asset_paths[item] = token
+            self.context_asset_paths[item] = token
             self.rpf_asset_paths[token] = entry
         self._apply_progression_report(
             scan.material_progressions[0] if scan.material_progressions else None,
         )
         self.summary.set(
-            f"{path.name} · {len(model_entries) + sum(item.suffix in _MODEL_SUFFIXES for item in scan.rpf_native_assets)} models · "
-            f"{len(context_entries) + sum(item.suffix in _CONTEXT_SUFFIXES for item in scan.rpf_native_assets)} related assets · {scan.edition_tag}"
+            f"{path.name} · {len(model_entries) + sum(scan.source_kind != 'rpf' and item.suffix in _MODEL_SUFFIXES for item in scan.rpf_native_assets)} models · "
+            f"{len(context_entries) + sum(scan.source_kind != 'rpf' and item.suffix in _CONTEXT_SUFFIXES for item in scan.rpf_native_assets)} related assets · "
+            + (
+                f"{target_edition} inspection target"
+                if scan.source_kind == "rpf" and target_edition
+                else scan.edition_tag
+            )
         )
-        self.create_button.configure(state="normal" if model_entries else "disabled")
+        self.create_button.configure(
+            state="normal" if model_entries else "disabled",
+            text=(
+                "Extract editable workspace…"
+                if scan.source_kind == "rpf"
+                else "Create editable copy"
+            ),
+        )
         self.status.set(
+            "Choose an indexed model asset. The RPF stays read-only; use "
+            "Extract editable workspace to make a separate working copy."
+            if scan.source_kind == "rpf" else
             "Choose a model asset. Package context is advisory until exact bindings decode."
         )
         if self.asset_tree.get_children():
@@ -551,6 +584,9 @@ class ModelMaterialWorkbenchFrame(ttk.Frame):
         self.source = authoring.root
         self.scan = None
         self.reader = None
+        self.asset_paths.clear()
+        self.context_asset_paths.clear()
+        self.rpf_asset_paths.clear()
         self.selected_asset = str(authoring.xml_path)
         self._clear_trees()
         item = self.asset_tree.insert(
@@ -585,6 +621,14 @@ class ModelMaterialWorkbenchFrame(ttk.Frame):
             self.create_button.configure(state="disabled")
             self._load_rpf_model(nested)
             return
+        self.create_button.configure(
+            state="normal",
+            text=(
+                "Extract editable workspace…"
+                if self.scan is not None and self.scan.source_kind == "rpf"
+                else "Create editable copy"
+            ),
+        )
         if self.reader is None:
             loose = Path(path)
             if loose.suffix.casefold() in _MODEL_SUFFIXES:
@@ -595,7 +639,8 @@ class ModelMaterialWorkbenchFrame(ttk.Frame):
         edition = self.edition.get()
         self._load_generation += 1
         generation = self._load_generation
-        self.status.set(f"Decoding {PurePosixPath(path).name}…")
+        logical_name = package_member_path(path).name
+        self.status.set(f"Decoding {logical_name}…")
 
         def worker() -> None:
             try:
@@ -603,7 +648,7 @@ class ModelMaterialWorkbenchFrame(ttk.Frame):
                 if content.truncated:
                     raise ValueError("Model exceeds the guarded 128 MiB decode limit")
                 project = inspect_model_bytes(
-                    self.project_root, PurePosixPath(path).name, content.data,
+                    self.project_root, logical_name, content.data,
                     edition=edition, gta_path=self._native_game_path(),
                     source=f"{source}!/{path}",
                 )
@@ -960,7 +1005,7 @@ class ModelMaterialWorkbenchFrame(ttk.Frame):
         parent = filedialog.askdirectory(parent=self, title="Choose workspace parent folder")
         if not parent:
             return
-        name = PurePosixPath(self.selected_asset).name
+        name = package_member_path(self.selected_asset).name
         destination = Path(parent) / f"{Path(name).stem}-materials"
         try:
             if self.reader is None:
@@ -1055,7 +1100,7 @@ class ModelMaterialWorkbenchFrame(ttk.Frame):
 
     def _open_context_asset(self, _event: object | None = None) -> None:
         selection = self.context_tree.selection()
-        path = self.asset_paths.get(selection[0]) if selection else None
+        path = self.context_asset_paths.get(selection[0]) if selection else None
         if path and self._on_open_asset is not None:
             self._on_open_asset(path)
 

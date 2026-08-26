@@ -22,6 +22,7 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
     profile = json.loads(
         (RUNTIME / "profiles" / "compatibility.json").read_text(encoding="utf-8")
     )
+    assert profile["runtimeVersion"] == "2.1.0"
     assert profile["policy"] == {
         "permanentOffsetsAllowed": False,
         "exactBuildMatchRequired": True,
@@ -47,6 +48,7 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
             encoding="utf-8"
         )
     )
+    assert package["runtime"]["version"] == profile["runtimeVersion"]
     assert package["binaryContract"]["packagingRequiresValidatedProfile"] is True
     assert package["binaryContract"]["validatedProfileExport"] == (
         "VehicleWorkbenchAxles_HasValidatedProfile"

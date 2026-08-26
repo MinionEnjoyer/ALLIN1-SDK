@@ -380,6 +380,61 @@ void TestVariableLengthRuntime() {
     }
 }
 
+void TestIntentionalPhysicalOrderOverride() {
+    auto configuration = MakeConfiguration(3, 0x5A17B055U);
+    std::swap(configuration.axles[0], configuration.axles[1]);
+    for (std::size_t position = 0; position < configuration.axles.size(); ++position) {
+        auto& axle = configuration.axles[position];
+        axle.order = static_cast<std::uint32_t>(position);
+        axle.role = position == 0U ? "front" :
+                    position + 1U == configuration.axles.size() ? "rear" : "middle";
+        axle.steered = position != 1U;
+        axle.powered = position == 1U;
+    }
+    Check(!ValidateConfiguration(configuration, "1.0.0").empty(),
+          "noncanonical physical order was accepted without an override");
+
+    IntentionalLayoutOverride layout;
+    layout.mode = "visual_instancing_remap";
+    layout.physical_bone_pairs = {
+        {"wheel_lm1", "wheel_rm1"},
+        {"wheel_lf", "wheel_rf"},
+        {"wheel_lr", "wheel_rr"},
+    };
+    layout.bone_position_sha256 = std::string(64U, '0');
+    layout.reason = "Author-reviewed single/dual/single wheel-family layout";
+    configuration.intentional_layout_override = layout;
+    Check(!ValidateConfiguration(configuration, "2.1.0").empty(),
+          "custom physical order accepted an authored 1.0.0 runtime floor");
+    configuration.minimum_runtime_version = kIntentionalLayoutMinimumRuntime;
+    Check(!ValidateConfiguration(configuration, "2.0.0").empty(),
+          "runtime 2.0.0 accepted a custom physical-order configuration");
+    Check(ValidateConfiguration(configuration, "2.1.0").empty(),
+          "valid intentional physical-order override was rejected");
+
+    Host host;
+    host.vehicles = {{91, configuration.model_hash, 1}};
+    WheelAccess access;
+    access.flags = InitialFlags(configuration.expected_wheel_count);
+    const auto before = access.flags;
+    LogSink log;
+    ConfigurationCatalog catalog;
+    catalog.active.emplace(configuration.model_hash, configuration);
+    AxleRuntime runtime(host, access, log);
+    Resolver resolver;
+    Check(runtime.Start(std::move(catalog), resolver),
+          "intentional-layout runtime did not start");
+    runtime.Service(std::chrono::steady_clock::now());
+    VerifyDesiredFlags(configuration, before, access.flags);
+    runtime.Shutdown();
+
+    auto stale = configuration;
+    stale.intentional_layout_override->physical_bone_pairs[0] =
+        {"wheel_lf", "wheel_rf"};
+    Check(!ValidateConfiguration(stale, "2.1.0").empty(),
+          "stale intentional layout mapping was accepted");
+}
+
 void TestInvalidWheelCountAndRollback() {
     Host host;
     WheelAccess access;
@@ -753,6 +808,42 @@ void TestValidationAndParsing() {
     Check(!parsed->axles.front().steering_gain.has_value(),
           "legacy boolean-only configuration did not remain implicit");
 
+    const std::string remapped_json = R"json({
+      "schemaVersion": 1,
+      "configurationId": "visual-flip-bus",
+      "modelName": "visual_flip_bus",
+      "modelHash": "0x5A17B055",
+      "expectedWheelCount": 6,
+      "minimumRuntimeVersion": "2.1.0",
+      "wheelIndexMap": {
+        "wheel_lf":0,"wheel_rf":1,"wheel_lm1":2,"wheel_rm1":3,
+        "wheel_lr":4,"wheel_rr":5
+      },
+      "axles": [
+        {"order":0,"role":"front","leftBone":"wheel_lm1","rightBone":"wheel_rm1","steered":true,"powered":false},
+        {"order":1,"role":"middle","leftBone":"wheel_lf","rightBone":"wheel_rf","steered":false,"powered":true},
+        {"order":2,"role":"rear","leftBone":"wheel_lr","rightBone":"wheel_rr","steered":true,"powered":false}
+      ],
+      "intentionalLayoutOverride": {
+        "mode":"visual_instancing_remap",
+        "physicalBonePairs":[["wheel_lm1","wheel_rm1"],["wheel_lf","wheel_rf"],["wheel_lr","wheel_rr"]],
+        "bonePositionSha256":"0000000000000000000000000000000000000000000000000000000000000000",
+        "reason":"Author-reviewed single/dual/single wheel-family layout"
+      },
+      "compatibility":{"story-legacy":true}
+    })json";
+    std::vector<ValidationIssue> old_remapped_issues;
+    Check(!ParseConfigurationJson(
+               remapped_json, "2.0.0", old_remapped_issues,
+               "remapped-old-runtime.json").has_value(),
+          "runtime 2.0.0 parsed a custom physical-order configuration");
+    std::vector<ValidationIssue> remapped_issues;
+    const auto parsed_remapped = ParseConfigurationJson(
+        remapped_json, "2.1.0", remapped_issues, "remapped.json");
+    Check(parsed_remapped.has_value() && remapped_issues.empty() &&
+              parsed_remapped->intentional_layout_override.has_value(),
+          "intentional physical-order override did not parse");
+
     auto missing_compatibility_json = json_text;
     const std::string compatibility_fixture =
         ",\n      \"compatibility\": {\"story-legacy\":true,\"story-enhanced\":false}";
@@ -974,6 +1065,7 @@ void TestValidationAndParsing() {
 int main() {
     try {
         TestVariableLengthRuntime();
+        TestIntentionalPhysicalOrderOverride();
         TestInvalidWheelCountAndRollback();
         TestRecoveryRetainsOriginalBaseline();
         TestShutdownRestorationRetries();

@@ -22,6 +22,7 @@ from allin1_sdk.addon_importer import (
 )
 from allin1_sdk.addon_sdk import AddonLinker, AddonManifest
 from allin1_sdk.cli import main
+from allin1_sdk.vehicle_project import VehicleProjectResolver
 
 
 WEAPONS_META = """<?xml version="1.0" encoding="UTF-8"?>
@@ -713,7 +714,7 @@ def test_invalid_zip_and_unsupported_source_are_rejected(tmp_path):
 
     text = tmp_path / "package.txt"
     text.write_text("content", encoding="utf-8")
-    with pytest.raises(ValueError, match=r"DLC folder or an \.oiv/\.zip/\.rar/\.7z"):
+    with pytest.raises(ValueError, match=r"DLC folder, direct \.rpf, or an \.oiv/\.zip/\.rar/\.7z"):
         AddonPackageInspector().inspect(text)
 
 
@@ -1056,6 +1057,36 @@ def test_draft_write_replaces_existing_file_atomically(tmp_path):
     assert not destination.with_name("addon.json.tmp").exists()
 
 
+def test_xml_parser_repairs_shipped_utf16_declaration_mismatch():
+    payload = (
+        b'<?xml version="1.0" encoding="UTF-16"?>\n'
+        b"<FirstPerson><Item>valid ASCII payload</Item></FirstPerson>"
+    )
+
+    root = importer._parse_xml(payload, "first_person.meta")
+
+    assert root.tag == "FirstPerson"
+    assert root.findtext("Item") == "valid ASCII payload"
+
+
+def test_xml_parser_does_not_repair_other_malformed_xml():
+    with pytest.raises(importer.ET.ParseError):
+        importer._parse_xml(b"<broken>", "broken.meta")
+
+
+def test_weapon_archetype_init_data_is_not_promoted_as_a_vehicle():
+    root = importer.ET.fromstring(
+        "<CWeaponModelInfo__InitDataList><InitDatas><Item>"
+        "<modelName>W_AR_TEST</modelName><txdName>weapons</txdName>"
+        "<layout>LAYOUT_WEAPON</layout>"
+        "</Item></InitDatas></CWeaponModelInfo__InitDataList>"
+    )
+
+    assert AddonPackageInspector._vehicle_records(
+        "weaponarchetypes.meta", root,
+    ) == []
+
+
 def test_sdk_import_package_cli_writes_draft_and_reports_linker_work(tmp_path):
     package = _write_loose_package(tmp_path)
     runner = CliRunner()
@@ -1217,13 +1248,52 @@ def test_sdk_inspect_package_rpfs_reports_safety_prerequisites(tmp_path, monkeyp
 
     many = tmp_path / "many.zip"
     with zipfile.ZipFile(many, "w") as archive:
-        for index in range(21):
+        for index in range(65):
             archive.writestr(f"pack-{index}/dlc.rpf", b"RPF7")
     too_many = CliRunner().invoke(main, [
         "sdk", "inspect-package-rpfs", str(many), "-o", str(output),
     ])
     assert too_many.exit_code == 1
-    assert "more than 20 RPF" in too_many.output
+    assert "more than 64 RPF" in too_many.output
+
+
+def test_workbench_recursively_inspects_more_than_twenty_small_rpfs(
+    tmp_path, monkeypatch,
+):
+    package = tmp_path / "fleet.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        for index in range(29):
+            archive.writestr(f"x64/vehiclemods/pack-{index}.rpf", b"RPF7")
+    game = tmp_path / "game"
+    game.mkdir()
+
+    class FakeIndex:
+        edition = "legacy"
+        archives = ()
+        entries = ()
+        warnings = ()
+
+        @staticmethod
+        def suffix_counts():
+            return {}
+
+    class FakeService:
+        def __init__(self, *_args):
+            pass
+
+        def index(self, archive):
+            assert Path(archive).read_bytes() == b"RPF7"
+            return FakeIndex()
+
+    monkeypatch.setattr(
+        "allin1_sdk.rpf_tools.RpfExplorerService", FakeService,
+    )
+    scan = AddonPackageInspector(tmp_path, game).inspect(package)
+
+    assert len(scan.rpf_archives) == 29
+    assert not any(
+        item.code == "rpf_inspection_limit" for item in scan.findings
+    )
 
 
 def test_sdk_inspect_package_rpfs_reports_index_failures(
@@ -1366,6 +1436,131 @@ def test_nested_rpf_vehicle_metadata_is_promoted_with_edition_provenance(
     }
     assert all(item["label"].startswith("Inspected RPF:") for item in archives)
     assert all(item["fields"]["Entries"] == 7 for item in archives)
+
+
+def test_direct_rpf_is_a_readable_shared_workbench_source(tmp_path, monkeypatch):
+    archive = tmp_path / "dlc.rpf"
+    archive.write_bytes(b"direct-rpf-fixture")
+    game = tmp_path / "game"
+    game.mkdir()
+    metadata = {
+        "vehicles.meta": VEHICLES_META,
+        "handling.meta": HANDLING_META,
+        "carvariations.meta": VARIATIONS_META,
+        "setup2.xml": (
+            "<SSetupData><deviceName>dlc_devcar</deviceName>"
+            "<nameHash>devcar</nameHash></SSetupData>"
+        ),
+    }
+    payloads = {
+        **{name: value.encode("utf-8") for name, value in metadata.items()},
+        "devcar.yft": b"fragment-bytes",
+        "devcar_hi.yft": b"high-fragment-bytes",
+        "devcar.ytd": b"texture-bytes",
+    }
+
+    def entry(path, *, archive_path=""):
+        content = payloads[path]
+        return SimpleNamespace(
+            id=f"{archive_path}::{path}", archive_path=archive_path,
+            path=path, kind=("resource" if Path(path).suffix in {".yft", ".ytd"}
+                             else "binary"),
+            # RSC resource sizes are logical allocations, not extracted lengths.
+            size=(8 * 1024 * 1024 if Path(path).suffix in {".yft", ".ytd"}
+                  else len(content)),
+            suffix=Path(path).suffix.casefold(), name=Path(path).name,
+            virtual_name=path,
+        )
+
+    fake_entries = (
+        entry("vehicles.meta"), entry("handling.meta"),
+        entry("carvariations.meta"), entry("setup2.xml"),
+        entry("devcar.yft", archive_path="x64/levels/gta5/vehicles.rpf"),
+        entry("devcar_hi.yft", archive_path="x64/levels/gta5/vehicles.rpf"),
+        entry("devcar.ytd", archive_path="x64/levels/gta5/vehicles.rpf"),
+    )
+
+    class FakeIndex:
+        edition = "Enhanced"
+        archives = (
+            SimpleNamespace(path=""),
+            SimpleNamespace(path="x64/levels/gta5/vehicles.rpf"),
+        )
+        warnings = ()
+        entries = ()
+
+        @staticmethod
+        def suffix_counts():
+            return {".meta": 3, ".xml": 1, ".yft": 2, ".ytd": 1}
+
+        def entry(self, entry_id):
+            return next(item for item in self.entries if item.id == entry_id)
+
+    FakeIndex.entries = fake_entries
+
+    class FakeService:
+        def __init__(self, project_root, gta_path):
+            assert Path(project_root) == tmp_path
+            assert Path(gta_path) == game
+
+        def index(self, source):
+            assert Path(source) == archive
+            return FakeIndex()
+
+        def extract_many(self, _index, selected, destination):
+            root = Path(destination)
+            root.mkdir(parents=True)
+            extracted = []
+            for number, item in enumerate(selected):
+                target = root / f"{number:04d}{item.suffix}"
+                target.write_bytes(payloads[item.path])
+                extracted.append(target)
+            return tuple(extracted)
+
+        def extract(self, _index, selected, destination):
+            target = Path(destination)
+            target.write_bytes(payloads[selected.path])
+            return target
+
+    monkeypatch.setattr("allin1_sdk.rpf_tools.RpfExplorerService", FakeService)
+    monkeypatch.setattr(importer, "audit_material_progressions", lambda *_a, **_k: ())
+
+    scan = AddonPackageInspector(tmp_path, game).inspect(archive)
+    assert scan.source_kind == "rpf"
+    assert len(scan.rpf_indexed_entries) == 7
+    assert len(scan.workbench_entries) == 8
+    assert {item.name for item in scan.rpf_indexed_entries} >= {
+        "devcar.yft", "devcar_hi.yft", "devcar.ytd",
+    }
+    assert any(item.code == "direct_rpf_target_edition" for item in scan.findings)
+
+    project = VehicleProjectResolver.inspect_scan(scan)
+    vehicle = project.model("devcar")
+    assert vehicle.primary_model.endswith("::devcar.yft")
+    assert vehicle.high_detail_model.endswith("::devcar_hi.yft")
+    assert vehicle.texture_asset.endswith("::devcar.ytd")
+
+    model_entry = next(
+        item for item in scan.workbench_entries if item.name == "devcar.yft"
+    )
+    content = PackageAssetReader(
+        archive, project_root=tmp_path, gta_path=game,
+    ).read(model_entry.path, limit=64)
+    assert content.data == b"fragment-bytes"
+    assert content.size == len(b"fragment-bytes")
+    assert not content.truncated
+
+    monkeypatch.setattr("allin1_sdk.cli.PROJECT_ROOT", tmp_path)
+    result = CliRunner().invoke(main, [
+        "inspect-workbench", str(archive), "--category", "vehicles",
+        "--gta-path", str(game),
+    ])
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    assert report["source_kind"] == "rpf"
+    assert report["summary"]["vehicles"] == 1
+    assert report["summary"]["rpf_indexed_entries"] == 7
+    assert report["summary"]["indexed_files"] == 8
 
 
 def test_sdk_audit_folder_reports_mixed_packages_and_partial_downloads(tmp_path):
@@ -1516,7 +1711,7 @@ def test_loose_package_parallel_reads_keep_deterministic_entry_content(tmp_path)
 def test_asset_reader_rejects_unsupported_sources(tmp_path):
     source = tmp_path / "asset.bin"
     source.write_bytes(b"binary")
-    with pytest.raises(ValueError, match=r"package folder or \.oiv/\.zip/\.rar/\.7z"):
+    with pytest.raises(ValueError, match=r"package folder, \.rpf, or \.oiv/\.zip/\.rar/\.7z"):
         PackageAssetReader(source)
 
 

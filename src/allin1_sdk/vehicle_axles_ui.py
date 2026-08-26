@@ -26,6 +26,8 @@ from allin1_sdk.axle_configurator import (
     AxleConfiguration,
     VehicleAxle,
     apply_axle_preset,
+    apply_intentional_layout_override,
+    clear_intentional_layout_override,
     detect_axle_configuration,
     retarget_axle_configuration,
     stock_metadata_flags,
@@ -147,6 +149,88 @@ def _edit_axle_controls(
     return replace(config, preset=PRESET_CUSTOM, axles=tuple(rows)), False
 
 
+class _PhysicalAxleOrderDialog(simpledialog.Dialog):
+    """Small, explicit front-to-rear ordering editor for unusual skeletons."""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        pairs: Iterable[tuple[str, str]],
+    ) -> None:
+        self._pairs = list(pairs)
+        self.listbox: tk.Listbox | None = None
+        self.result: tuple[tuple[str, str], ...] | None = None
+        super().__init__(parent, title="Physical axle order")
+
+    def body(self, master: tk.Misc) -> tk.Widget | None:
+        ttk.Label(
+            master,
+            text=(
+                "Arrange the existing wheel-bone pairs from the physical front "
+                "of the vehicle to the physical rear. This changes behavior "
+                "roles only; it does not rename bones or replace wheel meshes."
+            ),
+            wraplength=430,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        self.listbox = tk.Listbox(
+            master, height=max(3, len(self._pairs)), exportselection=False,
+        )
+        self.listbox.grid(row=1, column=0, sticky="nsew")
+        controls = ttk.Frame(master)
+        controls.grid(row=1, column=1, sticky="ns", padx=(8, 0))
+        ttk.Button(
+            controls, text="↑ Toward front", command=lambda: self._move(-1),
+        ).pack(fill="x")
+        ttk.Button(
+            controls, text="↓ Toward rear", command=lambda: self._move(1),
+        ).pack(fill="x", pady=(5, 0))
+        ttk.Label(
+            master,
+            text=(
+                "Use this only when the model deliberately reuses GTA's front "
+                "and shared rear wheel-mesh families in a nonstandard order."
+            ),
+            foreground="#52635c", wraplength=430, justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        master.columnconfigure(0, weight=1)
+        master.rowconfigure(1, weight=1)
+        self._refresh(0)
+        return self.listbox
+
+    def _refresh(self, selected: int) -> None:
+        if self.listbox is None:
+            return
+        self.listbox.delete(0, "end")
+        count = len(self._pairs)
+        for index, (left, right) in enumerate(self._pairs):
+            role = "Front" if index == 0 else "Rear" if index == count - 1 else "Middle"
+            self.listbox.insert("end", f"{index + 1}. {role} — {left} / {right}")
+        if self._pairs:
+            chosen = max(0, min(selected, len(self._pairs) - 1))
+            self.listbox.selection_set(chosen)
+            self.listbox.activate(chosen)
+
+    def _move(self, direction: int) -> None:
+        if self.listbox is None:
+            return
+        selected = self.listbox.curselection()
+        if not selected:
+            return
+        current = int(selected[0])
+        target = current + direction
+        if not 0 <= target < len(self._pairs):
+            return
+        self._pairs[current], self._pairs[target] = self._pairs[target], self._pairs[current]
+        self._refresh(target)
+
+    def validate(self) -> bool:
+        return len(self._pairs) == len(set(self._pairs))
+
+    def apply(self) -> None:
+        self.result = tuple(self._pairs)
+
+
 class VehicleAxlesPanel(ttk.Frame):
     """Variable-length, target-aware axle editor for two to five pairs."""
 
@@ -241,6 +325,7 @@ class VehicleAxlesPanel(ttk.Frame):
         self.prefab = tk.StringVar()
         self.visual = tk.StringVar()
         self.visual_axle = tk.StringVar(value="All applicable")
+        self._setup_combos: dict[str, ttk.Combobox] = {}
         for row, (label, variable, values) in enumerate((
             ("Target", self.target, tuple(TARGET_LABELS.values())),
             ("Quick preset", self.preset, AXLE_PRESETS),
@@ -252,6 +337,10 @@ class VehicleAxlesPanel(ttk.Frame):
             )
             combo.grid(row=row, column=1, sticky="ew", padx=(6, 0), pady=2)
             combo.bind("<<ComboboxSelected>>", self._configuration_changed)
+            self._setup_combos[label] = combo
+        self.target_combo = self._setup_combos["Target"]
+        self.preset_combo = self._setup_combos["Quick preset"]
+        self.export_combo = self._setup_combos["Export behavior"]
         setup.columnconfigure(1, weight=1)
         preset_actions = ttk.Frame(setup)
         preset_actions.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(5, 0))
@@ -260,9 +349,14 @@ class VehicleAxlesPanel(ttk.Frame):
         )
         self.detect_button.pack(side="left")
         self.preset_button = ttk.Button(
-            preset_actions, text="Preview preset", command=self._preview_preset,
+            preset_actions, text="Apply preset", command=self._preview_preset,
         )
         self.preset_button.pack(side="left", padx=(5, 0))
+        self.order_button = ttk.Button(
+            preset_actions, text="Physical order…",
+            command=self._set_physical_axle_order,
+        )
+        self.order_button.pack(side="left", padx=(5, 0))
 
         prefab_frame = ttk.LabelFrame(body, text="2 · Prefab library", padding=7)
         prefab_frame.pack(fill="x", pady=(7, 0))
@@ -307,7 +401,7 @@ class VehicleAxlesPanel(ttk.Frame):
             self.prefab_actions, text="Filters ▾", menu=self.filter_menu,
         )
         self.prefab_button = ttk.Button(
-            self.prefab_actions, text="Preview behavior", command=self._preview_prefab,
+            self.prefab_actions, text="Use behavior", command=self._preview_prefab,
         )
         self.visual_button = ttk.Button(
             self.prefab_actions, text="Preview tyres", command=self._preview_visual,
@@ -467,6 +561,15 @@ class VehicleAxlesPanel(ttk.Frame):
         self.more_menu = tk.Menu(self.actions, tearoff=False)
         self.more_menu.add_command(label="Undo", command=self._on_undo)
         self.more_menu.add_command(label="Redo", command=self._on_redo)
+        self.more_menu.add_separator()
+        self.more_menu.add_command(
+            label="Set physical axle order…",
+            command=self._set_physical_axle_order,
+        )
+        self.more_menu.add_command(
+            label="Restore canonical axle order",
+            command=self._restore_canonical_axle_order,
+        )
         self.more_menu.add_separator()
         self.more_menu.add_command(label="Export…", command=self._export)
         self.more_button = ttk.Menubutton(
@@ -805,19 +908,27 @@ class VehicleAxlesPanel(ttk.Frame):
     def _set_enabled(self, available: bool, *, editable: bool = False) -> None:
         state = "normal" if available and editable else "disabled"
         readonly = "readonly" if available and editable else "disabled"
+        for combo in self._setup_combos.values():
+            combo.configure(state=readonly)
         for combo in (self.prefab_combo, self.visual_combo):
             combo.configure(state=readonly)
         self.visual_axle_combo.configure(state=readonly)
         for widget in (
-            self.preset_button, self.prefab_button, self.visual_button,
+            self.preset_button, self.order_button,
+            self.prefab_button, self.visual_button,
             self.geometry_button,
             self.apply_button, *self.row_controls,
         ):
             widget.configure(state=state)
         for widget in self._unsupported_brake_controls:
             widget.configure(state="disabled")
-        self.detect_button.configure(state="normal" if self._bones else "disabled")
+        self.detect_button.configure(
+            state="normal" if self._bones and editable else "disabled"
+        )
         self.geometry_button.configure(
+            state="normal" if available and editable and self._bones else "disabled"
+        )
+        self.order_button.configure(
             state="normal" if available and editable and self._bones else "disabled"
         )
         self.undo_button.configure(state="normal" if editable else "disabled")
@@ -826,6 +937,16 @@ class VehicleAxlesPanel(ttk.Frame):
         history_state = "normal" if editable else "disabled"
         self.more_menu.entryconfigure("Undo", state=history_state)
         self.more_menu.entryconfigure("Redo", state=history_state)
+        order_state = "normal" if available and editable and self._bones else "disabled"
+        self.more_menu.entryconfigure("Set physical axle order…", state=order_state)
+        self.more_menu.entryconfigure(
+            "Restore canonical axle order",
+            state=(
+                "normal" if order_state == "normal" and self._draft is not None
+                and self._draft.intentional_layout_override is not None
+                else "disabled"
+            ),
+        )
         self.more_menu.entryconfigure("Export…", state="disabled")
         self.more_button.configure(state=history_state)
         if available and self._draft is not None:
@@ -850,8 +971,11 @@ class VehicleAxlesPanel(ttk.Frame):
         self._sync_from_draft()
         self._set_enabled(True, editable=self._editable)
 
-    def _configuration_changed(self, _event=None) -> None:
+    def _configuration_changed(self, event=None) -> None:
         if self._draft is None:
+            return
+        if event is not None and event.widget is self.preset_combo:
+            self._preview_preset()
             return
         self._draft = retarget_axle_configuration(
             replace(self._draft,
@@ -869,6 +993,7 @@ class VehicleAxlesPanel(ttk.Frame):
         try:
             self._draft = apply_axle_preset(self._draft, self.preset.get())
         except ValueError as exc:
+            self.preset.set(self._draft.preset)
             messagebox.showerror("Preset cannot be applied", str(exc), parent=self)
             return
         self._preview_findings = ()
@@ -876,6 +1001,70 @@ class VehicleAxlesPanel(ttk.Frame):
         self._steering_solution = None
         self._sync_from_draft()
         self.status.set("Preset previewed. Review mappings and validation, then apply.")
+
+    def _set_physical_axle_order(self) -> None:
+        if self._draft is None or not self._bones or not self._editable:
+            return
+        current = tuple(
+            (axle.left_bone, axle.right_bone)
+            for axle in sorted(self._draft.axles, key=lambda item: item.physical_order)
+        )
+        dialog = _PhysicalAxleOrderDialog(self, current)
+        selected = dialog.result
+        if selected is None:
+            return
+        if (
+            selected == current
+            and self._draft.intentional_layout_override is not None
+        ):
+            return
+        canonical = tuple(
+            (axle.left_bone, axle.right_bone)
+            for axle in sorted(self._draft.axles, key=lambda item: item.left_runtime_index)
+        )
+        try:
+            if selected == canonical:
+                proposed = clear_intentional_layout_override(self._draft)
+                status = "Canonical front-to-rear axle order restored."
+            else:
+                proposed = apply_intentional_layout_override(
+                    self._draft,
+                    self._bones,
+                    physical_bone_pairs=selected,
+                    reason=(
+                        "Author-confirmed physical order for intentional GTA "
+                        "wheel-mesh family instancing"
+                    ),
+                )
+                status = (
+                    "Custom physical axle order previewed. Recalculate signed "
+                    "steering, review validation, then apply."
+                )
+        except ValueError as exc:
+            messagebox.showerror(
+                "Physical order rejected", str(exc), parent=self,
+            )
+            return
+        self._draft = proposed
+        self._preview_findings = ()
+        self._preview_blocked = False
+        self._steering_solution = None
+        self._sync_from_draft()
+        self._set_enabled(True, editable=True)
+        self.status.set(status)
+
+    def _restore_canonical_axle_order(self) -> None:
+        if self._draft is None or not self._editable:
+            return
+        self._draft = clear_intentional_layout_override(self._draft)
+        self._preview_findings = ()
+        self._preview_blocked = False
+        self._steering_solution = None
+        self._sync_from_draft()
+        self._set_enabled(True, editable=True)
+        self.status.set(
+            "Canonical physical axle order restored. Review behavior before applying."
+        )
 
     def _calculate_steering(self) -> None:
         """Preview geometry-derived, signed gains without changing tyre visuals."""
@@ -1068,6 +1257,10 @@ class VehicleAxlesPanel(ttk.Frame):
             if self._steering_solution is not None
             else _current_gain_summary(self._draft)
         )
+        if self._draft.intentional_layout_override is not None:
+            self.geometry_summary.set(
+                self.geometry_summary.get() + " · custom physical order"
+            )
         if self._draft.axles:
             axle_choices = (
                 "All applicable",

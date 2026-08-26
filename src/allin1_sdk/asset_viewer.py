@@ -72,7 +72,8 @@ class AssetViewerDialog(ttk.Frame):
     def __init__(
         self, parent: tk.Misc, source: str | Path | None = None,
         scan: PackageScan | None = None,
-        *, installation_roots: tuple[Path, ...] = (), embedded: bool = False,
+        *, project_root: str | Path | None = None,
+        installation_roots: tuple[Path, ...] = (), embedded: bool = False,
         on_help=None, on_close=None,
     ) -> None:
         self._window: tk.Toplevel | None = None
@@ -80,6 +81,10 @@ class AssetViewerDialog(ttk.Frame):
         self._on_close = on_close
         self.installation_roots = tuple(
             Path(root).expanduser().resolve() for root in installation_roots
+        )
+        self.project_root = (
+            Path(project_root).expanduser().resolve()
+            if project_root is not None else Path(__file__).resolve().parents[2]
         )
         host = parent
         if not embedded:
@@ -296,6 +301,7 @@ class AssetViewerDialog(ttk.Frame):
         opening content and authoring a rebuilt asset are never conflated.
         """
         menu = tk.Menu(parent, tearoff=False)
+        menu.add_command(label="Open DLC RPF…", command=self._choose_rpf)
         menu.add_command(label="Open package folder…", command=self._choose_folder)
         menu.add_command(label="Open package archive…", command=self._choose_archive)
         return menu
@@ -397,12 +403,27 @@ class AssetViewerDialog(ttk.Frame):
         if selected:
             self._load_source(Path(selected))
 
+    def _choose_rpf(self) -> None:
+        selected = filedialog.askopenfilename(
+            parent=self, title="Select a GTA V DLC RPF",
+            filetypes=(("GTA V RPF", "*.rpf"), ("All files", "*.*")),
+        )
+        if selected:
+            self._load_source(Path(selected))
+
     def _load_source(self, source: Path, scan: PackageScan | None = None) -> None:
         self.status.set("Scanning package…")
         self.update_idletasks()
+        game_path = next(
+            (root for root in self.installation_roots if root.is_dir()), None,
+        )
         try:
-            loaded = scan or AddonPackageInspector().inspect(source)
-            reader = PackageAssetReader(source)
+            loaded = scan or AddonPackageInspector(
+                self.project_root, game_path,
+            ).inspect(source)
+            reader = PackageAssetReader(
+                source, project_root=self.project_root, gta_path=game_path,
+            )
         except (OSError, ValueError) as exc:
             messagebox.showerror("Could not open package", str(exc), parent=self)
             self.status.set("Package could not be opened.")
@@ -415,12 +436,13 @@ class AssetViewerDialog(ttk.Frame):
         self._set_package_actions(True)
         self._populate_tree()
         self.status.set(
-            f"{len(loaded.entries):,} files · {_human_size(loaded.total_bytes)} · "
+            f"{len(loaded.workbench_entries):,} indexed files · "
+            f"{_human_size(loaded.total_bytes)} · "
             f"{loaded.warning_count} warnings"
         )
         self.asset_title.set(self.source.name)
         self.asset_meta.set(
-            f"{loaded.source_kind.upper()} package · {loaded.error_count} errors · "
+            f"{loaded.source_kind.upper()} source · {loaded.error_count} errors · "
             f"{loaded.warning_count} warnings"
         )
         self._show_text(
@@ -440,7 +462,7 @@ class AssetViewerDialog(ttk.Frame):
             return
         query = self.search.get().strip().casefold()
         grouped: dict[str, list[PackageEntry]] = {}
-        for entry in self.scan.entries:
+        for entry in self.scan.workbench_entries:
             if query and query not in entry.path.casefold():
                 continue
             grouped.setdefault(entry.category, []).append(entry)
@@ -521,17 +543,27 @@ class AssetViewerDialog(ttk.Frame):
             if suffix in NATIVE_ASSET_SUFFIXES:
                 self.status.set(f"Inspecting native GTA asset: {entry.path}…")
                 self.update_idletasks()
-                project_root = Path(__file__).resolve().parents[2]
+                project_root = self.project_root
                 edition = (
-                    "Legacy" if self.scan and self.scan.edition_hints == ("legacy",)
-                    else "Enhanced"
-                )
-                report = NativeAssetInspector(
-                    project_root, self._native_game_path(),
-                ).inspect_bytes(
-                    entry.path, content.data, edition=edition,
-                    truncated=content.truncated,
-                )
+                    self.scan.inspection_target_edition
+                    if self.scan else ""
+                ) or "Enhanced"
+                try:
+                    report = NativeAssetInspector(
+                        project_root, self._native_game_path(),
+                    ).inspect_bytes(
+                        entry.name, content.data, edition=edition,
+                        truncated=content.truncated,
+                    )
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self._show_text(
+                        "Native preview unavailable. The asset remains available "
+                        f"for read-only export.\n\n{exc}"
+                    )
+                    self.status.set(
+                        f"Native preview unavailable: {entry.path}"
+                    )
+                    return
                 self.asset_meta.set(report.summary().replace("\n", " · "))
                 if report.image_png:
                     self._show_image(report.image_png, entry.path)
@@ -594,7 +626,7 @@ class AssetViewerDialog(ttk.Frame):
         )
         if not parent:
             return
-        destination = Path(parent) / f"{Path(entry.path).name}-workspace"
+        destination = Path(parent) / f"{entry.name}-workspace"
         try:
             content = self.reader.read(
                 entry.path, limit=native_preview_limit(entry.path, entry.size),
@@ -604,7 +636,7 @@ class AssetViewerDialog(ttk.Frame):
             workspace = NativeAssetInspector(
                 Path(__file__).resolve().parents[2], self._native_game_path(),
             ).export_workspace_bytes(
-                entry.path, content.data, destination, edition=self._native_edition(),
+                entry.name, content.data, destination, edition=self._native_edition(),
             )
         except (OSError, RuntimeError, ValueError) as exc:
             messagebox.showerror(
@@ -723,7 +755,7 @@ class AssetViewerDialog(ttk.Frame):
                     "category": entry.category,
                     "preview": entry.preview_kind,
                 }
-                for entry in self.scan.entries
+                for entry in self.scan.workbench_entries
             ],
             "findings": [
                 {

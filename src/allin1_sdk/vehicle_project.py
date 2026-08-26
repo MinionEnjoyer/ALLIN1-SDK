@@ -14,6 +14,7 @@ from allin1_sdk.addon_importer import (
     AddonPackageInspector,
     PackageEntry,
     PackageScan,
+    package_member_path,
 )
 from allin1_sdk.rage_data_compiler import (
     CompiledVehicle,
@@ -216,8 +217,10 @@ class VehicleProjectResolver:
 
     def inspect(
         self, source: str | Path, *, edition: str | None = None,
+        project_root: str | Path | None = None,
+        gta_path: str | Path | None = None,
     ) -> VehicleProject:
-        scan = AddonPackageInspector().inspect(source)
+        scan = AddonPackageInspector(project_root, gta_path).inspect(source)
         return self.inspect_scan(scan, edition=edition)
 
     @staticmethod
@@ -225,7 +228,9 @@ class VehicleProjectResolver:
         scan: PackageScan, *, edition: str | None = None,
     ) -> VehicleProject:
         compiled = RageVehicleDataCompiler.compile_scan(scan)
-        entries = {item.path.casefold(): item for item in scan.entries}
+        entries = {
+            item.path.casefold(): item for item in scan.workbench_entries
+        }
         project_models = tuple(
             VehicleProjectResolver._project_model(
                 vehicle, compiled.findings, entries, scan,
@@ -236,7 +241,9 @@ class VehicleProjectResolver:
             finding for model in project_models for finding in model.findings
             if finding not in compiled.findings
         )
-        resolved_edition = edition or scan.edition_tag
+        resolved_edition = (
+            edition or scan.inspection_target_edition or scan.edition_tag
+        )
         return VehicleProject(
             source=scan.source,
             source_kind=scan.source_kind,
@@ -269,8 +276,9 @@ class VehicleProjectResolver:
 
         model_key = vehicle.model.casefold()
         for path in vehicle.model_assets:
-            stem = PurePosixPath(path).stem.casefold()
-            suffix = PurePosixPath(path).suffix.casefold()
+            member_path = package_member_path(path)
+            stem = member_path.stem.casefold()
+            suffix = member_path.suffix.casefold()
             if suffix == ".yft" and stem == model_key:
                 role = "primary_model"
             elif suffix == ".yft" and stem == f"{model_key}_hi":
@@ -281,7 +289,7 @@ class VehicleProjectResolver:
         for path in vehicle.texture_assets:
             bind("texture_dictionary", path)
         for path in vehicle.metadata_sources:
-            name = PurePosixPath(path).name.casefold()
+            name = package_member_path(path).name.casefold()
             if "handling" in name:
                 role = "handling_metadata"
             elif "variation" in name:
@@ -330,7 +338,10 @@ class VehicleProjectResolver:
         evidence = {
             "kind": scan.source_kind,
             "entries": sorted(
-                ({"path": item.path, "size": item.size} for item in scan.entries),
+                (
+                    {"path": item.path, "size": item.size}
+                    for item in scan.workbench_entries
+                ),
                 key=lambda item: str(item["path"]).casefold(),
             ),
         }

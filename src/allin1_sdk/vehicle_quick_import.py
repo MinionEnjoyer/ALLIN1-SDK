@@ -108,12 +108,13 @@ def launcher_package_library_root(
 
 @dataclass(frozen=True)
 class VehicleQuickImportInspection:
-    """One bounded package scan and its honestly detected vehicle editions."""
+    """One bounded scan and its available or explicitly targeted editions."""
 
     source: Path
     scan: PackageScan
     available_editions: tuple[str, ...]
     suggested_edition: str
+    edition_basis: str = "package_branches"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -122,6 +123,7 @@ class VehicleQuickImportInspection:
             "source_kind": self.scan.source_kind,
             "available_editions": list(self.available_editions),
             "suggested_edition": self.suggested_edition,
+            "edition_basis": self.edition_basis,
             "vehicles": [
                 {
                     "model": item.model_name,
@@ -232,6 +234,10 @@ class VehicleQuickImportService:
             scan=scan,
             available_editions=available,
             suggested_edition=suggested,
+            edition_basis=(
+                "selected_decoder_target"
+                if scan.source_kind == "rpf" else "package_branches"
+            ),
         )
 
     def plan(
@@ -246,7 +252,8 @@ class VehicleQuickImportService:
         selected = edition.strip().casefold()
         if selected not in inspection.available_editions:
             raise ValueError(
-                f"Edition '{edition}' was not detected in the inspected package"
+                f"Edition '{edition}' is not available for the current package "
+                "or selected direct-RPF decoder target"
             )
         plan = self.converter.plan(
             inspection.source,

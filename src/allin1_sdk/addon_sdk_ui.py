@@ -205,6 +205,7 @@ class AddonSdkDialog(tk.Toplevel):
             command=self._open_manifest,
         )
         menu.add_separator()
+        menu.add_command(label="Open DLC RPF…", command=self._import_rpf)
         menu.add_command(label="Import DLC folder…", command=self._import_folder)
         menu.add_command(label="Import package archive…", command=self._import_archive)
         menu.add_command(label="Audit package folder…", command=self._audit_folder)
@@ -578,7 +579,8 @@ class AddonSdkDialog(tk.Toplevel):
         if key == "assets":
             from allin1_sdk.asset_viewer import AssetViewerDialog
             workspace = AssetViewerDialog(
-                page, installation_roots=self.installation_roots,
+                page, project_root=self.project_root,
+                installation_roots=self.installation_roots,
                 embedded=True, on_help=self._open_help,
                 on_close=self._go_back,
             )
@@ -1203,6 +1205,44 @@ class AddonSdkDialog(tk.Toplevel):
         if selected:
             self._import_package(Path(selected))
 
+    def _import_rpf(self) -> None:
+        selected = filedialog.askopenfilename(
+            parent=self, title="Open a GTA V DLC RPF",
+            filetypes=(("GTA V RPF", "*.rpf"), ("All files", "*.*")),
+        )
+        if not selected:
+            return
+        source = Path(selected).resolve()
+        try:
+            scan = self._package_inspector().inspect(source)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("RPF inspection failed", str(exc), parent=self)
+            return
+        self.package_source = source
+        self.package_scan = scan
+        has_content = bool(
+            scan.vehicles or scan.weapons or scan.peds
+            or scan.weapon_enhancements or scan.scripted_weapon_systems
+        )
+        has_models = any(
+            entry.suffix in {".ydr", ".ydd", ".yft"}
+            for entry in scan.workbench_entries
+        )
+        self._set_package_actions(assets=True, rpfs=True, workbench=has_content)
+        if has_content:
+            self._select_workspace("workbench")
+            self.workbench_workspace.open_source(source, scan)
+        elif has_models:
+            self._select_workspace("models")
+            self.model_material_workspace.open_source(source, scan)
+        else:
+            self._select_workspace("rpf")
+            self.rpf_workspace.open_archive(source)
+        self.status.set(
+            f"Direct RPF · {source.name} · "
+            f"{len(scan.workbench_entries):,} indexed files"
+        )
+
     def _audit_folder(self) -> None:
         selected = filedialog.askdirectory(
             parent=self, title="Select a folder containing test/mod packages",
@@ -1340,7 +1380,9 @@ class AddonSdkDialog(tk.Toplevel):
         """Route the current package into the integrated native model workspace."""
         self._select_workspace("models")
         if self.package_source is not None:
-            self.model_material_workspace.open_source(self.package_source)
+            self.model_material_workspace.open_source(
+                self.package_source, self.package_scan,
+            )
             self.status.set(
                 f"Models & Materials · {self.package_source.name}",
             )

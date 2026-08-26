@@ -38,7 +38,8 @@ class WorkbenchFrame(ttk.Frame):
         self.scan: PackageScan | None = None
         self.vehicle_authoring_workspace: VehicleAuthoringWorkspace | None = None
         self.status = tk.StringVar(
-            value="Open a package once, then inspect its vehicles, weapons, and peds."
+            value="Open a DLC RPF, package archive, or extracted folder once; "
+            "the Workbench routes its vehicles, weapons, and peds."
         )
         self._build()
 
@@ -52,6 +53,7 @@ class WorkbenchFrame(ttk.Frame):
             command_row, text="Content Workbench", style="DialogTitle.TLabel",
         ).pack(side="left")
         open_menu = tk.Menu(command_row, tearoff=False)
+        open_menu.add_command(label="Open DLC RPF…", command=self._choose_rpf)
         open_menu.add_command(label="Open package folder…", command=self._choose_folder)
         open_menu.add_command(label="Open package archive…", command=self._choose_archive)
         ttk.Button(
@@ -63,7 +65,7 @@ class WorkbenchFrame(ttk.Frame):
         )
         self.reload_button.pack(side="right", padx=(0, 7))
         ttk.Menubutton(
-            command_row, text="Open package", style="Accent.TButton", menu=open_menu,
+            command_row, text="Open content", style="Accent.TButton", menu=open_menu,
         ).pack(side="right", padx=(0, 7))
         self.status_label = ttk.Label(
             outer, textvariable=self.status, foreground="#52635c",
@@ -127,6 +129,14 @@ class WorkbenchFrame(ttk.Frame):
         if selected:
             self.open_source(selected)
 
+    def _choose_rpf(self) -> None:
+        selected = filedialog.askopenfilename(
+            parent=self, title="Select a GTA V DLC RPF",
+            filetypes=(("GTA V RPF", "*.rpf"), ("All files", "*.*")),
+        )
+        if selected:
+            self.open_source(selected)
+
     def open_source(
         self, source: str | Path, scan: PackageScan | None = None,
         *, category: str = "auto",
@@ -144,7 +154,7 @@ class WorkbenchFrame(ttk.Frame):
                 self.project_root, game,
             ).inspect(resolved)
         except (OSError, ValueError) as exc:
-            messagebox.showerror("Could not open package", str(exc), parent=self)
+            messagebox.showerror("Could not open content", str(exc), parent=self)
             return False
         self.source = resolved
         self.scan = loaded_scan
@@ -170,9 +180,16 @@ class WorkbenchFrame(ttk.Frame):
             self.tabs.tab(self.pages[key], text=f"{label} ({counts[key]})")
         self.reload_button.configure(state="normal")
         self.status.set(
-            f"{resolved.name} · {counts['vehicles']} vehicles · "
+            ("Direct RPF · " if loaded_scan.source_kind == "rpf" else "")
+            + f"{resolved.name} · {len(loaded_scan.workbench_entries):,} indexed files · "
+            f"{counts['vehicles']} vehicles · "
             f"{counts['weapons']} weapons · {counts['peds']} peds · "
             f"{loaded_scan.error_count} errors / {loaded_scan.warning_count} warnings"
+            + (
+                f" · target: {loaded_scan.inspection_target_edition}"
+                if loaded_scan.source_kind == "rpf"
+                and loaded_scan.inspection_target_edition else ""
+            )
         )
         selected = category
         if selected == "auto":

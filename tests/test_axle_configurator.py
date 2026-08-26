@@ -11,6 +11,8 @@ from allin1_sdk.axle_configurator import (
     FLAG_IS_DRIVEN,
     FLAG_IS_STEERED,
     HF_STEER_ALL_WHEELS,
+    HF_STEER_REARWHEELS,
+    INTENTIONAL_LAYOUT_RUNTIME_VERSION,
     PRESET_ALL_STEER,
     PRESET_STANDARD,
     PRESET_STEER_DRIVE_REAR,
@@ -20,6 +22,8 @@ from allin1_sdk.axle_configurator import (
     AxleAddonGeometry,
     AxleConfiguration,
     apply_axle_preset,
+    apply_intentional_layout_override,
+    clear_intentional_layout_override,
     detect_axle_configuration,
     fivem_client_lua,
     fivem_server_lua,
@@ -90,6 +94,208 @@ def test_six_wheel_acceptance_preset() -> None:
         ("wheel_lf", "wheel_rf"),
         ("wheel_lm1", "wheel_rm1"),
         ("wheel_lr", "wheel_rr"),
+    ]
+
+
+def test_intentional_visual_instancing_override_supports_custom_physical_order() -> None:
+    # This mirrors the reviewed bus layout: the shared-middle pair is the
+    # physical front, GTA's front family is the physical middle, and the rear
+    # pair remains the physical rear. Runtime slots stay canonical.
+    bones = tuple(
+        Bone(name, (x, y, 0.0))
+        for name, x, y in (
+            ("wheel_lf", -1.0, 6.0), ("wheel_rf", 1.0, 6.0),
+            ("wheel_lm1", -1.0, 9.0), ("wheel_rm1", 1.0, 9.0),
+            ("wheel_lr", -1.0, 3.0), ("wheel_rr", 1.0, 3.0),
+        )
+    )
+    detected = detect_axle_configuration(
+        "visual_flip_bus", bones, export_mode=EXPORT_FIVEM_RUNTIME,
+    )
+    assert any(
+        item.code == "physical_order_semantics"
+        for item in validate_axle_configuration(detected, bones)
+    )
+
+    remapped = apply_intentional_layout_override(
+        detected,
+        bones,
+        physical_bone_pairs=(
+            ("wheel_lm1", "wheel_rm1"),
+            ("wheel_lf", "wheel_rf"),
+            ("wheel_lr", "wheel_rr"),
+        ),
+        reason="Author-reviewed single/dual/single visual wheel layout",
+    )
+    configured = apply_axle_preset(remapped, PRESET_STEER_DRIVE_REAR)
+
+    assert configured.minimum_runtime_version == INTENTIONAL_LAYOUT_RUNTIME_VERSION
+    assert [
+        (axle.left_bone, axle.logical_role, axle.steered, axle.powered)
+        for axle in configured.axles
+    ] == [
+        ("wheel_lm1", "front", True, False),
+        ("wheel_lf", "middle", False, True),
+        ("wheel_lr", "rear", True, False),
+    ]
+    assert [
+        (axle.left_runtime_index, axle.right_runtime_index)
+        for axle in configured.axles
+    ] == [(2, 3), (0, 1), (4, 5)]
+    findings = validate_axle_configuration(configured, bones)
+    assert any(item.code == "intentional_layout_override" for item in findings)
+    assert not [
+        item for item in findings
+        if item.severity == "error" and item.code in {
+            "logical_role_semantics", "physical_order_semantics",
+            "physical_order_position", "canonical_reassignment",
+            "front_not_forwardmost", "rear_ahead_of_front",
+        }
+    ]
+    assert AxleConfiguration.from_dict(configured.to_dict()) == configured
+    flags = stock_metadata_flags(configured, HF_STEER_REARWHEELS | 0xA500)
+    assert flags.updated_flags & HF_STEER_REARWHEELS == 0
+    assert flags.updated_flags & HF_STEER_ALL_WHEELS == 0
+    assert flags.updated_flags & ~0xE0 == 0xA500 & ~0xE0
+
+
+def test_intentional_layout_override_enforces_and_preserves_runtime_floor() -> None:
+    bones = skeleton(3)
+    base = detect_axle_configuration("runtime_floor_bus", bones)
+    remapped = apply_intentional_layout_override(
+        base,
+        bones,
+        physical_bone_pairs=(
+            ("wheel_lm1", "wheel_rm1"),
+            ("wheel_lf", "wheel_rf"),
+            ("wheel_lr", "wheel_rr"),
+        ),
+    )
+    lowered = remapped.to_dict()
+    lowered["minimum_runtime_version"] = "2.0.0"
+    with pytest.raises(ValueError, match="2.1.0 or newer"):
+        AxleConfiguration.from_dict(lowered)
+
+    stronger = replace(base, minimum_runtime_version="3.4.5")
+    stronger_remap = apply_intentional_layout_override(
+        stronger,
+        bones,
+        physical_bone_pairs=(
+            ("wheel_lm1", "wheel_rm1"),
+            ("wheel_lf", "wheel_rf"),
+            ("wheel_lr", "wheel_rr"),
+        ),
+    )
+    assert stronger_remap.minimum_runtime_version == "3.4.5"
+
+
+def test_intentional_layout_override_rejects_incomplete_or_stale_evidence() -> None:
+    bones = skeleton(3)
+    config = detect_axle_configuration("bus", bones)
+    with pytest.raises(ValueError, match="every configured canonical pair"):
+        apply_intentional_layout_override(
+            config,
+            bones,
+            physical_bone_pairs=(
+                ("wheel_lm1", "wheel_rm1"),
+                ("wheel_lf", "wheel_rf"),
+            ),
+        )
+    remapped = apply_intentional_layout_override(
+        config,
+        bones,
+        physical_bone_pairs=(
+            ("wheel_lm1", "wheel_rm1"),
+            ("wheel_lf", "wheel_rf"),
+            ("wheel_lr", "wheel_rr"),
+        ),
+    )
+    moved = tuple(
+        replace(bone, position=(bone.position[0], bone.position[1] + 0.25, 0.0))
+        if bone.name == "wheel_lm1" else bone
+        for bone in bones
+    )
+    assert any(
+        item.code == "stale_layout_override" and item.severity == "error"
+        for item in validate_axle_configuration(remapped, moved)
+    )
+
+
+def test_intentional_layout_override_validation_fails_closed_after_tampering() -> None:
+    bones = skeleton(3)
+    remapped = apply_intentional_layout_override(
+        detect_axle_configuration("tampered_bus", bones),
+        bones,
+        physical_bone_pairs=(
+            ("wheel_lm1", "wheel_rm1"),
+            ("wheel_lf", "wheel_rf"),
+            ("wheel_lr", "wheel_rr"),
+        ),
+    )
+    assert remapped.intentional_layout_override is not None
+
+    mapping_tampered = replace(
+        remapped,
+        intentional_layout_override=replace(
+            remapped.intentional_layout_override,
+            physical_bone_pairs=(
+                ("wheel_lf", "wheel_rf"),
+                ("wheel_lm1", "wheel_rm1"),
+                ("wheel_lr", "wheel_rr"),
+            ),
+        ),
+    )
+    assert any(
+        item.code == "layout_override_mapping_mismatch"
+        for item in validate_axle_configuration(mapping_tampered, bones)
+    )
+
+    role_tampered = replace(
+        remapped,
+        axles=(
+            replace(remapped.axles[0], logical_role="middle"),
+            *remapped.axles[1:],
+        ),
+    )
+    assert any(
+        item.code == "layout_override_role_mismatch"
+        for item in validate_axle_configuration(role_tampered, bones)
+    )
+
+    assert any(
+        item.code == "layout_override_evidence_unavailable"
+        for item in validate_axle_configuration(remapped, ())
+    )
+    duplicate_bones = (*bones, bones[0])
+    assert any(
+        item.code == "layout_override_evidence_unavailable"
+        for item in validate_axle_configuration(remapped, duplicate_bones)
+    )
+
+
+def test_restoring_canonical_order_removes_override_and_roles() -> None:
+    bones = skeleton(3)
+    config = detect_axle_configuration("bus", bones)
+    remapped = apply_intentional_layout_override(
+        config,
+        bones,
+        physical_bone_pairs=(
+            ("wheel_lm1", "wheel_rm1"),
+            ("wheel_lf", "wheel_rf"),
+            ("wheel_lr", "wheel_rr"),
+        ),
+    )
+
+    restored = clear_intentional_layout_override(remapped)
+
+    assert restored.intentional_layout_override is None
+    assert [
+        (item.physical_order, item.logical_role, item.left_bone)
+        for item in restored.axles
+    ] == [
+        (1, "front", "wheel_lf"),
+        (2, "middle", "wheel_lm1"),
+        (3, "rear", "wheel_lr"),
     ]
 
 

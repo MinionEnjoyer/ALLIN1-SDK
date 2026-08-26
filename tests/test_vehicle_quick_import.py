@@ -141,8 +141,64 @@ def test_quick_import_discovers_explicit_editions_and_prefers_active_target(
             "vehicle_class": "VC_SUPER",
         },
     ]
-    with pytest.raises(ValueError, match="was not detected"):
+    with pytest.raises(ValueError, match="is not available"):
         service.plan(inspection, edition="unknown")
+
+
+def test_direct_rpf_quick_import_infers_registered_pack_and_streams_export(
+    tmp_path: Path,
+):
+    pack = tmp_path / "directcar"
+    pack.mkdir()
+    source = pack / "dlc.rpf"
+    source.write_bytes(b"direct-rpf-vehicle-payload")
+    scan = PackageScan(
+        source=source,
+        source_kind="rpf",
+        entries=(PackageEntry("dlc.rpf", source.stat().st_size),),
+        findings=(),
+        weapons=(), ammo=(), animation_weapons=(), shop_weapons=(),
+        vehicles=(VehicleRecord(
+            source="data/vehicles.meta",
+            model_name="directcar", txd_name="directcar",
+            handling_id="DIRECTCAR", game_name="DIRECTCAR",
+            make_name="TEST", audio_name_hash="TAILGATER",
+            layout="LAYOUT_STANDARD", vehicle_type="VEHICLE_TYPE_CAR",
+            vehicle_class="VC_SPORT", edition="enhanced",
+        ),),
+        registrations=(PackageRegistrationRecord(
+            "content.xml", "single-player-content",
+            ("dlc_directcar",), ("vehicles.meta",),
+        ),),
+        rpf_archives=(RpfPackageRecord(
+            "dlc.rpf", "enhanced", 2, 10, {".yft": 1},
+        ),),
+    )
+    project = tmp_path / "sdk"
+    game = tmp_path / "game"
+    project.mkdir()
+    game.mkdir()
+    service = VehicleQuickImportService(
+        project, game, inspector=_Inspector(scan),
+    )
+
+    inspection = service.inspect(source)
+    assert inspection.available_editions == ("enhanced",)
+    assert inspection.edition_basis == "selected_decoder_target"
+    review = service.plan(
+        inspection, edition="enhanced", package_id="fixture.directcar",
+    )
+    assert review.plan.dlc_pack == "directcar"
+    assert review.plan.source_kind == "rpf"
+    assert review.plan.source_member_sha256 == hashlib.sha256(
+        source.read_bytes()
+    ).hexdigest()
+
+    output = tmp_path / "review-package"
+    result = service.converter.export(review.plan, output)
+    assert result.package_root == output
+    assert (output / "payload" / "dlc.rpf").read_bytes() == source.read_bytes()
+    assert (output / "mod.toml").is_file()
 
 
 def test_quick_import_edits_storefront_only_and_keeps_traffic_off(

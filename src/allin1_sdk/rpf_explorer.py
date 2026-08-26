@@ -1307,6 +1307,10 @@ class RpfExplorerDialog(ttk.Frame):
         if selected:
             self._load_archive(Path(selected))
 
+    def open_archive(self, archive: str | Path) -> None:
+        """Open one direct RPF through the embedded SDK workspace route."""
+        self._load_archive(Path(archive).expanduser().resolve(strict=True))
+
     def _graph_game_path(self) -> Path | None:
         authored = self.game_path.get().strip()
         selected = Path(authored).resolve() if authored else None

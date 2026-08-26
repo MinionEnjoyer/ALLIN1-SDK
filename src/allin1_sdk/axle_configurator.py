@@ -24,6 +24,7 @@ from typing import Any, Iterable, Mapping, Protocol
 AXLE_SCHEMA_VERSION = 1
 LATEST_AXLE_SCHEMA_VERSION = 2
 SIGNED_STEERING_RUNTIME_VERSION = "2.0.0"
+INTENTIONAL_LAYOUT_RUNTIME_VERSION = "2.1.0"
 STEERING_GAIN_EPSILON = 1.0e-9
 
 STEERING_CALCULATION_AUTOMATIC = "automatic_geometry"
@@ -445,6 +446,98 @@ class SteeringCalculationProvenance:
         return payload
 
 
+INTENTIONAL_LAYOUT_OVERRIDE_MODE = "visual_instancing_remap"
+
+
+@dataclass(frozen=True)
+class IntentionalAxleLayoutOverride:
+    """Evidence for a deliberate physical/canonical wheel-bone remap.
+
+    Some GTA vehicle drawables intentionally place the canonical front and
+    shared middle/rear wheel families in a noncanonical physical order to work
+    around the engine's two-family visual instancing limit.  This exception is
+    never inferred.  It records the exact front-to-rear pair order and a digest
+    of the reviewed skeleton positions so an unrelated or later bone swap does
+    not silently inherit the authorization.
+    """
+
+    mode: str
+    physical_bone_pairs: tuple[tuple[str, str], ...]
+    bone_position_sha256: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.mode != INTENTIONAL_LAYOUT_OVERRIDE_MODE:
+            raise ValueError("Unsupported intentional axle layout override mode")
+        if not MINIMUM_AXLE_PAIRS <= len(self.physical_bone_pairs) <= MAXIMUM_AXLE_PAIRS:
+            raise ValueError("Intentional axle layout override requires 2-5 axle pairs")
+        canonical = {
+            (left, right) for _role, left, right in CANONICAL_WHEEL_PAIRS
+        }
+        if (
+            len(set(self.physical_bone_pairs)) != len(self.physical_bone_pairs)
+            or any(pair not in canonical for pair in self.physical_bone_pairs)
+        ):
+            raise ValueError(
+                "Intentional axle layout override must contain unique canonical pairs"
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", self.bone_position_sha256):
+            raise ValueError(
+                "Intentional axle layout override requires a lowercase SHA-256 digest"
+            )
+        reason = self.reason.strip()
+        if not 8 <= len(reason) <= 240:
+            raise ValueError(
+                "Intentional axle layout override reason must use 8-240 characters"
+            )
+        object.__setattr__(self, "reason", reason)
+
+    @classmethod
+    def from_dict(
+        cls, payload: Mapping[str, Any],
+    ) -> "IntentionalAxleLayoutOverride":
+        allowed = {
+            "mode", "physical_bone_pairs", "bone_position_sha256", "reason",
+        }
+        unknown = sorted(set(payload) - allowed)
+        if unknown:
+            raise ValueError(
+                "Unsupported intentional axle layout override fields: "
+                + ", ".join(unknown)
+            )
+        raw_pairs = payload.get("physical_bone_pairs")
+        if not isinstance(raw_pairs, (list, tuple)):
+            raise ValueError(
+                "Intentional axle layout override physical_bone_pairs must be an array"
+            )
+        pairs: list[tuple[str, str]] = []
+        for raw in raw_pairs:
+            if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+                raise ValueError(
+                    "Every intentional axle layout override pair must contain left and right bones"
+                )
+            pairs.append((
+                _bone_name(raw[0], "Override left wheel bone"),
+                _bone_name(raw[1], "Override right wheel bone"),
+            ))
+        return cls(
+            mode=str(payload.get("mode", "")).strip().casefold(),
+            physical_bone_pairs=tuple(pairs),
+            bone_position_sha256=str(
+                payload.get("bone_position_sha256", "")
+            ).strip().casefold(),
+            reason=str(payload.get("reason", "")).strip(),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "physical_bone_pairs": [list(pair) for pair in self.physical_bone_pairs],
+            "bone_position_sha256": self.bone_position_sha256,
+            "reason": self.reason,
+        }
+
+
 @dataclass(frozen=True)
 class AxleConfiguration:
     schema_version: int
@@ -466,6 +559,7 @@ class AxleConfiguration:
     )
     handbrake_rear_steering: bool = False
     steering_calculation: SteeringCalculationProvenance | None = None
+    intentional_layout_override: IntentionalAxleLayoutOverride | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -499,6 +593,17 @@ class AxleConfiguration:
                     "Schema-2 signed steering requires minimum runtime version "
                     f"{SIGNED_STEERING_RUNTIME_VERSION} or newer"
                 )
+        if (
+            self.intentional_layout_override is not None
+            and runtime_core < _semantic_version_core(
+                INTENTIONAL_LAYOUT_RUNTIME_VERSION,
+                "Intentional layout runtime version",
+            )
+        ):
+            raise ValueError(
+                "A custom physical axle order requires minimum runtime version "
+                f"{INTENTIONAL_LAYOUT_RUNTIME_VERSION} or newer"
+            )
 
     @property
     def expected_wheel_count(self) -> int:
@@ -544,6 +649,15 @@ class AxleConfiguration:
             SteeringCalculationProvenance.from_dict(raw_calculation)
             if isinstance(raw_calculation, Mapping) else None
         )
+        raw_layout_override = migrated.get("intentional_layout_override")
+        if raw_layout_override is not None and not isinstance(
+            raw_layout_override, Mapping
+        ):
+            raise ValueError("Intentional axle layout override must be an object")
+        layout_override = (
+            IntentionalAxleLayoutOverride.from_dict(raw_layout_override)
+            if isinstance(raw_layout_override, Mapping) else None
+        )
         if schema_version == LATEST_AXLE_SCHEMA_VERSION and calculation is None:
             raise ValueError("Schema-2 axle configurations require steering calculation evidence")
         return cls(
@@ -562,6 +676,7 @@ class AxleConfiguration:
             compatibility=compatibility,
             handbrake_rear_steering=handbrake_steering,
             steering_calculation=calculation,
+            intentional_layout_override=layout_override,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -588,6 +703,10 @@ class AxleConfiguration:
         if self.schema_version == LATEST_AXLE_SCHEMA_VERSION:
             assert self.steering_calculation is not None
             payload["steering_calculation"] = self.steering_calculation.to_dict()
+        if self.intentional_layout_override is not None:
+            payload["intentional_layout_override"] = (
+                self.intentional_layout_override.to_dict()
+            )
         return payload
 
 
@@ -732,6 +851,7 @@ def migrate_axle_configuration(payload: Mapping[str, Any]) -> dict[str, Any]:
         "modelHash": "model_hash",
         "minimumRuntimeVersion": "minimum_runtime_version",
         "steeringCalculation": "steering_calculation",
+        "intentionalLayoutOverride": "intentional_layout_override",
     }
     for authored, canonical in aliases.items():
         if authored in data and canonical not in data:
@@ -1034,6 +1154,212 @@ def detect_axle_configuration(
     )
 
 
+def apply_intentional_layout_override(
+    config: AxleConfiguration,
+    bones: Iterable[BoneLike],
+    *,
+    physical_bone_pairs: Iterable[tuple[str, str]] | None = None,
+    reason: str = (
+        "Intentional canonical-bone remap for GTA shared wheel-mesh instancing"
+    ),
+) -> AxleConfiguration:
+    """Authorize one exact noncanonical physical layout after skeleton review.
+
+    The override changes physical/logical axle presentation only.  Runtime
+    indices remain derived from canonical bone semantics, and mesh families
+    remain tied to their original GTA templates.  Signed steering evidence is
+    cleared because changing physical roles invalidates its pivot/reference
+    assumptions; authors can recalculate steering against the remapped order.
+    """
+
+    bone_rows = tuple(bones)
+    lookup: dict[str, BoneLike] = {}
+    for bone in bone_rows:
+        name = str(bone.name).strip().casefold()
+        if name in lookup:
+            raise ValueError(f"Canonical wheel bone is duplicated: {name}")
+        if name:
+            lookup[name] = bone
+    by_pair = {
+        (axle.left_bone, axle.right_bone): axle for axle in config.axles
+    }
+    positioned: list[tuple[float, tuple[str, str]]] = []
+    for pair, axle in by_pair.items():
+        try:
+            left, right = lookup[axle.left_bone], lookup[axle.right_bone]
+            forward = (float(left.position[1]) + float(right.position[1])) / 2.0
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Intentional layout override requires positions for {pair[0]}/{pair[1]}"
+            ) from exc
+        if not math.isfinite(forward):
+            raise ValueError("Intentional layout override requires finite wheel positions")
+        positioned.append((forward, pair))
+    if len({position for position, _pair in positioned}) != len(positioned):
+        raise ValueError(
+            "Intentional layout override requires distinct axle-center positions"
+        )
+    if physical_bone_pairs is None:
+        positioned.sort(key=lambda item: item[0], reverse=True)
+        pairs = tuple(pair for _position, pair in positioned)
+    else:
+        pairs = tuple(
+            (
+                _bone_name(left, "Override left wheel bone"),
+                _bone_name(right, "Override right wheel bone"),
+            )
+            for left, right in physical_bone_pairs
+        )
+        if len(pairs) != len(config.axles) or set(pairs) != set(by_pair):
+            raise ValueError(
+                "Intentional layout override must map every configured canonical pair exactly once"
+            )
+    if pairs == tuple(_dense_canonical_pairs(len(config.axles))):
+        raise ValueError(
+            "The skeleton already uses canonical front-to-rear order; no override is needed"
+        )
+    ordered: list[VehicleAxle] = []
+    for index, pair in enumerate(pairs, start=1):
+        role = (
+            "front" if index == 1
+            else "rear" if index == len(pairs)
+            else "middle"
+        )
+        axle = by_pair[pair]
+        ordered.append(replace(
+            axle,
+            physical_order=index,
+            logical_role=role,
+            steering_gain=1.0 if axle.steered else 0.0,
+        ))
+    safe = replace(
+        config,
+        schema_version=AXLE_SCHEMA_VERSION,
+        preset=PRESET_CUSTOM,
+        axles=tuple(ordered),
+        minimum_runtime_version=(
+            INTENTIONAL_LAYOUT_RUNTIME_VERSION
+            if _semantic_version_core(
+                config.minimum_runtime_version, "Minimum axle runtime version",
+            ) < _semantic_version_core(
+                INTENTIONAL_LAYOUT_RUNTIME_VERSION,
+                "Intentional layout runtime version",
+            )
+            else config.minimum_runtime_version
+        ),
+        steering_calculation=None,
+        intentional_layout_override=None,
+    )
+    from .axle_steering_geometry import canonical_bone_position_sha256
+
+    evidence = IntentionalAxleLayoutOverride(
+        mode=INTENTIONAL_LAYOUT_OVERRIDE_MODE,
+        physical_bone_pairs=pairs,
+        bone_position_sha256=canonical_bone_position_sha256(safe, bone_rows),
+        reason=reason,
+    )
+    return replace(safe, intentional_layout_override=evidence)
+
+
+def clear_intentional_layout_override(
+    config: AxleConfiguration,
+) -> AxleConfiguration:
+    """Restore canonical physical order and remove an authored exception."""
+
+    canonical_orders = {
+        pair: order
+        for order, pair in enumerate(
+            _dense_canonical_pairs(len(config.axles)), start=1,
+        )
+    }
+    canonical_roles = {
+        (left, right): role for role, left, right in CANONICAL_WHEEL_PAIRS
+    }
+    restored = tuple(sorted((
+        replace(
+            axle,
+            physical_order=canonical_orders[(axle.left_bone, axle.right_bone)],
+            logical_role=canonical_roles[(axle.left_bone, axle.right_bone)],
+            steering_gain=1.0 if axle.steered else 0.0,
+        )
+        for axle in config.axles
+    ), key=lambda axle: axle.physical_order))
+    return replace(
+        config,
+        schema_version=AXLE_SCHEMA_VERSION,
+        preset=PRESET_CUSTOM,
+        axles=restored,
+        steering_calculation=None,
+        intentional_layout_override=None,
+    )
+
+
+def _validated_intentional_layout_override(
+    config: AxleConfiguration,
+    bones: tuple[BoneLike, ...],
+) -> tuple[bool, tuple[AxleFinding, ...]]:
+    override = config.intentional_layout_override
+    if override is None:
+        return False, ()
+    findings: list[AxleFinding] = []
+    ordered = tuple(
+        (axle.left_bone, axle.right_bone)
+        for axle in sorted(config.axles, key=lambda item: item.physical_order)
+    )
+    valid = True
+    if ordered != override.physical_bone_pairs:
+        valid = False
+        findings.append(AxleFinding(
+            "error", "layout_override_mapping_mismatch",
+            "Intentional layout override no longer matches the configured physical axle order.",
+        ))
+    expected_roles = tuple(
+        "front" if index == 1 else "rear" if index == len(ordered) else "middle"
+        for index in range(1, len(ordered) + 1)
+    )
+    actual_roles = tuple(
+        axle.logical_role
+        for axle in sorted(config.axles, key=lambda item: item.physical_order)
+    )
+    if actual_roles != expected_roles:
+        valid = False
+        findings.append(AxleFinding(
+            "error", "layout_override_role_mismatch",
+            "Intentional layout override requires Front/Middle/Rear roles to follow physical order.",
+        ))
+    if bones:
+        try:
+            from .axle_steering_geometry import canonical_bone_position_sha256
+
+            digest = canonical_bone_position_sha256(config, bones)
+        except (TypeError, ValueError) as exc:
+            valid = False
+            findings.append(AxleFinding(
+                "error", "layout_override_evidence_unavailable",
+                f"Intentional layout evidence cannot be verified: {exc}",
+            ))
+        else:
+            if digest != override.bone_position_sha256:
+                valid = False
+                findings.append(AxleFinding(
+                    "error", "stale_layout_override",
+                    "Canonical wheel-bone positions changed after the intentional layout override was reviewed.",
+                ))
+    else:
+        valid = False
+        findings.append(AxleFinding(
+            "error", "layout_override_evidence_unavailable",
+            "Intentional layout overrides require the reviewed canonical wheel-bone positions.",
+        ))
+    if valid:
+        findings.append(AxleFinding(
+            "info", "intentional_layout_override",
+            "Intentional visual-instancing remap verified: "
+            + " → ".join(f"{left}/{right}" for left, right in ordered),
+        ))
+    return valid, tuple(findings)
+
+
 def apply_axle_preset(config: AxleConfiguration, preset: str) -> AxleConfiguration:
     if preset not in AXLE_PRESETS:
         raise ValueError("Unsupported axle preset")
@@ -1084,6 +1410,10 @@ def validate_axle_configuration(
     findings: list[AxleFinding] = []
     bone_rows = tuple(bones)
     bone_lookup = _bone_map(bone_rows)
+    layout_override_valid, layout_override_findings = (
+        _validated_intentional_layout_override(config, bone_rows)
+    )
+    findings.extend(layout_override_findings)
     calculation = config.steering_calculation
     by_order = {item.physical_order: item for item in config.axles}
     if calculation is not None and calculation.mode == STEERING_CALCULATION_AUTOMATIC:
@@ -1230,6 +1560,12 @@ def validate_axle_configuration(
         canonical = canonical_details.get(pair)
         if canonical is not None:
             expected_role, _canonical_order = canonical
+            if layout_override_valid:
+                expected_role = (
+                    "front" if axle.physical_order == 1
+                    else "rear" if axle.physical_order == len(config.axles)
+                    else "middle"
+                )
             if axle.logical_role != expected_role:
                 findings.append(AxleFinding(
                     "error", "logical_role_semantics",
@@ -1237,7 +1573,11 @@ def validate_axle_configuration(
                     f"{expected_role} logical role.", axle.physical_order,
                 ))
             expected_order = semantic_orders.get(pair)
-            if expected_order is not None and axle.physical_order != expected_order:
+            if (
+                not layout_override_valid
+                and expected_order is not None
+                and axle.physical_order != expected_order
+            ):
                 findings.append(AxleFinding(
                     "error", "physical_order_semantics",
                     f"{axle.left_bone}/{axle.right_bone} must be physical axle "
@@ -1327,7 +1667,7 @@ def validate_axle_configuration(
             for axle in sorted(config.axles, key=lambda item: item.physical_order)
             if (axle.left_bone, axle.right_bone) in position_by_pair
         ]
-        if any(
+        if not layout_override_valid and any(
             leading_position <= trailing_position
             for (_leading_order, leading_position),
             (_trailing_order, trailing_position)
@@ -1341,7 +1681,12 @@ def validate_axle_configuration(
         complete.sort(reverse=True)
         front_position = next((item[0] for item in complete if item[1] == "front"), None)
         rear_position = next((item[0] for item in complete if item[1] == "rear"), None)
-        if rear_position is not None and front_position is not None and rear_position > front_position:
+        if (
+            not layout_override_valid
+            and rear_position is not None
+            and front_position is not None
+            and rear_position > front_position
+        ):
             findings.extend((
                 AxleFinding(
                     "error", "rear_ahead_of_front",
@@ -1352,7 +1697,7 @@ def validate_axle_configuration(
                     "Canonical wheel roles have been spatially reassigned. Restore canonical placement and configure behavior through axle settings.",
                 ),
             ))
-        if complete and complete[0][1] != "front":
+        if not layout_override_valid and complete and complete[0][1] != "front":
             findings.append(AxleFinding(
                 "error", "front_not_forwardmost",
                 "wheel_lf/rf do not appear to be the forwardmost axle.",
@@ -1436,6 +1781,15 @@ def validate_axle_configuration(
             ))
 
     signed_gain = requires_signed_steering_gain(config)
+    if (
+        config.intentional_layout_override is not None
+        and config.export_mode == EXPORT_STOCK_METADATA
+    ):
+        findings.append(AxleFinding(
+            "error", "layout_override_runtime_required",
+            "A custom physical axle order requires the selective runtime; "
+            "stock handling flags still interpret canonical wheel roles.",
+        ))
     if config.export_mode == EXPORT_STOCK_METADATA and signed_gain:
         findings.append(AxleFinding(
             "error", "signed_steering_runtime_required",
@@ -1538,6 +1892,18 @@ def stock_metadata_flags(
             or original_flags < 0:
         raise ValueError("Handling flags must be a non-negative integer")
     ordered = sorted(config.axles, key=lambda item: item.physical_order)
+    if (
+        config.intentional_layout_override is not None
+        and config.export_mode == EXPORT_FIVEM_RUNTIME
+    ):
+        return StockMetadataResult(
+            original_flags,
+            original_flags & ~STEERING_HANDLING_MASK,
+            (
+                "Selective runtime owns steering for the custom physical axle "
+                "order; conflicting global steering flags were cleared.",
+            ),
+        )
     steered = {item.physical_order for item in ordered if item.steered}
     front, rear = ordered[0].physical_order, ordered[-1].physical_order
     target = 0
@@ -1892,7 +2258,8 @@ def write_fivem_resource(
 
 __all__ = [
     "AXLE_PRESETS", "AXLE_SCHEMA_VERSION", "LATEST_AXLE_SCHEMA_VERSION",
-    "SIGNED_STEERING_RUNTIME_VERSION", "STEERING_CALCULATION_AUTOMATIC",
+    "SIGNED_STEERING_RUNTIME_VERSION", "INTENTIONAL_LAYOUT_RUNTIME_VERSION",
+    "STEERING_CALCULATION_AUTOMATIC",
     "STEERING_CALCULATION_MANUAL", "STEERING_GEOMETRY_ALGORITHM_VERSION",
     "CANONICAL_WHEEL_PAIRS",
     "MAXIMUM_AXLE_PAIRS", "MINIMUM_AXLE_PAIRS", "TARGET_CANONICAL_PAIR_ORDER",
@@ -1903,9 +2270,11 @@ __all__ = [
     "PRESET_STANDARD", "PRESET_STEER_DRIVE_REAR", "RUNTIME_REQUIRED_MESSAGE",
     "SHARED_VISUAL_WARNING", "VISUAL_FRONT", "VISUAL_SHARED_MIDDLE_REAR",
     "AxleAddonGeometry", "AxleConfiguration", "AxleFinding",
+    "IntentionalAxleLayoutOverride", "INTENTIONAL_LAYOUT_OVERRIDE_MODE",
     "SteeringCalculationProvenance",
     "RuntimeReapplicationPolicy", "SteeringDiagnostic", "VehicleAxle",
-    "apply_axle_preset", "detect_axle_configuration", "fivem_client_lua",
+    "apply_axle_preset", "apply_intentional_layout_override",
+    "clear_intentional_layout_override", "detect_axle_configuration", "fivem_client_lua",
     "fivem_server_lua", "joaat_hex",
     "format_handling_flags", "migrate_axle_configuration", "parse_handling_flags",
     "requires_signed_steering_gain", "retarget_axle_configuration",

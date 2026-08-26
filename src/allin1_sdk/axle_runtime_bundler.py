@@ -1147,6 +1147,7 @@ def _validated_configuration_findings(
     requires_evidence = (
         vehicle.configuration.schema_version >= 2
         or _requires_signed_steering_gain(vehicle.configuration)
+        or vehicle.configuration.intentional_layout_override is not None
     )
     bones = tuple(vehicle.steering_evidence_bones)
     if requires_evidence and not bones:
@@ -1286,7 +1287,16 @@ def _symbolic_handling(config: AxleConfiguration) -> dict[str, Any]:
     steered = [axle for axle in ordered if axle.steered]
     set_flags: list[str] = []
     clear_flags = ["HF_STEER_REARWHEELS", "HF_HANDBRAKE_REARWHEELSTEER"]
-    if len(steered) == len(ordered) or (
+    if config.intentional_layout_override is not None:
+        # Global rear/all-wheel flags operate on GTA's canonical visual roles
+        # and can rotate a physically remapped wheel by the wrong phase or
+        # angle. The selective runtime owns each verified wheel slot instead.
+        mode = "custom_physical_order"
+        clear_flags = [
+            "HF_STEER_REARWHEELS", "HF_STEER_ALL_WHEELS",
+            "HF_HANDBRAKE_REARWHEELSTEER",
+        ]
+    elif len(steered) == len(ordered) or (
         len(ordered) >= 3
         and ordered[0].steered and ordered[-1].steered
         and any(not axle.steered for axle in ordered[1:-1])
@@ -1403,6 +1413,16 @@ def compatibility_configuration(
                 "positionEpsilon": calculation.position_epsilon,
             })
         payload["steeringCalculation"] = steering_calculation
+    if runtime_config.intentional_layout_override is not None:
+        layout = runtime_config.intentional_layout_override
+        payload["intentionalLayoutOverride"] = {
+            "mode": layout.mode,
+            "physicalBonePairs": [
+                [left, right] for left, right in layout.physical_bone_pairs
+            ],
+            "bonePositionSha256": layout.bone_position_sha256,
+            "reason": layout.reason,
+        }
     return payload
 
 

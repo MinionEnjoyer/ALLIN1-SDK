@@ -9,7 +9,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from xml.sax.saxutils import escape
 
-from allin1_sdk.addon_importer import AddonPackageInspector, PackageScan
+from allin1_sdk.addon_importer import (
+    AddonPackageInspector,
+    PackageScan,
+    package_member_path,
+)
 
 
 @dataclass(frozen=True)
@@ -259,10 +263,10 @@ class RageVehicleDataCompiler:
             kits[item.name.casefold()] = item
             if item.kit_id:
                 kits[item.kit_id.casefold()] = item
-        entries = tuple(item.path for item in scan.entries)
+        entries = tuple(item.path for item in scan.workbench_entries)
         label_assets = tuple(
             path for path in entries
-            if PurePosixPath(path).suffix.casefold() in {".gxt2", ".oxt"}
+            if package_member_path(path).suffix.casefold() in {".gxt2", ".oxt"}
         )
         registration_sources = tuple(item.source for item in scan.registrations)
         counts: dict[str, int] = {}
@@ -282,14 +286,14 @@ class RageVehicleDataCompiler:
             )
             model_assets = tuple(
                 path for path in entries
-                if PurePosixPath(path).suffix.casefold() in {".yft", ".ydd", ".ydr"}
-                and PurePosixPath(path).stem.casefold() in {model_key, f"{model_key}_hi"}
+                if package_member_path(path).suffix.casefold() in {".yft", ".ydd", ".ydr"}
+                and package_member_path(path).stem.casefold() in {model_key, f"{model_key}_hi"}
             )
             txd_key = (vehicle.txd_name or vehicle.model_name).casefold()
             texture_assets = tuple(
                 path for path in entries
-                if PurePosixPath(path).suffix.casefold() == ".ytd"
-                and PurePosixPath(path).stem.casefold() == txd_key
+                if package_member_path(path).suffix.casefold() == ".ytd"
+                and package_member_path(path).stem.casefold() == txd_key
             )
             model_findings: list[VehicleDataFinding] = []
             def add(severity: str, code: str, message: str) -> None:
