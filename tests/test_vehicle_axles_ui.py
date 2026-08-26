@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import tkinter as tk
 from types import SimpleNamespace
 
 from dataclasses import dataclass, replace
 
+import pytest
+
+from allin1_sdk.app import _configure_style
 from allin1_sdk.axle_steering_geometry import (
     AxleSteeringGain,
     SteeringGeometrySolution,
@@ -18,6 +22,7 @@ from allin1_sdk.axle_configurator import (
     detect_axle_configuration,
 )
 from allin1_sdk.vehicle_axles_ui import (
+    VehicleAxlesPanel,
     _edit_axle_controls,
     _format_steering_gain,
     _requires_selective_steering_runtime,
@@ -25,10 +30,27 @@ from allin1_sdk.vehicle_axles_ui import (
 )
 
 
+@pytest.fixture
+def tk_root():
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"Tk display is unavailable: {exc}")
+    root.withdraw()
+    _configure_style(root)
+    try:
+        yield root
+    finally:
+        if root.winfo_exists():
+            root.destroy()
+
+
 @dataclass(frozen=True)
 class Bone:
     name: str
     position: tuple[float, float, float]
+    scale: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    rotation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
 
 
 def _three_axle_bones() -> tuple[Bone, ...]:
@@ -163,3 +185,62 @@ def test_steering_role_edit_preserves_schema_three_support_weights() -> None:
         axle.suspension.support_weight for axle in edited.axles
         if axle.suspension is not None
     ] == [1.10, 0.95, 0.95]
+
+
+def test_panel_load_apply_export_and_clear_lifecycle(tk_root) -> None:
+    applied = []
+    exported = []
+    panel = VehicleAxlesPanel(
+        tk_root,
+        on_apply=applied.append,
+        on_undo=lambda: None,
+        on_redo=lambda: None,
+        on_export=exported.append,
+    )
+    try:
+        assert panel.configuration() is None
+        assert panel.snapshot() == ""
+        assert panel.detect_button.instate(["disabled"])
+
+        bones = _three_axle_bones()
+        panel.load(
+            "fixture_bus",
+            None,
+            bones=bones,
+            editable=True,
+            handling_flags=0,
+            drive_bias_front=0.5,
+        )
+
+        draft = panel.configuration()
+        assert draft is not None
+        assert draft.vehicle_model == "fixture_bus"
+        assert len(panel.tree.get_children()) == 3
+        assert panel.tree.selection() == ("0",)
+        assert panel.target_key() == "story-legacy"
+        assert '"vehicle_model": "fixture_bus"' in panel.snapshot()
+        assert panel.detect_button.instate(["!disabled"])
+
+        panel._apply()
+        panel._export()
+        assert applied == [draft]
+        assert exported == [draft]
+
+        panel._layout_actions(280)
+        assert panel._action_layout == "narrow"
+        assert panel.apply_button.cget("text") == "Apply"
+        panel._layout_actions(500)
+        assert panel._action_layout == "wide"
+        assert panel.apply_button.cget("text") == "Apply + validate"
+        assert panel._scroll_editor(SimpleNamespace(num=4, delta=0)) == "break"
+        assert panel._scroll_editor(SimpleNamespace(num=0, delta=-120)) == "break"
+        assert panel._scroll_editor(SimpleNamespace(num=0, delta=0)) == "break"
+
+        panel.clear()
+        assert panel.configuration() is None
+        assert panel.snapshot() == ""
+        assert not panel.tree.get_children()
+        assert panel.detect_button.instate(["disabled"])
+        assert panel.status.get() == "Select a vehicle to inspect its wheel skeleton."
+    finally:
+        panel.destroy()
