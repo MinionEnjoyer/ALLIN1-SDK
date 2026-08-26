@@ -624,6 +624,19 @@ def test_stage_manifest_target_joaat_and_config_compatibility_are_required(
     with pytest.raises(ValueError, match="runtime schema and mapping"):
         _builder(tmp_path).build(incomplete, tmp_path / "incomplete.oiv")
 
+    schema_one_signed = _vehicle_request(tmp_path / "schema-one-signed")
+    config_path = (
+        schema_one_signed.staging_root
+        / STORY_RUNTIME_NAME / "configs" / "mybus.json"
+    )
+    payload = json.loads(config_path.read_text("utf-8"))
+    payload["axles"][-1]["steeringGain"] = -0.22
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="runtime schema and mapping"):
+        _builder(tmp_path).build(
+            schema_one_signed, tmp_path / "schema-one-signed.oiv",
+        )
+
 
 def test_config_runtime_evidence_and_mapping_must_match_declaration_exactly(
     tmp_path: Path,

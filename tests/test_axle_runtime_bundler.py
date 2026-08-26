@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -12,11 +12,15 @@ from click.testing import CliRunner
 from allin1_sdk.agent_api import execute_request
 from allin1_sdk.axle_configurator import (
     AXLE_SCHEMA_VERSION,
+    LATEST_AXLE_SCHEMA_VERSION,
+    SIGNED_STEERING_RUNTIME_VERSION,
+    STEERING_CALCULATION_MANUAL,
     EXPORT_STOCK_METADATA,
     PRESET_CUSTOM,
     VISUAL_FRONT,
     VISUAL_SHARED_MIDDLE_REAR,
     AxleConfiguration,
+    SteeringCalculationProvenance,
     VehicleAxle,
     joaat_hex,
 )
@@ -47,6 +51,10 @@ from allin1_sdk.axle_runtime_bundler import (
     story_runtime_profile_report,
     target_capabilities,
 )
+from allin1_sdk.axle_steering_geometry import (
+    apply_steering_geometry_to_configuration,
+    solve_automatic_steering_geometry,
+)
 from allin1_sdk.cli import main
 
 
@@ -57,6 +65,26 @@ PAIRS = {
     "middle3": ("middle", "wheel_lm3", "wheel_rm3"),
     "rear": ("rear", "wheel_lr", "wheel_rr"),
 }
+
+
+@dataclass(frozen=True)
+class Bone:
+    name: str
+    position: tuple[float, float, float]
+    rotation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
+    scale: tuple[float, float, float] = (1.0, 1.0, 1.0)
+
+
+def _bones() -> tuple[Bone, ...]:
+    return tuple(
+        Bone(name, (x, y, 0.0))
+        for left, right, y in (
+            ("wheel_lf", "wheel_rf", 8.0),
+            ("wheel_lm1", "wheel_rm1", 0.0),
+            ("wheel_lr", "wheel_rr", -2.0),
+        )
+        for name, x in ((left, -1.25), (right, 1.25))
+    )
 
 
 def _config(
@@ -109,6 +137,23 @@ def _vehicle(
         configuration_id=f"{model}-axles",
         model_hash=model_hash if model_hash is not None else joaat_hex(model),
         asset_source=asset_source,
+    )
+
+
+def _signed_vehicle() -> VehicleAxleBuildInput:
+    vehicle = _vehicle()
+    bones = _bones()
+    solution = solve_automatic_steering_geometry(
+        vehicle.configuration, bones,
+    )
+    configuration = apply_steering_geometry_to_configuration(
+        vehicle.configuration, solution,
+    )
+    return replace(
+        vehicle,
+        configuration=configuration,
+        minimum_runtime_version=configuration.minimum_runtime_version,
+        steering_evidence_bones=bones,
     )
 
 
@@ -294,6 +339,7 @@ def test_four_explicit_capability_targets_are_pending_acceptance() -> None:
         assert capabilities.supports_runtime_wheel_flags is True
         assert capabilities.supports_selective_steering is True
         assert capabilities.supports_selective_drive is True
+        assert capabilities.supports_signed_steering_gain is False
         assert capabilities.minimum_physical_axles == 2
         assert capabilities.maximum_physical_axles == 5
         assert capabilities.acceptance_status == ACCEPTANCE_PENDING
@@ -359,7 +405,11 @@ def test_dual_tyres_remain_cosmetic_and_do_not_change_wheel_count() -> None:
     vehicle = replace(
         _vehicle(), dual_tyre_geometry=("rear_dual_left.ydr", "rear_dual_right.ydr"),
     )
-    payload = compatibility_configuration(vehicle, TARGET_FIVEM_LEGACY)
+    plan = AxleRuntimeBundlePlanner().plan(
+        (vehicle,), targets=(TARGET_FIVEM_LEGACY,),
+    )
+    assert plan.targets[0].status == STATUS_READY
+    payload = plan.targets[0].configurations[0].runtime_payload
     assert payload["expectedWheelCount"] == 6
     assert payload["dualTyresConsumePhysicalSlots"] is False
     assert len(payload["dualTyreGeometry"]) == 2
@@ -380,12 +430,153 @@ def test_more_than_five_axles_is_a_cosmetic_or_future_physics_case() -> None:
 
 def test_six_wheel_fixture_exports_steer_drive_rear_steer_without_index_formula() -> None:
     payload = compatibility_configuration(_vehicle(), TARGET_FIVEM_LEGACY)
+    assert payload["compatibility"] == {TARGET_FIVEM_LEGACY: True}
     assert [axle["wheelIndices"] for axle in payload["axles"]] == [[0, 1], [2, 3], [4, 5]]
     assert [axle["steered"] for axle in payload["axles"]] == [True, False, True]
+    assert all("steeringGain" not in axle for axle in payload["axles"])
+    assert [axle["visualFamily"] for axle in payload["axles"]] == [
+        VISUAL_FRONT, VISUAL_SHARED_MIDDLE_REAR, VISUAL_SHARED_MIDDLE_REAR,
+    ]
     assert [axle["powered"] for axle in payload["axles"]] == [False, True, False]
     assert payload["handling"]["setHandlingFlags"] == ["HF_STEER_ALL_WHEELS"]
     assert "fDriveBiasFront" in payload["handling"]["driveBiasRequirement"]
     assert all("0x08" not in json.dumps(axle) for axle in payload["axles"])
+
+
+def test_story_runtime_payload_declares_only_its_exact_native_target() -> None:
+    payload = compatibility_configuration(_vehicle(), TARGET_STORY_LEGACY)
+    assert payload["compatibility"] == {TARGET_STORY_LEGACY: True}
+
+
+def test_signed_gain_is_encoded_but_unsupported_targets_fail_closed() -> None:
+    vehicle = _vehicle()
+    axles = list(vehicle.configuration.axles)
+    axles[-1] = replace(axles[-1], steering_gain=-0.22)
+    vehicle = replace(
+        vehicle,
+        minimum_runtime_version=SIGNED_STEERING_RUNTIME_VERSION,
+        configuration=replace(
+            vehicle.configuration,
+            schema_version=LATEST_AXLE_SCHEMA_VERSION,
+            minimum_runtime_version=SIGNED_STEERING_RUNTIME_VERSION,
+            axles=tuple(axles),
+            steering_calculation=SteeringCalculationProvenance(
+                mode=STEERING_CALCULATION_MANUAL,
+                bone_position_sha256="0" * 64,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="signed steering-gain accessor"):
+        compatibility_configuration(vehicle, TARGET_FIVEM_LEGACY)
+    plan = AxleRuntimeBundlePlanner().plan(
+        (vehicle,), targets=(TARGET_FIVEM_LEGACY,),
+    )
+    assert plan.targets[0].status == STATUS_OMITTED
+    assert any(
+        "counter-steer or scaled steering was not packaged" in reason
+        for reason in plan.targets[0].reasons
+    )
+
+
+def test_validated_signed_target_emits_schema_two_evidence(monkeypatch) -> None:
+    vehicle = _signed_vehicle()
+    monkeypatch.setitem(
+        TARGET_CAPABILITIES,
+        TARGET_FIVEM_LEGACY,
+        replace(
+            TARGET_CAPABILITIES[TARGET_FIVEM_LEGACY],
+            maximum_axle_schema=2,
+            supports_signed_steering_gain=True,
+            runtime_implementation_version="2.0.0",
+        ),
+    )
+
+    plan = AxleRuntimeBundlePlanner().plan(
+        (vehicle,), targets=(TARGET_FIVEM_LEGACY,),
+    )
+    assert plan.targets[0].status == STATUS_READY
+    payload = plan.targets[0].configurations[0].runtime_payload
+
+    assert payload["schemaVersion"] == 2
+    assert payload["minimumRuntimeVersion"] == "2.0.0"
+    assert [item["steeringGain"] for item in payload["axles"]] == pytest.approx([
+        axle.steering_gain for axle in vehicle.configuration.axles
+    ])
+    assert payload["steeringCalculation"]["mode"] == "automaticGeometry"
+    assert payload["steeringCalculation"]["bonePositionSha256"] == (
+        vehicle.configuration.steering_calculation.bone_position_sha256
+    )
+    assert payload["steeringCalculation"]["pairPositionTolerance"] == 0.25
+    assert payload["steeringCalculation"]["positionEpsilon"] == 0.0001
+
+
+def test_signed_target_rejects_missing_skeleton_evidence(monkeypatch) -> None:
+    vehicle = replace(_signed_vehicle(), steering_evidence_bones=())
+    monkeypatch.setitem(
+        TARGET_CAPABILITIES,
+        TARGET_FIVEM_LEGACY,
+        replace(
+            TARGET_CAPABILITIES[TARGET_FIVEM_LEGACY],
+            maximum_axle_schema=2,
+            supports_signed_steering_gain=True,
+            runtime_implementation_version="2.0.0",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="skeleton-bone evidence"):
+        compatibility_configuration(vehicle, TARGET_FIVEM_LEGACY)
+
+
+def test_signed_target_rejects_forged_geometry_digest(monkeypatch) -> None:
+    vehicle = _signed_vehicle()
+    calculation = vehicle.configuration.steering_calculation
+    assert calculation is not None
+    vehicle = replace(
+        vehicle,
+        configuration=replace(
+            vehicle.configuration,
+            steering_calculation=replace(
+                calculation, bone_position_sha256="0" * 64,
+            ),
+        ),
+    )
+    monkeypatch.setitem(
+        TARGET_CAPABILITIES,
+        TARGET_FIVEM_LEGACY,
+        replace(
+            TARGET_CAPABILITIES[TARGET_FIVEM_LEGACY],
+            maximum_axle_schema=2,
+            supports_signed_steering_gain=True,
+            runtime_implementation_version="2.0.0",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="positions changed"):
+        compatibility_configuration(vehicle, TARGET_FIVEM_LEGACY)
+    plan = AxleRuntimeBundlePlanner().plan(
+        (vehicle,), targets=(TARGET_FIVEM_LEGACY,),
+    )
+    assert plan.targets[0].status == STATUS_OMITTED
+    assert any("positions changed" in reason for reason in plan.targets[0].reasons)
+
+
+def test_build_input_cannot_lower_authored_minimum_runtime() -> None:
+    vehicle = _vehicle()
+    vehicle = replace(
+        vehicle,
+        configuration=replace(
+            vehicle.configuration, minimum_runtime_version="2.0.0",
+        ),
+        minimum_runtime_version="1.0.0",
+    )
+    with pytest.raises(ValueError, match="cannot lower the authored"):
+        compatibility_configuration(vehicle, TARGET_FIVEM_LEGACY)
+
+
+def test_build_input_cannot_emit_native_incompatible_version_suffix() -> None:
+    vehicle = replace(_vehicle(), minimum_runtime_version="2.0.0-alpha")
+    with pytest.raises(ValueError, match="exact major.minor.patch"):
+        compatibility_configuration(vehicle, TARGET_FIVEM_LEGACY)
 
 
 def test_duplicate_model_hashes_fail_planning() -> None:

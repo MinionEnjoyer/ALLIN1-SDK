@@ -12,14 +12,17 @@ import re
 import tkinter as tk
 from dataclasses import replace
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Callable, Iterable
 
 from allin1_sdk.axle_configurator import (
+    AXLE_SCHEMA_VERSION,
     AXLE_PRESETS,
     EXPORT_FIVEM_RUNTIME,
     EXPORT_STOCK_METADATA,
     PRESET_CUSTOM,
+    STEERING_GAIN_EPSILON,
+    AxleFinding,
     AxleConfiguration,
     VehicleAxle,
     apply_axle_preset,
@@ -27,6 +30,13 @@ from allin1_sdk.axle_configurator import (
     retarget_axle_configuration,
     stock_metadata_flags,
     validate_axle_configuration,
+)
+from allin1_sdk.axle_steering_geometry import (
+    SteeringGeometryError,
+    SteeringGeometryRequest,
+    SteeringGeometrySolution,
+    apply_steering_geometry_to_configuration,
+    solve_automatic_steering_geometry,
 )
 from allin1_sdk.native_assets import NativeModelBone, NativeModelScene
 from allin1_sdk.ui_foundation import BODY_BACKGROUND
@@ -43,6 +53,98 @@ EXPORT_LABELS = {
     "Stock metadata": EXPORT_STOCK_METADATA,
     "Selective runtime": EXPORT_FIVEM_RUNTIME,
 }
+
+
+def _format_steering_gain(gain: float) -> str:
+    """Return the compact signed form used by the resolved-axle table."""
+
+    value = float(gain)
+    return "0.00" if abs(value) < 0.0005 else f"{value:+.2f}"
+
+
+def _steering_solution_summary(solution: SteeringGeometrySolution) -> str:
+    """Summarize one geometry proposal without obscuring the axle editor."""
+
+    source = {
+        "explicit": "manual pivot",
+        "selected_fixed_axles": "selected fixed axle",
+        "derived_fixed_axles": "fixed axle",
+    }.get(solution.pivot_source, solution.pivot_source.replace("_", " "))
+    gains = " · ".join(
+        f"A{item.physical_order} {_format_steering_gain(item.steering_gain)}"
+        for item in solution.axles
+    )
+    return (
+        f"Pivot Y {solution.pivot_longitudinal_position:.3f} ({source}) · "
+        f"{gains}"
+    )
+
+
+def _current_gain_summary(config: AxleConfiguration) -> str:
+    gains = " · ".join(
+        f"A{axle.physical_order} {_format_steering_gain(axle.steering_gain)}"
+        for axle in config.axles
+    )
+    return f"Current steering gains · {gains}"
+
+
+def _requires_selective_steering_runtime(config: AxleConfiguration) -> bool:
+    """Return whether signed/scaled gains exceed legacy boolean steering."""
+
+    return any(
+        abs(float(axle.steering_gain) - (1.0 if axle.steered else 0.0))
+        > STEERING_GAIN_EPSILON
+        for axle in config.axles
+    )
+
+
+def _edit_axle_controls(
+    config: AxleConfiguration,
+    index: int,
+    *,
+    steered: bool,
+    powered: bool,
+    service_brake: bool,
+    handbrake: bool,
+) -> tuple[AxleConfiguration, bool]:
+    """Apply one editor row and invalidate geometry only when its role changes.
+
+    Automatic steering evidence describes a specific set of steered/fixed
+    axles.  Changing that set makes the old pivot/reference evidence stale, so
+    the draft returns to safe schema-1 boolean steering until the author runs
+    Calculate steering again.  Drive and brake edits do not affect steering
+    geometry and therefore preserve signed gains and their evidence.
+    """
+
+    rows = list(config.axles)
+    if not 0 <= index < len(rows):
+        raise IndexError("Axle editor row is outside the configured axle array")
+    steering_changed = bool(steered) != rows[index].steered
+    rows[index] = replace(
+        rows[index],
+        steered=bool(steered),
+        steering_gain=(1.0 if steered else 0.0)
+        if steering_changed else rows[index].steering_gain,
+        powered=bool(powered),
+        service_brake=bool(service_brake),
+        handbrake=bool(handbrake),
+    )
+    if steering_changed:
+        rows = [
+            replace(row, steering_gain=1.0 if row.steered else 0.0)
+            for row in rows
+        ]
+        return (
+            replace(
+                config,
+                schema_version=AXLE_SCHEMA_VERSION,
+                preset=PRESET_CUSTOM,
+                axles=tuple(rows),
+                steering_calculation=None,
+            ),
+            True,
+        )
+    return replace(config, preset=PRESET_CUSTOM, axles=tuple(rows)), False
 
 
 class VehicleAxlesPanel(ttk.Frame):
@@ -68,6 +170,7 @@ class VehicleAxlesPanel(ttk.Frame):
         self._handling_flags: int | None = None
         self._drive_bias_front: float | None = None
         self._draft: AxleConfiguration | None = None
+        self._steering_solution: SteeringGeometrySolution | None = None
         self._preview_findings = ()
         self._preview_blocked = False
         self._editable = False
@@ -217,18 +320,21 @@ class VehicleAxlesPanel(ttk.Frame):
         )
         self.axle_section.pack(fill="x", pady=(7, 0))
         table = self.axle_section
-        columns = ("order", "role", "bones", "steer", "drive", "brakes", "family", "indices")
+        columns = (
+            "order", "role", "bones", "steer", "gain", "drive", "brakes",
+            "family", "indices",
+        )
         self.tree = ttk.Treeview(
             table, columns=columns, show="headings", selectmode="browse", height=5,
         )
         headings = {
             "order": "#", "role": "Role", "bones": "Canonical bones",
-            "steer": "Steer", "drive": "Drive", "brakes": "S/H",
+            "steer": "Steer", "gain": "Gain", "drive": "Drive", "brakes": "S/H",
             "family": "Visual family", "indices": "Runtime slots",
         }
         widths = {
             "order": 30, "role": 54, "bones": 148, "steer": 45, "drive": 45,
-            "brakes": 48, "family": 112, "indices": 78,
+            "gain": 52, "brakes": 48, "family": 112, "indices": 78,
         }
         for key in columns:
             self.tree.heading(key, text=headings[key])
@@ -282,6 +388,25 @@ class VehicleAxlesPanel(ttk.Frame):
         )
         self._wrap_labels.append(brake_note)
 
+        self.geometry_summary = tk.StringVar(
+            value="Uses wheel-bone Y only; tyre appearance stays independent."
+        )
+        geometry_bar = ttk.Frame(table)
+        geometry_bar.grid(
+            row=4, column=0, columnspan=2, sticky="ew", pady=(5, 0),
+        )
+        geometry_bar.columnconfigure(1, weight=1)
+        self.geometry_button = ttk.Button(
+            geometry_bar, text="Calculate steering", command=self._calculate_steering,
+        )
+        self.geometry_button.grid(row=0, column=0, sticky="w", padx=(0, 7))
+        self.geometry_label = ttk.Label(
+            geometry_bar, textvariable=self.geometry_summary, foreground="#52635c",
+            wraplength=400, justify="left",
+        )
+        self.geometry_label.grid(row=0, column=1, sticky="ew")
+        self._wrap_labels.append(self.geometry_label)
+
         self.handling_preview = tk.StringVar(
             value="Handling preview becomes available after metadata is linked."
         )
@@ -290,7 +415,7 @@ class VehicleAxlesPanel(ttk.Frame):
             wraplength=400, justify="left",
         )
         handling_label.grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(4, 0),
+            row=5, column=0, columnspan=2, sticky="w", pady=(4, 0),
         )
         self._wrap_labels.append(handling_label)
 
@@ -387,6 +512,7 @@ class VehicleAxlesPanel(ttk.Frame):
             label.configure(
                 wraplength=0 if label is self.status_label and width < 300 else wrap,
             )
+        self.geometry_label.configure(wraplength=max(90, int(width) - 190))
         self._refresh_status_display(width)
 
     def _status_changed(self, *_args: object) -> None:
@@ -623,6 +749,7 @@ class VehicleAxlesPanel(ttk.Frame):
         self._drive_bias_front = drive_bias_front
         self._editable = editable
         self._draft = config
+        self._steering_solution = None
         if config is not None:
             enabled_targets = [
                 target for target, enabled in config.compatibility if enabled
@@ -643,17 +770,23 @@ class VehicleAxlesPanel(ttk.Frame):
 
     def set_scene(self, scene: NativeModelScene | None) -> None:
         self._bones = tuple(scene.bones) if scene is not None else ()
+        self._steering_solution = None
         if self._model and self._draft is None and self._bones:
             self._detect()
         else:
-            self._validate()
+            self._sync_from_draft()
+            self._set_enabled(bool(self._draft), editable=self._editable)
 
     def clear(self) -> None:
         self._model = ""
         self._bones = ()
         self._draft = None
+        self._steering_solution = None
         self.tree.delete(*self.tree.get_children())
         self.finding_tree.delete(*self.finding_tree.get_children())
+        self.geometry_summary.set(
+            "Uses wheel-bone Y only; tyre appearance stays independent."
+        )
         self.status.set("Select a vehicle to inspect its wheel skeleton.")
         self._set_enabled(False)
 
@@ -677,12 +810,16 @@ class VehicleAxlesPanel(ttk.Frame):
         self.visual_axle_combo.configure(state=readonly)
         for widget in (
             self.preset_button, self.prefab_button, self.visual_button,
+            self.geometry_button,
             self.apply_button, *self.row_controls,
         ):
             widget.configure(state=state)
         for widget in self._unsupported_brake_controls:
             widget.configure(state="disabled")
         self.detect_button.configure(state="normal" if self._bones else "disabled")
+        self.geometry_button.configure(
+            state="normal" if available and editable and self._bones else "disabled"
+        )
         self.undo_button.configure(state="normal" if editable else "disabled")
         self.redo_button.configure(state="normal" if editable else "disabled")
         self.export_button.configure(state="disabled")
@@ -709,6 +846,7 @@ class VehicleAxlesPanel(ttk.Frame):
             return
         self._preview_findings = ()
         self._preview_blocked = False
+        self._steering_solution = None
         self._sync_from_draft()
         self._set_enabled(True, editable=self._editable)
 
@@ -735,8 +873,73 @@ class VehicleAxlesPanel(ttk.Frame):
             return
         self._preview_findings = ()
         self._preview_blocked = False
+        self._steering_solution = None
         self._sync_from_draft()
         self.status.set("Preset previewed. Review mappings and validation, then apply.")
+
+    def _calculate_steering(self) -> None:
+        """Preview geometry-derived, signed gains without changing tyre visuals."""
+
+        if self._draft is None or not self._bones:
+            self.status.set(
+                "Load a native vehicle skeleton before calculating steering."
+            )
+            return
+
+        request = SteeringGeometryRequest()
+        if self._draft.axles and all(axle.steered for axle in self._draft.axles):
+            pivot = simpledialog.askfloat(
+                "Neutral steering pivot",
+                "All physical axles steer, so a neutral pivot cannot be inferred.\n\n"
+                "Enter the vehicle-local Y coordinate (the same coordinate system "
+                "as the wheel bones):",
+                parent=self,
+            )
+            if pivot is None:
+                self.status.set(
+                    "Steering calculation cancelled; no axle gains were changed."
+                )
+                return
+            request = SteeringGeometryRequest(
+                pivot_longitudinal_position=float(pivot)
+            )
+
+        try:
+            solution = solve_automatic_steering_geometry(
+                self._draft, self._bones, request,
+            )
+            proposed = apply_steering_geometry_to_configuration(
+                self._draft, solution,
+            )
+        except SteeringGeometryError as exc:
+            messagebox.showerror(
+                "Steering cannot be calculated", str(exc), parent=self,
+            )
+            self.status.set(f"Steering calculation rejected: {exc}")
+            return
+
+        needs_runtime = _requires_selective_steering_runtime(proposed)
+        self._draft = replace(
+            proposed,
+            preset=PRESET_CUSTOM,
+            export_mode=(EXPORT_FIVEM_RUNTIME if needs_runtime else proposed.export_mode),
+        )
+        self._steering_solution = solution
+        self._preview_findings = ()
+        self._preview_blocked = False
+        self.preset.set(PRESET_CUSTOM)
+        if needs_runtime:
+            self.export_mode.set("Selective runtime")
+        self._sync_from_draft()
+        self.status.set(
+            "Longest steering lever arm normalized to 100%. "
+            + (
+                "Selective runtime selected for signed/scaled gains; target "
+                "validation remains fail-closed."
+                if needs_runtime
+                else "Review the calculated gains, then apply."
+            )
+        )
 
     def _preview_prefab(self) -> None:
         prefab_id = self._prefab_ids.get(self.prefab.get())
@@ -753,6 +956,7 @@ class VehicleAxlesPanel(ttk.Frame):
             self._draft = preview.proposed
             self._preview_findings = preview.findings
             self._preview_blocked = not preview.can_apply
+            self._steering_solution = None
             if preview.handling_flags_before is not None:
                 self.handling_preview.set(
                     "Handling flags preview: "
@@ -817,16 +1021,24 @@ class VehicleAxlesPanel(ttk.Frame):
         if not selected or self._draft is None:
             return
         index = int(selected[0])
-        rows = list(self._draft.axles)
-        rows[index] = replace(
-            rows[index], steered=self.row_steered.get(), powered=self.row_powered.get(),
-            service_brake=self.row_service.get(), handbrake=self.row_handbrake.get(),
+        self._draft, steering_changed = _edit_axle_controls(
+            self._draft,
+            index,
+            steered=self.row_steered.get(),
+            powered=self.row_powered.get(),
+            service_brake=self.row_service.get(),
+            handbrake=self.row_handbrake.get(),
         )
-        self._draft = replace(self._draft, preset=PRESET_CUSTOM, axles=tuple(rows))
         self._preview_findings = ()
         self._preview_blocked = False
+        self._steering_solution = None
         self.preset.set(PRESET_CUSTOM)
         self._sync_from_draft(select=index)
+        if steering_changed:
+            self.geometry_summary.set(
+                _current_gain_summary(self._draft)
+                + " · role changed; calculate steering again"
+            )
 
     def _sync_from_draft(self, *, select: int | None = None) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -845,11 +1057,17 @@ class VehicleAxlesPanel(ttk.Frame):
                 axle.logical_role.title(),
                 f"{axle.left_bone} / {axle.right_bone}",
                 "Yes" if axle.steered else "No",
+                _format_steering_gain(axle.steering_gain),
                 "Yes" if axle.powered else "No",
                 f"{'Y' if axle.service_brake else '–'}/{'Y' if axle.handbrake else '–'}",
                 axle.visual_family.replace("_", " "),
                 f"{axle.left_runtime_index}, {axle.right_runtime_index}",
             ))
+        self.geometry_summary.set(
+            _steering_solution_summary(self._steering_solution)
+            if self._steering_solution is not None
+            else _current_gain_summary(self._draft)
+        )
         if self._draft.axles:
             axle_choices = (
                 "All applicable",
@@ -872,6 +1090,22 @@ class VehicleAxlesPanel(ttk.Frame):
             self._draft, self._bones, handling_flags=self._handling_flags,
             asset_names=self._asset_names, target=self._target_key(),
         ))
+        deployment_blocked = False
+        if _requires_selective_steering_runtime(self._draft):
+            try:
+                from allin1_sdk.axle_runtime_bundler import target_capabilities
+
+                capability = target_capabilities(self._target_key())
+                deployment_blocked = not capability.supports_signed_steering_gain
+            except (KeyError, TypeError, ValueError):
+                deployment_blocked = True
+            if deployment_blocked:
+                findings.append(AxleFinding(
+                    "warning",
+                    "signed_steering_target_unavailable",
+                    "Signed steering is saved as authoring data, but this target "
+                    "has no validated steering-gain accessor and cannot be exported yet.",
+                ))
         existing = {(item.severity, item.code, item.message) for item in findings}
         findings.extend(
             item for item in self._preview_findings
@@ -884,7 +1118,7 @@ class VehicleAxlesPanel(ttk.Frame):
             )
         errors = sum(item.severity == "error" for item in findings)
         warnings = sum(item.severity == "warning" for item in findings)
-        runtime = "runtime required" if any(
+        runtime = "authoring only; target runtime unavailable" if deployment_blocked else "runtime required" if any(
             item.code.endswith("runtime_required") for item in findings
         ) else "stock-compatible pattern"
         self.status.set(
@@ -898,9 +1132,9 @@ class VehicleAxlesPanel(ttk.Frame):
                 else "disabled"
             )
         )
-        export_state = (
-            "normal" if not errors and not self._preview_blocked else "disabled"
-        )
+        export_state = "normal" if (
+            not errors and not self._preview_blocked and not deployment_blocked
+        ) else "disabled"
         self.export_button.configure(state=export_state)
         self.more_menu.entryconfigure("Export…", state=export_state)
         self.more_button.configure(

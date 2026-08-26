@@ -80,6 +80,7 @@ def test_catalog_is_structured_and_classifies_risk():
         assert catalog[command]["risk"] == "authoring_write"
     assert catalog["open-vehicle-workbench"]["risk"] == "read_only"
     assert catalog["open-axle-configurator"]["risk"] == "read_only"
+    assert catalog["preview-axle-steering"]["risk"] == "read_only"
     assert catalog["open-model-material-workbench"]["risk"] == "read_only"
     assert catalog["open-package-graph"]["risk"] == "authoring_write"
     assert catalog["import-package-graph"]["risk"] == "authoring_write"

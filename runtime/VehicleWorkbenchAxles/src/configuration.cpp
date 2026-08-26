@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -113,6 +114,23 @@ bool RuntimeSatisfies(const std::string& runtime,
            *runtime_version >= *minimum_version;
 }
 
+bool IsSha256(const std::string& value) {
+    return value.size() == 64U && std::all_of(
+        value.begin(), value.end(), [](unsigned char character) {
+            return std::isxdigit(character) != 0;
+        });
+}
+
+double EffectiveSteeringGain(const AxleDefinition& axle) noexcept {
+    return axle.steering_gain.value_or(axle.steered ? 1.0 : 0.0);
+}
+
+bool IsLegacySteeringGain(const AxleDefinition& axle) noexcept {
+    const double legacy = axle.steered ? 1.0 : 0.0;
+    return std::abs(EffectiveSteeringGain(axle) - legacy) <=
+           kSteeringGainEpsilon;
+}
+
 bool IsRelativeSafePath(const std::string& value) {
     if (value.empty()) return false;
     const std::filesystem::path path(value);
@@ -169,9 +187,10 @@ ValidateConfiguration(const AxleConfiguration& configuration,
                       const std::string& runtime_version,
                       const std::string& source_name) {
     std::vector<ValidationIssue> issues;
-    if (configuration.schema_version != kAxleSchemaVersion) {
+    if (configuration.schema_version < kLegacyAxleSchemaVersion ||
+        configuration.schema_version > kAxleSchemaVersion) {
         AddIssue(issues, "unsupported-schema",
-                 "Configuration schema is newer or older than runtime schema 1",
+                 "Configuration schema is outside the supported 1-2 range",
                  source_name);
     }
     if (configuration.configuration_id.empty() ||
@@ -197,6 +216,19 @@ ValidateConfiguration(const AxleConfiguration& configuration,
         AddIssue(issues, "runtime-too-old",
                  "Configuration requires runtime " +
                      configuration.minimum_runtime_version + " or newer",
+                 source_name);
+    }
+    if (configuration.schema_version == kAxleSchemaVersion &&
+        !RuntimeSatisfies(configuration.minimum_runtime_version,
+                          kSignedSteeringMinimumRuntime)) {
+        AddIssue(issues, "signed-runtime-version-too-old",
+                 "Schema 2 requires minimumRuntimeVersion 2.0.0 or newer",
+                 source_name);
+    }
+    if (!configuration.story_legacy && !configuration.story_enhanced) {
+        AddIssue(issues, "no-story-compatibility",
+                 "compatibility must explicitly enable storyLegacy, "
+                 "storyEnhanced, story-legacy, or story-enhanced",
                  source_name);
     }
 
@@ -230,7 +262,32 @@ ValidateConfiguration(const AxleConfiguration& configuration,
             AddIssue(issues, "invalid-canonical-pair",
                      "Axle " + std::to_string(position + 1) +
                          " is not a canonical left/right GTA wheel-bone pair",
+                         source_name);
+        }
+        const double steering_gain = EffectiveSteeringGain(axle);
+        if (!std::isfinite(steering_gain) ||
+            steering_gain < kMinimumSteeringGain ||
+            steering_gain > kMaximumSteeringGain) {
+            AddIssue(issues, "invalid-steering-gain",
+                     "Axle " + std::to_string(position + 1) +
+                         " steeringGain must be finite and between -1 and 1",
                      source_name);
+        } else if (!axle.steered &&
+                   std::abs(steering_gain) > kSteeringGainEpsilon) {
+            AddIssue(issues, "nonsteered-axle-gain",
+                     "Axle " + std::to_string(position + 1) +
+                         " must use steeringGain 0 when steered is false",
+                     source_name);
+        }
+        if (configuration.schema_version == kLegacyAxleSchemaVersion &&
+            !IsLegacySteeringGain(axle)) {
+            AddIssue(issues, "schema-1-signed-steering-gain",
+                     "Schema 1 permits legacy +1/0 steering only", source_name);
+        }
+        if (configuration.schema_version == kAxleSchemaVersion &&
+            !axle.steering_gain.has_value()) {
+            AddIssue(issues, "schema-2-missing-steering-gain",
+                     "Schema 2 requires steeringGain on every axle", source_name);
         }
         const bool valid_role = axle.role == "front" || axle.role == "middle" ||
                                 axle.role == "rear" || axle.role == "tag";
@@ -267,6 +324,110 @@ ValidateConfiguration(const AxleConfiguration& configuration,
         }
         configured_bones.insert(axle.left_bone);
         configured_bones.insert(axle.right_bone);
+    }
+
+    const bool has_nonlegacy_gain = std::any_of(
+        configuration.axles.begin(), configuration.axles.end(),
+        [](const AxleDefinition& axle) { return !IsLegacySteeringGain(axle); });
+    if (configuration.schema_version == kLegacyAxleSchemaVersion &&
+        configuration.steering_calculation.has_value()) {
+        AddIssue(issues, "schema-1-steering-evidence",
+                 "Schema 1 cannot contain steeringCalculation evidence",
+                 source_name);
+    }
+    if (configuration.schema_version == kAxleSchemaVersion) {
+        if (!has_nonlegacy_gain) {
+            AddIssue(issues, "schema-2-legacy-steering",
+                     "Schema 2 is reserved for signed or scaled steering",
+                     source_name);
+        }
+        if (!configuration.steering_calculation.has_value()) {
+            AddIssue(issues, "schema-2-missing-steering-evidence",
+                     "Schema 2 requires steeringCalculation evidence",
+                     source_name);
+        } else {
+            const auto& evidence = *configuration.steering_calculation;
+            if (evidence.mode != "automaticGeometry" &&
+                evidence.mode != "manual") {
+                AddIssue(issues, "invalid-steering-evidence-mode",
+                         "steeringCalculation mode must be automaticGeometry or manual",
+                         source_name);
+            }
+            if (evidence.algorithm_version != 1U) {
+                AddIssue(issues, "invalid-steering-algorithm",
+                         "steeringCalculation algorithmVersion must be 1",
+                         source_name);
+            }
+            if (!IsSha256(evidence.bone_position_sha256)) {
+                AddIssue(issues, "invalid-steering-evidence-digest",
+                         "steeringCalculation bonePositionSha256 is invalid",
+                         source_name);
+            }
+            if (evidence.mode == "manual") {
+                if (evidence.pivot_longitudinal_position.has_value() ||
+                    !evidence.pivot_source.empty() ||
+                    !evidence.pivot_axle_orders.empty() ||
+                    evidence.reference_axle_order.has_value() ||
+                    evidence.reference_lock_degrees.has_value() ||
+                    evidence.pair_position_tolerance.has_value() ||
+                    evidence.position_epsilon.has_value()) {
+                    AddIssue(issues, "manual-steering-evidence-fields",
+                             "Manual steering evidence cannot contain automatic geometry fields",
+                             source_name);
+                }
+            } else if (evidence.mode == "automaticGeometry") {
+                const bool automatic_fields =
+                    evidence.pivot_longitudinal_position.has_value() &&
+                    evidence.reference_axle_order.has_value() &&
+                    evidence.reference_lock_degrees.has_value() &&
+                    evidence.pair_position_tolerance.has_value() &&
+                    evidence.position_epsilon.has_value() &&
+                    std::isfinite(*evidence.pivot_longitudinal_position) &&
+                    std::isfinite(*evidence.reference_lock_degrees) &&
+                    std::isfinite(*evidence.pair_position_tolerance) &&
+                    std::isfinite(*evidence.position_epsilon) &&
+                    *evidence.reference_lock_degrees >= 1.0 &&
+                    *evidence.reference_lock_degrees <= 80.0 &&
+                    *evidence.pair_position_tolerance > 0.0 &&
+                    *evidence.position_epsilon > 0.0;
+                if (!automatic_fields) {
+                    AddIssue(issues, "incomplete-automatic-steering-evidence",
+                             "Automatic steering evidence requires finite pivot, reference, lock, pairPositionTolerance, and positionEpsilon fields",
+                             source_name);
+                }
+                if (evidence.reference_axle_order.has_value() &&
+                    (*evidence.reference_axle_order >= configuration.axles.size() ||
+                     !configuration.axles[*evidence.reference_axle_order].steered)) {
+                    AddIssue(issues, "invalid-steering-reference-axle",
+                             "Automatic steering reference axle must exist and remain steered",
+                             source_name);
+                }
+                const bool explicit_pivot = evidence.pivot_source == "explicit";
+                const bool fixed_pivot =
+                    evidence.pivot_source == "selected_fixed_axles" ||
+                    evidence.pivot_source == "derived_fixed_axles";
+                if (!explicit_pivot && !fixed_pivot) {
+                    AddIssue(issues, "invalid-steering-pivot-source",
+                             "Automatic steering pivotSource is invalid", source_name);
+                }
+                if ((explicit_pivot && !evidence.pivot_axle_orders.empty()) ||
+                    (fixed_pivot && evidence.pivot_axle_orders.empty())) {
+                    AddIssue(issues, "invalid-steering-pivot-selection",
+                             "Automatic steering pivot axle selection conflicts with pivotSource",
+                             source_name);
+                }
+                std::set<std::uint32_t> pivot_orders;
+                for (const auto order : evidence.pivot_axle_orders) {
+                    if (!pivot_orders.insert(order).second ||
+                        order >= configuration.axles.size() ||
+                        configuration.axles[order].steered) {
+                        AddIssue(issues, "invalid-steering-pivot-axle",
+                                 "Automatic steering pivot axles must be unique, existing fixed axles",
+                                 source_name);
+                    }
+                }
+            }
+        }
     }
 
     if (configuration.wheel_index_map.size() != configured_bones.size()) {
@@ -325,7 +486,9 @@ ParseConfigurationJson(const std::string& json_text,
             return std::nullopt;
         }
         const bool migrate_v0 = serialized_schema == 0;
-        result.schema_version = kAxleSchemaVersion;
+        result.schema_version = migrate_v0
+                                    ? kLegacyAxleSchemaVersion
+                                    : serialized_schema;
         result.configuration_id = RequiredString(root, "configurationId");
         result.model_name = RequiredString(root, "modelName");
         result.model_hash = ParseHash(Required(root, "modelHash"));
@@ -364,6 +527,9 @@ ParseConfigurationJson(const std::string& json_text,
             axle.right_bone = RequiredString(value, "rightBone");
             axle.steered = RequiredBool(value, "steered");
             axle.powered = RequiredBool(value, "powered");
+            if (const auto* gain = value.Find("steeringGain")) {
+                axle.steering_gain = gain->AsNumber();
+            }
             if (const auto* indices_value = value.Find("wheelIndices")) {
                 const auto& indices = indices_value->AsArray();
                 if (indices.size() != 2) {
@@ -394,6 +560,47 @@ ParseConfigurationJson(const std::string& json_text,
             result.axles.push_back(std::move(axle));
         }
 
+        if (const auto* calculation = root.Find("steeringCalculation")) {
+            calculation->AsObject();
+            SteeringCalculationEvidence evidence;
+            evidence.mode = RequiredString(*calculation, "mode");
+            evidence.algorithm_version = RequiredUInt32(
+                *calculation, "algorithmVersion");
+            evidence.bone_position_sha256 = RequiredString(
+                *calculation, "bonePositionSha256");
+            if (const auto* pivot =
+                    calculation->Find("pivotLongitudinalPosition")) {
+                evidence.pivot_longitudinal_position = pivot->AsNumber();
+            }
+            if (const auto* source = calculation->Find("pivotSource")) {
+                evidence.pivot_source = source->AsString();
+            }
+            if (const auto* orders = calculation->Find("pivotAxleOrders")) {
+                for (const auto& order : orders->AsArray()) {
+                    evidence.pivot_axle_orders.push_back(
+                        NumberToUInt32(order, "pivotAxleOrders"));
+                }
+            }
+            if (const auto* reference =
+                    calculation->Find("referenceAxleOrder")) {
+                evidence.reference_axle_order = NumberToUInt32(
+                    *reference, "referenceAxleOrder");
+            }
+            if (const auto* lock =
+                    calculation->Find("referenceLockDegrees")) {
+                evidence.reference_lock_degrees = lock->AsNumber();
+            }
+            if (const auto* tolerance =
+                    calculation->Find("pairPositionTolerance")) {
+                evidence.pair_position_tolerance = tolerance->AsNumber();
+            }
+            if (const auto* epsilon =
+                    calculation->Find("positionEpsilon")) {
+                evidence.position_epsilon = epsilon->AsNumber();
+            }
+            result.steering_calculation = std::move(evidence);
+        }
+
         if (result.wheel_index_map.empty()) {
             throw json::Error(
                 "configuration requires wheelIndexMapping or per-axle wheelIndices");
@@ -407,28 +614,37 @@ ParseConfigurationJson(const std::string& json_text,
         }
 
         if (const auto* compatibility = root.Find("compatibility")) {
-            compatibility->AsObject();
-            const bool has_explicit_story_targets =
-                compatibility->Find("storyLegacy") != nullptr ||
-                compatibility->Find("storyEnhanced") != nullptr ||
-                compatibility->Find("story-legacy") != nullptr ||
-                compatibility->Find("story-enhanced") != nullptr;
-            if (has_explicit_story_targets) {
-                result.story_legacy = false;
-                result.story_enhanced = false;
+            const auto& values = compatibility->AsObject();
+            static const std::set<std::string> recognized{
+                "storyLegacy", "storyEnhanced",
+                "story-legacy", "story-enhanced",
+            };
+            for (const auto& [key, value] : values) {
+                if (recognized.find(key) == recognized.end()) {
+                    throw json::Error(
+                        "compatibility contains unrecognized target '" + key +
+                        "'");
+                }
+                value.AsBool();
             }
-            if (const auto* legacy = compatibility->Find("storyLegacy")) {
-                result.story_legacy = legacy->AsBool();
-            }
-            if (const auto* enhanced = compatibility->Find("storyEnhanced")) {
-                result.story_enhanced = enhanced->AsBool();
-            }
-            if (const auto* legacy = compatibility->Find("story-legacy")) {
-                result.story_legacy = legacy->AsBool();
-            }
-            if (const auto* enhanced = compatibility->Find("story-enhanced")) {
-                result.story_enhanced = enhanced->AsBool();
-            }
+
+            const auto resolve_target = [&](const char* camel,
+                                            const char* dashed) {
+                const auto* camel_value = compatibility->Find(camel);
+                const auto* dashed_value = compatibility->Find(dashed);
+                if (camel_value != nullptr && dashed_value != nullptr &&
+                    camel_value->AsBool() != dashed_value->AsBool()) {
+                    throw json::Error(
+                        std::string("compatibility aliases disagree for '") +
+                        camel + "'");
+                }
+                return (camel_value != nullptr && camel_value->AsBool()) ||
+                       (dashed_value != nullptr && dashed_value->AsBool());
+            };
+            result.story_legacy =
+                resolve_target("storyLegacy", "story-legacy");
+            result.story_enhanced =
+                resolve_target("storyEnhanced", "story-enhanced");
         }
 
         auto validation =

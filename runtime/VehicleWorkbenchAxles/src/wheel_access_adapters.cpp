@@ -170,6 +170,25 @@ bool SetPowered(State& state, const VehicleSnapshot& vehicle,
            state.active->SetWheelPowered(vehicle, index, powered);
 }
 
+template <typename State>
+bool SupportsSteeringGain(const State& state) noexcept {
+    return state.active && state.active->SupportsSteeringGain();
+}
+
+template <typename State>
+bool ReadSteeringGain(State& state, const VehicleSnapshot& vehicle,
+                      std::uint32_t index, double& gain) {
+    return SupportsSteeringGain(state) &&
+           state.active->ReadWheelSteeringGain(vehicle, index, gain);
+}
+
+template <typename State>
+bool WriteSteeringGain(State& state, const VehicleSnapshot& vehicle,
+                       std::uint32_t index, double gain) {
+    return SupportsSteeringGain(state) &&
+           state.active->WriteWheelSteeringGain(vehicle, index, gain);
+}
+
 } // namespace
 
 LegacyWheelAccess::LegacyWheelAccess()
@@ -220,6 +239,17 @@ bool LegacyWheelAccess::SetWheelPowered(const VehicleSnapshot& vehicle,
                                         std::uint32_t index, bool powered) {
     return SetPowered(*state_, vehicle, index, powered);
 }
+bool LegacyWheelAccess::SupportsSteeringGain() const noexcept {
+    return vwa::SupportsSteeringGain(*state_);
+}
+bool LegacyWheelAccess::ReadWheelSteeringGain(
+    const VehicleSnapshot& vehicle, std::uint32_t index, double& gain) {
+    return ReadSteeringGain(*state_, vehicle, index, gain);
+}
+bool LegacyWheelAccess::WriteWheelSteeringGain(
+    const VehicleSnapshot& vehicle, std::uint32_t index, double gain) {
+    return WriteSteeringGain(*state_, vehicle, index, gain);
+}
 
 EnhancedWheelAccess::EnhancedWheelAccess()
     : EnhancedWheelAccess(
@@ -268,6 +298,17 @@ bool EnhancedWheelAccess::WriteWheelFlags(const VehicleSnapshot& vehicle,
 bool EnhancedWheelAccess::SetWheelPowered(const VehicleSnapshot& vehicle,
                                           std::uint32_t index, bool powered) {
     return SetPowered(*state_, vehicle, index, powered);
+}
+bool EnhancedWheelAccess::SupportsSteeringGain() const noexcept {
+    return vwa::SupportsSteeringGain(*state_);
+}
+bool EnhancedWheelAccess::ReadWheelSteeringGain(
+    const VehicleSnapshot& vehicle, std::uint32_t index, double& gain) {
+    return ReadSteeringGain(*state_, vehicle, index, gain);
+}
+bool EnhancedWheelAccess::WriteWheelSteeringGain(
+    const VehicleSnapshot& vehicle, std::uint32_t index, double gain) {
+    return WriteSteeringGain(*state_, vehicle, index, gain);
 }
 
 } // namespace vwa

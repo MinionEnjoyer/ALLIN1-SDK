@@ -81,9 +81,15 @@ from allin1_sdk.vehicle_authoring import (
 from allin1_sdk.axle_configurator import (
     EXPORT_MODES,
     AxleConfiguration,
+    requires_signed_steering_gain,
     retarget_axle_configuration,
     validate_axle_configuration,
     write_fivem_resource,
+)
+from allin1_sdk.axle_steering_geometry import (
+    SteeringGeometryRequest,
+    apply_steering_geometry_to_configuration,
+    solve_automatic_steering_geometry,
 )
 from allin1_sdk.axle_prefabs import (
     AxlePrefabCatalog,
@@ -99,6 +105,7 @@ from allin1_sdk.axle_runtime_bundler import (
     StoryRuntimeProfile,
     VehicleAxleBuildInput,
     story_runtime_profile_report,
+    target_capabilities,
 )
 from allin1_sdk.axle_oiv_export import (
     EnhancedOivTargetProfile,
@@ -139,17 +146,36 @@ def _axle_configuration_file(path: Path) -> AxleConfiguration:
     )
 
 
-def _axle_build_inputs(paths: tuple[Path, ...]) -> tuple[VehicleAxleBuildInput, ...]:
+def _axle_build_inputs(
+    paths: tuple[Path, ...],
+    skeleton_xmls: tuple[Path, ...] = (),
+) -> tuple[VehicleAxleBuildInput, ...]:
     if not paths:
         raise ValueError("At least one axle configuration JSON is required")
+    if skeleton_xmls and len(skeleton_xmls) != len(paths):
+        raise ValueError(
+            "Supply one --skeleton-xml for every axle configuration, in the "
+            "same order"
+        )
     result = []
-    for path in paths:
+    for index, path in enumerate(paths):
         configuration = _axle_configuration_file(path)
+        bones = ()
+        if skeleton_xmls:
+            scene, _metadata, warning = load_native_model_scene(
+                skeleton_xmls[index]
+            )
+            if scene is None:
+                raise ValueError(
+                    warning or "Skeleton XML did not contain a model scene"
+                )
+            bones = tuple(scene.bones)
         result.append(VehicleAxleBuildInput(
             configuration=configuration,
             configuration_id=configuration.configuration_id,
             model_hash=configuration.model_hash,
             minimum_runtime_version=configuration.minimum_runtime_version,
+            steering_evidence_bones=bones,
         ))
     return tuple(result)
 
@@ -2720,6 +2746,14 @@ def preview_axle_tyres(
 )
 @click.option("--target", "targets", multiple=True, type=click.Choice(TARGET_IDS))
 @click.option(
+    "--skeleton-xml", "skeleton_xml_files", multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help=(
+        "Canonical CodeWalker YFT XML evidence; repeat once per configuration "
+        "in the same order. Required for signed/schema-2 steering."
+    ),
+)
+@click.option(
     "--story-profile", "story_profile_files", multiple=True,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Verified Story runtime profile JSON; repeat once per Story target.",
@@ -2730,6 +2764,7 @@ def preview_axle_tyres(
 )
 def plan_axle_runtime_bundle(
     config_json: tuple[Path, ...], targets: tuple[str, ...],
+    skeleton_xml_files: tuple[Path, ...],
     story_profile_files: tuple[Path, ...], target_build_values: tuple[str, ...],
 ) -> None:
     """Plan cross-edition runtime outputs without creating files."""
@@ -2737,7 +2772,8 @@ def plan_axle_runtime_bundle(
         profiles = _story_runtime_profiles(story_profile_files)
         builds = _target_build_assignments(target_build_values)
         plan = AxleRuntimeBundlePlanner().plan(
-            _axle_build_inputs(config_json), targets=targets or TARGET_IDS,
+            _axle_build_inputs(config_json, skeleton_xml_files),
+            targets=targets or TARGET_IDS,
             story_profiles=profiles, requested_game_builds=builds,
         )
     except (OSError, TypeError, ValueError) as exc:
@@ -2751,6 +2787,14 @@ def plan_axle_runtime_bundle(
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
 @click.option("--target", "targets", multiple=True, type=click.Choice(TARGET_IDS))
+@click.option(
+    "--skeleton-xml", "skeleton_xml_files", multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help=(
+        "Canonical CodeWalker YFT XML evidence; repeat once per configuration "
+        "in the same order. Required for signed/schema-2 steering."
+    ),
+)
 @click.option(
     "--story-profile", "story_profile_files", multiple=True,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -2767,6 +2811,7 @@ def plan_axle_runtime_bundle(
 @click.option("--acknowledge-edit", is_flag=True, required=True)
 def build_axle_runtime_bundle(
     config_json: tuple[Path, ...], targets: tuple[str, ...],
+    skeleton_xml_files: tuple[Path, ...],
     story_profile_files: tuple[Path, ...], target_build_values: tuple[str, ...],
     output_dir: Path, acknowledge_edit: bool,
 ) -> None:
@@ -2776,7 +2821,8 @@ def build_axle_runtime_bundle(
         profiles = _story_runtime_profiles(story_profile_files)
         builds = _target_build_assignments(target_build_values)
         plan = AxleRuntimeBundlePlanner().plan(
-            _axle_build_inputs(config_json), targets=targets or TARGET_IDS,
+            _axle_build_inputs(config_json, skeleton_xml_files),
+            targets=targets or TARGET_IDS,
             story_profiles=profiles, requested_game_builds=builds,
         )
         result = AxleRuntimeBundleBuilder().build(plan, output_dir)
@@ -2924,6 +2970,104 @@ def inspect_vehicle_axles(
     click.echo(json.dumps(payload, indent=2))
 
 
+@main.command("preview-axle-steering")
+@click.argument(
+    "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.argument("model")
+@click.option(
+    "--skeleton-xml", required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="CodeWalker YFT XML containing canonical wheel-bone positions.",
+)
+@click.option(
+    "--reference-lock", type=click.FloatRange(min=1.0, max=80.0),
+    default=35.0, show_default=True,
+    help="Reference steering-lock angle used for the geometry calculation.",
+)
+@click.option(
+    "--pivot-y", type=float,
+    help="Explicit vehicle-local neutral-pivot Y; required for ambiguous all-steer layouts.",
+)
+@click.option(
+    "--pivot-axle", type=click.IntRange(min=1, max=5), multiple=True,
+    help="Fixed physical axle used to derive the neutral pivot; repeat to use a centroid.",
+)
+@click.option(
+    "--reference-axle", type=click.IntRange(min=1, max=5),
+    help="Steered physical axle normalized to full lock; defaults to the farthest lever arm.",
+)
+@click.option(
+    "--target", type=click.Choice((
+        "fivem-legacy", "fivem-enhanced", "story-legacy", "story-enhanced",
+    )),
+)
+def preview_axle_steering(
+    workspace: Path, model: str, skeleton_xml: Path, reference_lock: float,
+    pivot_y: float | None, pivot_axle: tuple[int, ...],
+    reference_axle: int | None, target: str | None,
+) -> None:
+    """Calculate signed per-axle steering gains without saving changes."""
+    try:
+        authoring = VehicleAuthoringWorkspace(workspace)
+        configuration = authoring.axle_configuration(model)
+        if configuration is None:
+            raise ValueError(f"No axle configuration is saved for {model}")
+        scene, _metadata, warning = load_native_model_scene(skeleton_xml)
+        if scene is None:
+            raise ValueError(warning or "Skeleton XML did not contain a model scene")
+        request = SteeringGeometryRequest(
+            reference_lock_degrees=reference_lock,
+            pivot_longitudinal_position=pivot_y,
+            pivot_axle_orders=tuple(pivot_axle),
+            reference_axle_order=reference_axle,
+        )
+        solution = solve_automatic_steering_geometry(
+            configuration, scene.bones, request,
+        )
+        proposed = apply_steering_geometry_to_configuration(configuration, solution)
+        findings = validate_axle_configuration(
+            proposed, scene.bones, target=target,
+        )
+        errors = sum(item.severity == "error" for item in findings)
+        signed = requires_signed_steering_gain(proposed)
+        deployment_supported: bool | None = None
+        deployment_reason = "Choose a target to evaluate deployment support."
+        if target is not None:
+            capability = target_capabilities(target)
+            deployment_supported = (
+                proposed.schema_version <= capability.maximum_axle_schema
+                and (not signed or capability.supports_signed_steering_gain)
+            )
+            deployment_reason = (
+                "Target exposes the required axle contract."
+                if deployment_supported
+                else "Target has no validated signed steering-gain accessor."
+            )
+        payload = {
+            "schema_version": 1,
+            "operation": "preview_axle_steering",
+            "workspace": str(authoring.root),
+            "revision": authoring.revision,
+            "model": configuration.vehicle_model,
+            "request": request.to_dict(),
+            "solution": solution.to_dict(),
+            "proposed_configuration": proposed.to_dict(),
+            "findings": [item.to_dict() for item in findings],
+            "can_apply": errors == 0,
+            "can_author": errors == 0,
+            "deployment": {
+                "target": target,
+                "supported": deployment_supported,
+                "reason": deployment_reason,
+            },
+            "saved": False,
+        }
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(payload, indent=2))
+
+
 @main.command("set-vehicle-axles")
 @click.argument(
     "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
@@ -2931,7 +3075,10 @@ def inspect_vehicle_axles(
 @click.argument("config_json", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
     "--skeleton-xml", type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    help="Optional CodeWalker YFT XML used for spatial validation.",
+    help=(
+        "CodeWalker YFT XML used for spatial validation; required for signed "
+        "schema-2 steering."
+    ),
 )
 @click.option("--expected-revision", type=click.IntRange(min=0), required=True)
 @click.option("--acknowledge-edit", is_flag=True, required=True)

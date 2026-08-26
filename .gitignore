@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 build/
 dist/
+runtime/VehicleWorkbenchAxles/out/
 .pytest_cache/
 .coverage
 htmlcov/

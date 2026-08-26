@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <iomanip>
 #include <map>
@@ -12,7 +13,7 @@
 #include <utility>
 
 #ifndef VWA_RUNTIME_VERSION
-#define VWA_RUNTIME_VERSION "1.0.0"
+#define VWA_RUNTIME_VERSION "2.0.0"
 #endif
 
 namespace vwa {
@@ -21,6 +22,22 @@ namespace {
 
 constexpr std::uint16_t kManagedWheelBits =
     static_cast<std::uint16_t>(kSteeredBit | kDrivenBit);
+constexpr double kGainComparisonEpsilon = kSteeringGainEpsilon;
+
+double EffectiveSteeringGain(const AxleDefinition& axle) noexcept {
+    return axle.steering_gain.value_or(axle.steered ? 1.0 : 0.0);
+}
+
+bool RequiresSteeringGainAccess(
+    const AxleConfiguration& configuration) noexcept {
+    return std::any_of(
+        configuration.axles.begin(), configuration.axles.end(),
+        [](const AxleDefinition& axle) {
+            const double legacy_gain = axle.steered ? 1.0 : 0.0;
+            return std::abs(EffectiveSteeringGain(axle) - legacy_gain) >
+                   kGainComparisonEpsilon;
+        });
+}
 
 std::string HashText(std::uint32_t value) {
     std::ostringstream output;
@@ -49,6 +66,8 @@ std::string SafeSourceName(const std::string& value) {
 struct AxleRuntime::Implementation {
     struct OriginalWheelState {
         std::uint16_t flags{0};
+        double steering_gain{0.0};
+        bool has_steering_gain{false};
     };
 
     struct TrackedVehicle {
@@ -62,9 +81,13 @@ struct AxleRuntime::Implementation {
         std::uint32_t index{0};
         bool steered{false};
         bool powered{false};
+        double desired_steering_gain{0.0};
         std::uint16_t original_flags{0};
         std::uint16_t desired_flags{0};
-        bool changed{false};
+        double original_steering_gain{0.0};
+        bool flags_changed{false};
+        bool steering_gain_changed{false};
+        bool manages_steering_gain{false};
     };
 
     IVehicleHost& host;
@@ -112,6 +135,16 @@ struct AxleRuntime::Implementation {
 
         std::vector<WheelPlan> plan;
         plan.reserve(configuration.axles.size() * 2U);
+        const bool manage_steering_gain =
+            RequiresSteeringGainAccess(configuration);
+        if (manage_steering_gain && !access.SupportsSteeringGain()) {
+            LogOnce(LogLevel::Error, "steering-gain-capability-missing",
+                    "Model " + HashText(configuration.model_hash) +
+                        " requests signed or scaled steering gain, but the "
+                        "validated build profile exposes steering flags only; "
+                        "no changes were applied");
+            return std::nullopt;
+        }
         std::set<std::uint32_t> unique_indices;
         for (const auto& axle : configuration.axles) {
             for (const auto* bone : {&axle.left_bone, &axle.right_bone}) {
@@ -125,8 +158,13 @@ struct AxleRuntime::Implementation {
                                 "runtime wheel mapping; no changes were applied");
                     return std::nullopt;
                 }
-                plan.push_back(
-                    {mapping->second, axle.steered, axle.powered, 0, 0, false});
+                WheelPlan wheel;
+                wheel.index = mapping->second;
+                wheel.steered = axle.steered;
+                wheel.powered = axle.powered;
+                wheel.desired_steering_gain = EffectiveSteeringGain(axle);
+                wheel.manages_steering_gain = manage_steering_gain;
+                plan.push_back(wheel);
             }
         }
         if (plan.size() != game_wheel_count) {
@@ -149,6 +187,16 @@ struct AxleRuntime::Implementation {
                             HashText(configuration.model_hash) + " was skipped");
                 return std::nullopt;
             }
+            if (wheel.manages_steering_gain &&
+                (!access.ReadWheelSteeringGain(
+                     vehicle, wheel.index, wheel.original_steering_gain) ||
+                 !std::isfinite(wheel.original_steering_gain))) {
+                LogOnce(LogLevel::Error, "steering-gain-read-failed",
+                        "Steering gain could not be read safely; model " +
+                            HashText(configuration.model_hash) +
+                            " was skipped with no writes");
+                return std::nullopt;
+            }
             std::uint16_t desired = static_cast<std::uint16_t>(
                 wheel.original_flags & static_cast<std::uint16_t>(~kManagedWheelBits));
             if (wheel.steered) {
@@ -158,7 +206,12 @@ struct AxleRuntime::Implementation {
                 desired = static_cast<std::uint16_t>(desired | kDrivenBit);
             }
             wheel.desired_flags = desired;
-            wheel.changed = desired != wheel.original_flags;
+            wheel.flags_changed = desired != wheel.original_flags;
+            wheel.steering_gain_changed =
+                wheel.manages_steering_gain &&
+                std::abs(wheel.desired_steering_gain -
+                         wheel.original_steering_gain) >
+                    kGainComparisonEpsilon;
         }
         return plan;
     }
@@ -169,15 +222,31 @@ struct AxleRuntime::Implementation {
         bool complete = true;
         for (std::size_t index = 0; index < changed_through; ++index) {
             const auto& wheel = plan[index];
-            if (!wheel.changed) continue;
-            complete = access.WriteWheelFlags(vehicle, wheel.index,
-                                              wheel.original_flags) &&
-                       complete;
-            const bool was_powered =
-                (wheel.original_flags & kDrivenBit) != 0;
-            complete = access.SetWheelPowered(vehicle, wheel.index,
-                                              was_powered) &&
-                       complete;
+            if (wheel.flags_changed) {
+                if (!ConfirmOfflineBeforeWrite() ||
+                    !access.WriteWheelFlags(vehicle, wheel.index,
+                                            wheel.original_flags)) {
+                    complete = false;
+                    if (state == RuntimeState::DisabledOnline) return false;
+                }
+                const bool was_powered =
+                    (wheel.original_flags & kDrivenBit) != 0;
+                if (!ConfirmOfflineBeforeWrite() ||
+                    !access.SetWheelPowered(vehicle, wheel.index,
+                                            was_powered)) {
+                    complete = false;
+                    if (state == RuntimeState::DisabledOnline) return false;
+                }
+            }
+            if (wheel.steering_gain_changed) {
+                if (!ConfirmOfflineBeforeWrite() ||
+                    !access.WriteWheelSteeringGain(
+                        vehicle, wheel.index,
+                        wheel.original_steering_gain)) {
+                    complete = false;
+                    if (state == RuntimeState::DisabledOnline) return false;
+                }
+            }
         }
         return complete;
     }
@@ -204,6 +273,11 @@ struct AxleRuntime::Implementation {
         auto plan = BuildPlan(vehicle, configuration, game_wheel_count);
         if (!plan.has_value()) return false;
 
+        // Reads and plan construction can take an arbitrary amount of time.
+        // Re-check the session at the write boundary, then again before each
+        // individual mutating adapter call below.
+        if (!ConfirmOfflineBeforeWrite()) return false;
+
         auto tracked_it = tracked.find(vehicle.entity_id);
         const bool new_generation =
             tracked_it == tracked.end() ||
@@ -216,22 +290,57 @@ struct AxleRuntime::Implementation {
             replacement.last_verified = now;
             for (const auto& wheel : *plan) {
                 replacement.originals.emplace(
-                    wheel.index, OriginalWheelState{wheel.original_flags});
+                    wheel.index,
+                    OriginalWheelState{
+                        wheel.original_flags,
+                        wheel.original_steering_gain,
+                        wheel.manages_steering_gain,
+                    });
             }
         }
 
         for (std::size_t index = 0; index < plan->size(); ++index) {
             const auto& wheel = (*plan)[index];
-            if (!wheel.changed) continue;
-            if (!access.WriteWheelFlags(vehicle, wheel.index,
-                                        wheel.desired_flags) ||
-                !access.SetWheelPowered(vehicle, wheel.index, wheel.powered)) {
+            bool applied = true;
+            if (wheel.flags_changed) {
+                applied =
+                    ConfirmOfflineBeforeWrite() &&
+                    access.WriteWheelFlags(vehicle, wheel.index,
+                                           wheel.desired_flags);
+                if (applied) {
+                    applied = ConfirmOfflineBeforeWrite() &&
+                              access.SetWheelPowered(vehicle, wheel.index,
+                                                     wheel.powered);
+                }
+            }
+            if (applied && wheel.steering_gain_changed) {
+                applied = ConfirmOfflineBeforeWrite() &&
+                          access.WriteWheelSteeringGain(
+                              vehicle, wheel.index,
+                              wheel.desired_steering_gain);
+            }
+            if (!applied) {
+                if (state == RuntimeState::DisabledOnline) return false;
                 const bool restored = RollBack(vehicle, *plan, index + 1U);
+                if (state == RuntimeState::DisabledOnline) return false;
+                bool baseline_retained = !new_generation;
+                if (new_generation) {
+                    if (restored) {
+                        tracked.erase(vehicle.entity_id);
+                    } else {
+                        // Rollback itself was incomplete.  Retain the original
+                        // state captured before the first write so shutdown or
+                        // a later lifecycle pass can safely retry restoration.
+                        tracked[vehicle.entity_id] = std::move(replacement);
+                        baseline_retained = true;
+                    }
+                }
                 LogOnce(LogLevel::Error, "wheel-write-failed",
                         std::string("Wheel update failed and rollback was ") +
                             (restored ? "completed" : "incomplete") +
-                            "; runtime stopped tracking that entity");
-                tracked.erase(vehicle.entity_id);
+                            (baseline_retained
+                                 ? "; original baseline retained for retry"
+                                 : "; no modified state remains to restore"));
                 return false;
             }
         }
@@ -251,6 +360,12 @@ struct AxleRuntime::Implementation {
         return true;
     }
 
+    bool ConfirmOfflineBeforeWrite() {
+        if (!host.IsOnlineSession()) return true;
+        DisableForOnline();
+        return false;
+    }
+
     void DisableForOnline() {
         if (state == RuntimeState::DisabledOnline) return;
         // Once an online session is observed, do not perform restoration writes.
@@ -264,32 +379,95 @@ struct AxleRuntime::Implementation {
                 "further reads or writes");
     }
 
-    void RestoreTracked() {
-        if (!settings.restore_on_unload || host.IsOnlineSession() ||
-            !access.IsResolved()) {
+    bool RestoreTracked() {
+        if (!settings.restore_on_unload) {
             tracked.clear();
-            return;
+            return true;
         }
-        for (const auto& [entity_id, saved] : tracked) {
+        if (host.IsOnlineSession()) {
+            DisableForOnline();
+            return true;
+        }
+        if (!access.IsResolved()) {
+            LogOnce(LogLevel::Error, "restore-access-unavailable",
+                    "Shutdown restoration is pending because the validated "
+                    "wheel adapter is unavailable");
+            return false;
+        }
+        for (auto iterator = tracked.begin(); iterator != tracked.end();) {
+            const auto entity_id = iterator->first;
+            const auto& saved = iterator->second;
             const auto current = host.LookupVehicle(entity_id);
-            if (!current.has_value() ||
-                current->model_hash != saved.model_hash ||
-                current->wheel_generation != saved.wheel_generation) {
+            if (!current.has_value()) {
+                // The host no longer owns this identity, so there is no live
+                // storage left that can be restored safely. Retaining the
+                // baseline would only fault every subsequent shutdown retry.
+                LogOnce(
+                    LogLevel::Info, "restore-entity-released",
+                    "Model " + HashText(saved.model_hash) +
+                        " no longer has a live tracked entity; its obsolete "
+                        "restoration baseline was released without writes");
+                iterator = tracked.erase(iterator);
                 continue;
             }
+            if (current->model_hash != saved.model_hash ||
+                current->wheel_generation != saved.wheel_generation) {
+                // Entity ids may be reused and wheel storage may be recreated.
+                // Never apply an old baseline to the replacement identity.
+                LogOnce(
+                    LogLevel::Info, "restore-identity-replaced",
+                    "Model " + HashText(saved.model_hash) +
+                        " was replaced before restoration; its obsolete "
+                        "baseline was released without touching the new entity");
+                iterator = tracked.erase(iterator);
+                continue;
+            }
+            bool vehicle_restored = true;
             for (const auto& [index, original] : saved.originals) {
                 std::uint16_t flags = 0;
-                if (!access.ReadWheelFlags(*current, index, flags)) continue;
-                const auto restored = static_cast<std::uint16_t>(
-                    (flags & static_cast<std::uint16_t>(~kManagedWheelBits)) |
-                    (original.flags & kManagedWheelBits));
-                if (restored == flags) continue;
-                if (!access.WriteWheelFlags(*current, index, restored)) continue;
-                access.SetWheelPowered(*current, index,
-                                       (original.flags & kDrivenBit) != 0);
+                const bool flags_read =
+                    access.ReadWheelFlags(*current, index, flags);
+                if (!flags_read) {
+                    vehicle_restored = false;
+                } else {
+                    const auto restored = static_cast<std::uint16_t>(
+                        (flags & static_cast<std::uint16_t>(~kManagedWheelBits)) |
+                        (original.flags & kManagedWheelBits));
+                    if (restored != flags) {
+                        if (!ConfirmOfflineBeforeWrite()) return true;
+                        if (!access.WriteWheelFlags(*current, index, restored)) {
+                            vehicle_restored = false;
+                        }
+                    }
+                }
+                // Power state may be backed by more than the exposed flag
+                // word.  Reassert it on every retry, including when the flag
+                // write succeeded during an earlier partial restore.
+                if (!ConfirmOfflineBeforeWrite()) return true;
+                if (!access.SetWheelPowered(
+                        *current, index,
+                        (original.flags & kDrivenBit) != 0)) {
+                    vehicle_restored = false;
+                }
+                if (original.has_steering_gain) {
+                    if (!access.SupportsSteeringGain()) {
+                        vehicle_restored = false;
+                    } else {
+                        if (!ConfirmOfflineBeforeWrite()) return true;
+                        if (!access.WriteWheelSteeringGain(
+                                *current, index, original.steering_gain)) {
+                            vehicle_restored = false;
+                        }
+                    }
+                }
+            }
+            if (vehicle_restored) {
+                iterator = tracked.erase(iterator);
+            } else {
+                ++iterator;
             }
         }
-        tracked.clear();
+        return tracked.empty();
     }
 };
 
@@ -305,6 +483,13 @@ bool AxleRuntime::Start(ConfigurationCatalog catalog,
     auto& runtime = *implementation_;
     if (runtime.state != RuntimeState::Stopped) {
         Shutdown();
+        if (runtime.state != RuntimeState::Stopped) {
+            runtime.LogOnce(
+                LogLevel::Error, "restart-blocked-restore-pending",
+                "Runtime restart was blocked because original wheel state is "
+                "still pending restoration");
+            return false;
+        }
     }
     runtime.state = RuntimeState::Starting;
     runtime.emitted_once.clear();
@@ -359,6 +544,16 @@ bool AxleRuntime::Start(ConfigurationCatalog catalog,
                     std::to_string(configuration.axles.size()) +
                     " physical axles, exceeding the validated target limit; "
                     "additional wheels must remain cosmetic");
+            continue;
+        }
+        if (RequiresSteeringGainAccess(configuration) &&
+            !runtime.access.SupportsSteeringGain()) {
+            runtime.log.Write(
+                LogLevel::Warning, "steering-gain-capability-missing",
+                "Model " + HashText(model_hash) +
+                    " requests signed or scaled steering gain, but this exact "
+                    "build profile validates only steering/drive flag access; "
+                    "the configuration was disabled before vehicle writes");
             continue;
         }
         runtime.log.Write(
@@ -454,8 +649,17 @@ void AxleRuntime::Shutdown() {
     if (!implementation_) return;
     auto& runtime = *implementation_;
     if (runtime.state == RuntimeState::Stopped) return;
-    if (runtime.state == RuntimeState::Running) {
-        runtime.RestoreTracked();
+    if (runtime.state == RuntimeState::Running ||
+        runtime.state == RuntimeState::Faulted) {
+        if (!runtime.RestoreTracked()) {
+            runtime.configurations.clear();
+            runtime.state = RuntimeState::Faulted;
+            runtime.LogOnce(
+                LogLevel::Error, "shutdown-restore-pending",
+                "Runtime stopped new work, but original wheel state could not "
+                "be fully restored; call Shutdown again to retry safely");
+            return;
+        }
     } else {
         runtime.tracked.clear();
     }

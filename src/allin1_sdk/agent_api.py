@@ -198,6 +198,7 @@ READ_ONLY_COMMANDS = frozenset({
     "plan-managed-vehicle-package",
     "plan-axle-runtime-bundle",
     "preview-axle-prefab",
+    "preview-axle-steering",
     "preview-axle-tyres",
     "open-rpf-graph",
     "open-model-material-workbench",

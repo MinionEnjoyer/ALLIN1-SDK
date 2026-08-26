@@ -101,6 +101,8 @@ def test_prefab_and_bundle_commands_are_structured_and_api_classified(tmp_path: 
     assert plan_help.exit_code == 0
     assert "--story-profile" in plan_help.output
     assert "--game-build" in plan_help.output
+    assert "--skeleton-xml" in plan_help.output
+    assert "Required for signed/schema-2 steering" in plan_help.output
 
 
 def test_oiv_cli_preview_and_build_use_same_persisted_identity(tmp_path: Path) -> None:

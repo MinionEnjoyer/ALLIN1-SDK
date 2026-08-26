@@ -716,8 +716,14 @@ class VehicleAuthoringWorkspace:
         model = before_project.model(configuration.vehicle_model)
         if model.model.casefold() != configuration.vehicle_model:
             raise ValueError("Axle configuration model does not match the selected vehicle")
+        bone_rows = tuple(bones)
+        if configuration.steering_calculation is not None and not bone_rows:
+            raise ValueError(
+                "Signed steering configurations require the selected vehicle's "
+                "canonical wheel-bone skeleton so calculation evidence can be verified"
+            )
         findings = validate_axle_configuration(
-            configuration, bones,
+            configuration, bone_rows,
             asset_names=(item.path for item in model.assets),
         )
         errors = [item for item in findings if item.severity == "error"]

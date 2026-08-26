@@ -30,8 +30,14 @@ ScriptHookV host bridge, and in-game acceptance run before packaging.
 - `wheel_lm3` / `wheel_rm3`
 - `wheel_lr` / `wheel_rr`
 
-Configuration arrays can contain 2–5 pairs.  Steering and powered state are
-independent booleans on every pair.  The runtime maps bones through the exported
+Configuration arrays can contain 2–5 pairs. Steering, signed steering gain,
+powered state, and visual family remain independent on every pair. Schema 1
+omits `steeringGain` and retains the original boolean-only behavior: `+1` for a
+steered axle and `0` for a fixed axle. Schema 2 requires an explicit bounded
+gain on every axle, runtime 2.0 or newer, and calculation evidence; negative
+values counter-steer and non-steered axles must use zero. Automatic evidence
+also records the positive `pairPositionTolerance` and `positionEpsilon` inputs
+so the calculation can be reproduced exactly. The runtime maps bones through the exported
 `wheelIndexMap`; it never assumes `axleOrder * 2`.  Before applying, it validates
 the complete map against the game-reported wheel count and the adapter's
 validated maximum physical axle count.
@@ -50,9 +56,15 @@ VehicleWorkbenchAxles/
   runtime.json
   configs/
     example_bus.json
+    example_bus.bones.json
   logs/
     VehicleWorkbenchAxles.log
 ```
+
+The bundled `example_bus` configuration is intentionally non-deployable. Its
+companion bone fixture documents the illustrative vehicle-local positions used
+to produce the provenance digest; real packages must recalculate that digest
+from the selected model's decoded canonical wheel bones.
 
 One generic binary loads multiple configurations.  Vehicle packages declare a
 minimum runtime version and copy only their own configuration.  They must not
@@ -78,7 +90,8 @@ no validated profile.
 
 The future bundler integration supplies:
 
-1. a schema-1 JSON config in `VehicleWorkbenchAxles/configs/`;
+1. a schema-1 legacy or schema-2 signed JSON config in
+   `VehicleWorkbenchAxles/configs/`;
 2. an explicit `wheelIndexMap` emitted from canonical bones and target vehicle
    information;
 3. a runtime dependency record with target edition, minimum runtime version,
@@ -135,6 +148,12 @@ The future ScriptHook host bridge implements `IVehicleHost` and
 The shared core never takes a ScriptHook dependency and never retains a raw
 vehicle/wheel pointer.
 
+Signed gain is a separate adapter capability. The current profiles expose only
+steering/drive flag access, so a config requesting counter-steer or scaled
+steering is disabled before vehicle writes. A future exact-build profile must
+provide validated gain read/write access; the core then captures, transactionally
+applies, rolls back, recovers, and restores that state alongside managed flags.
+
 ## Lifecycle
 
 - Startup: online guard, exact edition/build detection, fail-closed adapter
@@ -142,11 +161,17 @@ vehicle/wheel pointer.
 - Gameplay: event application for create/ownership/repair/wheel recreation plus
   a configurable 2-second recovery verification.  No per-frame write loop.
 - Apply: reacquire entity snapshot, validate generation/count/map, read all
-  16-bit flags, modify only `0x08` and `0x10`, rollback partial failure.
-- Shutdown: stop new writes, reacquire matching entity generation, restore only
-  managed bits when safe, release all tracking.
+  16-bit flags, modify only `0x08` and `0x10`, and—only with an explicit
+  validated capability—apply signed gain; rollback partial failure.
+- Shutdown: stop new work, reacquire matching entity generation, restore only
+  managed bits when safe, and retain incomplete restoration state for an
+  explicit retry rather than silently rebasing or releasing it.
 - Online detection: immediately drop state and disable without restoration or
   further memory access.
+
+Each configuration must explicitly opt into at least one recognized Story
+target in `compatibility`; omission, unknown keys, and false-only declarations
+fail closed.
 
 Logs use model hashes, build numbers, target identifiers, config basenames, and
 reason codes.  They do not include absolute user paths or repeated frame spam.

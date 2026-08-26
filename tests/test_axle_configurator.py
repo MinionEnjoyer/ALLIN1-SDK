@@ -26,6 +26,7 @@ from allin1_sdk.axle_configurator import (
     format_handling_flags,
     joaat_hex,
     parse_handling_flags,
+    requires_signed_steering_gain,
     resolve_runtime_wheel_index_map,
     retarget_axle_configuration,
     steering_diagnostic,
@@ -90,6 +91,17 @@ def test_six_wheel_acceptance_preset() -> None:
         ("wheel_lm1", "wheel_rm1"),
         ("wheel_lr", "wheel_rr"),
     ]
+
+
+def test_axle_preset_preserves_stronger_runtime_floor() -> None:
+    config = replace(
+        detect_axle_configuration("runtime_floor", skeleton(3)),
+        minimum_runtime_version="3.1.0",
+    )
+
+    updated = apply_axle_preset(config, PRESET_STEER_DRIVE_REAR)
+
+    assert updated.minimum_runtime_version == "3.1.0"
 
 
 def test_spatial_reassignment_and_left_right_messages_are_exact() -> None:
@@ -170,6 +182,113 @@ def test_schema_migration_and_forward_rejection() -> None:
     bad["schema_version"] = 99
     with pytest.raises(ValueError, match="Unsupported"):
         AxleConfiguration.from_dict(bad)
+
+    prerelease = config.to_dict()
+    prerelease["minimum_runtime_version"] = "2.0.0-alpha"
+    with pytest.raises(ValueError, match="major.minor.patch"):
+        AxleConfiguration.from_dict(prerelease)
+
+
+def test_gapped_canonical_middle_pairs_fail_closed() -> None:
+    valid_bones = skeleton(3)
+    gapped_bones = tuple(
+        replace(
+            bone,
+            name=bone.name.replace("m1", "m2"),
+        ) if "m1" in bone.name else bone
+        for bone in valid_bones
+    )
+    with pytest.raises(ValueError, match="must be dense"):
+        detect_axle_configuration("gapped", gapped_bones)
+
+    config = detect_axle_configuration("bus", valid_bones)
+    gapped_config = replace(config, axles=(
+        config.axles[0],
+        replace(
+            config.axles[1],
+            left_bone="wheel_lm2",
+            right_bone="wheel_rm2",
+        ),
+        config.axles[2],
+    ))
+    assert any(
+        finding.code == "canonical_pair_sequence"
+        for finding in validate_axle_configuration(gapped_config, gapped_bones)
+    )
+
+
+def test_schema_one_omits_gain_and_schema_two_requires_signed_evidence() -> None:
+    config = detect_axle_configuration(
+        "bus", skeleton(3), preset=PRESET_STEER_DRIVE_REAR,
+    )
+    legacy = config.to_dict()
+    assert legacy["schema_version"] == 1
+    assert all("steering_gain" not in row for row in legacy["axles"])
+    loaded = AxleConfiguration.from_dict(legacy)
+    assert [item.steering_gain for item in loaded.axles] == [1.0, 0.0, 1.0]
+    assert loaded.to_dict() == legacy
+
+    invalid_v1 = config.to_dict()
+    invalid_v1["axles"][-1]["steering_gain"] = -0.22
+    with pytest.raises(ValueError, match="schema 2"):
+        AxleConfiguration.from_dict(invalid_v1)
+
+    from allin1_sdk.axle_steering_geometry import (
+        apply_steering_geometry_to_configuration,
+        solve_automatic_steering_geometry,
+    )
+
+    signed_config = apply_steering_geometry_to_configuration(
+        config, solve_automatic_steering_geometry(config, skeleton(3)),
+    )
+    signed = signed_config.to_dict()
+    assert signed["schema_version"] == 2
+    assert all("steering_gain" in row for row in signed["axles"])
+    assert signed["steering_calculation"]["bone_position_sha256"]
+    assert AxleConfiguration.from_dict(signed) == signed_config
+
+    invalid = signed.copy()
+    invalid["axles"] = [dict(row) for row in signed["axles"]]
+    invalid["axles"][0]["steering_gain"] = 1.01
+    with pytest.raises(ValueError, match="finite number from -1 to 1"):
+        AxleConfiguration.from_dict(invalid)
+
+    missing_gain = signed.copy()
+    missing_gain["axles"] = [dict(row) for row in signed["axles"]]
+    missing_gain["axles"][0].pop("steering_gain")
+    with pytest.raises(ValueError, match="explicit steering_gain"):
+        AxleConfiguration.from_dict(missing_gain)
+
+    missing_evidence = signed.copy()
+    missing_evidence.pop("steering_calculation")
+    with pytest.raises(ValueError, match="calculation evidence"):
+        AxleConfiguration.from_dict(missing_evidence)
+
+    downgraded_runtime = signed.copy()
+    downgraded_runtime["minimum_runtime_version"] = "1.0.0"
+    with pytest.raises(ValueError, match="2.0.0 or newer"):
+        AxleConfiguration.from_dict(downgraded_runtime)
+
+    tampered_rows = list(signed_config.axles)
+    tampered_rows[-1] = replace(
+        tampered_rows[-1],
+        steering_gain=float(tampered_rows[-1].steering_gain) * 0.5,
+    )
+    tampered = replace(signed_config, axles=tuple(tampered_rows))
+    assert any(
+        item.code == "steering_evidence_mismatch"
+        for item in validate_axle_configuration(tampered, skeleton(3))
+    )
+
+    changed_pivot_rows = list(signed_config.axles)
+    changed_pivot_rows[1] = replace(
+        changed_pivot_rows[1], steered=True, steering_gain=0.2,
+    )
+    changed_pivot = replace(signed_config, axles=tuple(changed_pivot_rows))
+    assert any(
+        item.code == "steering_pivot_evidence"
+        for item in validate_axle_configuration(changed_pivot, skeleton(3))
+    )
 
 
 def test_legacy_migration_derives_indices_from_bones_not_row_order() -> None:
@@ -273,6 +392,33 @@ def test_fivem_export_rejects_story_only_configuration() -> None:
         fivem_client_lua(config)
 
 
+def test_signed_gain_never_silently_downgrades_to_stock_or_fivem_flags() -> None:
+    base = detect_axle_configuration(
+        "bus", skeleton(3), preset=PRESET_STEER_DRIVE_REAR,
+        export_mode=EXPORT_STOCK_METADATA,
+    )
+    from allin1_sdk.axle_steering_geometry import (
+        apply_steering_geometry_to_configuration,
+        solve_automatic_steering_geometry,
+    )
+
+    signed = apply_steering_geometry_to_configuration(
+        base, solve_automatic_steering_geometry(base, skeleton(3)),
+    )
+    assert requires_signed_steering_gain(signed)
+    stock_signed = replace(signed, export_mode=EXPORT_STOCK_METADATA)
+    findings = validate_axle_configuration(stock_signed, skeleton(3))
+    assert any(
+        item.severity == "error"
+        and item.code == "signed_steering_runtime_required"
+        for item in findings
+    )
+
+    fivem = replace(signed, export_mode=EXPORT_FIVEM_RUNTIME)
+    with pytest.raises(ValueError, match="cannot apply signed or scaled"):
+        fivem_client_lua(fivem)
+
+
 def test_canonical_index_resolver_does_not_leave_gaps_when_lm_pairs_are_absent() -> None:
     mapping = resolve_runtime_wheel_index_map(
         (("wheel_lf", "wheel_rf"), ("wheel_lr", "wheel_rr")),
@@ -327,6 +473,7 @@ def test_diagnostics_distinguish_response_from_visual_orientation() -> None:
     )
     assert "logical/physical axle reassignment" in reverse.outcome
     assert "bone roll" in visual.outcome
+    assert all(wheel.configured_phase in {"same", "fixed"} for wheel in visual.wheels)
 
 
 def test_joaat_is_stable_and_serialized() -> None:

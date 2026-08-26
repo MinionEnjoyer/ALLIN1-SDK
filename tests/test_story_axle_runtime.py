@@ -6,8 +6,12 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+from types import SimpleNamespace
 
 import pytest
+
+from allin1_sdk.axle_configurator import AxleConfiguration, joaat_hex
+from allin1_sdk.axle_steering_geometry import canonical_bone_position_sha256
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +28,7 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
         "signatureAndExecutablePageValidationRequired": True,
         "packageEligibleReceiptRequired": True,
         "x64PeExportInspectionRequired": True,
+        "signedSteeringGainRequiresValidatedAccessor": True,
         "onlineSessionsAllowed": False,
     }
     for target in ("story-legacy", "story-enhanced"):
@@ -31,6 +36,11 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
         assert profile["profiles"][target]["status"] == (
             "implemented-awaiting-validation"
         )
+        assert profile["profiles"][target]["capabilities"] == {
+            "steeringFlags": True,
+            "driveFlags": True,
+            "signedSteeringGain": False,
+        }
 
     package = json.loads(
         (RUNTIME / "profiles" / "runtime-package.json").read_text(
@@ -41,6 +51,9 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
     assert package["binaryContract"]["validatedProfileExport"] == (
         "VehicleWorkbenchAxles_HasValidatedProfile"
     )
+    assert package["binaryContract"]["capabilities"][
+        "signedSteeringGain"
+    ] is False
     assert all(
         not target["packageEligible"] and target["supportedGameBuilds"] == []
         for target in package["targets"].values()
@@ -66,15 +79,27 @@ def test_story_runtime_schema_and_fixture_are_variable_length() -> None:
     assert axle_array["minItems"] == 2
     assert axle_array["maxItems"] == 5
     assert schema["properties"]["expectedWheelCount"]["enum"] == [4, 6, 8, 10]
+    gain_schema = axle_array["items"]["properties"]["steeringGain"]
+    assert gain_schema["minimum"] == -1.0
+    assert gain_schema["maximum"] == 1.0
 
     example = json.loads(
         (RUNTIME / "examples" / "example_bus.json").read_text(encoding="utf-8")
     )
+    bone_fixture = json.loads(
+        (RUNTIME / "examples" / "example_bus.bones.json").read_text(
+            encoding="utf-8"
+        )
+    )
     assert example["expectedWheelCount"] == 6
+    assert example["modelHash"] == joaat_hex(example["modelName"])
     assert len(example["axles"]) == 3
     assert [
         (axle["steered"], axle["powered"]) for axle in example["axles"]
     ] == [(True, False), (False, True), (True, False)]
+    assert [axle["steeringGain"] for axle in example["axles"]] == [
+        1.0, 0.0, -0.22,
+    ]
     assert set(example["wheelIndexMapping"]["by_bone"]) == {
         "wheel_lf",
         "wheel_rf",
@@ -83,6 +108,15 @@ def test_story_runtime_schema_and_fixture_are_variable_length() -> None:
         "wheel_lr",
         "wheel_rr",
     }
+    configuration = AxleConfiguration.from_dict(example)
+    bones = tuple(
+        SimpleNamespace(name=item["name"], position=tuple(item["position"]))
+        for item in bone_fixture["bones"]
+    )
+    assert bone_fixture["deployable"] is False
+    assert example["steeringCalculation"]["bonePositionSha256"] == (
+        canonical_bone_position_sha256(configuration, bones)
+    )
 
     core = (RUNTIME / "src" / "runtime.cpp").read_text(encoding="utf-8")
     assert "wheel_index_map.find" in core

@@ -56,6 +56,15 @@ public:
                                  std::uint16_t) = 0;
     virtual bool SetWheelPowered(const VehicleSnapshot&, std::uint32_t,
                                  bool) = 0;
+    // Signed per-wheel steering gain is an optional, build-profile capability.
+    // Existing reviewed profiles remain source/binary compatible at the
+    // contract level and explicitly report no support until all three methods
+    // are implemented and acceptance-tested for an exact game build.
+    virtual bool SupportsSteeringGain() const noexcept { return false; }
+    virtual bool ReadWheelSteeringGain(const VehicleSnapshot&, std::uint32_t,
+                                       double&) { return false; }
+    virtual bool WriteWheelSteeringGain(const VehicleSnapshot&, std::uint32_t,
+                                        double) { return false; }
 };
 
 class IWheelAccess {
@@ -82,6 +91,13 @@ public:
     virtual bool SetWheelPowered(const VehicleSnapshot& vehicle,
                                  std::uint32_t index,
                                  bool powered) = 0;
+    virtual bool SupportsSteeringGain() const noexcept = 0;
+    virtual bool ReadWheelSteeringGain(const VehicleSnapshot& vehicle,
+                                       std::uint32_t index,
+                                       double& gain) = 0;
+    virtual bool WriteWheelSteeringGain(const VehicleSnapshot& vehicle,
+                                        std::uint32_t index,
+                                        double gain) = 0;
 };
 
 class LegacyWheelAccess final : public IWheelAccess {
@@ -106,6 +122,11 @@ public:
     bool WriteWheelFlags(const VehicleSnapshot&, std::uint32_t,
                          std::uint16_t) override;
     bool SetWheelPowered(const VehicleSnapshot&, std::uint32_t, bool) override;
+    bool SupportsSteeringGain() const noexcept override;
+    bool ReadWheelSteeringGain(const VehicleSnapshot&, std::uint32_t,
+                               double&) override;
+    bool WriteWheelSteeringGain(const VehicleSnapshot&, std::uint32_t,
+                                double) override;
 
 private:
     struct State;
@@ -134,6 +155,11 @@ public:
     bool WriteWheelFlags(const VehicleSnapshot&, std::uint32_t,
                          std::uint16_t) override;
     bool SetWheelPowered(const VehicleSnapshot&, std::uint32_t, bool) override;
+    bool SupportsSteeringGain() const noexcept override;
+    bool ReadWheelSteeringGain(const VehicleSnapshot&, std::uint32_t,
+                               double&) override;
+    bool WriteWheelSteeringGain(const VehicleSnapshot&, std::uint32_t,
+                                double) override;
 
 private:
     struct State;

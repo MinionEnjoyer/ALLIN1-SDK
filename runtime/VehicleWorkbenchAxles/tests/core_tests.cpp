@@ -2,7 +2,9 @@
 #include "vehicle_workbench_axles/runtime.hpp"
 #include "vehicle_workbench_axles/wheel_access.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -99,7 +101,12 @@ public:
 class Host final : public IVehicleHost {
 public:
     GameIdentity DetectGame() const override { return game; }
-    bool IsOnlineSession() const override { return online; }
+    bool IsOnlineSession() const override {
+        ++online_checks;
+        return online ||
+               (online_on_check.has_value() &&
+                online_checks >= *online_on_check);
+    }
     std::vector<VehicleSnapshot> EnumerateVehicles() override {
         return vehicles;
     }
@@ -113,6 +120,8 @@ public:
 
     GameIdentity game{Edition::Legacy, 9999, "mock-fingerprint"};
     bool online{false};
+    std::optional<std::size_t> online_on_check;
+    mutable std::size_t online_checks{0};
     std::vector<VehicleSnapshot> vehicles;
 };
 
@@ -142,6 +151,10 @@ public:
     bool ReadWheelFlags(const VehicleSnapshot&, std::uint32_t index,
                         std::uint16_t& value) override {
         if (!resolved || index >= flags.size()) return false;
+        if (fail_next_read_at.has_value() && *fail_next_read_at == index) {
+            fail_next_read_at.reset();
+            return false;
+        }
         value = flags[index];
         ++reads;
         return true;
@@ -161,6 +174,11 @@ public:
     bool SetWheelPowered(const VehicleSnapshot&, std::uint32_t index,
                          bool powered) override {
         if (!resolved || index >= flags.size()) return false;
+        if (fail_next_power_write_at.has_value() &&
+            *fail_next_power_write_at == index) {
+            fail_next_power_write_at.reset();
+            return false;
+        }
         if (powered) {
             flags[index] = static_cast<std::uint16_t>(flags[index] | kDrivenBit);
         } else {
@@ -170,6 +188,34 @@ public:
         ++powered_writes;
         return true;
     }
+    bool SupportsSteeringGain() const noexcept override {
+        return supports_steering_gain;
+    }
+    bool ReadWheelSteeringGain(const VehicleSnapshot&, std::uint32_t index,
+                               double& gain) override {
+        if (!resolved || !supports_steering_gain ||
+            index >= steering_gains.size()) {
+            return false;
+        }
+        gain = steering_gains[index];
+        ++gain_reads;
+        return true;
+    }
+    bool WriteWheelSteeringGain(const VehicleSnapshot&, std::uint32_t index,
+                                double gain) override {
+        if (!resolved || !supports_steering_gain ||
+            index >= steering_gains.size()) {
+            return false;
+        }
+        if (fail_next_gain_write_at.has_value() &&
+            *fail_next_gain_write_at == index) {
+            fail_next_gain_write_at.reset();
+            return false;
+        }
+        steering_gains[index] = gain;
+        ++gain_writes;
+        return true;
+    }
 
     Edition target{Edition::Legacy};
     bool supported{true};
@@ -177,10 +223,17 @@ public:
     std::uint32_t maximum_axles{5};
     std::string failure;
     std::vector<std::uint16_t> flags;
+    std::vector<double> steering_gains;
+    bool supports_steering_gain{false};
+    std::optional<std::uint32_t> fail_next_read_at;
     std::optional<std::uint32_t> fail_next_write_at;
+    std::optional<std::uint32_t> fail_next_power_write_at;
+    std::optional<std::uint32_t> fail_next_gain_write_at;
     std::size_t reads{0};
     std::size_t writes{0};
     std::size_t powered_writes{0};
+    std::size_t gain_reads{0};
+    std::size_t gain_writes{0};
     std::size_t resolve_calls{0};
 };
 
@@ -200,6 +253,8 @@ AxleConfiguration MakeConfiguration(std::size_t axle_count,
     result.model_hash = model_hash;
     result.expected_wheel_count = static_cast<std::uint32_t>(axle_count * 2U);
     result.minimum_runtime_version = "1.0.0";
+    result.story_legacy = true;
+    result.story_enhanced = true;
 
     std::vector<std::pair<std::string, std::string>> selected;
     selected.push_back(kAllPairs.front());
@@ -227,6 +282,19 @@ AxleConfiguration MakeConfiguration(std::size_t axle_count,
         result.wheel_index_map.emplace(pair.second, --next_index);
     }
     return result;
+}
+
+void PromoteToSignedSchema(AxleConfiguration& configuration) {
+    configuration.schema_version = kAxleSchemaVersion;
+    configuration.minimum_runtime_version = kSignedSteeringMinimumRuntime;
+    SteeringCalculationEvidence evidence;
+    evidence.mode = "manual";
+    evidence.algorithm_version = 1;
+    evidence.bone_position_sha256 = std::string(64U, '0');
+    configuration.steering_calculation = std::move(evidence);
+    for (auto& axle : configuration.axles) {
+        axle.steering_gain = axle.steered ? 1.0 : 0.0;
+    }
 }
 
 std::vector<std::uint16_t> InitialFlags(std::size_t count) {
@@ -354,6 +422,119 @@ void TestInvalidWheelCountAndRollback() {
     rollback_runtime.Shutdown();
 }
 
+void TestRecoveryRetainsOriginalBaseline() {
+    Host host;
+    WheelAccess access;
+    LogSink log;
+    Resolver resolver;
+    auto configuration = MakeConfiguration(3);
+    const auto original = InitialFlags(6);
+    access.flags = original;
+    host.vehicles = {{31, configuration.model_hash, 7}};
+    ConfigurationCatalog catalog;
+    catalog.active.emplace(configuration.model_hash, configuration);
+    AxleRuntime runtime(host, access, log);
+    Check(runtime.Start(std::move(catalog), resolver),
+          "recovery fixture failed to start");
+    const auto first = std::chrono::steady_clock::now();
+    runtime.Service(first);
+    Check(runtime.TrackedVehicleCount() == 1,
+          "initial application did not retain its baseline");
+
+    // Drift one managed value away from both the authored value and the
+    // startup baseline, then fail the recovery write.  The recovery rollback
+    // restores this drift value; shutdown must still use the startup baseline.
+    access.flags[0] = static_cast<std::uint16_t>(access.flags[0] & ~0x18U);
+    access.fail_next_write_at = 0;
+    runtime.Service(first + std::chrono::seconds(3));
+    Check(runtime.TrackedVehicleCount() == 1,
+          "failed recovery discarded the startup baseline");
+    runtime.Shutdown();
+    Check(runtime.State() == RuntimeState::Stopped && access.flags == original,
+          "shutdown restored a recovery snapshot instead of startup state");
+}
+
+void TestShutdownRestorationRetries() {
+    Resolver resolver;
+    for (const bool fail_read : {true, false}) {
+        Host host;
+        WheelAccess access;
+        LogSink log;
+        auto configuration = MakeConfiguration(3);
+        const auto original = InitialFlags(6);
+        access.flags = original;
+        host.vehicles = {{41, configuration.model_hash, 9}};
+        ConfigurationCatalog catalog;
+        catalog.active.emplace(configuration.model_hash, configuration);
+        AxleRuntime runtime(host, access, log);
+        Check(runtime.Start(std::move(catalog), resolver),
+              "shutdown retry fixture failed to start");
+        runtime.Service(std::chrono::steady_clock::now());
+        if (fail_read) {
+            access.fail_next_read_at = 0;
+        } else {
+            access.fail_next_write_at = 0;
+        }
+        runtime.Shutdown();
+        Check(runtime.State() == RuntimeState::Faulted &&
+                  runtime.TrackedVehicleCount() == 1 && access.IsResolved(),
+              "failed shutdown restoration did not remain retryable");
+        runtime.Shutdown();
+        Check(runtime.State() == RuntimeState::Stopped &&
+                  runtime.TrackedVehicleCount() == 0 &&
+                  access.flags == original && !access.IsResolved(),
+              "second shutdown did not complete retained restoration");
+    }
+}
+
+void TestShutdownReleasesObsoleteVehicleIdentities() {
+    Resolver resolver;
+    for (const int replacement_case : {0, 1, 2}) {
+        Host host;
+        WheelAccess access;
+        LogSink log;
+        auto configuration = MakeConfiguration(3);
+        access.flags = InitialFlags(6);
+        host.vehicles = {{51, configuration.model_hash, 12}};
+        ConfigurationCatalog catalog;
+        catalog.active.emplace(configuration.model_hash, configuration);
+        AxleRuntime runtime(host, access, log);
+        Check(runtime.Start(std::move(catalog), resolver),
+              "obsolete identity fixture failed to start");
+        runtime.Service(std::chrono::steady_clock::now());
+        Check(runtime.TrackedVehicleCount() == 1,
+              "obsolete identity fixture did not retain its baseline");
+        const auto flag_writes = access.writes;
+        const auto power_writes = access.powered_writes;
+
+        if (replacement_case == 0) {
+            host.vehicles.clear();
+        } else if (replacement_case == 1) {
+            ++host.vehicles.front().wheel_generation;
+        } else {
+            host.vehicles.front().model_hash ^= 0x01010101U;
+        }
+
+        runtime.Shutdown();
+        Check(runtime.State() == RuntimeState::Stopped &&
+                  runtime.TrackedVehicleCount() == 0 && !access.IsResolved(),
+              "obsolete vehicle identity kept shutdown faulted");
+        Check(access.writes == flag_writes &&
+                  access.powered_writes == power_writes,
+              "obsolete vehicle identity was touched during shutdown");
+        const std::string expected_code =
+            replacement_case == 0
+                ? "restore-entity-released"
+                : "restore-identity-replaced";
+        Check(std::any_of(
+                  log.entries.begin(), log.entries.end(),
+                  [&](const auto& entry) {
+                      return entry.first == expected_code;
+                  }),
+              "obsolete vehicle identity release was not diagnosed");
+    }
+}
+
 void TestOnlineAndUnsupportedGuards() {
     Host host;
     host.online = true;
@@ -372,6 +553,31 @@ void TestOnlineAndUnsupportedGuards() {
     Check(access.resolve_calls == 0 && access.writes == 0,
           "online guard reached adapter resolution or writes");
     runtime.Shutdown();
+
+    Host boundary_host;
+    WheelAccess boundary_access;
+    LogSink boundary_log;
+    auto boundary_configuration = MakeConfiguration(2);
+    boundary_access.flags = InitialFlags(4);
+    boundary_host.vehicles = {
+        {2, boundary_configuration.model_hash, 1},
+    };
+    // Start, Service, and Apply each observe Story Mode.  The fourth check is
+    // the write-boundary guard after all reads have completed.
+    boundary_host.online_on_check = 4;
+    ConfigurationCatalog boundary_catalog;
+    boundary_catalog.active.emplace(boundary_configuration.model_hash,
+                                    boundary_configuration);
+    AxleRuntime boundary_runtime(
+        boundary_host, boundary_access, boundary_log);
+    Check(boundary_runtime.Start(std::move(boundary_catalog), resolver),
+          "write-boundary fixture failed to start");
+    boundary_runtime.Service(std::chrono::steady_clock::now());
+    Check(boundary_runtime.State() == RuntimeState::DisabledOnline &&
+              boundary_access.writes == 0 &&
+              boundary_access.powered_writes == 0,
+          "online transition between reads and writes crossed the guard");
+    boundary_runtime.Shutdown();
 
     LegacyWheelAccess real_adapter;
     GameIdentity game{Edition::Legacy, 9999, "fixture"};
@@ -402,6 +608,114 @@ void TestOnlineAndUnsupportedGuards() {
     profiled_adapter.Reset();
     Check(!profiled_adapter.IsResolved() && !profile->bound,
           "profile reset retained resolved accessors");
+}
+
+void TestSignedSteeringGainCapabilityAndRestore() {
+    Resolver resolver;
+    auto configuration = MakeConfiguration(3);
+    PromoteToSignedSchema(configuration);
+    configuration.axles[0].steering_gain = 1.0;
+    configuration.axles[1].steering_gain = 0.0;
+    configuration.axles[2].steering_gain = -0.22;
+
+    Host unsupported_host;
+    unsupported_host.vehicles = {{80, configuration.model_hash, 1}};
+    WheelAccess unsupported_access;
+    unsupported_access.flags = InitialFlags(6);
+    LogSink unsupported_log;
+    ConfigurationCatalog unsupported_catalog;
+    unsupported_catalog.active.emplace(configuration.model_hash, configuration);
+    AxleRuntime unsupported_runtime(
+        unsupported_host, unsupported_access, unsupported_log);
+    Check(!unsupported_runtime.Start(std::move(unsupported_catalog), resolver),
+          "flag-only profile accepted signed steering gain");
+    Check(unsupported_access.writes == 0 && unsupported_access.gain_writes == 0,
+          "unsupported steering gain reached a wheel write");
+    Check(std::any_of(
+              unsupported_log.entries.begin(), unsupported_log.entries.end(),
+              [](const auto& entry) {
+                  return entry.first == "steering-gain-capability-missing";
+              }),
+          "unsupported steering gain did not report its capability blocker");
+    unsupported_runtime.Shutdown();
+
+    Host host;
+    host.vehicles = {{81, configuration.model_hash, 2}};
+    WheelAccess access;
+    access.supports_steering_gain = true;
+    access.flags = InitialFlags(6);
+    access.steering_gains = {0.11, 0.12, 0.13, 0.14, 0.15, 0.16};
+    const auto gains_before = access.steering_gains;
+    LogSink log;
+    ConfigurationCatalog catalog;
+    catalog.active.emplace(configuration.model_hash, configuration);
+    AxleRuntime runtime(host, access, log);
+    Check(runtime.Start(std::move(catalog), resolver),
+          "gain-capable profile did not start");
+    runtime.Service(std::chrono::steady_clock::now());
+    for (const auto& axle : configuration.axles) {
+        const double expected = axle.steering_gain.value_or(
+            axle.steered ? 1.0 : 0.0);
+        Check(std::abs(access.steering_gains.at(
+                           configuration.wheel_index_map.at(axle.left_bone)) -
+                       expected) < 0.000001 &&
+                  std::abs(access.steering_gains.at(
+                               configuration.wheel_index_map.at(axle.right_bone)) -
+                           expected) < 0.000001,
+              "signed steering gain did not follow the canonical wheel map");
+    }
+    runtime.Shutdown();
+    Check(access.steering_gains == gains_before,
+          "shutdown did not restore original steering gain");
+
+    Host independent_restore_host;
+    independent_restore_host.vehicles = {{83, configuration.model_hash, 4}};
+    WheelAccess independent_restore_access;
+    independent_restore_access.supports_steering_gain = true;
+    independent_restore_access.flags = InitialFlags(6);
+    independent_restore_access.steering_gains = gains_before;
+    LogSink independent_restore_log;
+    ConfigurationCatalog independent_restore_catalog;
+    independent_restore_catalog.active.emplace(
+        configuration.model_hash, configuration);
+    AxleRuntime independent_restore_runtime(
+        independent_restore_host, independent_restore_access,
+        independent_restore_log);
+    Check(independent_restore_runtime.Start(
+              std::move(independent_restore_catalog), resolver),
+          "independent gain restore fixture did not start");
+    independent_restore_runtime.Service(std::chrono::steady_clock::now());
+    independent_restore_access.fail_next_read_at = 0;
+    independent_restore_runtime.Shutdown();
+    Check(independent_restore_runtime.State() == RuntimeState::Faulted &&
+              independent_restore_access.steering_gains == gains_before,
+          "flag read failure prevented independent gain restoration");
+    independent_restore_runtime.Shutdown();
+    Check(independent_restore_runtime.State() == RuntimeState::Stopped,
+          "independent gain restore retry did not complete");
+
+    Host rollback_host;
+    rollback_host.vehicles = {{82, configuration.model_hash, 3}};
+    WheelAccess rollback_access;
+    rollback_access.supports_steering_gain = true;
+    rollback_access.flags = InitialFlags(6);
+    rollback_access.steering_gains = gains_before;
+    const auto flags_before = rollback_access.flags;
+    rollback_access.fail_next_gain_write_at = 1;
+    LogSink rollback_log;
+    ConfigurationCatalog rollback_catalog;
+    rollback_catalog.active.emplace(configuration.model_hash, configuration);
+    AxleRuntime rollback_runtime(
+        rollback_host, rollback_access, rollback_log);
+    Check(rollback_runtime.Start(std::move(rollback_catalog), resolver),
+          "gain rollback runtime did not start");
+    rollback_runtime.Service(std::chrono::steady_clock::now());
+    Check(rollback_access.flags == flags_before &&
+              rollback_access.steering_gains == gains_before,
+          "failed steering gain transaction did not restore all wheel state");
+    Check(rollback_runtime.TrackedVehicleCount() == 0,
+          "failed steering gain transaction remained tracked");
+    rollback_runtime.Shutdown();
 }
 
 void TestValidationAndParsing() {
@@ -436,6 +750,153 @@ void TestValidationAndParsing() {
           "explicit target wheel mapping was rewritten");
     Check(parsed->story_legacy && !parsed->story_enhanced,
           "target-specific compatibility was not preserved");
+    Check(!parsed->axles.front().steering_gain.has_value(),
+          "legacy boolean-only configuration did not remain implicit");
+
+    auto missing_compatibility_json = json_text;
+    const std::string compatibility_fixture =
+        ",\n      \"compatibility\": {\"story-legacy\":true,\"story-enhanced\":false}";
+    const auto compatibility_fixture_position =
+        missing_compatibility_json.find(compatibility_fixture);
+    Check(compatibility_fixture_position != std::string::npos,
+          "compatibility parser fixture was not found");
+    missing_compatibility_json.erase(compatibility_fixture_position,
+                                     compatibility_fixture.size());
+    std::vector<ValidationIssue> missing_compatibility_issues;
+    Check(!ParseConfigurationJson(
+               missing_compatibility_json, "1.0.0",
+               missing_compatibility_issues, "missing-compatibility.json")
+               .has_value(),
+          "missing compatibility defaulted to a Story target");
+
+    auto unknown_compatibility_json = json_text;
+    unknown_compatibility_json.replace(
+        unknown_compatibility_json.find("\"story-legacy\":true"),
+        std::string("\"story-legacy\":true").size(),
+        "\"story\":true");
+    std::vector<ValidationIssue> unknown_compatibility_issues;
+    Check(!ParseConfigurationJson(
+               unknown_compatibility_json, "1.0.0",
+               unknown_compatibility_issues, "unknown-compatibility.json")
+               .has_value(),
+          "unrecognized compatibility key enabled a Story target");
+
+    auto legacy_signed_json = json_text;
+    const std::string rear_legacy =
+        "\"steered\":true,\"powered\":false}";
+    const auto rear_position = legacy_signed_json.rfind(rear_legacy);
+    Check(rear_position != std::string::npos,
+          "signed gain parser fixture was not found");
+    legacy_signed_json.replace(
+        rear_position, rear_legacy.size(),
+        "\"steered\":true,\"steeringGain\":-0.22,\"powered\":false}");
+    std::vector<ValidationIssue> legacy_signed_issues;
+    const auto legacy_signed = ParseConfigurationJson(
+        legacy_signed_json, "2.0.0", legacy_signed_issues, "legacy-signed.json");
+    Check(!legacy_signed.has_value(),
+          "schema 1 accepted a non-legacy signed steering gain");
+
+    auto signed_json = legacy_signed_json;
+    signed_json.replace(signed_json.find("\"schemaVersion\": 1"), 18,
+                        "\"schemaVersion\": 2");
+    const std::string minimum_legacy =
+        "\"minimumRuntimeVersion\": \"1.0.0\"";
+    signed_json.replace(
+        signed_json.find(minimum_legacy), minimum_legacy.size(),
+        "\"minimumRuntimeVersion\": \"2.0.0\"");
+    const std::string front_legacy =
+        "\"steered\":true,\"powered\":false}";
+    const auto front_position = signed_json.find(front_legacy);
+    signed_json.replace(
+        front_position, front_legacy.size(),
+        "\"steered\":true,\"steeringGain\":1.0,\"powered\":false}");
+    const std::string middle_legacy =
+        "\"steered\":false,\"powered\":true}";
+    const auto middle_position = signed_json.find(middle_legacy);
+    signed_json.replace(
+        middle_position, middle_legacy.size(),
+        "\"steered\":false,\"steeringGain\":0.0,\"powered\":true}");
+    const auto compatibility_position = signed_json.find(
+        "\"compatibility\":");
+    signed_json.insert(
+        compatibility_position,
+        "\"steeringCalculation\":{"
+        "\"mode\":\"manual\",\"algorithmVersion\":1,"
+        "\"bonePositionSha256\":\"" + std::string(64U, '0') + "\"},\n      ");
+    std::vector<ValidationIssue> signed_issues;
+    const auto parsed_signed = ParseConfigurationJson(
+        signed_json, "2.0.0", signed_issues, "signed.json");
+    Check(parsed_signed.has_value() && signed_issues.empty() &&
+              parsed_signed->axles.back().steering_gain.has_value() &&
+              std::abs(*parsed_signed->axles.back().steering_gain + 0.22) <
+                  0.000001,
+          "signed steeringGain did not parse exactly");
+
+    auto automatic_json = signed_json;
+    automatic_json.replace(
+        automatic_json.find("\"mode\":\"manual\""),
+        std::string("\"mode\":\"manual\"").size(),
+        "\"mode\":\"automaticGeometry\"");
+    const std::string evidence_end = "\"},\n      \"compatibility\"";
+    const auto evidence_end_position = automatic_json.find(evidence_end);
+    Check(evidence_end_position != std::string::npos,
+          "automatic evidence parser fixture was not found");
+    automatic_json.insert(
+        evidence_end_position + 1U,
+        ",\"pivotLongitudinalPosition\":-1.0,"
+        "\"pivotSource\":\"selected_fixed_axles\","
+        "\"pivotAxleOrders\":[1],\"referenceAxleOrder\":0,"
+        "\"referenceLockDegrees\":35.0,"
+        "\"pairPositionTolerance\":0.01,"
+        "\"positionEpsilon\":0.0001");
+    std::vector<ValidationIssue> automatic_issues;
+    const auto parsed_automatic = ParseConfigurationJson(
+        automatic_json, "2.0.0", automatic_issues, "automatic.json");
+    Check(parsed_automatic.has_value() && automatic_issues.empty() &&
+              parsed_automatic->steering_calculation.has_value() &&
+              parsed_automatic->steering_calculation
+                  ->pair_position_tolerance == 0.01 &&
+              parsed_automatic->steering_calculation->position_epsilon ==
+                  0.0001,
+          "automatic reproducibility tolerances did not parse");
+
+    auto signed_gain = *parsed;
+    PromoteToSignedSchema(signed_gain);
+    Check(!ValidateConfiguration(signed_gain, "2.0.0").empty(),
+          "schema 2 accepted an entirely legacy steering configuration");
+    signed_gain.axles[0].steering_gain = 1.0;
+    signed_gain.axles[1].steering_gain = 0.0;
+    signed_gain.axles[2].steering_gain = -0.22;
+    Check(ValidateConfiguration(signed_gain, "2.0.0").empty(),
+          "valid signed steering gain was rejected");
+    auto nonsteered_gain = signed_gain;
+    nonsteered_gain.axles[1].steering_gain = 0.25;
+    Check(!ValidateConfiguration(nonsteered_gain, "2.0.0").empty(),
+          "non-steered axle accepted non-zero steering gain");
+    auto out_of_range_gain = signed_gain;
+    out_of_range_gain.axles[2].steering_gain = -1.01;
+    Check(!ValidateConfiguration(out_of_range_gain, "2.0.0").empty(),
+          "out-of-range steering gain was accepted");
+
+    auto automatic = signed_gain;
+    automatic.steering_calculation->mode = "automaticGeometry";
+    automatic.steering_calculation->pivot_longitudinal_position = -1.0;
+    automatic.steering_calculation->pivot_source = "selected_fixed_axles";
+    automatic.steering_calculation->pivot_axle_orders = {1};
+    automatic.steering_calculation->reference_axle_order = 0;
+    automatic.steering_calculation->reference_lock_degrees = 35.0;
+    automatic.steering_calculation->pair_position_tolerance = 0.01;
+    automatic.steering_calculation->position_epsilon = 0.0001;
+    Check(ValidateConfiguration(automatic, "2.0.0").empty(),
+          "complete automatic steering provenance was rejected");
+    auto incomplete_automatic = automatic;
+    incomplete_automatic.steering_calculation->position_epsilon.reset();
+    Check(!ValidateConfiguration(incomplete_automatic, "2.0.0").empty(),
+          "automatic provenance omitted a reproducibility input");
+    auto invalid_manual = signed_gain;
+    invalid_manual.steering_calculation->pair_position_tolerance = 0.01;
+    Check(!ValidateConfiguration(invalid_manual, "2.0.0").empty(),
+          "manual provenance accepted an automatic-only tolerance");
 
     auto cosmetic = *parsed;
     cosmetic.wheel_index_map.emplace("wheel_dual_lf", 6);
@@ -455,8 +916,8 @@ void TestValidationAndParsing() {
     std::vector<ValidationIssue> newer_issues;
     const auto newer = ParseConfigurationJson(
         std::string(json_text).replace(json_text.find("\"schemaVersion\": 1"),
-                                       18, "\"schemaVersion\": 2"),
-        "1.0.0", newer_issues, "future.json");
+                                       18, "\"schemaVersion\": 3"),
+        "2.0.0", newer_issues, "future.json");
     Check(!newer.has_value(), "newer schema did not fail closed");
 
     const std::string schema_zero = R"json({
@@ -465,10 +926,12 @@ void TestValidationAndParsing() {
       "modelName": "legacy_fixture",
       "modelHash": "0x87654321",
       "expectedWheelCount": 4,
+      "minimumRuntimeVersion": "1.0.0",
       "axles": [
         {"order":0,"role":"front","leftBone":"wheel_lf","rightBone":"wheel_rf","wheelIndices":[1,0],"steered":true,"powered":false},
         {"order":1,"role":"rear","leftBone":"wheel_lr","rightBone":"wheel_rr","wheelIndices":[3,2],"steered":false,"powered":true}
-      ]
+      ],
+      "compatibility": {"storyLegacy": true}
     })json";
     std::vector<ValidationIssue> migration_issues;
     const auto migrated = ParseConfigurationJson(
@@ -512,7 +975,11 @@ int main() {
     try {
         TestVariableLengthRuntime();
         TestInvalidWheelCountAndRollback();
+        TestRecoveryRetainsOriginalBaseline();
+        TestShutdownRestorationRetries();
+        TestShutdownReleasesObsoleteVehicleIdentities();
         TestOnlineAndUnsupportedGuards();
+        TestSignedSteeringGainCapabilityAndRestore();
         TestValidationAndParsing();
         std::cout << "VehicleWorkbenchAxles core tests passed\n";
         return EXIT_SUCCESS;

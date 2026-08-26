@@ -22,6 +22,11 @@ Build one generic runtime from shared C++ source and load any number of
 versioned JSON vehicle configurations.  Build Legacy and Enhanced artifacts
 from that source, but keep their wheel-access adapters isolated.
 
+Runtime contract 2.0 keeps schema 1 as the legacy boolean `+1/0` format and
+accepts schema 2 only when every gain is explicit, minimum runtime 2.0 is
+declared, and calculation evidence is present. Exact-build adapters still have
+to attest the separate signed-gain accessor before such a config is deployable.
+
 The runtime core depends only on `IWheelAccess`, `IVehicleHost`, and `ILogSink`.
 It maps canonical bone semantics to wheel indices from the exported
 `wheelIndexMap`; it never calculates an index as `axleOrder * 2`.
@@ -39,11 +44,18 @@ The runtime:
 3. reacquires an entity snapshot for each operation and retains no game pointer;
 4. verifies game-reported wheel count and the complete unique index map;
 5. read-modify-writes only bits `0x08` (steered) and `0x10` (driven);
-6. rolls back a partial application when the adapter reports failure;
-7. reapplies on explicit lifecycle events or a bounded recovery pass, never an
+6. treats signed per-axle steering gain as a distinct, opt-in profile
+   capability and rejects scaled/counter-steer configurations before writes
+   when the exact-build adapter cannot read, write, and restore it;
+7. rolls back a partial application when the adapter reports failure and
+   retains the original pre-application baseline when recovery must retry;
+8. reapplies on explicit lifecycle events or a bounded recovery pass, never an
    unconditional frame write loop;
-8. restores modified bits only when the entity and wheel generation can be
-   safely reacquired during shutdown.
+9. rechecks the online guard immediately before every mutating adapter call;
+10. restores modified bits and any capability-backed gain only when the entity
+   and wheel generation can be
+   safely reacquired during shutdown, retaining failed reads/writes for a safe
+   follow-up shutdown attempt.
 
 ## Consequences
 

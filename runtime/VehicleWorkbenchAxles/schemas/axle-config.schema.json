@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://allin1.local/schemas/vehicle-workbench-axles/v1.json",
+  "$id": "https://allin1.local/schemas/vehicle-workbench-axles/v2.json",
   "title": "Vehicle Workbench axle configuration",
   "type": "object",
   "additionalProperties": false,
@@ -11,14 +11,94 @@
     "modelHash",
     "expectedWheelCount",
     "minimumRuntimeVersion",
-    "axles"
+    "axles",
+    "compatibility"
   ],
   "anyOf": [
     { "required": ["wheelIndexMap"] },
     { "required": ["wheelIndexMapping"] }
   ],
+  "allOf": [
+    {
+      "if": {
+        "required": ["schemaVersion"],
+        "properties": { "schemaVersion": { "const": 1 } }
+      },
+      "then": {
+        "not": { "required": ["steeringCalculation"] },
+        "properties": {
+          "axles": {
+            "items": {
+              "allOf": [
+                {
+                  "if": {
+                    "required": ["steered"],
+                    "properties": { "steered": { "const": true } }
+                  },
+                  "then": {
+                    "properties": {
+                      "steeringGain": {
+                        "minimum": 0.999999999,
+                        "maximum": 1.0
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": ["steered"],
+                    "properties": { "steered": { "const": false } }
+                  },
+                  "then": {
+                    "properties": {
+                      "steeringGain": {
+                        "minimum": -1e-9,
+                        "maximum": 1e-9
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["schemaVersion"],
+        "properties": { "schemaVersion": { "const": 2 } }
+      },
+      "then": {
+        "required": ["steeringCalculation"],
+        "properties": {
+          "minimumRuntimeVersion": {
+            "type": "string",
+            "pattern": "^(?:[2-9]|[1-9][0-9]+)\\.[0-9]+\\.[0-9]+$"
+          },
+          "axles": {
+            "items": { "required": ["steeringGain"] },
+            "contains": {
+              "type": "object",
+              "required": ["steered", "steeringGain"],
+              "properties": {
+                "steered": { "const": true },
+                "steeringGain": {
+                  "not": {
+                    "minimum": 0.999999999,
+                    "maximum": 1.0
+                  }
+                }
+              }
+            },
+            "minContains": 1
+          }
+        }
+      }
+    }
+  ],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "type": "integer", "enum": [1, 2] },
     "configurationId": { "type": "string", "minLength": 1, "maxLength": 128 },
     "modelName": { "type": "string", "minLength": 1, "maxLength": 128 },
     "modelHash": { "type": ["string", "integer"] },
@@ -60,6 +140,22 @@
         "type": "object",
         "additionalProperties": false,
         "required": ["order", "role", "leftBone", "rightBone", "steered", "powered"],
+        "allOf": [
+          {
+            "if": {
+              "required": ["steered"],
+              "properties": { "steered": { "const": false } }
+            },
+            "then": {
+              "properties": {
+                "steeringGain": {
+                  "minimum": -1e-9,
+                  "maximum": 1e-9
+                }
+              }
+            }
+          }
+        ],
         "properties": {
           "order": { "type": "integer", "minimum": 0, "maximum": 4 },
           "role": { "type": "string", "enum": ["front", "middle", "rear", "tag"] },
@@ -72,6 +168,12 @@
             "items": { "type": "integer", "minimum": 0, "maximum": 9 }
           },
           "steered": { "type": "boolean" },
+          "steeringGain": {
+            "type": "number",
+            "minimum": -1.0,
+            "maximum": 1.0,
+            "description": "Optional signed phase/gain. Omit for legacy boolean steering; non-steered axles must use 0."
+          },
           "powered": { "type": "boolean" },
           "serviceBrake": { "type": "boolean" },
           "handbrake": { "type": "boolean" },
@@ -82,6 +184,94 @@
     "handling": { "type": "object" },
     "dualTyreGeometry": { "type": "array", "items": { "type": "string" } },
     "dualTyresConsumePhysicalSlots": { "const": false },
-    "compatibility": { "type": "object" }
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "storyLegacy": { "type": "boolean" },
+        "storyEnhanced": { "type": "boolean" },
+        "story-legacy": { "type": "boolean" },
+        "story-enhanced": { "type": "boolean" }
+      },
+      "anyOf": [
+        {
+          "required": ["storyLegacy"],
+          "properties": { "storyLegacy": { "const": true } }
+        },
+        {
+          "required": ["storyEnhanced"],
+          "properties": { "storyEnhanced": { "const": true } }
+        },
+        {
+          "required": ["story-legacy"],
+          "properties": { "story-legacy": { "const": true } }
+        },
+        {
+          "required": ["story-enhanced"],
+          "properties": { "story-enhanced": { "const": true } }
+        }
+      ]
+    },
+    "steeringCalculation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "algorithmVersion", "bonePositionSha256"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["automaticGeometry", "manual"] },
+        "algorithmVersion": { "const": 1 },
+        "bonePositionSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "pivotLongitudinalPosition": { "type": "number" },
+        "pivotSource": {
+          "type": "string",
+          "enum": ["explicit", "selected_fixed_axles", "derived_fixed_axles"]
+        },
+        "pivotAxleOrders": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 0, "maximum": 4 }
+        },
+        "referenceAxleOrder": { "type": "integer", "minimum": 0, "maximum": 4 },
+        "referenceLockDegrees": { "type": "number", "minimum": 1, "maximum": 80 },
+        "pairPositionTolerance": { "type": "number", "exclusiveMinimum": 0 },
+        "positionEpsilon": { "type": "number", "exclusiveMinimum": 0 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["mode"],
+            "properties": { "mode": { "const": "automaticGeometry" } }
+          },
+          "then": {
+            "required": [
+              "pivotLongitudinalPosition", "pivotSource",
+              "pivotAxleOrders", "referenceAxleOrder", "referenceLockDegrees",
+              "pairPositionTolerance", "positionEpsilon"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": ["mode"],
+            "properties": { "mode": { "const": "manual" } }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["pivotLongitudinalPosition"] },
+                { "required": ["pivotSource"] },
+                { "required": ["pivotAxleOrders"] },
+                { "required": ["referenceAxleOrder"] },
+                { "required": ["referenceLockDegrees"] },
+                { "required": ["pairPositionTolerance"] },
+                { "required": ["positionEpsilon"] }
+              ]
+            }
+          }
+        }
+      ]
+    }
   }
 }

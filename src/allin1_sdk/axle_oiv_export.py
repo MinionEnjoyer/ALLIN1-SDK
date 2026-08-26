@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -20,7 +21,11 @@ from typing import Any, Mapping, Protocol, Sequence
 from lxml import etree as ET
 from PIL import Image
 
-from allin1_sdk.axle_configurator import AXLE_SCHEMA_VERSION, joaat_hex
+from allin1_sdk.axle_configurator import (
+    AXLE_SCHEMA_VERSION,
+    STEERING_GAIN_EPSILON,
+    joaat_hex,
+)
 from allin1_sdk.axle_runtime_bundler import (
     RuntimeDependency,
     STORY_RUNTIME_NAME,
@@ -964,6 +969,26 @@ class OivContentPlanner:
             left = str(axle.get("leftBone", "")).casefold()
             right = str(axle.get("rightBone", "")).casefold()
             role = axle.get("role")
+            steered = axle.get("steered")
+            steering_gain = axle.get(
+                "steeringGain", 1.0 if steered is True else 0.0,
+            )
+            legacy_gain = 1.0 if steered is True else 0.0
+            valid_steering_gain = (
+                not isinstance(steering_gain, bool)
+                and isinstance(steering_gain, (int, float))
+                and math.isfinite(float(steering_gain))
+                and -1.0 <= float(steering_gain) <= 1.0
+                and (
+                    steered is True
+                    or abs(float(steering_gain)) <= STEERING_GAIN_EPSILON
+                )
+                and (
+                    schema != AXLE_SCHEMA_VERSION
+                    or abs(float(steering_gain) - legacy_gain)
+                    <= STEERING_GAIN_EPSILON
+                )
+            )
             expected_role = (
                 "front" if position == 0
                 else "rear" if position + 1 == len(axles)
@@ -979,7 +1004,8 @@ class OivContentPlanner:
                     else role not in expected_role
                 )
                 or (left, right) != expected_pairs[position]
-                or not isinstance(axle.get("steered"), bool)
+                or not isinstance(steered, bool)
+                or not valid_steering_gain
                 or not isinstance(axle.get("powered"), bool)
                 or by_bone.get(left) != indices[0]
                 or by_bone.get(right) != indices[1]

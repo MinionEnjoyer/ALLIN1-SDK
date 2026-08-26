@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError, dataclass
+from dataclasses import FrozenInstanceError, dataclass, replace
 from pathlib import Path
 
 import pytest
 
 from allin1_sdk.axle_configurator import AxleConfiguration, EXPORT_FIVEM_RUNTIME
+from allin1_sdk.axle_steering_geometry import (
+    apply_steering_geometry_to_configuration,
+    solve_automatic_steering_geometry,
+)
 from allin1_sdk.axle_prefabs import (
     AxleBehaviorPrefab,
     AxlePrefabCatalog,
@@ -105,6 +109,25 @@ def test_every_builtin_prefab_resolves_variable_length_runtime_mapping(catalog):
             value for axle in preview.proposed.axles
             for value in (axle.left_runtime_index, axle.right_runtime_index)
         }) == prefab.axle_count * 2
+
+
+def test_behavior_prefab_preserves_stronger_runtime_floor(catalog):
+    wheel_bones = bones(3)
+    base = replace(
+        apply_prefab(
+            "6x2_rear_steer_bus", "runtime_floor_bus", wheel_bones,
+            "fivem-legacy", EXPORT_FIVEM_RUNTIME, catalog=catalog,
+        ).proposed,
+        minimum_runtime_version="3.1.0",
+    )
+
+    preview = apply_prefab(
+        "6x4_tandem_drive", "runtime_floor_bus", wheel_bones,
+        "fivem-legacy", EXPORT_FIVEM_RUNTIME, base_config=base,
+        catalog=catalog,
+    )
+
+    assert preview.proposed.minimum_runtime_version == "3.1.0"
 
 
 def test_visual_catalog_is_complete(tyres):
@@ -271,6 +294,30 @@ def test_visual_packages_never_add_physics_slots(catalog, tyres, package_id):
     ]
     assert before == after
     assert all(not addon.is_wheel_mesh for axle in preview.proposed.axles for addon in axle.addon_geometry)
+
+
+def test_visual_package_preserves_signed_geometry_and_bone_evidence(catalog, tyres):
+    wheel_bones = bones(3)
+    base = apply_prefab(
+        "6x2_rear_steer_bus", "signed_visual_bus", wheel_bones,
+        "fivem-legacy", EXPORT_FIVEM_RUNTIME, catalog=catalog,
+    ).proposed
+    signed = apply_steering_geometry_to_configuration(
+        base, solve_automatic_steering_geometry(base, wheel_bones),
+    )
+    preview = apply_visual_package("all_singles", signed, catalog=tyres)
+
+    assert [item.steering_gain for item in preview.proposed.axles] == [
+        item.steering_gain for item in signed.axles
+    ]
+    assert preview.proposed.steering_calculation == signed.steering_calculation
+    assert [
+        (item.left_runtime_index, item.right_runtime_index)
+        for item in preview.proposed.axles
+    ] == [
+        (item.left_runtime_index, item.right_runtime_index)
+        for item in signed.axles
+    ]
 
 
 def test_shared_middle_rear_template_limitation_is_explicit(catalog, tyres):

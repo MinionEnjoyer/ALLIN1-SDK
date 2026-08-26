@@ -1,0 +1,12 @@
+{
+  "fixture": "illustrative vehicle-local canonical wheel-bone positions",
+  "deployable": false,
+  "bones": [
+    {"name": "wheel_lf", "position": [-1.2, 3.0, 0.0]},
+    {"name": "wheel_rf", "position": [1.2, 3.0, 0.0]},
+    {"name": "wheel_lm1", "position": [-1.2, 0.0, 0.0]},
+    {"name": "wheel_rm1", "position": [1.2, 0.0, 0.0]},
+    {"name": "wheel_lr", "position": [-1.2, -3.0, 0.0]},
+    {"name": "wheel_rr", "position": [1.2, -3.0, 0.0]}
+  ]
+}

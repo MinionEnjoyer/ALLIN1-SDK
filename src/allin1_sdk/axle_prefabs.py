@@ -556,6 +556,7 @@ class PrefabAxleConfiguration(AxleConfiguration):
             minimum_runtime_version=config.minimum_runtime_version,
             compatibility=config.compatibility,
             handbrake_rear_steering=config.handbrake_rear_steering,
+            steering_calculation=config.steering_calculation,
             visual_tyre_selection=(
                 visual_tyre_selection
                 if visual_tyre_selection is not None else existing
@@ -1306,6 +1307,10 @@ def apply_prefab(
             left_runtime_index=runtime_mapping[left],
             right_runtime_index=runtime_mapping[right],
             steered=authored.steered,
+            # Applying a behavior prefab invalidates any prior geometry-derived
+            # gain evidence. Return to the exact schema-1 +1/0 behavior until
+            # the author explicitly recalculates or supplies manual gains.
+            steering_gain=1.0 if authored.steered else 0.0,
             powered=authored.powered,
             service_brake=existing.service_brake if existing else True,
             handbrake=existing.handbrake if existing else order == prefab.axle_count - 1,

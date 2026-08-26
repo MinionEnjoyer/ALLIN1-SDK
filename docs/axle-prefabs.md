@@ -25,6 +25,14 @@ includes a separate trailer category. Pattern tokens are labels only:
 Runtime behavior always comes from each axle's explicit Boolean and role
 fields. No prefab stores runtime wheel indices.
 
+After choosing a behavior, **Calculate steering** can derive signed gains from
+the canonical wheel-bone positions. Fixed axles define the neutral pivot; an
+all-steer layout must provide an explicit vehicle-local pivot and is never
+guessed. The solver uses a bounded center-line geometry estimate: positive is
+same-phase, negative is counter-phase, and zero is fixed. The longest steering
+lever arm is normalized to `1.0`. This is steering geometry, not a dynamic
+understeer/oversteer tyre model.
+
 The canonical pair map is:
 
 - Two axles: `wheel_lf/rf`, `wheel_lr/rr`
@@ -93,6 +101,14 @@ if preview.can_apply:
     config = confirm_prefab_application(preview, confirmed=True)
     visual_preview = apply_visual_package("mixed_tag", config, catalog=tyres)
 ```
+
+For automatic geometry, call
+`solve_automatic_steering_geometry(config, skeleton_bones)` and then
+`apply_steering_geometry_to_configuration(config, solution)`. The latter
+promotes only nonlegacy gains to schema 2 and records a digest of canonical
+bone positions plus the pivot/reference evidence. The console and typed Agent
+API expose the same read-only proposal through `preview-axle-steering`; saving
+still uses the acknowledged `set-vehicle-axles` command.
 
 If `visual_preview.design_only` is true, use
 `persist_visual_design(..., confirmed=True)` only to record the design intent.

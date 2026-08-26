@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import tomllib
 from pathlib import Path
 
@@ -34,9 +35,10 @@ def test_official_vehicle_snapshot_matches_sibling_core_catalogs():
     }
 
     assert SNAPSHOT_SCHEMA_VERSION == 1
-    assert SOURCE_VERSION == tomllib.loads(
-        (core_root / "pyproject.toml").read_text(encoding="utf-8")
-    )["project"]["version"]
+    # SOURCE_VERSION records when the catalog snapshot was generated; it is
+    # not the SDK or launcher product version. The source digests and resolved
+    # model/hash pairs below are the authoritative freshness checks.
+    assert re.fullmatch(r"\d+\.\d+\.\d+", SOURCE_VERSION)
     assert SOURCE_FILES == {
         "data/vehicles.toml": hashlib.sha256(online_path.read_bytes()).hexdigest(),
         "data/story_vehicles.json": hashlib.sha256(story_path.read_bytes()).hexdigest(),

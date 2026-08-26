@@ -22,7 +22,9 @@ from allin1_sdk.axle_configurator import (
     AXLE_SCHEMA_VERSION,
     CANONICAL_WHEEL_PAIRS,
     EXPORT_FIVEM_RUNTIME,
+    STEERING_GAIN_EPSILON,
     AxleConfiguration,
+    BoneLike,
     fivem_client_lua,
     fivem_server_lua,
     joaat_hex,
@@ -143,6 +145,29 @@ def _model_hash(value: int | str) -> str:
     if not 0 <= number <= 0xFFFFFFFF:
         raise ValueError("Model hash must be an unsigned 32-bit integer")
     return f"0x{number:08X}"
+
+
+def _steering_gain(axle: object) -> float:
+    """Return a validated signed gain while retaining boolean-only drafts."""
+    steered = bool(getattr(axle, "steered", False))
+    raw = getattr(axle, "steering_gain", None)
+    gain = (1.0 if steered else 0.0) if raw is None else raw
+    if isinstance(gain, bool) or not isinstance(gain, (int, float)):
+        raise ValueError("Axle steering gain must be a finite number from -1 to 1")
+    normalized = float(gain)
+    if not -1.0 <= normalized <= 1.0 or normalized != normalized:
+        raise ValueError("Axle steering gain must be a finite number from -1 to 1")
+    if not steered and abs(normalized) > STEERING_GAIN_EPSILON:
+        raise ValueError("A non-steered axle must use zero steering gain")
+    return normalized
+
+
+def _requires_signed_steering_gain(configuration: AxleConfiguration) -> bool:
+    return any(
+        abs(_steering_gain(axle) - (1.0 if axle.steered else 0.0))
+        > STEERING_GAIN_EPSILON
+        for axle in configuration.axles
+    )
 
 
 def _relative_file(path: str, label: str) -> str:
@@ -349,6 +374,7 @@ class TargetCapabilities:
     maximum_axle_schema: int
     supports_selective_steering: bool
     supports_selective_drive: bool
+    supports_signed_steering_gain: bool
     runtime_implementation_version: str
     supported_game_builds: tuple[str, ...]
     minimum_physical_axles: int = 2
@@ -363,22 +389,22 @@ class TargetCapabilities:
 TARGET_CAPABILITIES: Mapping[str, TargetCapabilities] = {
     TARGET_FIVEM_LEGACY: TargetCapabilities(
         TARGET_FIVEM_LEGACY, "fivem", "legacy", True, False, False,
-        True, AXLE_SCHEMA_VERSION, True, True, DEFAULT_RUNTIME_VERSION,
+        True, AXLE_SCHEMA_VERSION, True, True, False, DEFAULT_RUNTIME_VERSION,
         ("fivem-current",),
     ),
     TARGET_FIVEM_ENHANCED: TargetCapabilities(
         TARGET_FIVEM_ENHANCED, "fivem", "enhanced", True, True, False,
-        True, AXLE_SCHEMA_VERSION, True, True, DEFAULT_RUNTIME_VERSION,
+        True, AXLE_SCHEMA_VERSION, True, True, False, DEFAULT_RUNTIME_VERSION,
         ("fivem-enhanced-current",),
     ),
     TARGET_STORY_LEGACY: TargetCapabilities(
         TARGET_STORY_LEGACY, "story", "legacy", True, False, True,
-        True, AXLE_SCHEMA_VERSION, True, True, DEFAULT_RUNTIME_VERSION,
+        True, AXLE_SCHEMA_VERSION, True, True, False, DEFAULT_RUNTIME_VERSION,
         (),
     ),
     TARGET_STORY_ENHANCED: TargetCapabilities(
         TARGET_STORY_ENHANCED, "story", "enhanced", True, True, True,
-        True, AXLE_SCHEMA_VERSION, True, True, DEFAULT_RUNTIME_VERSION,
+        True, AXLE_SCHEMA_VERSION, True, True, False, DEFAULT_RUNTIME_VERSION,
         (),
     ),
 }
@@ -1067,6 +1093,11 @@ class VehicleAxleBuildInput:
     reported_wheel_count: int | None = None
     asset_source: Path | None = None
     dual_tyre_geometry: tuple[str, ...] = ()
+    # Schema-2 steering evidence is meaningful only when it can be checked
+    # against the canonical, vehicle-local wheel-bone positions that produced
+    # it.  Callers must supply those positions explicitly; the bundler never
+    # guesses them from a model name, mesh, or visual wheel family.
+    steering_evidence_bones: tuple[BoneLike, ...] = ()
 
     @property
     def normalized_configuration_id(self) -> str:
@@ -1075,6 +1106,70 @@ class VehicleAxleBuildInput:
     @property
     def normalized_model_hash(self) -> str:
         return _model_hash(self.model_hash)
+
+
+def _effective_minimum_runtime_version(vehicle: VehicleAxleBuildInput) -> str:
+    """Validate that bundle metadata never lowers the authored dependency."""
+
+    requested = _validated_version(vehicle.minimum_runtime_version)
+    authored = _validated_version(
+        vehicle.configuration.minimum_runtime_version,
+        "Configuration minimum runtime version",
+    )
+    # The cross-edition axle configuration and native parser intentionally use
+    # an exact numeric contract, even though release/profile metadata elsewhere
+    # in this module may use ordinary semantic-version suffixes.
+    exact = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+    if exact.fullmatch(requested) is None or exact.fullmatch(authored) is None:
+        raise ValueError(
+            "Axle minimum runtime versions must use exact major.minor.patch form"
+        )
+    if _version_key(requested) < _version_key(authored):
+        raise ValueError(
+            f"Build input minimum runtime {requested} cannot lower the authored "
+            f"configuration requirement {authored}"
+        )
+    return requested
+
+
+def _validated_configuration_findings(
+    vehicle: VehicleAxleBuildInput,
+) -> tuple[object, ...]:
+    """Validate an authoring config, authenticating signed/schema-2 evidence.
+
+    Schema-1 configurations retain the historical metadata-only validation
+    path.  A schema-2 or signed-gain configuration instead fails closed unless
+    the caller supplies canonical skeleton-bone evidence; passing the bones to
+    the shared validator checks the authored digest (and reproduces automatic
+    geometry calculations) before any runtime payload can be emitted.
+    """
+
+    requires_evidence = (
+        vehicle.configuration.schema_version >= 2
+        or _requires_signed_steering_gain(vehicle.configuration)
+    )
+    bones = tuple(vehicle.steering_evidence_bones)
+    if requires_evidence and not bones:
+        raise ValueError(
+            "Signed/schema-2 axle configuration requires verified canonical "
+            "skeleton-bone evidence"
+        )
+    findings = validate_axle_configuration(vehicle.configuration, bones)
+    fatal = [
+        item for item in findings
+        if item.severity == "error"
+        and item.code not in {
+            "runtime_indices",
+            "wheel_index_count",
+            # This planner is explicitly selecting a validated runtime target;
+            # the finding is expected when the authoring draft still names the
+            # stock-metadata workspace and is superseded by that target gate.
+            "signed_steering_runtime_required",
+        }
+    ]
+    if fatal:
+        raise ValueError(fatal[0].message)
+    return findings
 
 
 @dataclass(frozen=True)
@@ -1166,6 +1261,7 @@ def _runtime_configuration(
     vehicle: VehicleAxleBuildInput,
     target_id: str,
 ) -> tuple[AxleConfiguration, ResolvedWheelMap]:
+    minimum_runtime_version = _effective_minimum_runtime_version(vehicle)
     wheel_map = resolve_runtime_wheel_map(vehicle, target_id)
     axles = tuple(
         replace(
@@ -1181,7 +1277,7 @@ def _runtime_configuration(
         axles=axles,
         configuration_id=vehicle.normalized_configuration_id,
         model_hash=vehicle.normalized_model_hash,
-        minimum_runtime_version=_validated_version(vehicle.minimum_runtime_version),
+        minimum_runtime_version=minimum_runtime_version,
     ), wheel_map
 
 
@@ -1224,15 +1320,31 @@ def compatibility_configuration(
     vehicle: VehicleAxleBuildInput,
     target_id: str,
 ) -> dict[str, Any]:
+    capability = target_capabilities(target_id)
+    if (
+        _requires_signed_steering_gain(vehicle.configuration)
+        and not capability.supports_signed_steering_gain
+    ):
+        raise ValueError(
+            f"{capability.target_id} does not expose a validated signed "
+            "steering-gain accessor"
+        )
+    if vehicle.configuration.schema_version > capability.maximum_axle_schema:
+        raise ValueError(
+            f"{capability.target_id} supports axle schema "
+            f"{capability.maximum_axle_schema}, but the configuration requires "
+            f"schema {vehicle.configuration.schema_version}"
+        )
+    _validated_configuration_findings(vehicle)
     runtime_config, wheel_map = _runtime_configuration(vehicle, target_id)
     ordered = sorted(runtime_config.axles, key=lambda axle: axle.physical_order)
-    return {
-        "schemaVersion": AXLE_SCHEMA_VERSION,
+    payload: dict[str, Any] = {
+        "schemaVersion": runtime_config.schema_version,
         "configurationId": vehicle.normalized_configuration_id,
         "modelName": runtime_config.vehicle_model,
         "modelHash": vehicle.normalized_model_hash,
         "expectedWheelCount": wheel_map.reported_wheel_count,
-        "minimumRuntimeVersion": _validated_version(vehicle.minimum_runtime_version),
+        "minimumRuntimeVersion": runtime_config.minimum_runtime_version,
         "handling": _symbolic_handling(runtime_config),
         "axles": [
             {
@@ -1245,6 +1357,10 @@ def compatibility_configuration(
                     wheel_map.by_bone[axle.right_bone.casefold()],
                 ],
                 "steered": axle.steered,
+                **(
+                    {"steeringGain": _steering_gain(axle)}
+                    if runtime_config.schema_version >= 2 else {}
+                ),
                 "powered": axle.powered,
                 "serviceBrake": axle.service_brake,
                 "handbrake": axle.handbrake,
@@ -1255,8 +1371,39 @@ def compatibility_configuration(
         "dualTyreGeometry": list(vehicle.dual_tyre_geometry),
         "dualTyresConsumePhysicalSlots": False,
         "wheelIndexMapping": wheel_map.to_dict(),
-        "compatibility": {target: target == target_id for target in TARGET_IDS},
+        # Runtime payloads are target-specific.  Do not carry unrelated target
+        # keys into a Story configuration: the native parser intentionally
+        # rejects unknown/FiveM-only compatibility declarations.
+        "compatibility": {target_id: True},
     }
+    if runtime_config.schema_version >= 2:
+        calculation = runtime_config.steering_calculation
+        if calculation is None:
+            raise ValueError("Schema-2 runtime payload requires steering evidence")
+        steering_calculation: dict[str, Any] = {
+            "mode": (
+                "automaticGeometry"
+                if calculation.mode == "automatic_geometry" else calculation.mode
+            ),
+            "algorithmVersion": calculation.algorithm_version,
+            "bonePositionSha256": calculation.bone_position_sha256,
+        }
+        if calculation.mode == "automatic_geometry":
+            steering_calculation.update({
+                "pivotLongitudinalPosition": (
+                    calculation.pivot_longitudinal_position
+                ),
+                "pivotSource": calculation.pivot_source,
+                "pivotAxleOrders": [
+                    order - 1 for order in calculation.pivot_axle_orders
+                ],
+                "referenceAxleOrder": calculation.reference_axle_order - 1,
+                "referenceLockDegrees": calculation.reference_lock_degrees,
+                "pairPositionTolerance": calculation.pair_position_tolerance,
+                "positionEpsilon": calculation.position_epsilon,
+            })
+        payload["steeringCalculation"] = steering_calculation
+    return payload
 
 
 @dataclass(frozen=True)
@@ -1433,16 +1580,34 @@ class AxleRuntimeBundlePlanner:
         dependencies: list[DependencyDeclaration] = []
         runtime: RuntimeDependency | None = None
 
-        if not capability.supports_current_axle_schema \
-                or AXLE_SCHEMA_VERSION > capability.maximum_axle_schema:
+        if not capability.supports_current_axle_schema:
             reasons.append("Target runtime does not support the current axle configuration schema")
         for vehicle in vehicles:
+            if vehicle.configuration.schema_version > capability.maximum_axle_schema:
+                reasons.append(
+                    f"{vehicle.configuration.vehicle_model}: axle schema "
+                    f"{vehicle.configuration.schema_version} exceeds target maximum "
+                    f"{capability.maximum_axle_schema}"
+                )
             declared = dict(vehicle.configuration.compatibility)
             if declared and not declared.get(capability.target_id, False):
                 reasons.append(
                     f"{vehicle.configuration.vehicle_model}: shared axle configuration "
                     f"does not enable {capability.target_id}"
                 )
+            try:
+                requires_gain = _requires_signed_steering_gain(
+                    vehicle.configuration,
+                )
+            except ValueError as exc:
+                reasons.append(f"{vehicle.configuration.vehicle_model}: {exc}")
+            else:
+                if requires_gain and not capability.supports_signed_steering_gain:
+                    reasons.append(
+                        f"{vehicle.configuration.vehicle_model}: {capability.target_id} "
+                        "does not expose a validated signed steering-gain accessor; "
+                        "counter-steer or scaled steering was not packaged"
+                    )
         if requested_game_build is not None and capability.supported_game_builds \
                 and requested_game_build not in capability.supported_game_builds:
             reasons.append(f"Unsupported target game build: {requested_game_build}")
@@ -1522,9 +1687,9 @@ class AxleRuntimeBundlePlanner:
         if not reasons:
             for vehicle in vehicles:
                 try:
-                    _validated_version(vehicle.minimum_runtime_version)
+                    minimum_runtime_version = _effective_minimum_runtime_version(vehicle)
                     if runtime is None or _version_key(runtime.version) < _version_key(
-                        vehicle.minimum_runtime_version
+                        minimum_runtime_version
                     ):
                         raise ValueError(
                             f"Runtime {runtime.version if runtime else 'missing'} is older than "
@@ -1532,16 +1697,12 @@ class AxleRuntimeBundlePlanner:
                         )
                     if runtime.maximum_schema_version < vehicle.configuration.schema_version:
                         raise ValueError("Configuration/runtime schema mismatch")
-                    # Shared validation catches physical-role/bone issues. Runtime
-                    # index findings are intentionally superseded by target mapping.
-                    findings = validate_axle_configuration(vehicle.configuration)
-                    fatal = [
-                        item for item in findings
-                        if item.severity == "error"
-                        and item.code not in {"runtime_indices", "wheel_index_count"}
-                    ]
-                    if fatal:
-                        raise ValueError(fatal[0].message)
+                    # Shared validation catches physical-role/bone issues. For
+                    # signed/schema-2 inputs it also authenticates the authored
+                    # calculation against caller-supplied canonical skeleton
+                    # positions. Runtime-index findings are superseded below by
+                    # the target-specific semantic mapping.
+                    _validated_configuration_findings(vehicle)
                     runtime_config, wheel_map = _runtime_configuration(
                         vehicle, capability.target_id,
                     )
@@ -1866,7 +2027,9 @@ class AxleRuntimeBundleBuilder:
                     "model_name": item.source.configuration.vehicle_model,
                     "model_hash": item.source.normalized_model_hash,
                     "schema_version": item.source.configuration.schema_version,
-                    "minimum_runtime_version": item.source.minimum_runtime_version,
+                    "minimum_runtime_version": (
+                        item.runtime_configuration.minimum_runtime_version
+                    ),
                     "wheel_mapping": item.wheel_map.to_dict(),
                 }
                 for item in plan.configurations

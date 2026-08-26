@@ -41,6 +41,14 @@ and never create another physical axle or runtime wheel index.
    checksums, game-build declarations, mapping provenance, omissions, and an
    `awaiting_in_game_validation` acceptance state. Packaging success is not an
    in-game support claim.
+10. Legacy boolean steering remains schema 1. Automatic or manual signed gain
+    promotes only that vehicle configuration to schema 2 and records a digest
+    of canonical wheel-bone positions plus pivot/reference evidence. Changing a
+    tyre mesh or visual family cannot invalidate or alter steering phase.
+11. Automatic geometry is a kinematic center-line estimate, not a dynamic tyre
+    slip simulation. It uses fixed axles (or an explicit author pivot), aims the
+    configured steering axles at one turn center, and normalizes the longest
+    lever arm to a bounded signed gain.
 
 ## Safety consequences
 
@@ -49,6 +57,9 @@ and never create another physical axle or runtime wheel index.
   without redistribution rights cannot be bundled.
 - Duplicate model hashes, wheel indices outside the reported count, unsupported
   schemas/builds, and incompatible runtime versions fail planning.
+- Stock metadata, flag-only FiveM exports, and Story profiles without an
+  attested signed-gain accessor reject schema-2 steering instead of silently
+  replacing counter-steer with ordinary same-phase steering.
 - Story Enhanced may stage a validated runtime/configuration while reporting
   vehicle asset installation as manual when no supported Story converter exists,
   as required by the architecture. FiveM Enhanced vehicle assets are omitted as

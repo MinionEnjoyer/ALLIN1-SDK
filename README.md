@@ -12,7 +12,7 @@ make weapons, vehicles, archives, and other add-ons work coherently.
 ALLIN1 SDK supports GTA V Legacy and GTA V Enhanced. Its inspection and planning
 workflows are designed for Story Mode mod development.
 
-> **Current public release:** **0.5.6**. Install it from ALLIN1 Launcher or
+> **Current public release:** **0.5.7**. Install it from ALLIN1 Launcher or
 > download the self-contained Windows package from
 > [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases).
 
@@ -20,6 +20,24 @@ workflows are designed for Story Mode mod development.
 
 If ALLIN1 Launcher and SDK are useful to you, project support is available through
 [Buy Me a Coffee](https://buymeacoffee.com/minionenjoyer).
+
+## What's new in 0.5.7
+
+- **Automatic steering geometry** derives a neutral pivot from decoded
+  vehicle-local wheel-bone positions and proposes progressive signed gains for
+  every explicitly steered axle. Positive values steer with the command and
+  negative values counter-steer; meshes and tyre visuals never decide phase.
+- Schema-2 axle configurations retain reproducible bone-position provenance,
+  require a runtime that explicitly proves signed-gain support, and fail closed
+  when evidence, wheel mappings, or target capabilities do not match.
+- The same steering workflow is available through the Vehicle Workbench, CLI,
+  typed Agent API, Story runtime bundle planner, and guarded OIV export path.
+- Preset, prefab, and UI edits now preserve stronger authored runtime-version
+  requirements instead of silently lowering them during geometry invalidation.
+- Runtime restoration releases despawned or identity-mismatched vehicles safely
+  while retaining only matching live entities whose restoration actually failed.
+- The native example now carries a reproducible illustrative bone fixture and
+  real provenance digest; generated native build trees are excluded from Git.
 
 ## What's new in 0.5.6
 

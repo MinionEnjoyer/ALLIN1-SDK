@@ -22,6 +22,10 @@ from allin1_sdk.axle_prefabs import (
     apply_visual_package,
     persist_visual_design,
 )
+from allin1_sdk.axle_steering_geometry import (
+    apply_steering_geometry_to_configuration,
+    solve_automatic_steering_geometry,
+)
 
 
 VEHICLES = """<CVehicleModelInfo__InitDataList><InitDatas><Item>
@@ -182,6 +186,75 @@ def test_axle_configuration_updates_flags_bias_and_manifest_with_undo_redo(tmp_p
     assert "fDriveBiasFront value=\"0.5\"" in (
         workspace.source / "handling.meta"
     ).read_text("utf-8")
+
+
+def test_preview_axle_steering_cli_returns_read_only_signed_proposal(
+    tmp_path, monkeypatch,
+):
+    workspace = VehicleAuthoringWorkspace.create(
+        _source(tmp_path), tmp_path / "steering-preview-workspace",
+    )
+    bones = _axle_skeleton()
+    config = detect_axle_configuration(
+        "authorcar", bones, preset=PRESET_STEER_DRIVE_REAR,
+        export_mode=EXPORT_FIVEM_RUNTIME,
+    )
+    workspace.set_axle_configuration(config, bones=bones, expected_revision=0)
+    skeleton_xml = tmp_path / "authorcar.yft.xml"
+    skeleton_xml.write_text("<fixture/>", encoding="utf-8")
+    monkeypatch.setattr(
+        "allin1_sdk.cli.load_native_model_scene",
+        lambda _path: (SimpleNamespace(bones=bones), {}, None),
+    )
+
+    result = CliRunner().invoke(main, [
+        "preview-axle-steering", str(workspace.root), "authorcar",
+        "--skeleton-xml", str(skeleton_xml), "--reference-lock", "35",
+        "--target", "fivem-legacy",
+    ])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["operation"] == "preview_axle_steering"
+    assert payload["saved"] is False
+    assert payload["revision"] == 1
+    assert payload["solution"]["pivot_axle_orders"] == [2]
+    assert payload["solution"]["axles"][0]["steering_gain"] == pytest.approx(1.0)
+    assert payload["solution"]["axles"][2]["steering_gain"] < 0.0
+    assert payload["proposed_configuration"]["axles"][2]["steering_gain"] < 0.0
+    assert payload["can_author"] is True
+    assert payload["deployment"] == {
+        "target": "fivem-legacy",
+        "supported": False,
+        "reason": "Target has no validated signed steering-gain accessor.",
+    }
+    assert workspace.axle_configuration("authorcar").axles[2].steering_gain == 1.0
+    assert workspace.axle_configuration("authorcar").to_dict() == config.to_dict()
+    assert "fDriveBiasFront value=\"0.5\"" in (
+        workspace.source / "handling.meta"
+    ).read_text("utf-8")
+
+
+def test_signed_axle_authoring_requires_and_verifies_skeleton_evidence(tmp_path):
+    workspace = VehicleAuthoringWorkspace.create(
+        _source(tmp_path), tmp_path / "signed-axle-workspace",
+    )
+    bones = _axle_skeleton()
+    base = detect_axle_configuration(
+        "authorcar", bones, preset=PRESET_STEER_DRIVE_REAR,
+        export_mode=EXPORT_FIVEM_RUNTIME,
+    )
+    signed = apply_steering_geometry_to_configuration(
+        base, solve_automatic_steering_geometry(base, bones),
+    )
+
+    with pytest.raises(ValueError, match="wheel-bone skeleton"):
+        workspace.set_axle_configuration(signed, expected_revision=0)
+
+    result = workspace.set_axle_configuration(
+        signed, bones=bones, expected_revision=0,
+    )
+    assert result.revision == 1
+    assert workspace.axle_configuration("authorcar") == signed
 
 
 def test_visual_tyre_selection_round_trips_through_authoring_manifest(tmp_path):
