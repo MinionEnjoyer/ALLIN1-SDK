@@ -190,7 +190,7 @@ ValidateConfiguration(const AxleConfiguration& configuration,
     if (configuration.schema_version < kLegacyAxleSchemaVersion ||
         configuration.schema_version > kAxleSchemaVersion) {
         AddIssue(issues, "unsupported-schema",
-                 "Configuration schema is outside the supported 1-2 range",
+                 "Configuration schema is outside the supported 1-4 range",
                  source_name);
     }
     if (configuration.configuration_id.empty() ||
@@ -218,11 +218,41 @@ ValidateConfiguration(const AxleConfiguration& configuration,
                      configuration.minimum_runtime_version + " or newer",
                  source_name);
     }
-    if (configuration.schema_version == kAxleSchemaVersion &&
+    if (configuration.schema_version == kSignedSteeringAxleSchemaVersion &&
         !RuntimeSatisfies(configuration.minimum_runtime_version,
                           kSignedSteeringMinimumRuntime)) {
         AddIssue(issues, "signed-runtime-version-too-old",
                  "Schema 2 requires minimumRuntimeVersion 2.0.0 or newer",
+                 source_name);
+    }
+    if (configuration.schema_version == kAxleSupportAxleSchemaVersion &&
+        !RuntimeSatisfies(configuration.minimum_runtime_version,
+                          kAxleSupportMinimumRuntime)) {
+        AddIssue(issues, "support-runtime-version-too-old",
+                 "Schema 3 support bias requires minimumRuntimeVersion 3.0.0 or newer",
+                 source_name);
+    }
+    if (configuration.steering_command_polarity != "normal" &&
+        configuration.steering_command_polarity != "inverted") {
+        AddIssue(issues, "invalid-steering-command-polarity",
+                 "steeringCommandPolarity must be normal or inverted",
+                 source_name);
+    }
+    if (configuration.schema_version == kAxleSchemaVersion) {
+        if (configuration.steering_command_polarity != "inverted") {
+            AddIssue(issues, "schema-4-polarity-required",
+                     "Schema 4 requires steeringCommandPolarity inverted",
+                     source_name);
+        }
+        if (!RuntimeSatisfies(configuration.minimum_runtime_version,
+                              kSteeringPolarityMinimumRuntime)) {
+            AddIssue(issues, "polarity-runtime-version-too-old",
+                     "Schema 4 inverted steering requires minimumRuntimeVersion 4.0.0 or newer",
+                     source_name);
+        }
+    } else if (configuration.steering_command_polarity != "normal") {
+        AddIssue(issues, "polarity-schema-mismatch",
+                 "Inverted steering command polarity requires schema 4",
                  source_name);
     }
     if (!configuration.story_legacy && !configuration.story_enhanced) {
@@ -324,6 +354,7 @@ ValidateConfiguration(const AxleConfiguration& configuration,
 
     std::set<std::uint32_t> orders;
     std::set<std::string> configured_bones;
+    std::size_t suspension_count = 0;
     for (std::size_t position = 0; position < axle_count; ++position) {
         const auto& axle = configuration.axles[position];
         if (!orders.insert(axle.order).second || axle.order != position) {
@@ -358,10 +389,22 @@ ValidateConfiguration(const AxleConfiguration& configuration,
             AddIssue(issues, "schema-1-signed-steering-gain",
                      "Schema 1 permits legacy +1/0 steering only", source_name);
         }
-        if (configuration.schema_version == kAxleSchemaVersion &&
+        if (configuration.schema_version >= kSignedSteeringAxleSchemaVersion &&
             !axle.steering_gain.has_value()) {
-            AddIssue(issues, "schema-2-missing-steering-gain",
-                     "Schema 2 requires steeringGain on every axle", source_name);
+            AddIssue(issues, "missing-explicit-steering-gain",
+                     "Schemas 2 and 3 require steeringGain on every axle", source_name);
+        }
+        if (axle.suspension.has_value()) {
+            ++suspension_count;
+            const double support_weight = axle.suspension->support_weight;
+            if (!std::isfinite(support_weight) ||
+                support_weight < kMinimumSupportWeight ||
+                support_weight > kMaximumSupportWeight) {
+                AddIssue(issues, "invalid-support-weight",
+                         "Axle " + std::to_string(position + 1) +
+                             " suspension supportWeight must be finite and between 0.75 and 1.25",
+                         source_name);
+            }
         }
         const bool valid_role = axle.role == "front" || axle.role == "middle" ||
                                 axle.role == "rear" || axle.role == "tag";
@@ -400,6 +443,23 @@ ValidateConfiguration(const AxleConfiguration& configuration,
         configured_bones.insert(axle.right_bone);
     }
 
+    if (configuration.schema_version == kAxleSupportAxleSchemaVersion) {
+        if (suspension_count != axle_count) {
+            AddIssue(issues, "incomplete-support-bias",
+                     "Schema 3 requires suspension supportWeight on every physical axle",
+                     source_name);
+        }
+    } else if (configuration.schema_version == kAxleSchemaVersion) {
+        if (suspension_count != 0U && suspension_count != axle_count) {
+            AddIssue(issues, "incomplete-support-bias",
+                     "Schema 4 suspension supportWeight must cover every physical axle",
+                     source_name);
+        }
+    } else if (suspension_count != 0U) {
+        AddIssue(issues, "support-bias-schema-mismatch",
+                 "Suspension supportWeight requires schema 3", source_name);
+    }
+
     const bool has_nonlegacy_gain = std::any_of(
         configuration.axles.begin(), configuration.axles.end(),
         [](const AxleDefinition& axle) { return !IsLegacySteeringGain(axle); });
@@ -409,15 +469,27 @@ ValidateConfiguration(const AxleConfiguration& configuration,
                  "Schema 1 cannot contain steeringCalculation evidence",
                  source_name);
     }
-    if (configuration.schema_version == kAxleSchemaVersion) {
+    if (configuration.schema_version == kSignedSteeringAxleSchemaVersion) {
         if (!has_nonlegacy_gain) {
             AddIssue(issues, "schema-2-legacy-steering",
                      "Schema 2 is reserved for signed or scaled steering",
                      source_name);
         }
+    }
+    const bool requires_steering_evidence =
+        configuration.schema_version >= kSignedSteeringAxleSchemaVersion &&
+        has_nonlegacy_gain;
+    if (!requires_steering_evidence &&
+        configuration.schema_version != kLegacyAxleSchemaVersion &&
+        configuration.steering_calculation.has_value()) {
+        AddIssue(issues, "unnecessary-steering-evidence",
+                 "steeringCalculation is only valid when signed or scaled steering is authored",
+                 source_name);
+    }
+    if (requires_steering_evidence) {
         if (!configuration.steering_calculation.has_value()) {
             AddIssue(issues, "schema-2-missing-steering-evidence",
-                     "Schema 2 requires steeringCalculation evidence",
+                     "Signed or scaled steering requires steeringCalculation evidence",
                      source_name);
         } else {
             const auto& evidence = *configuration.steering_calculation;
@@ -435,6 +507,26 @@ ValidateConfiguration(const AxleConfiguration& configuration,
             if (!IsSha256(evidence.bone_position_sha256)) {
                 AddIssue(issues, "invalid-steering-evidence-digest",
                          "steeringCalculation bonePositionSha256 is invalid",
+                         source_name);
+            }
+            if (configuration.intentional_layout_override.has_value()) {
+                if (evidence.physical_bone_pairs !=
+                    configuration.intentional_layout_override
+                        ->physical_bone_pairs) {
+                    AddIssue(issues, "steering-layout-evidence-mismatch",
+                             "steeringCalculation physicalBonePairs must exactly match intentionalLayoutOverride and axle order",
+                             source_name);
+                }
+                if (evidence.bone_position_sha256 !=
+                    configuration.intentional_layout_override
+                        ->bone_position_sha256) {
+                    AddIssue(issues, "steering-layout-digest-mismatch",
+                             "steeringCalculation and intentionalLayoutOverride must reference the same wheel-position digest",
+                             source_name);
+                }
+            } else if (!evidence.physical_bone_pairs.empty()) {
+                AddIssue(issues, "unexpected-steering-layout-evidence",
+                         "steeringCalculation physicalBonePairs requires intentionalLayoutOverride",
                          source_name);
             }
             if (evidence.mode == "manual") {
@@ -574,6 +666,9 @@ ParseConfigurationJson(const std::string& json_text,
         } else {
             throw json::Error("missing required field 'minimumRuntimeVersion'");
         }
+        if (const auto* polarity = root.Find("steeringCommandPolarity")) {
+            result.steering_command_polarity = polarity->AsString();
+        }
 
         if (const auto* mapping_value = root.Find("wheelIndexMap")) {
             const auto& mapping = mapping_value->AsObject();
@@ -603,6 +698,13 @@ ParseConfigurationJson(const std::string& json_text,
             axle.powered = RequiredBool(value, "powered");
             if (const auto* gain = value.Find("steeringGain")) {
                 axle.steering_gain = gain->AsNumber();
+            }
+            if (const auto* suspension = value.Find("suspension")) {
+                suspension->AsObject();
+                AxleSuspension settings;
+                settings.support_weight =
+                    Required(*suspension, "supportWeight").AsNumber();
+                axle.suspension = settings;
             }
             if (const auto* indices_value = value.Find("wheelIndices")) {
                 const auto& indices = indices_value->AsArray();
@@ -671,6 +773,18 @@ ParseConfigurationJson(const std::string& json_text,
             if (const auto* epsilon =
                     calculation->Find("positionEpsilon")) {
                 evidence.position_epsilon = epsilon->AsNumber();
+            }
+            if (const auto* pairs =
+                    calculation->Find("physicalBonePairs")) {
+                for (const auto& pair_value : pairs->AsArray()) {
+                    const auto& pair = pair_value.AsArray();
+                    if (pair.size() != 2U) {
+                        throw json::Error(
+                            "steeringCalculation physicalBonePairs entries must contain left and right bones");
+                    }
+                    evidence.physical_bone_pairs.emplace_back(
+                        pair[0].AsString(), pair[1].AsString());
+                }
             }
             result.steering_calculation = std::move(evidence);
         }

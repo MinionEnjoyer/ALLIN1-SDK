@@ -33,6 +33,11 @@ same-phase, negative is counter-phase, and zero is fixed. The longest steering
 lever arm is normalized to `1.0`. This is steering geometry, not a dynamic
 understeer/oversteer tyre model.
 
+**Steering polarity** is a separate vehicle-level config choice. `normal`
+keeps each base gain in phase; `inverted` multiplies every base gain by `-1`
+exactly once at runtime. It does not reorder axles or rewrite the saved gains.
+Inverted configs use axle schema 4 and runtime 4.0.0 or newer.
+
 The canonical pair map is:
 
 - Two axles: `wheel_lf/rf`, `wheel_lr/rr`
@@ -109,6 +114,14 @@ promotes only nonlegacy gains to schema 2 and records a digest of canonical
 bone positions plus the pivot/reference evidence. The console and typed Agent
 API expose the same read-only proposal through `preview-axle-steering`; saving
 still uses the acknowledged `set-vehicle-axles` command.
+
+The selected-axle editor can also author an experimental relative support
+weight from 0.75 through 1.25. Enabling it seeds every physical axle at 1.0;
+partial arrays are rejected. This promotes the configuration to schema 3 with
+minimum runtime 3.0.0 and emits each runtime row as
+`suspension: { "supportWeight": number }`. Production export stays disabled
+until the chosen target explicitly advertises a validated support-bias
+accessor; saving the authoring draft does not claim runtime compatibility.
 
 If `visual_preview.design_only` is true, use
 `persist_visual_design(..., confirmed=True)` only to record the design intent.

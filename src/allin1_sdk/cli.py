@@ -84,9 +84,13 @@ from allin1_sdk.vehicle_authoring import (
 )
 from allin1_sdk.axle_configurator import (
     EXPORT_MODES,
+    STEERING_COMMAND_POLARITY_INVERTED,
+    STEERING_COMMAND_POLARITY_NORMAL,
     AxleConfiguration,
+    requires_axle_support_bias,
     requires_signed_steering_gain,
     retarget_axle_configuration,
+    set_steering_command_polarity,
     validate_axle_configuration,
     write_fivem_resource,
 )
@@ -3052,6 +3056,13 @@ def inspect_vehicle_axles(
     help="Steered physical axle normalized to full lock; defaults to the farthest lever arm.",
 )
 @click.option(
+    "--steering-polarity",
+    type=click.Choice(("normal", "inverted")),
+    help=(
+        "Preview a vehicle-level command polarity without rewriting geometry-derived base gains."
+    ),
+)
+@click.option(
     "--target", type=click.Choice((
         "fivem-legacy", "fivem-enhanced", "story-legacy", "story-enhanced",
     )),
@@ -3059,7 +3070,8 @@ def inspect_vehicle_axles(
 def preview_axle_steering(
     workspace: Path, model: str, skeleton_xml: Path, reference_lock: float,
     pivot_y: float | None, pivot_axle: tuple[int, ...],
-    reference_axle: int | None, target: str | None,
+    reference_axle: int | None, steering_polarity: str | None,
+    target: str | None,
 ) -> None:
     """Calculate signed per-axle steering gains without saving changes."""
     try:
@@ -3067,6 +3079,13 @@ def preview_axle_steering(
         configuration = authoring.axle_configuration(model)
         if configuration is None:
             raise ValueError(f"No axle configuration is saved for {model}")
+        if steering_polarity is not None:
+            configuration = set_steering_command_polarity(
+                configuration,
+                STEERING_COMMAND_POLARITY_INVERTED
+                if steering_polarity == "inverted"
+                else STEERING_COMMAND_POLARITY_NORMAL,
+            )
         scene, _metadata, warning = load_native_model_scene(skeleton_xml)
         if scene is None:
             raise ValueError(warning or "Skeleton XML did not contain a model scene")
@@ -3085,6 +3104,7 @@ def preview_axle_steering(
         )
         errors = sum(item.severity == "error" for item in findings)
         signed = requires_signed_steering_gain(proposed)
+        support_bias = requires_axle_support_bias(proposed)
         deployment_supported: bool | None = None
         deployment_reason = "Choose a target to evaluate deployment support."
         if target is not None:
@@ -3092,11 +3112,20 @@ def preview_axle_steering(
             deployment_supported = (
                 proposed.schema_version <= capability.maximum_axle_schema
                 and (not signed or capability.supports_signed_steering_gain)
+                and (
+                    not support_bias or capability.supports_axle_support_bias
+                )
             )
             deployment_reason = (
                 "Target exposes the required axle contract."
                 if deployment_supported
-                else "Target has no validated signed steering-gain accessor."
+                else (
+                    "Target has no validated signed steering-gain accessor."
+                    if signed and not capability.supports_signed_steering_gain
+                    else "Target has no validated per-axle suspension support accessor."
+                    if support_bias and not capability.supports_axle_support_bias
+                    else "Target does not support the required axle schema."
+                )
             )
         payload = {
             "schema_version": 1,

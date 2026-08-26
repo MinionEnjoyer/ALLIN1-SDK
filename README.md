@@ -12,7 +12,7 @@ make weapons, vehicles, archives, and other add-ons work coherently.
 ALLIN1 SDK supports GTA V Legacy and GTA V Enhanced. Its inspection and planning
 workflows are designed for Story Mode mod development.
 
-> **Current public release:** **0.5.8**. Install it from ALLIN1 Launcher or
+> **Current public release:** **0.5.9**. Install it from ALLIN1 Launcher or
 > download the self-contained Windows package from
 > [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases).
 
@@ -20,6 +20,26 @@ workflows are designed for Story Mode mod development.
 
 If ALLIN1 Launcher and SDK are useful to you, project support is available through
 [Buy Me a Coffee](https://buymeacoffee.com/minionenjoyer).
+
+## What's new in 0.5.9
+
+- **Vehicle-specific axle ordering** lets authors explicitly map an unusual
+  front-to-rear bone layout without renaming bones or assuming that display
+  order equals GTA's runtime wheel-slot order. Overrides remain bound to exact
+  skeleton evidence and fail closed when the selected vehicle changes.
+- **Configurable steering polarity** can invert the complete steering command
+  once per vehicle while preserving the signed gain and physical order of every
+  axle. The effective values are visible in validation and runtime diagnostics.
+- **Per-axle suspension support** adds bounded relative support weights for all
+  physical axle pairs. The runtime contract normalizes them against the
+  vehicle's original total support and requires reversible readback, physics
+  activation, rollback, and restoration capabilities before permitting writes.
+- VehicleWorkbenchAxles 4.0.0 carries the schema-4 configuration, target wheel
+  mapping, capability, receipt, logging, CLI, Agent API, and desktop Workbench
+  contracts. Story runtime exports remain fail-closed unless an exact build has
+  an independently validated profile.
+- The production suite uses generic synthetic regression fixtures; temporary
+  F11 vehicle tests and private third-party vehicle assets are not distributed.
 
 ## What's new in 0.5.8
 

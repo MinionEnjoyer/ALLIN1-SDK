@@ -1,6 +1,6 @@
 {
   "manifestVersion": 1,
-  "runtimeVersion": "2.1.0",
+  "runtimeVersion": "4.0.0",
   "profiles": {
     "story-legacy": {
       "status": "implemented-awaiting-validation",
@@ -8,7 +8,9 @@
       "capabilities": {
         "steeringFlags": true,
         "driveFlags": true,
-        "signedSteeringGain": false
+        "signedSteeringGain": false,
+        "staticForce": false,
+        "physicsActivation": false
       },
       "reason": "No validated Legacy wheel-access signature profile is shipped. The adapter disables before memory access."
     },
@@ -18,7 +20,9 @@
       "capabilities": {
         "steeringFlags": true,
         "driveFlags": true,
-        "signedSteeringGain": false
+        "signedSteeringGain": false,
+        "staticForce": false,
+        "physicsActivation": false
       },
       "reason": "No validated Enhanced wheel-access signature profile is shipped. The adapter disables before memory access."
     }
@@ -30,6 +34,7 @@
     "packageEligibleReceiptRequired": true,
     "x64PeExportInspectionRequired": true,
     "signedSteeringGainRequiresValidatedAccessor": true,
+    "staticForceRequiresValidatedAccessorAndPhysicsActivation": true,
     "onlineSessionsAllowed": false
   }
 }

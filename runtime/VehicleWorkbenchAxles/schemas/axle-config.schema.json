@@ -1,9 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://allin1.local/schemas/vehicle-workbench-axles/v2.json",
+  "$id": "https://allin1.local/schemas/vehicle-workbench-axles/v4.json",
   "title": "Vehicle Workbench axle configuration",
   "type": "object",
   "additionalProperties": false,
+  "$defs": {
+    "canonicalWheelPair": {
+      "oneOf": [
+        { "const": ["wheel_lf", "wheel_rf"] },
+        { "const": ["wheel_lm1", "wheel_rm1"] },
+        { "const": ["wheel_lm2", "wheel_rm2"] },
+        { "const": ["wheel_lm3", "wheel_rm3"] },
+        { "const": ["wheel_lr", "wheel_rr"] }
+      ]
+    }
+  },
   "required": [
     "schemaVersion",
     "configurationId",
@@ -14,6 +25,52 @@
     "axles",
     "compatibility"
   ],
+  "dependentSchemas": {
+    "intentionalLayoutOverride": {
+      "oneOf": [
+        {
+          "properties": {
+            "axles": { "minItems": 2, "maxItems": 2 },
+            "intentionalLayoutOverride": {
+              "properties": {
+                "physicalBonePairs": { "minItems": 2, "maxItems": 2 }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "axles": { "minItems": 3, "maxItems": 3 },
+            "intentionalLayoutOverride": {
+              "properties": {
+                "physicalBonePairs": { "minItems": 3, "maxItems": 3 }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "axles": { "minItems": 4, "maxItems": 4 },
+            "intentionalLayoutOverride": {
+              "properties": {
+                "physicalBonePairs": { "minItems": 4, "maxItems": 4 }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "axles": { "minItems": 5, "maxItems": 5 },
+            "intentionalLayoutOverride": {
+              "properties": {
+                "physicalBonePairs": { "minItems": 5, "maxItems": 5 }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
   "anyOf": [
     { "required": ["wheelIndexMap"] },
     { "required": ["wheelIndexMapping"] }
@@ -30,6 +87,7 @@
           "axles": {
             "items": {
               "allOf": [
+                { "not": { "required": ["suspension"] } },
                 {
                   "if": {
                     "required": ["steered"],
@@ -77,7 +135,10 @@
             "pattern": "^(?:[2-9]|[1-9][0-9]+)\\.[0-9]+\\.[0-9]+$"
           },
           "axles": {
-            "items": { "required": ["steeringGain"] },
+            "items": {
+              "required": ["steeringGain"],
+              "not": { "required": ["suspension"] }
+            },
             "contains": {
               "type": "object",
               "required": ["steered", "steeringGain"],
@@ -95,15 +156,144 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "required": ["schemaVersion"],
+        "properties": { "schemaVersion": { "const": 3 } }
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "axles": {
+                  "contains": {
+                    "type": "object",
+                    "required": ["steered", "steeringGain"],
+                    "properties": {
+                      "steered": { "const": true },
+                      "steeringGain": {
+                        "not": {
+                          "minimum": 0.999999999,
+                          "maximum": 1.0
+                        }
+                      }
+                    }
+                  },
+                  "minContains": 1
+                }
+              }
+            },
+            "then": { "required": ["steeringCalculation"] },
+            "else": { "not": { "required": ["steeringCalculation"] } }
+          }
+        ],
+        "properties": {
+          "minimumRuntimeVersion": {
+            "type": "string",
+            "pattern": "^(?:[3-9]|[1-9][0-9]+)\\.[0-9]+\\.[0-9]+$"
+          },
+          "axles": {
+            "items": { "required": ["steeringGain", "suspension"] }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["schemaVersion"],
+        "properties": { "schemaVersion": { "const": 4 } }
+      },
+      "then": {
+        "required": ["steeringCommandPolarity"],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "axles": {
+                  "contains": {
+                    "type": "object",
+                    "required": ["steered", "steeringGain"],
+                    "properties": {
+                      "steered": { "const": true },
+                      "steeringGain": {
+                        "not": { "minimum": 0.999999999, "maximum": 1.0 }
+                      }
+                    }
+                  },
+                  "minContains": 1
+                }
+              }
+            },
+            "then": { "required": ["steeringCalculation"] },
+            "else": { "not": { "required": ["steeringCalculation"] } }
+          },
+          {
+            "if": {
+              "properties": {
+                "axles": { "contains": { "required": ["suspension"] } }
+              }
+            },
+            "then": {
+              "properties": {
+                "axles": { "items": { "required": ["suspension"] } }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "steeringCommandPolarity": { "const": "inverted" },
+          "minimumRuntimeVersion": {
+            "type": "string",
+            "pattern": "^(?:[4-9]|[1-9][0-9]+)\\.[0-9]+\\.[0-9]+$"
+          },
+          "axles": { "items": { "required": ["steeringGain"] } }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["steeringCommandPolarity"],
+        "properties": { "steeringCommandPolarity": { "const": "inverted" } }
+      },
+      "then": {
+        "properties": { "schemaVersion": { "const": 4 } }
+      }
+    },
+    {
+      "if": {
+        "required": ["steeringCalculation"],
+        "properties": {
+          "steeringCalculation": { "required": ["physicalBonePairs"] }
+        }
+      },
+      "then": { "required": ["intentionalLayoutOverride"] }
+    },
+    {
+      "if": {
+        "required": ["intentionalLayoutOverride", "steeringCalculation"]
+      },
+      "then": {
+        "properties": {
+          "steeringCalculation": { "required": ["physicalBonePairs"] }
+        }
+      }
     }
   ],
   "properties": {
-    "schemaVersion": { "type": "integer", "enum": [1, 2] },
+    "schemaVersion": { "type": "integer", "enum": [1, 2, 3, 4] },
     "configurationId": { "type": "string", "minLength": 1, "maxLength": 128 },
     "modelName": { "type": "string", "minLength": 1, "maxLength": 128 },
     "modelHash": { "type": ["string", "integer"] },
     "expectedWheelCount": { "type": "integer", "enum": [4, 6, 8, 10] },
     "minimumRuntimeVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "steeringCommandPolarity": {
+      "type": "string",
+      "enum": ["normal", "inverted"],
+      "default": "normal",
+      "description": "Vehicle-level command polarity. Runtime computes effective steering gain as the authored base steeringGain multiplied once by +1 for normal or -1 for inverted."
+    },
     "wheelIndexMap": {
       "type": "object",
       "minProperties": 4,
@@ -175,6 +365,19 @@
             "description": "Optional signed phase/gain. Omit for legacy boolean steering; non-steered axles must use 0."
           },
           "powered": { "type": "boolean" },
+          "suspension": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["supportWeight"],
+            "properties": {
+              "supportWeight": {
+                "type": "number",
+                "minimum": 0.75,
+                "maximum": 1.25,
+                "description": "Relative axle support bias; runtime normalizes all physical axles to the vehicle's original total StaticForce."
+              }
+            }
+          },
           "serviceBrake": { "type": "boolean" },
           "handbrake": { "type": "boolean" },
           "visualFamily": { "type": "string" }
@@ -236,7 +439,14 @@
         "referenceAxleOrder": { "type": "integer", "minimum": 0, "maximum": 4 },
         "referenceLockDegrees": { "type": "number", "minimum": 1, "maximum": 80 },
         "pairPositionTolerance": { "type": "number", "exclusiveMinimum": 0 },
-        "positionEpsilon": { "type": "number", "exclusiveMinimum": 0 }
+        "positionEpsilon": { "type": "number", "exclusiveMinimum": 0 },
+        "physicalBonePairs": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/canonicalWheelPair" }
+        }
       },
       "allOf": [
         {
@@ -272,6 +482,36 @@
           }
         }
       ]
+    },
+    "intentionalLayoutOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "physicalBonePairs",
+        "bonePositionSha256",
+        "reason"
+      ],
+      "properties": {
+        "mode": { "const": "visual_instancing_remap" },
+        "physicalBonePairs": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/canonicalWheelPair" }
+        },
+        "bonePositionSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 240,
+          "pattern": "^[^\\r\\n]{8,240}$"
+        }
+      }
     }
   }
 }

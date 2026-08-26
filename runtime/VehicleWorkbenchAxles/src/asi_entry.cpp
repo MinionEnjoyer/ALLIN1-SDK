@@ -6,6 +6,8 @@
 
 #include <cstdint>
 
+#include "vehicle_workbench_axles/configuration.hpp"
+
 namespace {
 
 #if defined(VWA_ASI_EDITION_Legacy)
@@ -26,7 +28,7 @@ struct RuntimeDescriptor {
 
 const RuntimeDescriptor kDescriptor{
     1,
-    1,
+    vwa::kAxleSchemaVersion,
     VWA_RUNTIME_VERSION,
     kTarget,
     "implemented-awaiting-validated-profile",

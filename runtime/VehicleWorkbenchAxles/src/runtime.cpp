@@ -13,7 +13,7 @@
 #include <utility>
 
 #ifndef VWA_RUNTIME_VERSION
-#define VWA_RUNTIME_VERSION "2.1.0"
+#define VWA_RUNTIME_VERSION "4.0.0"
 #endif
 
 namespace vwa {
@@ -23,19 +23,55 @@ namespace {
 constexpr std::uint16_t kManagedWheelBits =
     static_cast<std::uint16_t>(kSteeredBit | kDrivenBit);
 constexpr double kGainComparisonEpsilon = kSteeringGainEpsilon;
+constexpr double kStaticForceAbsoluteTolerance = 1.0e-4;
+constexpr double kStaticForceRelativeTolerance = 0.005;
 
-double EffectiveSteeringGain(const AxleDefinition& axle) noexcept {
+bool StaticForceEqual(double left, double right) noexcept {
+    const double scale = std::max(std::abs(left), std::abs(right));
+    const double tolerance = std::max(
+        kStaticForceAbsoluteTolerance,
+        kStaticForceRelativeTolerance * scale);
+    return std::abs(left - right) <= tolerance;
+}
+
+double BaseSteeringGain(const AxleDefinition& axle) noexcept {
     return axle.steering_gain.value_or(axle.steered ? 1.0 : 0.0);
+}
+
+double EffectiveSteeringGain(const AxleConfiguration& configuration,
+                             const AxleDefinition& axle) noexcept {
+    const double polarity =
+        configuration.steering_command_polarity == "inverted" ? -1.0 : 1.0;
+    return BaseSteeringGain(axle) * polarity;
 }
 
 bool RequiresSteeringGainAccess(
     const AxleConfiguration& configuration) noexcept {
     return std::any_of(
         configuration.axles.begin(), configuration.axles.end(),
-        [](const AxleDefinition& axle) {
+        [&configuration](const AxleDefinition& axle) {
             const double legacy_gain = axle.steered ? 1.0 : 0.0;
-            return std::abs(EffectiveSteeringGain(axle) - legacy_gain) >
+            return std::abs(
+                       EffectiveSteeringGain(configuration, axle) - legacy_gain) >
                    kGainComparisonEpsilon;
+        });
+}
+
+bool RequiresStaticForceAccess(
+    const AxleConfiguration& configuration) noexcept {
+    return !configuration.axles.empty() && std::all_of(
+        configuration.axles.begin(), configuration.axles.end(),
+        [](const AxleDefinition& axle) {
+            return axle.suspension.has_value();
+        });
+}
+
+bool HasAnyStaticForceSetting(
+    const AxleConfiguration& configuration) noexcept {
+    return std::any_of(
+        configuration.axles.begin(), configuration.axles.end(),
+        [](const AxleDefinition& axle) {
+            return axle.suspension.has_value();
         });
 }
 
@@ -68,6 +104,8 @@ struct AxleRuntime::Implementation {
         std::uint16_t flags{0};
         double steering_gain{0.0};
         bool has_steering_gain{false};
+        double static_force{0.0};
+        bool has_static_force{false};
     };
 
     struct TrackedVehicle {
@@ -85,9 +123,14 @@ struct AxleRuntime::Implementation {
         std::uint16_t original_flags{0};
         std::uint16_t desired_flags{0};
         double original_steering_gain{0.0};
+        double support_weight{1.0};
+        double original_static_force{0.0};
+        double desired_static_force{0.0};
         bool flags_changed{false};
         bool steering_gain_changed{false};
         bool manages_steering_gain{false};
+        bool static_force_changed{false};
+        bool manages_static_force{false};
     };
 
     IVehicleHost& host;
@@ -137,12 +180,33 @@ struct AxleRuntime::Implementation {
         plan.reserve(configuration.axles.size() * 2U);
         const bool manage_steering_gain =
             RequiresSteeringGainAccess(configuration);
+        const bool manage_static_force =
+            RequiresStaticForceAccess(configuration);
+        if ((configuration.schema_version == kAxleSupportAxleSchemaVersion ||
+             HasAnyStaticForceSetting(configuration)) &&
+            !manage_static_force) {
+            LogOnce(LogLevel::Error, "incomplete-support-bias",
+                    "Model " + HashText(configuration.model_hash) +
+                        " does not define supportWeight for every physical "
+                        "axle; no changes were applied");
+            return std::nullopt;
+        }
         if (manage_steering_gain && !access.SupportsSteeringGain()) {
             LogOnce(LogLevel::Error, "steering-gain-capability-missing",
                     "Model " + HashText(configuration.model_hash) +
                         " requests signed or scaled steering gain, but the "
                         "validated build profile exposes steering flags only; "
                         "no changes were applied");
+            return std::nullopt;
+        }
+        if (manage_static_force &&
+            (!access.SupportsStaticForce() ||
+             !host.SupportsPhysicsActivation())) {
+            LogOnce(LogLevel::Error, "static-force-capability-missing",
+                    "Model " + HashText(configuration.model_hash) +
+                        " requests axle support bias, but this exact build "
+                        "does not expose validated StaticForce access and "
+                        "physics activation; no changes were applied");
             return std::nullopt;
         }
         std::set<std::uint32_t> unique_indices;
@@ -162,8 +226,14 @@ struct AxleRuntime::Implementation {
                 wheel.index = mapping->second;
                 wheel.steered = axle.steered;
                 wheel.powered = axle.powered;
-                wheel.desired_steering_gain = EffectiveSteeringGain(axle);
+                wheel.desired_steering_gain =
+                    EffectiveSteeringGain(configuration, axle);
                 wheel.manages_steering_gain = manage_steering_gain;
+                wheel.manages_static_force = manage_static_force;
+                if (manage_static_force) {
+                    wheel.support_weight =
+                        axle.suspension->support_weight;
+                }
                 plan.push_back(wheel);
             }
         }
@@ -179,6 +249,8 @@ struct AxleRuntime::Implementation {
                                                const WheelPlan& right) {
             return left.index < right.index;
         });
+        double original_static_force_total = 0.0;
+        double weighted_static_force_total = 0.0;
         for (auto& wheel : plan) {
             if (!access.ReadWheelFlags(vehicle, wheel.index,
                                        wheel.original_flags)) {
@@ -186,6 +258,22 @@ struct AxleRuntime::Implementation {
                         "Wheel flags could not be read safely; model " +
                             HashText(configuration.model_hash) + " was skipped");
                 return std::nullopt;
+            }
+            if (wheel.manages_static_force &&
+                (!access.ReadWheelStaticForce(
+                     vehicle, wheel.index, wheel.original_static_force) ||
+                 !std::isfinite(wheel.original_static_force) ||
+                 wheel.original_static_force <= 0.0)) {
+                LogOnce(LogLevel::Error, "static-force-read-failed",
+                        "Suspension StaticForce could not be read safely; model " +
+                            HashText(configuration.model_hash) +
+                            " was skipped with no writes");
+                return std::nullopt;
+            }
+            if (wheel.manages_static_force) {
+                original_static_force_total += wheel.original_static_force;
+                weighted_static_force_total +=
+                    wheel.original_static_force * wheel.support_weight;
             }
             if (wheel.manages_steering_gain &&
                 (!access.ReadWheelSteeringGain(
@@ -213,6 +301,33 @@ struct AxleRuntime::Implementation {
                          wheel.original_steering_gain) >
                     kGainComparisonEpsilon;
         }
+        if (manage_static_force) {
+            if (!std::isfinite(original_static_force_total) ||
+                original_static_force_total <= 0.0 ||
+                !std::isfinite(weighted_static_force_total) ||
+                weighted_static_force_total <= 0.0) {
+                LogOnce(LogLevel::Error, "static-force-normalization-invalid",
+                        "Original suspension support or authored support weights "
+                        "could not be normalized; no changes were applied");
+                return std::nullopt;
+            }
+            const double normalization =
+                original_static_force_total / weighted_static_force_total;
+            for (auto& wheel : plan) {
+                wheel.desired_static_force =
+                    wheel.original_static_force * wheel.support_weight *
+                    normalization;
+                if (!std::isfinite(wheel.desired_static_force) ||
+                    wheel.desired_static_force <= 0.0) {
+                    LogOnce(LogLevel::Error, "static-force-normalization-invalid",
+                            "Normalized suspension support was not finite and positive; no changes were applied");
+                    return std::nullopt;
+                }
+                wheel.static_force_changed = !StaticForceEqual(
+                    wheel.desired_static_force,
+                    wheel.original_static_force);
+            }
+        }
         return plan;
     }
 
@@ -220,6 +335,7 @@ struct AxleRuntime::Implementation {
                   const std::vector<WheelPlan>& plan,
                   std::size_t changed_through) {
         bool complete = true;
+        bool restored_static_force = false;
         for (std::size_t index = 0; index < changed_through; ++index) {
             const auto& wheel = plan[index];
             if (wheel.flags_changed) {
@@ -245,6 +361,36 @@ struct AxleRuntime::Implementation {
                         wheel.original_steering_gain)) {
                     complete = false;
                     if (state == RuntimeState::DisabledOnline) return false;
+                }
+            }
+            if (wheel.static_force_changed) {
+                if (!ConfirmOfflineBeforeWrite() ||
+                    !access.WriteWheelStaticForce(
+                        vehicle, wheel.index,
+                        wheel.original_static_force)) {
+                    complete = false;
+                    if (state == RuntimeState::DisabledOnline) return false;
+                } else {
+                    restored_static_force = true;
+                }
+            }
+        }
+        if (restored_static_force) {
+            if (!ConfirmOfflineBeforeWrite() ||
+                !host.ActivatePhysics(vehicle)) {
+                complete = false;
+                if (state == RuntimeState::DisabledOnline) return false;
+            }
+            for (std::size_t index = 0; index < changed_through; ++index) {
+                const auto& wheel = plan[index];
+                if (!wheel.static_force_changed) continue;
+                double verified = 0.0;
+                if (!access.ReadWheelStaticForce(
+                        vehicle, wheel.index, verified) ||
+                    !std::isfinite(verified) ||
+                    !StaticForceEqual(
+                        verified, wheel.original_static_force)) {
+                    complete = false;
                 }
             }
         }
@@ -283,6 +429,45 @@ struct AxleRuntime::Implementation {
             tracked_it == tracked.end() ||
             tracked_it->second.wheel_generation != vehicle.wheel_generation ||
             tracked_it->second.model_hash != vehicle.model_hash;
+        if (!new_generation && !plan->empty() &&
+            plan->front().manages_static_force) {
+            double baseline_total = 0.0;
+            double weighted_baseline_total = 0.0;
+            bool baseline_complete = true;
+            for (const auto& wheel : *plan) {
+                const auto original =
+                    tracked_it->second.originals.find(wheel.index);
+                if (original == tracked_it->second.originals.end() ||
+                    !original->second.has_static_force ||
+                    !std::isfinite(original->second.static_force)) {
+                    baseline_complete = false;
+                    break;
+                }
+                baseline_total += original->second.static_force;
+                weighted_baseline_total +=
+                    original->second.static_force * wheel.support_weight;
+            }
+            if (!baseline_complete || !std::isfinite(baseline_total) ||
+                baseline_total <= 0.0 ||
+                !std::isfinite(weighted_baseline_total) ||
+                weighted_baseline_total <= 0.0) {
+                LogOnce(LogLevel::Error, "static-force-baseline-invalid",
+                        "Tracked original StaticForce support is incomplete; recovery was skipped with no writes");
+                return false;
+            }
+            const double normalization =
+                baseline_total / weighted_baseline_total;
+            for (auto& wheel : *plan) {
+                const auto& original =
+                    tracked_it->second.originals.at(wheel.index);
+                wheel.desired_static_force =
+                    original.static_force * wheel.support_weight *
+                    normalization;
+                wheel.static_force_changed = !StaticForceEqual(
+                    wheel.desired_static_force,
+                    wheel.original_static_force);
+            }
+        }
         TrackedVehicle replacement;
         if (new_generation) {
             replacement.model_hash = vehicle.model_hash;
@@ -295,10 +480,38 @@ struct AxleRuntime::Implementation {
                         wheel.original_flags,
                         wheel.original_steering_gain,
                         wheel.manages_steering_gain,
+                        wheel.original_static_force,
+                        wheel.manages_static_force,
                     });
             }
         }
 
+        const auto fail_transaction =
+            [&](std::size_t changed_through, const std::string& code,
+                const std::string& detail) {
+                if (state == RuntimeState::DisabledOnline) return false;
+                const bool restored =
+                    RollBack(vehicle, *plan, changed_through);
+                if (state == RuntimeState::DisabledOnline) return false;
+                bool baseline_retained = !new_generation;
+                if (new_generation) {
+                    if (restored) {
+                        tracked.erase(vehicle.entity_id);
+                    } else {
+                        tracked[vehicle.entity_id] = std::move(replacement);
+                        baseline_retained = true;
+                    }
+                }
+                LogOnce(LogLevel::Error, code,
+                        detail + " and rollback was " +
+                            (restored ? "completed" : "incomplete") +
+                            (baseline_retained
+                                 ? "; original baseline retained for retry"
+                                 : "; no modified state remains to restore"));
+                return false;
+            };
+
+        bool static_force_written = false;
         for (std::size_t index = 0; index < plan->size(); ++index) {
             const auto& wheel = (*plan)[index];
             bool applied = true;
@@ -319,29 +532,48 @@ struct AxleRuntime::Implementation {
                               vehicle, wheel.index,
                               wheel.desired_steering_gain);
             }
+            if (applied && wheel.static_force_changed) {
+                applied = ConfirmOfflineBeforeWrite() &&
+                          access.WriteWheelStaticForce(
+                              vehicle, wheel.index,
+                              wheel.desired_static_force);
+                static_force_written = static_force_written || applied;
+            }
             if (!applied) {
-                if (state == RuntimeState::DisabledOnline) return false;
-                const bool restored = RollBack(vehicle, *plan, index + 1U);
-                if (state == RuntimeState::DisabledOnline) return false;
-                bool baseline_retained = !new_generation;
-                if (new_generation) {
-                    if (restored) {
-                        tracked.erase(vehicle.entity_id);
-                    } else {
-                        // Rollback itself was incomplete.  Retain the original
-                        // state captured before the first write so shutdown or
-                        // a later lifecycle pass can safely retry restoration.
-                        tracked[vehicle.entity_id] = std::move(replacement);
-                        baseline_retained = true;
-                    }
+                return fail_transaction(index + 1U, "wheel-write-failed",
+                                        "Wheel update failed");
+            }
+        }
+
+        if (static_force_written &&
+            (!ConfirmOfflineBeforeWrite() ||
+             !host.ActivatePhysics(vehicle))) {
+            return fail_transaction(plan->size(),
+                                    "physics-activation-failed",
+                                    "Physics activation after StaticForce updates failed");
+        }
+
+        if (RequiresStaticForceAccess(configuration)) {
+            double verified_total = 0.0;
+            double expected_total = 0.0;
+            for (const auto& wheel : *plan) {
+                double verified = 0.0;
+                if (!access.ReadWheelStaticForce(
+                        vehicle, wheel.index, verified) ||
+                    !std::isfinite(verified) ||
+                    !StaticForceEqual(verified,
+                                      wheel.desired_static_force)) {
+                    return fail_transaction(
+                        plan->size(), "static-force-verification-failed",
+                        "StaticForce readback did not match the normalized support plan");
                 }
-                LogOnce(LogLevel::Error, "wheel-write-failed",
-                        std::string("Wheel update failed and rollback was ") +
-                            (restored ? "completed" : "incomplete") +
-                            (baseline_retained
-                                 ? "; original baseline retained for retry"
-                                 : "; no modified state remains to restore"));
-                return false;
+                verified_total += verified;
+                expected_total += wheel.desired_static_force;
+            }
+            if (!StaticForceEqual(verified_total, expected_total)) {
+                return fail_transaction(
+                    plan->size(), "static-force-total-changed",
+                    "StaticForce verification detected a change in total vehicle support");
             }
         }
 
@@ -423,6 +655,7 @@ struct AxleRuntime::Implementation {
                 continue;
             }
             bool vehicle_restored = true;
+            bool has_static_force_baseline = false;
             for (const auto& [index, original] : saved.originals) {
                 std::uint16_t flags = 0;
                 const bool flags_read =
@@ -458,6 +691,48 @@ struct AxleRuntime::Implementation {
                                 *current, index, original.steering_gain)) {
                             vehicle_restored = false;
                         }
+                    }
+                }
+                if (original.has_static_force) {
+                    has_static_force_baseline = true;
+                    if (!access.SupportsStaticForce() ||
+                        !host.SupportsPhysicsActivation()) {
+                        vehicle_restored = false;
+                    } else {
+                        double current_force = 0.0;
+                        if (!access.ReadWheelStaticForce(
+                                *current, index, current_force) ||
+                            !std::isfinite(current_force)) {
+                            vehicle_restored = false;
+                        } else if (!StaticForceEqual(
+                                       current_force,
+                                       original.static_force)) {
+                            if (!ConfirmOfflineBeforeWrite()) return true;
+                            if (!access.WriteWheelStaticForce(
+                                    *current, index,
+                                    original.static_force)) {
+                                vehicle_restored = false;
+                            }
+                        }
+                    }
+                }
+            }
+            if (has_static_force_baseline) {
+                if (!ConfirmOfflineBeforeWrite()) return true;
+                if (!host.ActivatePhysics(*current)) {
+                    vehicle_restored = false;
+                }
+            }
+            if (has_static_force_baseline && access.SupportsStaticForce()) {
+                for (const auto& [index, original] : saved.originals) {
+                    if (!original.has_static_force) continue;
+                    double verified = 0.0;
+                    if (!access.ReadWheelStaticForce(
+                            *current, index, verified) ||
+                        !std::isfinite(verified) ||
+                        !StaticForceEqual(verified,
+                                          original.static_force)) {
+                        vehicle_restored = false;
                     }
                 }
             }
@@ -556,12 +831,44 @@ bool AxleRuntime::Start(ConfigurationCatalog catalog,
                     "the configuration was disabled before vehicle writes");
             continue;
         }
+        if (RequiresStaticForceAccess(configuration) &&
+            (!runtime.access.SupportsStaticForce() ||
+             !runtime.host.SupportsPhysicsActivation())) {
+            runtime.log.Write(
+                LogLevel::Warning, "static-force-capability-missing",
+                "Model " + HashText(model_hash) +
+                    " requests axle support bias, but this exact build lacks "
+                    "validated StaticForce access or physics activation; the "
+                    "configuration was disabled before vehicle writes");
+            continue;
+        }
+        if ((configuration.schema_version == kAxleSupportAxleSchemaVersion ||
+             HasAnyStaticForceSetting(configuration)) &&
+            !RequiresStaticForceAccess(configuration)) {
+            runtime.log.Write(
+                LogLevel::Warning, "incomplete-support-bias",
+                "Model " + HashText(model_hash) +
+                    " omits supportWeight on one or more physical axles; the "
+                    "configuration was disabled before vehicle writes");
+            continue;
+        }
         runtime.log.Write(
             LogLevel::Info, "configuration-loaded",
             "Loaded model " + HashText(model_hash) + " with " +
                 std::to_string(configuration.axles.size()) + " physical axles and " +
                 std::to_string(configuration.expected_wheel_count) +
-                " mapped wheel slots");
+                " mapped wheel slots; steering polarity=" +
+                configuration.steering_command_polarity);
+        for (const auto& axle : configuration.axles) {
+            runtime.log.Write(
+                LogLevel::Debug, "steering-gain-resolved",
+                "Model " + HashText(model_hash) + " axle " +
+                    std::to_string(axle.order) + " base=" +
+                    std::to_string(BaseSteeringGain(axle)) + " polarity=" +
+                    configuration.steering_command_polarity + " effective=" +
+                    std::to_string(
+                        EffectiveSteeringGain(configuration, axle)));
+        }
         runtime.configurations.emplace(model_hash, std::move(configuration));
     }
     if (runtime.configurations.empty()) {

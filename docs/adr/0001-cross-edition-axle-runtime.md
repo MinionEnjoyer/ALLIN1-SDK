@@ -19,8 +19,10 @@ and never create another physical axle or runtime wheel index.
 
 1. `AxleConfiguration` remains the runtime-independent authoring contract.
 2. `AxleRuntimeBundlePlanner` resolves four explicit target IDs through immutable
-   capability records. UI and API consumers can use the same records; edition
-   checks must not be duplicated in presentation code.
+   fail-closed capability records. Story-only schema and wheel-access features
+   may then be enabled only from a checksum-pinned runtime profile and matching
+   acceptance receipt. UI and API consumers use that validated dependency
+   result; edition checks must not be duplicated in presentation code.
 3. Runtime wheel maps are keyed by canonical bone semantics. Explicit exported
    bone-to-index evidence wins. Otherwise a target mapping rule filters its
    canonical semantic sequence to the configured pairs. No code derives an index
@@ -49,6 +51,12 @@ and never create another physical axle or runtime wheel index.
     slip simulation. It uses fixed axles (or an explicit author pivot), aims the
     configured steering axles at one turn center, and normalizes the longest
     lever arm to a bounded signed gain.
+12. Old Story profiles default to schema 1 with signed steering and axle support
+    disabled. A signed-steering capability requires schema 2 plus write,
+    readback, and reapplication acceptance. Axle support requires schema 3 plus
+    static-force apply/readback, normalized total and left/right preservation,
+    repair reapplication, transactional rollback, unload restore, and
+    fail-closed physics activation acceptance. FiveM remains false for both.
 
 ## Safety consequences
 

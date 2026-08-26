@@ -6,6 +6,8 @@ from dataclasses import dataclass, replace
 import pytest
 
 from allin1_sdk.axle_configurator import (
+    AXLE_SUPPORT_RUNTIME_VERSION,
+    AXLE_SUPPORT_SCHEMA_VERSION,
     EXPORT_FIVEM_RUNTIME,
     EXPORT_STOCK_METADATA,
     FLAG_IS_DRIVEN,
@@ -18,12 +20,18 @@ from allin1_sdk.axle_configurator import (
     PRESET_STEER_DRIVE_REAR,
     RUNTIME_REQUIRED_MESSAGE,
     SHARED_VISUAL_WARNING,
+    STEERING_COMMAND_POLARITY_INVERTED,
+    STEERING_COMMAND_POLARITY_NORMAL,
+    STEERING_POLARITY_RUNTIME_VERSION,
+    STEERING_POLARITY_SCHEMA_VERSION,
     VISUAL_FRONT,
     AxleAddonGeometry,
     AxleConfiguration,
     apply_axle_preset,
+    apply_axle_support_weights,
     apply_intentional_layout_override,
     clear_intentional_layout_override,
+    clear_axle_support_weights,
     detect_axle_configuration,
     fivem_client_lua,
     fivem_server_lua,
@@ -31,8 +39,10 @@ from allin1_sdk.axle_configurator import (
     joaat_hex,
     parse_handling_flags,
     requires_signed_steering_gain,
+    requires_axle_support_bias,
     resolve_runtime_wheel_index_map,
     retarget_axle_configuration,
+    set_steering_command_polarity,
     steering_diagnostic,
     stock_metadata_flags,
     update_story_wheel_flags,
@@ -70,10 +80,19 @@ def skeleton(count: int) -> tuple[Bone, ...]:
 def test_variable_axle_detection_uses_dense_semantic_target_mapping(axle_count: int) -> None:
     config = detect_axle_configuration("fixture", skeleton(axle_count))
     assert len(config.axles) == axle_count
-    assert [
+    runtime_indices = [
         value for axle in config.axles
         for value in (axle.left_runtime_index, axle.right_runtime_index)
-    ] == list(range(axle_count * 2))
+    ]
+    assert sorted(runtime_indices) == list(range(axle_count * 2))
+    by_bone = {
+        axle.left_bone: (axle.left_runtime_index, axle.right_runtime_index)
+        for axle in config.axles
+    }
+    assert by_bone["wheel_lf"] == (0, 1)
+    assert by_bone["wheel_lr"] == (2, 3)
+    if axle_count >= 3:
+        assert by_bone["wheel_lm1"] == (4, 5)
     assert not [
         item for item in validate_axle_configuration(
             config, skeleton(axle_count), target="fivem-legacy",
@@ -95,6 +114,31 @@ def test_six_wheel_acceptance_preset() -> None:
         ("wheel_lm1", "wheel_rm1"),
         ("wheel_lr", "wheel_rr"),
     ]
+
+
+def test_vehicle_polarity_is_configurable_without_rewriting_base_gains() -> None:
+    config = detect_axle_configuration(
+        "synthetic_polarity", skeleton(3),
+        preset=PRESET_STEER_DRIVE_REAR,
+        export_mode=EXPORT_FIVEM_RUNTIME,
+    )
+    base = tuple(axle.steering_gain for axle in config.axles)
+
+    inverted = set_steering_command_polarity(
+        config, STEERING_COMMAND_POLARITY_INVERTED,
+    )
+    assert inverted.schema_version == STEERING_POLARITY_SCHEMA_VERSION
+    assert inverted.minimum_runtime_version == STEERING_POLARITY_RUNTIME_VERSION
+    assert tuple(axle.steering_gain for axle in inverted.axles) == base
+    assert requires_signed_steering_gain(inverted)
+    assert inverted.to_dict()["steering_command_polarity"] == "inverted"
+    restored = set_steering_command_polarity(
+        AxleConfiguration.from_dict(inverted.to_dict()),
+        STEERING_COMMAND_POLARITY_NORMAL,
+    )
+    assert restored.schema_version == 1
+    assert restored.minimum_runtime_version == STEERING_POLARITY_RUNTIME_VERSION
+    assert tuple(axle.steering_gain for axle in restored.axles) == base
 
 
 def test_intentional_visual_instancing_override_supports_custom_physical_order() -> None:
@@ -141,7 +185,7 @@ def test_intentional_visual_instancing_override_supports_custom_physical_order()
     assert [
         (axle.left_runtime_index, axle.right_runtime_index)
         for axle in configured.axles
-    ] == [(2, 3), (0, 1), (4, 5)]
+    ] == [(4, 5), (0, 1), (2, 3)]
     findings = validate_axle_configuration(configured, bones)
     assert any(item.code == "intentional_layout_override" for item in findings)
     assert not [
@@ -497,6 +541,63 @@ def test_schema_one_omits_gain_and_schema_two_requires_signed_evidence() -> None
     )
 
 
+def test_schema_three_support_weights_are_all_or_none_and_round_trip() -> None:
+    base = detect_axle_configuration(
+        "support_bus", skeleton(3), preset=PRESET_STEER_DRIVE_REAR,
+    )
+    configured = apply_axle_support_weights(
+        base, {1: 1.15, 2: 0.90, 3: 0.95},
+    )
+
+    assert configured.schema_version == AXLE_SUPPORT_SCHEMA_VERSION
+    assert configured.minimum_runtime_version == AXLE_SUPPORT_RUNTIME_VERSION
+    assert requires_axle_support_bias(configured)
+    payload = configured.to_dict()
+    assert [
+        row["suspension"]["support_weight"] for row in payload["axles"]
+    ] == pytest.approx([1.15, 0.90, 0.95])
+    assert AxleConfiguration.from_dict(payload) == configured
+
+    partial = configured.to_dict()
+    partial["axles"][1].pop("suspension")
+    with pytest.raises(ValueError, match="every physical axle"):
+        AxleConfiguration.from_dict(partial)
+    with pytest.raises(ValueError, match="cover every physical axle"):
+        apply_axle_support_weights(base, {1: 1.0, 2: 1.0})
+    with pytest.raises(ValueError, match="0.75 to 1.25"):
+        apply_axle_support_weights(base, {1: 1.0, 2: 1.0, 3: 1.26})
+
+    cleared = clear_axle_support_weights(configured)
+    assert cleared.schema_version == 1
+    assert cleared.minimum_runtime_version == "1.0.0"
+    assert not requires_axle_support_bias(cleared)
+
+
+def test_schema_three_can_combine_support_bias_with_signed_steering() -> None:
+    from allin1_sdk.axle_steering_geometry import (
+        apply_steering_geometry_to_configuration,
+        solve_automatic_steering_geometry,
+    )
+
+    bones = skeleton(3)
+    base = detect_axle_configuration(
+        "signed_support_bus", bones, preset=PRESET_STEER_DRIVE_REAR,
+    )
+    signed = apply_steering_geometry_to_configuration(
+        base, solve_automatic_steering_geometry(base, bones),
+    )
+    configured = apply_axle_support_weights(
+        signed, {1: 1.10, 2: 0.95, 3: 0.95},
+    )
+
+    assert configured.schema_version == AXLE_SUPPORT_SCHEMA_VERSION
+    assert configured.steering_calculation == signed.steering_calculation
+    loaded = AxleConfiguration.from_dict(configured.to_dict())
+    assert loaded == configured
+    cleared = clear_axle_support_weights(configured)
+    assert cleared.schema_version == 2
+    assert cleared.steering_calculation == signed.steering_calculation
+
 def test_legacy_migration_derives_indices_from_bones_not_row_order() -> None:
     payload = detect_axle_configuration("bus", skeleton(3)).to_dict()
     payload["schema_version"] = 0
@@ -514,7 +615,7 @@ def test_legacy_migration_derives_indices_from_bones_not_row_order() -> None:
         for axle in migrated.axles
     }
     assert indices == {
-        "wheel_lf": (0, 1), "wheel_lm1": (2, 3), "wheel_lr": (4, 5),
+        "wheel_lf": (0, 1), "wheel_lm1": (4, 5), "wheel_lr": (2, 3),
     }
     migrated_by_bone = {item.left_bone: item for item in migrated.axles}
     assert migrated_by_bone["wheel_lf"].physical_order == 1
@@ -661,7 +762,7 @@ def test_invalid_runtime_index_count_blocks_export() -> None:
         "bus", skeleton(3), preset=PRESET_ALL_STEER,
         export_mode=EXPORT_FIVEM_RUNTIME,
     )
-    broken = replace(config.axles[2], left_runtime_index=2)
+    broken = replace(config.axles[2], left_runtime_index=0)
     invalid = replace(config, axles=(*config.axles[:2], broken))
     with pytest.raises(ValueError, match="Cannot generate"):
         fivem_client_lua(invalid)

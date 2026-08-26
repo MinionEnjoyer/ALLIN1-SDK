@@ -17,15 +17,24 @@ from typing import Any, Iterable, Mapping, Protocol
 
 
 # Schema 1 is the legacy boolean-steering contract still consumed by the
-# published runtimes.  Schema 2 is emitted selectively only after an author
-# creates a non-legacy signed steering solution.  Keeping the legacy constant
-# stable prevents unrelated detected/prefab configurations from being
-# needlessly promoted before a schema-2 runtime is available.
+# published runtimes. Schema 2 adds signed steering evidence. Schema 3 adds
+# experimental all-axle support bias. Schema 4 adds vehicle-level steering
+# command polarity. Keeping each
+# feature version explicit prevents a new authoring feature from silently
+# promoting unrelated configurations.
 AXLE_SCHEMA_VERSION = 1
-LATEST_AXLE_SCHEMA_VERSION = 2
+SIGNED_STEERING_SCHEMA_VERSION = 2
+AXLE_SUPPORT_SCHEMA_VERSION = 3
+STEERING_POLARITY_SCHEMA_VERSION = 4
+LATEST_AXLE_SCHEMA_VERSION = STEERING_POLARITY_SCHEMA_VERSION
 SIGNED_STEERING_RUNTIME_VERSION = "2.0.0"
 INTENTIONAL_LAYOUT_RUNTIME_VERSION = "2.1.0"
+AXLE_SUPPORT_RUNTIME_VERSION = "3.0.0"
+STEERING_POLARITY_RUNTIME_VERSION = "4.0.0"
 STEERING_GAIN_EPSILON = 1.0e-9
+AXLE_SUPPORT_WEIGHT_MINIMUM = 0.75
+AXLE_SUPPORT_WEIGHT_MAXIMUM = 1.25
+AXLE_SUPPORT_WEIGHT_DEFAULT = 1.0
 
 STEERING_CALCULATION_AUTOMATIC = "automatic_geometry"
 STEERING_CALCULATION_MANUAL = "manual"
@@ -34,6 +43,12 @@ STEERING_CALCULATION_MODES = (
     STEERING_CALCULATION_MANUAL,
 )
 STEERING_GEOMETRY_ALGORITHM_VERSION = 1
+STEERING_COMMAND_POLARITY_NORMAL = "normal"
+STEERING_COMMAND_POLARITY_INVERTED = "inverted"
+STEERING_COMMAND_POLARITIES = (
+    STEERING_COMMAND_POLARITY_NORMAL,
+    STEERING_COMMAND_POLARITY_INVERTED,
+)
 STEERING_PIVOT_SOURCES = (
     "explicit",
     "selected_fixed_axles",
@@ -120,12 +135,23 @@ def _dense_canonical_pairs(axle_count: int) -> tuple[tuple[str, str], ...]:
         )
     )
 
+GTA_RUNTIME_WHEEL_PAIR_ORDER = (
+    # GTA enumerates the canonical front and rear families before the optional
+    # middle families. This is runtime slot order, not spatial axle order.
+    # A three-axle vehicle therefore reports lf/rf=0/1, lr/rr=2/3, and
+    # lm1/rm1=4/5 even when lm1/rm1 is physically between the other pairs.
+    ("wheel_lf", "wheel_rf"),
+    ("wheel_lr", "wheel_rr"),
+    ("wheel_lm1", "wheel_rm1"),
+    ("wheel_lm2", "wheel_rm2"),
+    ("wheel_lm3", "wheel_rm3"),
+)
+
 TARGET_CANONICAL_PAIR_ORDER: dict[str, tuple[tuple[str, str], ...]] = {
-    # Keep target knowledge in this one resolver.  Current validated FiveM and
-    # Workbench Story adapters expose the same semantic ordering, but callers
-    # do not derive indices from an axle row number and a future target can
-    # provide a different rule without migrating vehicle configurations.
-    target: tuple((left, right) for _role, left, right in CANONICAL_WHEEL_PAIRS)
+    # Keep target knowledge in this one resolver. Callers must never derive a
+    # runtime index from physical/display order. A future target can replace
+    # this rule without migrating authored axle rows.
+    target: GTA_RUNTIME_WHEEL_PAIR_ORDER
     for target in (
         "fivem-legacy", "fivem-enhanced", "story-legacy", "story-enhanced",
     )
@@ -176,6 +202,45 @@ class AxleAddonGeometry:
 
 
 @dataclass(frozen=True)
+class AxleSuspension:
+    """Experimental relative load contribution for one physical axle pair."""
+
+    support_weight: float = AXLE_SUPPORT_WEIGHT_DEFAULT
+
+    def __post_init__(self) -> None:
+        value = self.support_weight
+        if (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or not AXLE_SUPPORT_WEIGHT_MINIMUM <= float(value) <= AXLE_SUPPORT_WEIGHT_MAXIMUM
+        ):
+            raise ValueError(
+                "Axle suspension support weight must be a finite number from "
+                f"{AXLE_SUPPORT_WEIGHT_MINIMUM:.2f} to {AXLE_SUPPORT_WEIGHT_MAXIMUM:.2f}"
+            )
+        object.__setattr__(self, "support_weight", float(value))
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "AxleSuspension":
+        values = dict(payload)
+        if "supportWeight" in values:
+            if "support_weight" in values:
+                raise ValueError("Axle suspension repeats support_weight")
+            values["support_weight"] = values.pop("supportWeight")
+        unknown = sorted(set(values) - {"support_weight"})
+        if unknown:
+            raise ValueError(
+                "Unknown axle suspension field(s): " + ", ".join(unknown)
+            )
+        if "support_weight" not in values:
+            raise ValueError("Axle suspension requires support_weight")
+        return cls(support_weight=values["support_weight"])
+
+    def to_dict(self) -> dict[str, float]:
+        return {"support_weight": self.support_weight}
+
+
+@dataclass(frozen=True)
 class VehicleAxle:
     physical_order: int
     logical_role: str
@@ -190,6 +255,7 @@ class VehicleAxle:
     visual_family: str = VISUAL_SHARED_MIDDLE_REAR
     addon_geometry: tuple[AxleAddonGeometry, ...] = ()
     steering_gain: float | None = None
+    suspension: AxleSuspension | None = None
 
     def __post_init__(self) -> None:
         # Schema-1 drafts predate signed steering gain. Preserve their exact
@@ -210,8 +276,10 @@ class VehicleAxle:
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "VehicleAxle":
         role = str(payload.get("logical_role", "")).strip().casefold()
-        if role not in {"front", "middle", "rear"}:
-            raise ValueError("Axle logical role must be Front, Middle, or Rear")
+        if role not in {"front", "middle", "rear", "tag"}:
+            raise ValueError(
+                "Axle logical role must be Front, Middle, Tag, or Rear"
+            )
         visual = str(payload.get("visual_family", "")).strip().casefold()
         if visual not in VISUAL_FAMILIES:
             raise ValueError("Axle visual family must be front or shared_middle_rear")
@@ -235,6 +303,9 @@ class VehicleAxle:
         addons = payload.get("addon_geometry", ())
         if not isinstance(addons, (list, tuple)):
             raise ValueError("Axle add-on geometry must be a list")
+        raw_suspension = payload.get("suspension")
+        if raw_suspension is not None and not isinstance(raw_suspension, Mapping):
+            raise ValueError("Axle suspension must be an object")
         return cls(
             physical_order=order,
             logical_role=role,
@@ -245,12 +316,20 @@ class VehicleAxle:
             visual_family=visual,
             addon_geometry=tuple(AxleAddonGeometry.from_dict(item) for item in addons),
             steering_gain=gain,
+            suspension=(
+                AxleSuspension.from_dict(raw_suspension)
+                if isinstance(raw_suspension, Mapping) else None
+            ),
             **states,
         )
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["addon_geometry"] = [asdict(item) for item in self.addon_geometry]
+        if self.suspension is None:
+            payload.pop("suspension", None)
+        else:
+            payload["suspension"] = self.suspension.to_dict()
         return payload
 
 
@@ -289,7 +368,7 @@ class RuntimeReapplicationPolicy:
 
 @dataclass(frozen=True)
 class SteeringCalculationProvenance:
-    """Evidence attached to a schema-2 signed steering configuration.
+    """Evidence attached to schema-2/3 signed steering configuration.
 
     The SHA-256 is deliberately limited to canonical wheel-bone names and
     resolved XYZ positions.  Meshes, tyre packages, materials, and GTA's two
@@ -306,6 +385,10 @@ class SteeringCalculationProvenance:
     reference_lock_degrees: float | None = None
     pair_position_tolerance: float | None = None
     position_epsilon: float | None = None
+    # Bone-position evidence is deliberately canonical-name-sorted. Bind a
+    # calculation made for an intentional visual-instancing remap to the exact
+    # front-to-rear pair order as separate evidence.
+    physical_bone_pairs: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         mode = str(self.mode).strip().casefold()
@@ -316,6 +399,35 @@ class SteeringCalculationProvenance:
         if not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError("Steering calculation bone-position SHA-256 is invalid")
         object.__setattr__(self, "bone_position_sha256", digest)
+        normalized_pairs: list[tuple[str, str]] = []
+        canonical_pairs = {
+            (left, right) for _role, left, right in CANONICAL_WHEEL_PAIRS
+        }
+        for raw_pair in self.physical_bone_pairs:
+            if not isinstance(raw_pair, (list, tuple)) or len(raw_pair) != 2:
+                raise ValueError(
+                    "Steering calculation physical bone pairs must contain left/right pairs"
+                )
+            pair = (
+                _bone_name(raw_pair[0], "Steering evidence left wheel bone"),
+                _bone_name(raw_pair[1], "Steering evidence right wheel bone"),
+            )
+            if pair not in canonical_pairs:
+                raise ValueError(
+                    "Steering calculation physical bone pairs must use canonical wheel pairs"
+                )
+            normalized_pairs.append(pair)
+        if len(normalized_pairs) != len(set(normalized_pairs)):
+            raise ValueError(
+                "Steering calculation physical bone pairs must be unique"
+            )
+        if normalized_pairs and not (
+            MINIMUM_AXLE_PAIRS <= len(normalized_pairs) <= MAXIMUM_AXLE_PAIRS
+        ):
+            raise ValueError(
+                "Steering calculation physical bone pairs require 2-5 axle pairs"
+            )
+        object.__setattr__(self, "physical_bone_pairs", tuple(normalized_pairs))
         if (
             isinstance(self.algorithm_version, bool)
             or not isinstance(self.algorithm_version, int)
@@ -393,6 +505,7 @@ class SteeringCalculationProvenance:
             "referenceLockDegrees": "reference_lock_degrees",
             "pairPositionTolerance": "pair_position_tolerance",
             "positionEpsilon": "position_epsilon",
+            "physicalBonePairs": "physical_bone_pairs",
         }
         for authored, canonical in aliases.items():
             if authored in values:
@@ -404,6 +517,7 @@ class SteeringCalculationProvenance:
             "pivot_longitudinal_position", "pivot_source", "pivot_axle_orders",
             "reference_axle_order", "reference_lock_degrees",
             "pair_position_tolerance", "position_epsilon",
+            "physical_bone_pairs",
         }
         unknown = sorted(set(values) - allowed)
         if unknown:
@@ -421,6 +535,12 @@ class SteeringCalculationProvenance:
             and not isinstance(order, bool) else order
             for order in raw_orders
         )
+        raw_pairs = values.get("physical_bone_pairs", ())
+        if not isinstance(raw_pairs, (list, tuple)):
+            raise ValueError(
+                "Steering calculation physical bone pairs must be an array"
+            )
+        values["physical_bone_pairs"] = tuple(raw_pairs)
         if runtime_reference:
             reference = values.get("reference_axle_order")
             if isinstance(reference, int) and not isinstance(reference, bool):
@@ -433,6 +553,10 @@ class SteeringCalculationProvenance:
             "algorithm_version": self.algorithm_version,
             "bone_position_sha256": self.bone_position_sha256,
         }
+        if self.physical_bone_pairs:
+            payload["physical_bone_pairs"] = [
+                list(pair) for pair in self.physical_bone_pairs
+            ]
         if self.mode == STEERING_CALCULATION_AUTOMATIC:
             payload.update({
                 "pivot_longitudinal_position": self.pivot_longitudinal_position,
@@ -496,16 +620,28 @@ class IntentionalAxleLayoutOverride:
     def from_dict(
         cls, payload: Mapping[str, Any],
     ) -> "IntentionalAxleLayoutOverride":
+        values = dict(payload)
+        aliases = {
+            "physicalBonePairs": "physical_bone_pairs",
+            "bonePositionSha256": "bone_position_sha256",
+        }
+        for authored, canonical in aliases.items():
+            if authored in values:
+                if canonical in values:
+                    raise ValueError(
+                        "Intentional axle layout override repeats " + canonical
+                    )
+                values[canonical] = values.pop(authored)
         allowed = {
             "mode", "physical_bone_pairs", "bone_position_sha256", "reason",
         }
-        unknown = sorted(set(payload) - allowed)
+        unknown = sorted(set(values) - allowed)
         if unknown:
             raise ValueError(
                 "Unsupported intentional axle layout override fields: "
                 + ", ".join(unknown)
             )
-        raw_pairs = payload.get("physical_bone_pairs")
+        raw_pairs = values.get("physical_bone_pairs")
         if not isinstance(raw_pairs, (list, tuple)):
             raise ValueError(
                 "Intentional axle layout override physical_bone_pairs must be an array"
@@ -521,12 +657,12 @@ class IntentionalAxleLayoutOverride:
                 _bone_name(raw[1], "Override right wheel bone"),
             ))
         return cls(
-            mode=str(payload.get("mode", "")).strip().casefold(),
+            mode=str(values.get("mode", "")).strip().casefold(),
             physical_bone_pairs=tuple(pairs),
             bone_position_sha256=str(
-                payload.get("bone_position_sha256", "")
+                values.get("bone_position_sha256", "")
             ).strip().casefold(),
-            reason=str(payload.get("reason", "")).strip(),
+            reason=str(values.get("reason", "")).strip(),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -558,6 +694,10 @@ class AxleConfiguration:
         ("story-enhanced", False),
     )
     handbrake_rear_steering: bool = False
+    # Vehicle-level command polarity is deliberately independent of physical
+    # axle order and the geometry-derived per-axle base gains.  Runtime uses
+    # ``effective gain = base steering_gain * (+1 normal / -1 inverted)``.
+    steering_command_polarity: str = STEERING_COMMAND_POLARITY_NORMAL
     steering_calculation: SteeringCalculationProvenance | None = None
     intentional_layout_override: IntentionalAxleLayoutOverride | None = None
 
@@ -565,27 +705,49 @@ class AxleConfiguration:
         if (
             isinstance(self.schema_version, bool)
             or not isinstance(self.schema_version, int)
-            or self.schema_version not in {AXLE_SCHEMA_VERSION, LATEST_AXLE_SCHEMA_VERSION}
+            or self.schema_version not in {
+                AXLE_SCHEMA_VERSION,
+                SIGNED_STEERING_SCHEMA_VERSION,
+                AXLE_SUPPORT_SCHEMA_VERSION,
+                STEERING_POLARITY_SCHEMA_VERSION,
+            }
         ):
             raise ValueError(f"Unsupported axle configuration schema: {self.schema_version}")
         runtime_core = _semantic_version_core(
             self.minimum_runtime_version, "Minimum axle runtime version",
         )
+        if (
+            not isinstance(self.steering_command_polarity, str)
+            or self.steering_command_polarity not in STEERING_COMMAND_POLARITIES
+        ):
+            raise ValueError(
+                "Steering command polarity must be normal or inverted"
+            )
         nonlegacy = any(
             abs(float(axle.steering_gain) - (1.0 if axle.steered else 0.0))
             > STEERING_GAIN_EPSILON
             for axle in self.axles
         )
+        support_rows = tuple(axle.suspension is not None for axle in self.axles)
+        has_support = any(support_rows)
+        if has_support and not all(support_rows):
+            raise ValueError(
+                "Axle suspension support weights must be configured for every physical axle"
+            )
         if self.schema_version == AXLE_SCHEMA_VERSION:
             if self.steering_calculation is not None:
                 raise ValueError("Schema-1 axle configurations cannot contain steering provenance")
             if nonlegacy:
                 raise ValueError("Signed steering gain requires axle configuration schema 2")
-        else:
+            if has_support:
+                raise ValueError("Axle suspension support weights require axle configuration schema 3")
+        elif self.schema_version == SIGNED_STEERING_SCHEMA_VERSION:
             if self.steering_calculation is None:
                 raise ValueError("Schema-2 axle configurations require steering calculation evidence")
             if not nonlegacy:
                 raise ValueError("Schema 2 is reserved for non-legacy signed steering gain")
+            if has_support:
+                raise ValueError("Axle suspension support weights require axle configuration schema 3")
             if runtime_core < _semantic_version_core(
                 SIGNED_STEERING_RUNTIME_VERSION, "Signed steering runtime version",
             ):
@@ -593,6 +755,55 @@ class AxleConfiguration:
                     "Schema-2 signed steering requires minimum runtime version "
                     f"{SIGNED_STEERING_RUNTIME_VERSION} or newer"
                 )
+        elif self.schema_version == AXLE_SUPPORT_SCHEMA_VERSION:
+            if not support_rows or not all(support_rows):
+                raise ValueError(
+                    "Schema-3 axle configurations require suspension support_weight "
+                    "for every physical axle"
+                )
+            if nonlegacy and self.steering_calculation is None:
+                raise ValueError(
+                    "Schema-3 signed steering requires steering calculation evidence"
+                )
+            if not nonlegacy and self.steering_calculation is not None:
+                raise ValueError(
+                    "Legacy steering cannot retain signed steering calculation evidence"
+                )
+            if runtime_core < _semantic_version_core(
+                AXLE_SUPPORT_RUNTIME_VERSION, "Axle support runtime version",
+            ):
+                raise ValueError(
+                    "Schema-3 axle support requires minimum runtime version "
+                    f"{AXLE_SUPPORT_RUNTIME_VERSION} or newer"
+                )
+        else:
+            if self.steering_command_polarity != STEERING_COMMAND_POLARITY_INVERTED:
+                raise ValueError(
+                    "Schema-4 axle configurations require inverted steering polarity"
+                )
+            if nonlegacy and self.steering_calculation is None:
+                raise ValueError(
+                    "Schema-4 signed base gains require steering calculation evidence"
+                )
+            if not nonlegacy and self.steering_calculation is not None:
+                raise ValueError(
+                    "Legacy base gains cannot retain signed steering calculation evidence"
+                )
+            if runtime_core < _semantic_version_core(
+                STEERING_POLARITY_RUNTIME_VERSION,
+                "Steering polarity runtime version",
+            ):
+                raise ValueError(
+                    "Schema-4 inverted steering requires minimum runtime version "
+                    f"{STEERING_POLARITY_RUNTIME_VERSION} or newer"
+                )
+        if (
+            self.schema_version != STEERING_POLARITY_SCHEMA_VERSION
+            and self.steering_command_polarity != STEERING_COMMAND_POLARITY_NORMAL
+        ):
+            raise ValueError(
+                "Inverted steering command polarity requires axle schema 4"
+            )
         if (
             self.intentional_layout_override is not None
             and runtime_core < _semantic_version_core(
@@ -639,6 +850,9 @@ class AxleConfiguration:
         handbrake_steering = migrated.get("handbrake_rear_steering", False)
         if not isinstance(handbrake_steering, bool):
             raise ValueError("Handbrake rear steering state must be a boolean")
+        steering_command_polarity = migrated.get(
+            "steering_command_polarity", STEERING_COMMAND_POLARITY_NORMAL,
+        )
         schema_version = migrated.get("schema_version")
         if not isinstance(schema_version, int):
             raise ValueError("Axle configuration schema must be an integer")
@@ -658,7 +872,7 @@ class AxleConfiguration:
             IntentionalAxleLayoutOverride.from_dict(raw_layout_override)
             if isinstance(raw_layout_override, Mapping) else None
         )
-        if schema_version == LATEST_AXLE_SCHEMA_VERSION and calculation is None:
+        if schema_version == SIGNED_STEERING_SCHEMA_VERSION and calculation is None:
             raise ValueError("Schema-2 axle configurations require steering calculation evidence")
         return cls(
             schema_version=schema_version,
@@ -675,6 +889,7 @@ class AxleConfiguration:
             minimum_runtime_version=runtime_version,
             compatibility=compatibility,
             handbrake_rear_steering=handbrake_steering,
+            steering_command_polarity=steering_command_polarity,
             steering_calculation=calculation,
             intentional_layout_override=layout_override,
         )
@@ -699,9 +914,9 @@ class AxleConfiguration:
             "runtime_reapplication": asdict(self.runtime_reapplication),
             "compatibility": dict(self.compatibility),
             "handbrake_rear_steering": self.handbrake_rear_steering,
+            "steering_command_polarity": self.steering_command_polarity,
         }
-        if self.schema_version == LATEST_AXLE_SCHEMA_VERSION:
-            assert self.steering_calculation is not None
+        if self.steering_calculation is not None:
             payload["steering_calculation"] = self.steering_calculation.to_dict()
         if self.intentional_layout_override is not None:
             payload["intentional_layout_override"] = (
@@ -840,7 +1055,7 @@ def _identifier_path(value: Any, label: str) -> str:
 
 
 def migrate_axle_configuration(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Normalize legacy/v2 spellings without silently promoting the schema."""
+    """Normalize legacy/v2/v3 spellings without silently promoting schema."""
     data = dict(payload)
     # Accept the documented cross-runtime spelling at the import boundary;
     # SDK reports remain consistent with the repository's snake_case schemas.
@@ -850,6 +1065,7 @@ def migrate_axle_configuration(payload: Mapping[str, Any]) -> dict[str, Any]:
         "modelName": "vehicle_model",
         "modelHash": "model_hash",
         "minimumRuntimeVersion": "minimum_runtime_version",
+        "steeringCommandPolarity": "steering_command_polarity",
         "steeringCalculation": "steering_calculation",
         "intentionalLayoutOverride": "intentional_layout_override",
     }
@@ -862,7 +1078,12 @@ def migrate_axle_configuration(payload: Mapping[str, Any]) -> dict[str, Any]:
     if (
         isinstance(schema, bool)
         or not isinstance(schema, int)
-        or schema not in {AXLE_SCHEMA_VERSION, LATEST_AXLE_SCHEMA_VERSION}
+        or schema not in {
+            AXLE_SCHEMA_VERSION,
+            SIGNED_STEERING_SCHEMA_VERSION,
+            AXLE_SUPPORT_SCHEMA_VERSION,
+            STEERING_POLARITY_SCHEMA_VERSION,
+        }
     ):
         raise ValueError(f"Unsupported axle configuration schema: {schema}")
     if "model" in data and "vehicle_model" not in data:
@@ -904,8 +1125,10 @@ def migrate_axle_configuration(payload: Mapping[str, Any]) -> dict[str, Any]:
             if "steering_gain" in item:
                 raise ValueError("Axle repeats steering_gain")
             item["steering_gain"] = item.pop("steeringGain")
-        if schema == LATEST_AXLE_SCHEMA_VERSION and "steering_gain" not in item:
-            raise ValueError("Schema-2 axle rows require explicit steering_gain values")
+        if schema >= SIGNED_STEERING_SCHEMA_VERSION and "steering_gain" not in item:
+            raise ValueError(
+                f"Schema-{schema} axle rows require explicit steering_gain values"
+            )
         migrated_axles.append(item)
     if any(
         "physical_order" not in item
@@ -940,14 +1163,11 @@ def migrate_axle_configuration(payload: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError(
                 "Legacy axle configuration contains a gapped canonical middle pair"
             )
-        semantic_mapping = {
-            bone: index
-            for pair_index, pair in enumerate(ordered)
-            for bone, index in (
-                (pair[0], pair_index * 2),
-                (pair[1], (pair_index * 2) + 1),
-            )
-        }
+        # Runtime slots follow GTA's canonical wheel enumeration, which is
+        # independent of the front-to-rear semantic order recovered below.
+        semantic_mapping = resolve_runtime_wheel_index_map(
+            selected, target="fivem-legacy",
+        )
         semantic_orders = {
             pair: order for order, pair in enumerate(ordered, start=1)
         }
@@ -968,8 +1188,13 @@ def migrate_axle_configuration(payload: Mapping[str, Any]) -> dict[str, Any]:
         data.setdefault("model_hash", joaat_hex(model))
     data.setdefault(
         "minimum_runtime_version",
-        SIGNED_STEERING_RUNTIME_VERSION
-        if schema == LATEST_AXLE_SCHEMA_VERSION else "1.0.0",
+        (
+            AXLE_SUPPORT_RUNTIME_VERSION
+            if schema == AXLE_SUPPORT_SCHEMA_VERSION
+            else SIGNED_STEERING_RUNTIME_VERSION
+            if schema == SIGNED_STEERING_SCHEMA_VERSION
+            else "1.0.0"
+        ),
     )
     data.setdefault("compatibility", {"fivem-legacy": True})
     data.setdefault("handbrake_rear_steering", False)
@@ -981,7 +1206,7 @@ def resolve_runtime_wheel_index_map(
     *,
     target: str,
 ) -> dict[str, int]:
-    """Resolve explicit wheel slots from target rules and canonical semantics."""
+    """Resolve explicit GTA wheel slots independently of physical axle order."""
     target_key = target.strip().casefold()
     rules = TARGET_CANONICAL_PAIR_ORDER.get(target_key)
     if rules is None:
@@ -1234,7 +1459,14 @@ def apply_intentional_layout_override(
         ))
     safe = replace(
         config,
-        schema_version=AXLE_SCHEMA_VERSION,
+        schema_version=(
+            STEERING_POLARITY_SCHEMA_VERSION
+            if config.steering_command_polarity
+            == STEERING_COMMAND_POLARITY_INVERTED
+            else AXLE_SUPPORT_SCHEMA_VERSION
+            if all(axle.suspension is not None for axle in ordered)
+            else AXLE_SCHEMA_VERSION
+        ),
         preset=PRESET_CUSTOM,
         axles=tuple(ordered),
         minimum_runtime_version=(
@@ -1286,7 +1518,14 @@ def clear_intentional_layout_override(
     ), key=lambda axle: axle.physical_order))
     return replace(
         config,
-        schema_version=AXLE_SCHEMA_VERSION,
+        schema_version=(
+            STEERING_POLARITY_SCHEMA_VERSION
+            if config.steering_command_polarity
+            == STEERING_COMMAND_POLARITY_INVERTED
+            else AXLE_SUPPORT_SCHEMA_VERSION
+            if all(axle.suspension is not None for axle in restored)
+            else AXLE_SCHEMA_VERSION
+        ),
         preset=PRESET_CUSTOM,
         axles=restored,
         steering_calculation=None,
@@ -1391,7 +1630,14 @@ def apply_axle_preset(config: AxleConfiguration, preset: str) -> AxleConfigurati
         ))
     return replace(
         config,
-        schema_version=AXLE_SCHEMA_VERSION,
+        schema_version=(
+            STEERING_POLARITY_SCHEMA_VERSION
+            if config.steering_command_polarity
+            == STEERING_COMMAND_POLARITY_INVERTED
+            else AXLE_SUPPORT_SCHEMA_VERSION
+            if all(axle.suspension is not None for axle in updated)
+            else AXLE_SCHEMA_VERSION
+        ),
         preset=preset,
         axles=tuple(updated),
         steering_calculation=None,
@@ -1416,6 +1662,27 @@ def validate_axle_configuration(
     findings.extend(layout_override_findings)
     calculation = config.steering_calculation
     by_order = {item.physical_order: item for item in config.axles}
+    ordered_physical_pairs = tuple(
+        (axle.left_bone, axle.right_bone)
+        for axle in sorted(config.axles, key=lambda item: item.physical_order)
+    )
+    if calculation is not None and calculation.physical_bone_pairs:
+        if calculation.physical_bone_pairs != ordered_physical_pairs:
+            findings.append(AxleFinding(
+                "error", "steering_physical_order_evidence",
+                "Steering evidence no longer matches the configured physical "
+                "axle order. Recalculate steering before applying or exporting.",
+            ))
+    if (
+        calculation is not None
+        and config.intentional_layout_override is not None
+        and calculation.physical_bone_pairs != ordered_physical_pairs
+    ):
+        findings.append(AxleFinding(
+            "error", "steering_layout_override_evidence",
+            "Steering for an intentional axle-layout override must be calculated "
+            "after the override and bound to its exact physical bone-pair order.",
+        ))
     if calculation is not None and calculation.mode == STEERING_CALCULATION_AUTOMATIC:
         invalid_pivots = [
             order for order in calculation.pivot_axle_orders
@@ -1566,11 +1833,20 @@ def validate_axle_configuration(
                     else "rear" if axle.physical_order == len(config.axles)
                     else "middle"
                 )
-            if axle.logical_role != expected_role:
+            valid_roles = (
+                {"middle", "tag"} if expected_role == "middle"
+                else {expected_role}
+            )
+            if axle.logical_role not in valid_roles:
                 findings.append(AxleFinding(
                     "error", "logical_role_semantics",
                     f"{axle.left_bone}/{axle.right_bone} must use the "
-                    f"{expected_role} logical role.", axle.physical_order,
+                    + (
+                        "middle or tag logical role."
+                        if expected_role == "middle"
+                        else f"{expected_role} logical role."
+                    ),
+                    axle.physical_order,
                 ))
             expected_order = semantic_orders.get(pair)
             if (
@@ -1876,11 +2152,184 @@ def _is_front_and_final_rear_with_fixed_middle(config: AxleConfiguration) -> boo
 
 
 def requires_signed_steering_gain(config: AxleConfiguration) -> bool:
-    """Return whether exact behavior exceeds legacy boolean steering flags."""
+    """Return whether effective behavior exceeds legacy boolean steering flags.
+
+    Per-axle ``steering_gain`` values remain geometry-derived base gains.  The
+    vehicle-level command polarity is applied only when behavior is consumed,
+    so changing polarity never rewrites or invalidates axle-order evidence.
+    """
+    return any(
+        abs(
+            effective_steering_gain(config, axle)
+            - (1.0 if axle.steered else 0.0)
+        )
+        > STEERING_GAIN_EPSILON
+        for axle in config.axles
+    )
+
+
+def has_nonlegacy_base_steering_gain(config: AxleConfiguration) -> bool:
+    """Return whether authored base gains need geometry/manual provenance."""
+
     return any(
         abs(float(axle.steering_gain) - (1.0 if axle.steered else 0.0))
         > STEERING_GAIN_EPSILON
         for axle in config.axles
+    )
+
+
+def effective_steering_gain(
+    config: AxleConfiguration, axle: VehicleAxle,
+) -> float:
+    """Return one runtime gain after the vehicle-level polarity is applied."""
+
+    multiplier = (
+        -1.0
+        if getattr(
+            config, "steering_command_polarity", STEERING_COMMAND_POLARITY_NORMAL,
+        )
+        == STEERING_COMMAND_POLARITY_INVERTED
+        else 1.0
+    )
+    return float(axle.steering_gain) * multiplier
+
+
+def set_steering_command_polarity(
+    config: AxleConfiguration, polarity: str,
+) -> AxleConfiguration:
+    """Set normal or inverted command polarity without touching base gains.
+
+    The minimum runtime floor is raised only for inverted polarity. Returning
+    to normal downgrades the axle schema but keeps version floors monotonic,
+    because the SDK cannot prove who authored a coincident runtime version.
+    """
+
+    if (
+        not isinstance(polarity, str)
+        or polarity not in STEERING_COMMAND_POLARITIES
+    ):
+        raise ValueError("Steering command polarity must be normal or inverted")
+    runtime_version = config.minimum_runtime_version
+    if polarity == STEERING_COMMAND_POLARITY_INVERTED:
+        if _semantic_version_core(
+            runtime_version, "Minimum axle runtime version",
+        ) < _semantic_version_core(
+            STEERING_POLARITY_RUNTIME_VERSION,
+            "Steering polarity runtime version",
+        ):
+            runtime_version = STEERING_POLARITY_RUNTIME_VERSION
+    schema_version = (
+        STEERING_POLARITY_SCHEMA_VERSION
+        if polarity == STEERING_COMMAND_POLARITY_INVERTED
+        else AXLE_SUPPORT_SCHEMA_VERSION
+        if requires_axle_support_bias(config)
+        else SIGNED_STEERING_SCHEMA_VERSION
+        if has_nonlegacy_base_steering_gain(config)
+        else AXLE_SCHEMA_VERSION
+    )
+    return replace(
+        config,
+        steering_command_polarity=polarity,
+        schema_version=schema_version,
+        minimum_runtime_version=runtime_version,
+    )
+
+
+def requires_axle_support_bias(config: AxleConfiguration) -> bool:
+    """Return whether every axle carries the schema-3 support contract."""
+
+    return bool(config.axles) and all(
+        axle.suspension is not None for axle in config.axles
+    )
+
+
+def apply_axle_support_weights(
+    config: AxleConfiguration,
+    support_weights: Mapping[int, float],
+) -> AxleConfiguration:
+    """Apply one explicit support weight to every resolved physical axle.
+
+    Partial maps are rejected rather than guessing a neutral value. The UI may
+    seed an entire map with 1.0 before changing the selected row, while API
+    callers must acknowledge every physical axle explicitly.
+    """
+
+    expected = {axle.physical_order for axle in config.axles}
+    normalized: dict[int, AxleSuspension] = {}
+    for raw_order, raw_weight in support_weights.items():
+        if isinstance(raw_order, bool) or not isinstance(raw_order, int):
+            raise ValueError("Axle suspension physical orders must be integers")
+        if raw_order in normalized:
+            raise ValueError(f"Axle suspension repeats physical axle {raw_order}")
+        normalized[raw_order] = AxleSuspension(raw_weight)
+    if set(normalized) != expected:
+        missing = sorted(expected - set(normalized))
+        unknown = sorted(set(normalized) - expected)
+        detail = []
+        if missing:
+            detail.append("missing " + ", ".join(map(str, missing)))
+        if unknown:
+            detail.append("unknown " + ", ".join(map(str, unknown)))
+        raise ValueError(
+            "Axle suspension support weights must cover every physical axle"
+            + (": " + "; ".join(detail) if detail else "")
+        )
+    axles = tuple(
+        replace(axle, suspension=normalized[axle.physical_order])
+        for axle in config.axles
+    )
+    runtime_version = config.minimum_runtime_version
+    if _semantic_version_core(
+        runtime_version, "Minimum axle runtime version",
+    ) < _semantic_version_core(
+        AXLE_SUPPORT_RUNTIME_VERSION, "Axle support runtime version",
+    ):
+        runtime_version = AXLE_SUPPORT_RUNTIME_VERSION
+    return replace(
+        config,
+        schema_version=(
+            STEERING_POLARITY_SCHEMA_VERSION
+            if config.steering_command_polarity
+            == STEERING_COMMAND_POLARITY_INVERTED
+            else AXLE_SUPPORT_SCHEMA_VERSION
+        ),
+        minimum_runtime_version=runtime_version,
+        axles=axles,
+    )
+
+
+def clear_axle_support_weights(config: AxleConfiguration) -> AxleConfiguration:
+    """Remove support authoring data and return to the remaining feature schema."""
+
+    axles = tuple(replace(axle, suspension=None) for axle in config.axles)
+    signed = any(
+        abs(float(axle.steering_gain) - (1.0 if axle.steered else 0.0))
+        > STEERING_GAIN_EPSILON
+        for axle in axles
+    )
+    schema = (
+        STEERING_POLARITY_SCHEMA_VERSION
+        if config.steering_command_polarity
+        == STEERING_COMMAND_POLARITY_INVERTED
+        else SIGNED_STEERING_SCHEMA_VERSION if signed else AXLE_SCHEMA_VERSION
+    )
+    calculation = config.steering_calculation if signed else None
+    runtime_version = config.minimum_runtime_version
+    if (
+        runtime_version == AXLE_SUPPORT_RUNTIME_VERSION
+        and config.steering_command_polarity == STEERING_COMMAND_POLARITY_NORMAL
+    ):
+        runtime_version = (
+            INTENTIONAL_LAYOUT_RUNTIME_VERSION
+            if config.intentional_layout_override is not None
+            else SIGNED_STEERING_RUNTIME_VERSION if signed else "1.0.0"
+        )
+    return replace(
+        config,
+        schema_version=schema,
+        minimum_runtime_version=runtime_version,
+        axles=axles,
+        steering_calculation=calculation,
     )
 
 
@@ -2258,26 +2707,38 @@ def write_fivem_resource(
 
 __all__ = [
     "AXLE_PRESETS", "AXLE_SCHEMA_VERSION", "LATEST_AXLE_SCHEMA_VERSION",
+    "SIGNED_STEERING_SCHEMA_VERSION", "AXLE_SUPPORT_SCHEMA_VERSION",
+    "STEERING_POLARITY_SCHEMA_VERSION",
     "SIGNED_STEERING_RUNTIME_VERSION", "INTENTIONAL_LAYOUT_RUNTIME_VERSION",
+    "AXLE_SUPPORT_RUNTIME_VERSION", "STEERING_POLARITY_RUNTIME_VERSION",
+    "STEERING_COMMAND_POLARITY_NORMAL", "STEERING_COMMAND_POLARITY_INVERTED",
+    "STEERING_COMMAND_POLARITIES", "AXLE_SUPPORT_WEIGHT_MINIMUM",
+    "AXLE_SUPPORT_WEIGHT_MAXIMUM", "AXLE_SUPPORT_WEIGHT_DEFAULT",
     "STEERING_CALCULATION_AUTOMATIC",
     "STEERING_CALCULATION_MANUAL", "STEERING_GEOMETRY_ALGORITHM_VERSION",
     "CANONICAL_WHEEL_PAIRS",
-    "MAXIMUM_AXLE_PAIRS", "MINIMUM_AXLE_PAIRS", "TARGET_CANONICAL_PAIR_ORDER",
+    "GTA_RUNTIME_WHEEL_PAIR_ORDER", "MAXIMUM_AXLE_PAIRS", "MINIMUM_AXLE_PAIRS",
+    "TARGET_CANONICAL_PAIR_ORDER",
     "EXPORT_FIVEM_RUNTIME", "EXPORT_MODES", "EXPORT_STOCK_METADATA",
     "FLAG_IS_DRIVEN", "FLAG_IS_STEERED", "HF_HANDBRAKE_REARWHEELSTEER",
     "HF_STEER_ALL_WHEELS", "HF_STEER_REARWHEELS", "PRESET_ALL_STEER",
     "PRESET_CUSTOM", "PRESET_FRONT_STEER", "PRESET_REAR_STEER",
     "PRESET_STANDARD", "PRESET_STEER_DRIVE_REAR", "RUNTIME_REQUIRED_MESSAGE",
     "SHARED_VISUAL_WARNING", "VISUAL_FRONT", "VISUAL_SHARED_MIDDLE_REAR",
-    "AxleAddonGeometry", "AxleConfiguration", "AxleFinding",
+    "AxleAddonGeometry", "AxleConfiguration", "AxleFinding", "AxleSuspension",
     "IntentionalAxleLayoutOverride", "INTENTIONAL_LAYOUT_OVERRIDE_MODE",
     "SteeringCalculationProvenance",
     "RuntimeReapplicationPolicy", "SteeringDiagnostic", "VehicleAxle",
-    "apply_axle_preset", "apply_intentional_layout_override",
+    "apply_axle_preset", "apply_axle_support_weights",
+    "apply_intentional_layout_override",
+    "clear_axle_support_weights",
     "clear_intentional_layout_override", "detect_axle_configuration", "fivem_client_lua",
     "fivem_server_lua", "joaat_hex",
     "format_handling_flags", "migrate_axle_configuration", "parse_handling_flags",
-    "requires_signed_steering_gain", "retarget_axle_configuration",
+    "effective_steering_gain", "has_nonlegacy_base_steering_gain",
+    "requires_axle_support_bias",
+    "requires_signed_steering_gain", "set_steering_command_polarity",
+    "retarget_axle_configuration",
     "steering_diagnostic", "stock_metadata_flags",
     "resolve_runtime_wheel_index_map", "update_story_wheel_flags", "update_wheel_flags",
     "validate_axle_configuration", "write_fivem_resource",

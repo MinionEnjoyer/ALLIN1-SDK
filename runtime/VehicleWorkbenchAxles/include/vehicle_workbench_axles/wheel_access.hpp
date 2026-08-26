@@ -65,6 +65,14 @@ public:
                                        double&) { return false; }
     virtual bool WriteWheelSteeringGain(const VehicleSnapshot&, std::uint32_t,
                                         double) { return false; }
+    // Per-wheel suspension StaticForce is an optional exact-build capability.
+    // Profiles must expose read and write together after their offsets and
+    // semantics have been reviewed for that executable identity.
+    virtual bool SupportsStaticForce() const noexcept { return false; }
+    virtual bool ReadWheelStaticForce(const VehicleSnapshot&, std::uint32_t,
+                                      double&) { return false; }
+    virtual bool WriteWheelStaticForce(const VehicleSnapshot&, std::uint32_t,
+                                       double) { return false; }
 };
 
 class IWheelAccess {
@@ -98,6 +106,13 @@ public:
     virtual bool WriteWheelSteeringGain(const VehicleSnapshot& vehicle,
                                         std::uint32_t index,
                                         double gain) = 0;
+    virtual bool SupportsStaticForce() const noexcept = 0;
+    virtual bool ReadWheelStaticForce(const VehicleSnapshot& vehicle,
+                                      std::uint32_t index,
+                                      double& force) = 0;
+    virtual bool WriteWheelStaticForce(const VehicleSnapshot& vehicle,
+                                       std::uint32_t index,
+                                       double force) = 0;
 };
 
 class LegacyWheelAccess final : public IWheelAccess {
@@ -127,6 +142,11 @@ public:
                                double&) override;
     bool WriteWheelSteeringGain(const VehicleSnapshot&, std::uint32_t,
                                 double) override;
+    bool SupportsStaticForce() const noexcept override;
+    bool ReadWheelStaticForce(const VehicleSnapshot&, std::uint32_t,
+                              double&) override;
+    bool WriteWheelStaticForce(const VehicleSnapshot&, std::uint32_t,
+                               double) override;
 
 private:
     struct State;
@@ -160,6 +180,11 @@ public:
                                double&) override;
     bool WriteWheelSteeringGain(const VehicleSnapshot&, std::uint32_t,
                                 double) override;
+    bool SupportsStaticForce() const noexcept override;
+    bool ReadWheelStaticForce(const VehicleSnapshot&, std::uint32_t,
+                              double&) override;
+    bool WriteWheelStaticForce(const VehicleSnapshot&, std::uint32_t,
+                               double) override;
 
 private:
     struct State;

@@ -9,13 +9,16 @@ This is a centre-line (single-track) authoring calculation.  Given a reference
 lock angle, every steered axle is aimed at one common instantaneous turn centre::
 
     radius = abs(reference_y - pivot_y) / tan(reference_lock)
-    axle_angle = atan((axle_y - pivot_y) / radius)
+    forward_offset = axis_direction * (axle_y - pivot_y)
+    axle_angle = atan(forward_offset / radius)
     steering_gain = axle_angle / reference_lock_magnitude
 
-It does not claim to predict dynamic tyre-slip understeer or oversteer.  When
-several fixed axles are selected, their longitudinal centroid is a documented,
-stable neutral-pivot approximation.  Authors can override it with an explicit
-vehicle-local Y position.
+``axis_direction`` is derived from the explicitly declared physical axle order,
+so either model-local Y convention is accepted while physical front remains a
+positive steering lever arm.  It does not claim to predict dynamic tyre-slip
+understeer or oversteer.  When several fixed axles are selected, their
+longitudinal centroid is a documented, stable neutral-pivot approximation.
+Authors can override it with an explicit vehicle-local Y position.
 """
 
 from __future__ import annotations
@@ -30,12 +33,17 @@ from typing import Any, Iterable, Mapping
 
 from .axle_configurator import (
     AXLE_SCHEMA_VERSION,
+    AXLE_SUPPORT_RUNTIME_VERSION,
+    AXLE_SUPPORT_SCHEMA_VERSION,
     CANONICAL_WHEEL_PAIRS,
-    LATEST_AXLE_SCHEMA_VERSION,
     MAXIMUM_AXLE_PAIRS,
     MINIMUM_AXLE_PAIRS,
     PRESET_CUSTOM,
+    SIGNED_STEERING_SCHEMA_VERSION,
     SIGNED_STEERING_RUNTIME_VERSION,
+    STEERING_COMMAND_POLARITY_INVERTED,
+    STEERING_POLARITY_RUNTIME_VERSION,
+    STEERING_POLARITY_SCHEMA_VERSION,
     STEERING_CALCULATION_AUTOMATIC,
     STEERING_CALCULATION_MANUAL,
     STEERING_GEOMETRY_ALGORITHM_VERSION,
@@ -355,7 +363,7 @@ def _bone_positions(
     config: AxleConfiguration,
     bones: Iterable[BoneLike],
     request: SteeringGeometryRequest,
-) -> dict[int, float]:
+) -> tuple[dict[int, float], float]:
     if not MINIMUM_AXLE_PAIRS <= len(config.axles) <= MAXIMUM_AXLE_PAIRS:
         raise SteeringGeometryError("Automatic steering requires 2-5 physical axles")
     ordered = sorted(config.axles, key=lambda item: item.physical_order)
@@ -392,14 +400,22 @@ def _bone_positions(
                 "longitudinally; apply or repair the wheel-bone transforms"
             )
         positions[axle.physical_order] = (left_y + right_y) / 2.0
-    for leading, trailing in zip(ordered, ordered[1:]):
-        gap = positions[leading.physical_order] - positions[trailing.physical_order]
-        if gap <= request.position_epsilon:
-            raise SteeringGeometryError(
-                "Axle centres must have distinct, strictly front-to-rear "
-                "vehicle-local Y positions"
-            )
-    return positions
+    gaps = [
+        positions[leading.physical_order] - positions[trailing.physical_order]
+        for leading, trailing in zip(ordered, ordered[1:])
+    ]
+    if any(abs(gap) <= request.position_epsilon for gap in gaps):
+        raise SteeringGeometryError(
+            "Axle centres must have distinct, strictly front-to-rear "
+            "vehicle-local Y positions"
+        )
+    directions = {1.0 if gap > 0.0 else -1.0 for gap in gaps}
+    if len(directions) != 1:
+        raise SteeringGeometryError(
+            "Axle centres must progress monotonically in declared physical "
+            "front-to-rear order along either vehicle-local Y direction"
+        )
+    return positions, directions.pop()
 
 
 def _resolve_pivot(
@@ -466,7 +482,7 @@ def solve_automatic_steering_geometry(
         else SteeringGeometryRequest.from_dict(request)
     )
     bone_rows = tuple(bones)
-    positions = _bone_positions(config, bone_rows, options)
+    positions, axis_direction = _bone_positions(config, bone_rows, options)
     bone_position_sha256 = canonical_bone_position_sha256(config, bone_rows)
     pivot, pivot_source, pivot_orders = _resolve_pivot(config, positions, options)
     steered = [item for item in config.axles if item.steered]
@@ -505,7 +521,7 @@ def solve_automatic_steering_geometry(
             candidates,
             key=lambda item: (
                 abs(positions[item.physical_order] - pivot),
-                positions[item.physical_order] - pivot,
+                axis_direction * (positions[item.physical_order] - pivot),
             ),
         )
     lock_radians = math.radians(float(options.reference_lock_degrees))
@@ -520,7 +536,7 @@ def solve_automatic_steering_geometry(
         position = positions[axle.physical_order]
         offset = position - pivot
         if axle.steered:
-            angle = math.atan(offset / turn_radius)
+            angle = math.atan(axis_direction * offset / turn_radius)
             gain = angle / lock_radians
             if abs(gain) > 1.0 + options.position_epsilon:
                 raise SteeringGeometryError(
@@ -588,8 +604,9 @@ def _preserved_runtime_version(existing: Any, required: str) -> str:
 
 def _automatic_runtime_provenance(
     solution: SteeringGeometrySolution,
+    physical_bone_pairs: tuple[tuple[str, str], ...] = (),
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "mode": "automaticGeometry",
         "algorithmVersion": STEERING_GEOMETRY_ALGORITHM_VERSION,
         "bonePositionSha256": solution.bone_position_sha256,
@@ -601,6 +618,24 @@ def _automatic_runtime_provenance(
         "pairPositionTolerance": solution.pair_position_tolerance,
         "positionEpsilon": solution.position_epsilon,
     }
+    if physical_bone_pairs:
+        payload["physicalBonePairs"] = [
+            [left, right] for left, right in physical_bone_pairs
+        ]
+    return payload
+
+
+def _configuration_physical_pair_evidence(
+    config: AxleConfiguration,
+) -> tuple[tuple[str, str], ...]:
+    """Bind steering evidence to an explicitly overridden physical order."""
+
+    if config.intentional_layout_override is None:
+        return ()
+    return tuple(
+        (axle.left_bone, axle.right_bone)
+        for axle in sorted(config.axles, key=lambda item: item.physical_order)
+    )
 
 
 def apply_steering_geometry_to_payload(
@@ -622,9 +657,28 @@ def apply_steering_geometry_to_payload(
         isinstance(row, Mapping) and "order" in row and "physical_order" not in row
         for row in rows
     )
+    support_rows = tuple(
+        isinstance(row, Mapping) and row.get("suspension") is not None
+        for row in rows
+    )
+    if any(support_rows) and not all(support_rows):
+        raise SteeringGeometryError(
+            "Axle suspension support weights must cover every physical axle"
+        )
+    has_support = bool(support_rows) and all(support_rows)
     gains = solution.gain_by_physical_order
     seen: set[int] = set()
+    pairs_by_order: dict[int, tuple[str, str]] = {}
+    layout_override = result.get(
+        "intentionalLayoutOverride" if runtime_shape
+        else "intentional_layout_override"
+    )
     promote = _solution_requires_schema_two(solution)
+    inverted = result.get(
+        "steeringCommandPolarity" if runtime_shape
+        else "steering_command_polarity",
+        "normal",
+    ) == STEERING_COMMAND_POLARITY_INVERTED
     for row in rows:
         if not isinstance(row, dict):
             raise SteeringGeometryError("Axle configuration contains an invalid axle row")
@@ -642,7 +696,18 @@ def apply_steering_geometry_to_payload(
             raise SteeringGeometryError(
                 f"Steering solution has no gain for physical axle {order}"
             )
-        if promote:
+        left_key, right_key = (
+            ("leftBone", "rightBone") if runtime_shape
+            else ("left_bone", "right_bone")
+        )
+        left, right = row.get(left_key), row.get(right_key)
+        if left is not None or right is not None:
+            if not isinstance(left, str) or not isinstance(right, str):
+                raise SteeringGeometryError(
+                    "Steering evidence requires complete left/right bone names"
+                )
+            pairs_by_order[order] = (left.strip().casefold(), right.strip().casefold())
+        if promote or has_support or inverted:
             if runtime_shape:
                 row["steeringGain"] = gains[order]
             else:
@@ -655,33 +720,94 @@ def apply_steering_geometry_to_payload(
         raise SteeringGeometryError(
             "Steering solution and configuration payload axle sets do not match"
         )
+    physical_bone_pairs: tuple[tuple[str, str], ...] = ()
+    if layout_override is not None:
+        if not isinstance(layout_override, Mapping):
+            raise SteeringGeometryError(
+                "Intentional axle-layout override evidence must be an object"
+            )
+        if set(pairs_by_order) != set(gains):
+            raise SteeringGeometryError(
+                "An intentional axle-layout override requires left/right bone "
+                "identity for every physical axle"
+            )
+        physical_bone_pairs = tuple(
+            pairs_by_order[order] for order in sorted(gains)
+        )
+        authored_pairs = layout_override.get(
+            "physicalBonePairs" if runtime_shape else "physical_bone_pairs"
+        )
+        if not isinstance(authored_pairs, (list, tuple)):
+            raise SteeringGeometryError(
+                "Intentional axle-layout override is missing physical bone-pair evidence"
+            )
+        normalized_authored: list[tuple[str, str]] = []
+        for raw_pair in authored_pairs:
+            if not isinstance(raw_pair, (list, tuple)) or len(raw_pair) != 2:
+                raise SteeringGeometryError(
+                    "Intentional axle-layout override has invalid physical bone-pair evidence"
+                )
+            normalized_authored.append((
+                str(raw_pair[0]).strip().casefold(),
+                str(raw_pair[1]).strip().casefold(),
+            ))
+        if tuple(normalized_authored) != physical_bone_pairs:
+            raise SteeringGeometryError(
+                "Intentional axle-layout override and axle rows disagree on "
+                "physical bone-pair order"
+            )
     if promote:
+        target_schema = (
+            STEERING_POLARITY_SCHEMA_VERSION
+            if inverted else AXLE_SUPPORT_SCHEMA_VERSION
+            if has_support else SIGNED_STEERING_SCHEMA_VERSION
+        )
+        required_runtime = (
+            STEERING_POLARITY_RUNTIME_VERSION
+            if inverted else AXLE_SUPPORT_RUNTIME_VERSION
+            if has_support else SIGNED_STEERING_RUNTIME_VERSION
+        )
         if runtime_shape:
-            result["schemaVersion"] = LATEST_AXLE_SCHEMA_VERSION
+            result["schemaVersion"] = target_schema
             result["minimumRuntimeVersion"] = _preserved_runtime_version(
                 result.get("minimumRuntimeVersion", "1.0.0"),
-                SIGNED_STEERING_RUNTIME_VERSION,
+                required_runtime,
             )
-            result["steeringCalculation"] = _automatic_runtime_provenance(solution)
+            result["steeringCalculation"] = _automatic_runtime_provenance(
+                solution, physical_bone_pairs,
+            )
         else:
-            result["schema_version"] = LATEST_AXLE_SCHEMA_VERSION
+            result["schema_version"] = target_schema
             result["minimum_runtime_version"] = _preserved_runtime_version(
                 result.get("minimum_runtime_version", "1.0.0"),
-                SIGNED_STEERING_RUNTIME_VERSION,
+                required_runtime,
             )
             result["preset"] = PRESET_CUSTOM
-            result["steering_calculation"] = solution.provenance().to_dict()
+            result["steering_calculation"] = replace(
+                solution.provenance(),
+                physical_bone_pairs=physical_bone_pairs,
+            ).to_dict()
     else:
+        target_schema = (
+            STEERING_POLARITY_SCHEMA_VERSION
+            if inverted else AXLE_SUPPORT_SCHEMA_VERSION
+            if has_support else AXLE_SCHEMA_VERSION
+        )
+        required_runtime = (
+            STEERING_POLARITY_RUNTIME_VERSION
+            if inverted else AXLE_SUPPORT_RUNTIME_VERSION
+            if has_support else "1.0.0"
+        )
         if runtime_shape:
-            result["schemaVersion"] = AXLE_SCHEMA_VERSION
+            result["schemaVersion"] = target_schema
             result["minimumRuntimeVersion"] = _preserved_runtime_version(
-                result.get("minimumRuntimeVersion", "1.0.0"), "1.0.0",
+                result.get("minimumRuntimeVersion", "1.0.0"), required_runtime,
             )
             result.pop("steeringCalculation", None)
         else:
-            result["schema_version"] = AXLE_SCHEMA_VERSION
+            result["schema_version"] = target_schema
             result["minimum_runtime_version"] = _preserved_runtime_version(
-                result.get("minimum_runtime_version", "1.0.0"), "1.0.0",
+                result.get("minimum_runtime_version", "1.0.0"), required_runtime,
             )
             result.pop("steering_calculation", None)
     return result
@@ -703,25 +829,52 @@ def apply_steering_geometry_to_configuration(
         replace(axle, steering_gain=gains[axle.physical_order])
         for axle in config.axles
     )
+    has_support = bool(axles) and all(
+        axle.suspension is not None for axle in axles
+    )
     if not _solution_requires_schema_two(solution):
         return replace(
             config,
-            schema_version=AXLE_SCHEMA_VERSION,
+            schema_version=(
+                STEERING_POLARITY_SCHEMA_VERSION
+                if config.steering_command_polarity
+                == STEERING_COMMAND_POLARITY_INVERTED
+                else AXLE_SUPPORT_SCHEMA_VERSION if has_support else AXLE_SCHEMA_VERSION
+            ),
             minimum_runtime_version=_preserved_runtime_version(
-                config.minimum_runtime_version, "1.0.0",
+                config.minimum_runtime_version,
+                STEERING_POLARITY_RUNTIME_VERSION
+                if config.steering_command_polarity
+                == STEERING_COMMAND_POLARITY_INVERTED
+                else AXLE_SUPPORT_RUNTIME_VERSION if has_support else "1.0.0",
             ),
             axles=axles,
             steering_calculation=None,
         )
+    provenance = replace(
+        solution.provenance(),
+        physical_bone_pairs=_configuration_physical_pair_evidence(config),
+    )
     return replace(
         config,
-        schema_version=LATEST_AXLE_SCHEMA_VERSION,
+        schema_version=(
+            STEERING_POLARITY_SCHEMA_VERSION
+            if config.steering_command_polarity
+            == STEERING_COMMAND_POLARITY_INVERTED
+            else AXLE_SUPPORT_SCHEMA_VERSION
+            if has_support else SIGNED_STEERING_SCHEMA_VERSION
+        ),
         minimum_runtime_version=_preserved_runtime_version(
-            config.minimum_runtime_version, SIGNED_STEERING_RUNTIME_VERSION,
+            config.minimum_runtime_version,
+            STEERING_POLARITY_RUNTIME_VERSION
+            if config.steering_command_polarity
+            == STEERING_COMMAND_POLARITY_INVERTED
+            else AXLE_SUPPORT_RUNTIME_VERSION
+            if has_support else SIGNED_STEERING_RUNTIME_VERSION,
         ),
         preset=PRESET_CUSTOM,
         axles=axles,
-        steering_calculation=solution.provenance(),
+        steering_calculation=provenance,
     )
 
 
@@ -754,6 +907,9 @@ def apply_manual_steering_gains_to_configuration(
         replace(axle, steering_gain=normalized[axle.physical_order])
         for axle in config.axles
     )
+    has_support = bool(axles) and all(
+        axle.suspension is not None for axle in axles
+    )
     nonlegacy = any(
         abs(normalized[axle.physical_order] - (1.0 if axle.steered else 0.0))
         > STEERING_GAIN_EPSILON
@@ -762,9 +918,18 @@ def apply_manual_steering_gains_to_configuration(
     if not nonlegacy:
         return replace(
             config,
-            schema_version=AXLE_SCHEMA_VERSION,
+            schema_version=(
+                STEERING_POLARITY_SCHEMA_VERSION
+                if config.steering_command_polarity
+                == STEERING_COMMAND_POLARITY_INVERTED
+                else AXLE_SUPPORT_SCHEMA_VERSION if has_support else AXLE_SCHEMA_VERSION
+            ),
             minimum_runtime_version=_preserved_runtime_version(
-                config.minimum_runtime_version, "1.0.0",
+                config.minimum_runtime_version,
+                STEERING_POLARITY_RUNTIME_VERSION
+                if config.steering_command_polarity
+                == STEERING_COMMAND_POLARITY_INVERTED
+                else AXLE_SUPPORT_RUNTIME_VERSION if has_support else "1.0.0",
             ),
             axles=axles,
             steering_calculation=None,
@@ -773,12 +938,24 @@ def apply_manual_steering_gains_to_configuration(
         mode=STEERING_CALCULATION_MANUAL,
         algorithm_version=STEERING_GEOMETRY_ALGORITHM_VERSION,
         bone_position_sha256=canonical_bone_position_sha256(config, tuple(bones)),
+        physical_bone_pairs=_configuration_physical_pair_evidence(config),
     )
     return replace(
         config,
-        schema_version=LATEST_AXLE_SCHEMA_VERSION,
+        schema_version=(
+            STEERING_POLARITY_SCHEMA_VERSION
+            if config.steering_command_polarity
+            == STEERING_COMMAND_POLARITY_INVERTED
+            else AXLE_SUPPORT_SCHEMA_VERSION
+            if has_support else SIGNED_STEERING_SCHEMA_VERSION
+        ),
         minimum_runtime_version=_preserved_runtime_version(
-            config.minimum_runtime_version, SIGNED_STEERING_RUNTIME_VERSION,
+            config.minimum_runtime_version,
+            STEERING_POLARITY_RUNTIME_VERSION
+            if config.steering_command_polarity
+            == STEERING_COMMAND_POLARITY_INVERTED
+            else AXLE_SUPPORT_RUNTIME_VERSION
+            if has_support else SIGNED_STEERING_RUNTIME_VERSION,
         ),
         preset=PRESET_CUSTOM,
         axles=axles,

@@ -17,20 +17,31 @@ from typing import Callable, Iterable
 
 from allin1_sdk.axle_configurator import (
     AXLE_SCHEMA_VERSION,
+    AXLE_SUPPORT_SCHEMA_VERSION,
+    AXLE_SUPPORT_WEIGHT_DEFAULT,
+    AXLE_SUPPORT_WEIGHT_MAXIMUM,
+    AXLE_SUPPORT_WEIGHT_MINIMUM,
     AXLE_PRESETS,
     EXPORT_FIVEM_RUNTIME,
     EXPORT_STOCK_METADATA,
     PRESET_CUSTOM,
-    STEERING_GAIN_EPSILON,
+    STEERING_COMMAND_POLARITY_INVERTED,
+    STEERING_COMMAND_POLARITY_NORMAL,
+    STEERING_POLARITY_SCHEMA_VERSION,
     AxleFinding,
     AxleConfiguration,
     VehicleAxle,
     apply_axle_preset,
+    apply_axle_support_weights,
     apply_intentional_layout_override,
+    clear_axle_support_weights,
     clear_intentional_layout_override,
     detect_axle_configuration,
     retarget_axle_configuration,
     stock_metadata_flags,
+    requires_axle_support_bias,
+    requires_signed_steering_gain,
+    set_steering_command_polarity,
     validate_axle_configuration,
 )
 from allin1_sdk.axle_steering_geometry import (
@@ -64,7 +75,9 @@ def _format_steering_gain(gain: float) -> str:
     return "0.00" if abs(value) < 0.0005 else f"{value:+.2f}"
 
 
-def _steering_solution_summary(solution: SteeringGeometrySolution) -> str:
+def _steering_solution_summary(
+    solution: SteeringGeometrySolution, polarity: str = STEERING_COMMAND_POLARITY_NORMAL,
+) -> str:
     """Summarize one geometry proposal without obscuring the axle editor."""
 
     source = {
@@ -72,8 +85,13 @@ def _steering_solution_summary(solution: SteeringGeometrySolution) -> str:
         "selected_fixed_axles": "selected fixed axle",
         "derived_fixed_axles": "fixed axle",
     }.get(solution.pivot_source, solution.pivot_source.replace("_", " "))
+    multiplier = -1.0 if polarity == STEERING_COMMAND_POLARITY_INVERTED else 1.0
     gains = " · ".join(
         f"A{item.physical_order} {_format_steering_gain(item.steering_gain)}"
+        + (
+            f" → {_format_steering_gain(item.steering_gain * multiplier)}"
+            if multiplier < 0.0 else ""
+        )
         for item in solution.axles
     )
     return (
@@ -83,21 +101,23 @@ def _steering_solution_summary(solution: SteeringGeometrySolution) -> str:
 
 
 def _current_gain_summary(config: AxleConfiguration) -> str:
-    gains = " · ".join(
+    base = " · ".join(
         f"A{axle.physical_order} {_format_steering_gain(axle.steering_gain)}"
         for axle in config.axles
     )
-    return f"Current steering gains · {gains}"
+    if config.steering_command_polarity == STEERING_COMMAND_POLARITY_INVERTED:
+        effective = " · ".join(
+            f"A{axle.physical_order} {_format_steering_gain(-axle.steering_gain)}"
+            for axle in config.axles
+        )
+        return f"Base gains · {base} · inverted effective · {effective}"
+    return f"Base steering gains · {base} · normal polarity"
 
 
 def _requires_selective_steering_runtime(config: AxleConfiguration) -> bool:
     """Return whether signed/scaled gains exceed legacy boolean steering."""
 
-    return any(
-        abs(float(axle.steering_gain) - (1.0 if axle.steered else 0.0))
-        > STEERING_GAIN_EPSILON
-        for axle in config.axles
-    )
+    return requires_signed_steering_gain(config)
 
 
 def _edit_axle_controls(
@@ -136,10 +156,19 @@ def _edit_axle_controls(
             replace(row, steering_gain=1.0 if row.steered else 0.0)
             for row in rows
         ]
+        support_enabled = bool(rows) and all(
+            row.suspension is not None for row in rows
+        )
         return (
             replace(
                 config,
-                schema_version=AXLE_SCHEMA_VERSION,
+                schema_version=(
+                    STEERING_POLARITY_SCHEMA_VERSION
+                    if config.steering_command_polarity
+                    == STEERING_COMMAND_POLARITY_INVERTED
+                    else AXLE_SUPPORT_SCHEMA_VERSION
+                    if support_enabled else AXLE_SCHEMA_VERSION
+                ),
                 preset=PRESET_CUSTOM,
                 axles=tuple(rows),
                 steering_calculation=None,
@@ -322,6 +351,7 @@ class VehicleAxlesPanel(ttk.Frame):
         self.target = tk.StringVar(value=TARGET_LABELS["story-legacy"])
         self.preset = tk.StringVar(value=AXLE_PRESETS[0])
         self.export_mode = tk.StringVar(value="Stock metadata")
+        self.steering_polarity = tk.StringVar(value="Normal")
         self.prefab = tk.StringVar()
         self.visual = tk.StringVar()
         self.visual_axle = tk.StringVar(value="All applicable")
@@ -330,6 +360,7 @@ class VehicleAxlesPanel(ttk.Frame):
             ("Target", self.target, tuple(TARGET_LABELS.values())),
             ("Quick preset", self.preset, AXLE_PRESETS),
             ("Export behavior", self.export_mode, tuple(EXPORT_LABELS)),
+            ("Steering polarity", self.steering_polarity, ("Normal", "Inverted")),
         )):
             ttk.Label(setup, text=label).grid(row=row, column=0, sticky="w", pady=2)
             combo = ttk.Combobox(
@@ -341,9 +372,10 @@ class VehicleAxlesPanel(ttk.Frame):
         self.target_combo = self._setup_combos["Target"]
         self.preset_combo = self._setup_combos["Quick preset"]
         self.export_combo = self._setup_combos["Export behavior"]
+        self.polarity_combo = self._setup_combos["Steering polarity"]
         setup.columnconfigure(1, weight=1)
         preset_actions = ttk.Frame(setup)
-        preset_actions.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        preset_actions.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(5, 0))
         self.detect_button = ttk.Button(
             preset_actions, text="Detect skeleton", command=self._detect,
         )
@@ -415,7 +447,7 @@ class VehicleAxlesPanel(ttk.Frame):
         self.axle_section.pack(fill="x", pady=(7, 0))
         table = self.axle_section
         columns = (
-            "order", "role", "bones", "steer", "gain", "drive", "brakes",
+            "order", "role", "bones", "steer", "gain", "effective", "drive", "brakes",
             "family", "indices",
         )
         self.tree = ttk.Treeview(
@@ -423,12 +455,13 @@ class VehicleAxlesPanel(ttk.Frame):
         )
         headings = {
             "order": "#", "role": "Role", "bones": "Canonical bones",
-            "steer": "Steer", "gain": "Gain", "drive": "Drive", "brakes": "S/H",
+            "steer": "Steer", "gain": "Base gain", "effective": "Effective",
+            "drive": "Drive", "brakes": "S/H",
             "family": "Visual family", "indices": "Runtime slots",
         }
         widths = {
             "order": 30, "role": 54, "bones": 148, "steer": 45, "drive": 45,
-            "gain": 52, "brakes": 48, "family": 112, "indices": 78,
+            "gain": 62, "effective": 62, "brakes": 48, "family": 112, "indices": 78,
         }
         for key in columns:
             self.tree.heading(key, text=headings[key])
@@ -450,6 +483,10 @@ class VehicleAxlesPanel(ttk.Frame):
         self.row_powered = tk.BooleanVar()
         self.row_service = tk.BooleanVar(value=True)
         self.row_handbrake = tk.BooleanVar()
+        self.row_support_enabled = tk.BooleanVar()
+        self.row_support_weight = tk.StringVar(
+            value=f"{AXLE_SUPPORT_WEIGHT_DEFAULT:.2f}"
+        )
         self.row_controls: list[tk.Widget] = []
         self._unsupported_brake_controls: list[tk.Widget] = []
         for index, (label, variable) in enumerate((
@@ -465,11 +502,34 @@ class VehicleAxlesPanel(ttk.Frame):
             if label.endswith("*"):
                 widget.configure(state="disabled")
                 self._unsupported_brake_controls.append(widget)
+        support_editor = ttk.Frame(row_editor)
+        support_editor.grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(3, 1),
+        )
+        self.row_support_toggle = ttk.Checkbutton(
+            support_editor,
+            text="Support bias (all axles)",
+            variable=self.row_support_enabled,
+            command=self._support_state_changed,
+        )
+        self.row_support_toggle.pack(side="left")
+        ttk.Label(support_editor, text="Weight").pack(side="left", padx=(9, 4))
+        self.row_support_spin = ttk.Spinbox(
+            support_editor,
+            from_=AXLE_SUPPORT_WEIGHT_MINIMUM,
+            to=AXLE_SUPPORT_WEIGHT_MAXIMUM,
+            increment=0.05,
+            textvariable=self.row_support_weight,
+            width=5,
+            format="%.2f",
+        )
+        self.row_support_spin.pack(side="left")
+        self.row_controls.append(self.row_support_toggle)
         self.row_apply = ttk.Button(
             row_editor, text="Update selected", command=self._update_selected_axle,
         )
         self.row_apply.grid(
-            row=2, column=0, columnspan=2, sticky="ew", pady=(3, 0),
+            row=3, column=0, columnspan=2, sticky="ew", pady=(3, 0),
         )
         self.row_controls.append(self.row_apply)
         brake_note = ttk.Label(
@@ -922,6 +982,7 @@ class VehicleAxlesPanel(ttk.Frame):
             widget.configure(state=state)
         for widget in self._unsupported_brake_controls:
             widget.configure(state="disabled")
+        self._support_state_changed()
         self.detect_button.configure(
             state="normal" if self._bones and editable else "disabled"
         )
@@ -976,6 +1037,29 @@ class VehicleAxlesPanel(ttk.Frame):
             return
         if event is not None and event.widget is self.preset_combo:
             self._preview_preset()
+            return
+        if event is not None and event.widget is self.polarity_combo:
+            try:
+                self._draft = set_steering_command_polarity(
+                    self._draft,
+                    STEERING_COMMAND_POLARITY_INVERTED
+                    if self.steering_polarity.get() == "Inverted"
+                    else STEERING_COMMAND_POLARITY_NORMAL,
+                )
+            except ValueError as exc:
+                messagebox.showerror(
+                    "Steering polarity rejected", str(exc), parent=self,
+                )
+                self._sync_from_draft()
+                return
+            self._preview_findings = ()
+            self._preview_blocked = False
+            self._sync_from_draft()
+            self.status.set(
+                "Steering command polarity set to "
+                f"{self._draft.steering_command_polarity}. Base gains and "
+                "physical axle order were not changed."
+            )
             return
         self._draft = retarget_axle_configuration(
             replace(self._draft,
@@ -1203,21 +1287,61 @@ class VehicleAxlesPanel(ttk.Frame):
         self.row_powered.set(axle.powered)
         self.row_service.set(axle.service_brake)
         self.row_handbrake.set(axle.handbrake)
+        self.row_support_enabled.set(axle.suspension is not None)
+        self.row_support_weight.set(
+            f"{(axle.suspension.support_weight if axle.suspension else AXLE_SUPPORT_WEIGHT_DEFAULT):.2f}"
+        )
         self._loading_row = False
+        self._support_state_changed()
+
+    def _support_state_changed(self) -> None:
+        state = (
+            "normal"
+            if self._editable and self._draft is not None
+            and self.row_support_enabled.get()
+            else "disabled"
+        )
+        self.row_support_spin.configure(state=state)
 
     def _update_selected_axle(self) -> None:
         selected = self.tree.selection()
         if not selected or self._draft is None:
             return
         index = int(selected[0])
-        self._draft, steering_changed = _edit_axle_controls(
-            self._draft,
-            index,
-            steered=self.row_steered.get(),
-            powered=self.row_powered.get(),
-            service_brake=self.row_service.get(),
-            handbrake=self.row_handbrake.get(),
-        )
+        try:
+            weight = (
+                float(self.row_support_weight.get())
+                if self.row_support_enabled.get() else None
+            )
+            candidate, steering_changed = _edit_axle_controls(
+                self._draft,
+                index,
+                steered=self.row_steered.get(),
+                powered=self.row_powered.get(),
+                service_brake=self.row_service.get(),
+                handbrake=self.row_handbrake.get(),
+            )
+            if weight is not None:
+                selected_order = candidate.axles[index].physical_order
+                weights = {
+                    axle.physical_order: (
+                        axle.suspension.support_weight
+                        if axle.suspension is not None
+                        else AXLE_SUPPORT_WEIGHT_DEFAULT
+                    )
+                    for axle in candidate.axles
+                }
+                weights[selected_order] = weight
+                candidate = apply_axle_support_weights(candidate, weights)
+            elif requires_axle_support_bias(candidate):
+                candidate = clear_axle_support_weights(candidate)
+        except (TypeError, ValueError) as exc:
+            messagebox.showerror(
+                "Axle support weight is invalid", str(exc), parent=self,
+            )
+            self._sync_from_draft(select=index)
+            return
+        self._draft = candidate
         self._preview_findings = ()
         self._preview_blocked = False
         self._steering_solution = None
@@ -1240,6 +1364,12 @@ class VehicleAxlesPanel(ttk.Frame):
             "Stock metadata",
         )
         self.export_mode.set(label)
+        self.steering_polarity.set(
+            "Inverted"
+            if self._draft.steering_command_polarity
+            == STEERING_COMMAND_POLARITY_INVERTED
+            else "Normal"
+        )
         for index, axle in enumerate(self._draft.axles):
             self.tree.insert("", "end", iid=str(index), values=(
                 axle.physical_order,
@@ -1247,13 +1377,22 @@ class VehicleAxlesPanel(ttk.Frame):
                 f"{axle.left_bone} / {axle.right_bone}",
                 "Yes" if axle.steered else "No",
                 _format_steering_gain(axle.steering_gain),
+                _format_steering_gain(
+                    -axle.steering_gain
+                    if self._draft.steering_command_polarity
+                    == STEERING_COMMAND_POLARITY_INVERTED
+                    else axle.steering_gain
+                ),
                 "Yes" if axle.powered else "No",
                 f"{'Y' if axle.service_brake else '–'}/{'Y' if axle.handbrake else '–'}",
                 axle.visual_family.replace("_", " "),
                 f"{axle.left_runtime_index}, {axle.right_runtime_index}",
             ))
         self.geometry_summary.set(
-            _steering_solution_summary(self._steering_solution)
+            _steering_solution_summary(
+                self._steering_solution,
+                self._draft.steering_command_polarity,
+            )
             if self._steering_solution is not None
             else _current_gain_summary(self._draft)
         )
@@ -1298,6 +1437,23 @@ class VehicleAxlesPanel(ttk.Frame):
                     "signed_steering_target_unavailable",
                     "Signed steering is saved as authoring data, but this target "
                     "has no validated steering-gain accessor and cannot be exported yet.",
+                ))
+        if requires_axle_support_bias(self._draft):
+            try:
+                from allin1_sdk.axle_runtime_bundler import target_capabilities
+
+                capability = target_capabilities(self._target_key())
+                support_blocked = not capability.supports_axle_support_bias
+            except (KeyError, TypeError, ValueError):
+                support_blocked = True
+            deployment_blocked = deployment_blocked or support_blocked
+            if support_blocked:
+                findings.append(AxleFinding(
+                    "warning",
+                    "axle_support_target_unavailable",
+                    "Axle support bias is saved as experimental authoring data, "
+                    "but this target has no validated per-wheel support accessor "
+                    "and cannot be exported yet.",
                 ))
         existing = {(item.severity, item.code, item.message) for item in findings}
         findings.extend(

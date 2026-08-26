@@ -22,12 +22,17 @@ from allin1_sdk.axle_configurator import (
     AXLE_SCHEMA_VERSION,
     CANONICAL_WHEEL_PAIRS,
     EXPORT_FIVEM_RUNTIME,
+    LATEST_AXLE_SCHEMA_VERSION,
     STEERING_GAIN_EPSILON,
     AxleConfiguration,
     BoneLike,
+    has_nonlegacy_base_steering_gain,
     fivem_client_lua,
     fivem_server_lua,
     joaat_hex,
+    requires_axle_support_bias,
+    requires_signed_steering_gain,
+    resolve_runtime_wheel_index_map,
     validate_axle_configuration,
 )
 
@@ -77,15 +82,30 @@ _REQUIRED_STORY_ACCEPTANCE_TESTS = frozenset({
     "unsupported_build_fail_closed",
     "online_session_guard",
 })
+_AXLE_SUPPORT_ACCEPTANCE_TESTS = frozenset({
+    "support_bias_apply_readback",
+    "support_bias_total_preserved",
+    "support_bias_left_right_preserved",
+    "support_bias_repair_reapplication",
+    "support_bias_transaction_rollback",
+    "support_bias_unload_restore",
+    "support_bias_unsupported_fail_closed",
+    "support_bias_physics_activation_fail_closed",
+})
+_SIGNED_STEERING_ACCEPTANCE_TESTS = frozenset({
+    "signed_steering_gain_apply_readback",
+    "intentional_layout_override_mapping",
+})
 
 _THIRD_PARTY_BINARY_NAMES = frozenset({
     "scripthookv.dll", "scripthookv.net.dll", "dinput8.dll",
     "openiv.asi", "openrpf.asi", "alchemist.exe",
 })
 
-# Mapping is semantic, not spatial/ordinal.  A target may replace this rule as
-# its runtime evolves without changing authoring files.
-_CANONICAL_WHEEL_SEQUENCE = tuple(
+# Membership is canonical, but runtime enumeration is resolved by the shared
+# target rule in axle_configurator. It must not be inferred from this set or
+# from front-to-rear axle presentation.
+_CANONICAL_WHEEL_BONES = frozenset(
     bone
     for _role, left, right in CANONICAL_WHEEL_PAIRS
     for bone in (left, right)
@@ -163,11 +183,7 @@ def _steering_gain(axle: object) -> float:
 
 
 def _requires_signed_steering_gain(configuration: AxleConfiguration) -> bool:
-    return any(
-        abs(_steering_gain(axle) - (1.0 if axle.steered else 0.0))
-        > STEERING_GAIN_EPSILON
-        for axle in configuration.axles
-    )
+    return requires_signed_steering_gain(configuration)
 
 
 def _relative_file(path: str, label: str) -> str:
@@ -381,6 +397,7 @@ class TargetCapabilities:
     maximum_physical_axles: int = 5
     acceptance_status: str = ACCEPTANCE_PENDING
     published_supported: bool = False
+    supports_axle_support_bias: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -389,22 +406,26 @@ class TargetCapabilities:
 TARGET_CAPABILITIES: Mapping[str, TargetCapabilities] = {
     TARGET_FIVEM_LEGACY: TargetCapabilities(
         TARGET_FIVEM_LEGACY, "fivem", "legacy", True, False, False,
-        True, AXLE_SCHEMA_VERSION, True, True, False, DEFAULT_RUNTIME_VERSION,
+        AXLE_SCHEMA_VERSION >= LATEST_AXLE_SCHEMA_VERSION,
+        AXLE_SCHEMA_VERSION, True, True, False, DEFAULT_RUNTIME_VERSION,
         ("fivem-current",),
     ),
     TARGET_FIVEM_ENHANCED: TargetCapabilities(
         TARGET_FIVEM_ENHANCED, "fivem", "enhanced", True, True, False,
-        True, AXLE_SCHEMA_VERSION, True, True, False, DEFAULT_RUNTIME_VERSION,
+        AXLE_SCHEMA_VERSION >= LATEST_AXLE_SCHEMA_VERSION,
+        AXLE_SCHEMA_VERSION, True, True, False, DEFAULT_RUNTIME_VERSION,
         ("fivem-enhanced-current",),
     ),
     TARGET_STORY_LEGACY: TargetCapabilities(
         TARGET_STORY_LEGACY, "story", "legacy", True, False, True,
-        True, AXLE_SCHEMA_VERSION, True, True, False, DEFAULT_RUNTIME_VERSION,
+        AXLE_SCHEMA_VERSION >= LATEST_AXLE_SCHEMA_VERSION,
+        AXLE_SCHEMA_VERSION, True, True, False, DEFAULT_RUNTIME_VERSION,
         (),
     ),
     TARGET_STORY_ENHANCED: TargetCapabilities(
         TARGET_STORY_ENHANCED, "story", "enhanced", True, True, True,
-        True, AXLE_SCHEMA_VERSION, True, True, False, DEFAULT_RUNTIME_VERSION,
+        AXLE_SCHEMA_VERSION >= LATEST_AXLE_SCHEMA_VERSION,
+        AXLE_SCHEMA_VERSION, True, True, False, DEFAULT_RUNTIME_VERSION,
         (),
     ),
 }
@@ -528,6 +549,56 @@ def _required_json_int(payload: Mapping[str, Any], key: str, label: str) -> int:
     return value
 
 
+def _optional_json_bool(
+    payload: Mapping[str, Any], key: str, label: str, *, default: bool = False,
+) -> bool:
+    if key not in payload:
+        return default
+    return _required_json_bool(payload, key, label)
+
+
+def _optional_json_int(
+    payload: Mapping[str, Any], key: str, label: str, *, default: int,
+) -> int:
+    if key not in payload:
+        return default
+    return _required_json_int(payload, key, label)
+
+
+def _runtime_capability_flags(
+    payload: Mapping[str, Any], label: str,
+) -> tuple[bool, bool, bool]:
+    capabilities = payload.get("capabilities")
+    if capabilities is None:
+        return False, False, False
+    if not isinstance(capabilities, Mapping):
+        raise ValueError(f"{label} capabilities must be an object")
+    expected = {
+        "signed_steering_gain", "static_force", "physics_activation",
+    }
+    unknown = sorted(set(capabilities) - expected)
+    if unknown:
+        raise ValueError(
+            f"{label} capabilities contain unsupported fields: "
+            + ", ".join(str(item) for item in unknown)
+        )
+    missing = sorted(expected - set(capabilities))
+    if missing:
+        raise ValueError(
+            f"{label} capabilities are missing: " + ", ".join(missing)
+        )
+    signed = _required_json_bool(
+        capabilities, "signed_steering_gain", f"{label} capabilities",
+    )
+    static_force = _required_json_bool(
+        capabilities, "static_force", f"{label} capabilities",
+    )
+    physics_activation = _required_json_bool(
+        capabilities, "physics_activation", f"{label} capabilities",
+    )
+    return signed, static_force, physics_activation
+
+
 @dataclass(frozen=True)
 class StoryRuntimeValidationReceipt:
     schema_version: int
@@ -540,6 +611,9 @@ class StoryRuntimeValidationReceipt:
     binary_architecture: str
     supported_game_builds: tuple[str, ...]
     maximum_axle_schema: int
+    supports_signed_steering_gain: bool
+    supports_static_force: bool
+    supports_physics_activation: bool
     descriptor_abi_version: int
     required_exports: tuple[str, ...]
     validated_profile_export_result: bool
@@ -568,6 +642,9 @@ class StoryRuntimeValidationReceipt:
             for key, value in tests.items()
         ):
             raise ValueError("Story runtime receipt acceptance results must be strings")
+        signed, static_force, physics_activation = _runtime_capability_flags(
+            payload, "Story runtime receipt",
+        )
         return cls(
             schema_version=_required_json_int(
                 payload, "schema_version", "Story runtime receipt",
@@ -583,6 +660,9 @@ class StoryRuntimeValidationReceipt:
             maximum_axle_schema=_required_json_int(
                 payload, "maximum_axle_schema", "Story runtime receipt",
             ),
+            supports_signed_steering_gain=signed,
+            supports_static_force=static_force,
+            supports_physics_activation=physics_activation,
             descriptor_abi_version=_required_json_int(
                 payload, "descriptor_abi_version", "Story runtime receipt",
             ),
@@ -619,6 +699,9 @@ class StoryRuntimeValidationReceipt:
         binary_evidence: PeExportEvidence,
         supported_game_builds: tuple[str, ...],
         maximum_schema_version: int,
+        supports_signed_steering_gain: bool,
+        supports_static_force: bool,
+        supports_physics_activation: bool,
         redistribution_allowed: bool,
         license_name: str,
     ) -> "StoryRuntimeValidationReceipt":
@@ -649,6 +732,29 @@ class StoryRuntimeValidationReceipt:
         if self.maximum_axle_schema != maximum_schema_version \
                 or maximum_schema_version < AXLE_SCHEMA_VERSION:
             raise ValueError("Story runtime receipt axle schema does not match")
+        if self.supports_signed_steering_gain != supports_signed_steering_gain:
+            raise ValueError(
+                "Story runtime receipt signed steering capability does not match"
+            )
+        if self.supports_static_force != supports_static_force:
+            raise ValueError(
+                "Story runtime receipt static-force capability does not match"
+            )
+        if self.supports_physics_activation != supports_physics_activation:
+            raise ValueError(
+                "Story runtime receipt physics-activation capability does not match"
+            )
+        supports_axle_support_bias = (
+            supports_static_force and supports_physics_activation
+        )
+        if supports_axle_support_bias and maximum_schema_version < 3:
+            raise ValueError(
+                "Axle support capability requires Story axle schema 3 or newer"
+            )
+        if supports_signed_steering_gain and maximum_schema_version < 2:
+            raise ValueError(
+                "Signed steering capability requires Story axle schema 2 or newer"
+            )
         if self.descriptor_abi_version != RUNTIME_CONTRACT_VERSION:
             raise ValueError("Story runtime receipt descriptor ABI is unsupported")
         if not set(STORY_RUNTIME_REQUIRED_EXPORTS).issubset(self.required_exports) \
@@ -661,9 +767,14 @@ class StoryRuntimeValidationReceipt:
                 "Story runtime receipt did not verify an enabled build profile export"
             )
         acceptance = dict(self.acceptance_tests)
-        missing = sorted(_REQUIRED_STORY_ACCEPTANCE_TESTS - set(acceptance))
+        required_acceptance = set(_REQUIRED_STORY_ACCEPTANCE_TESTS)
+        if supports_axle_support_bias:
+            required_acceptance.update(_AXLE_SUPPORT_ACCEPTANCE_TESTS)
+        if supports_signed_steering_gain:
+            required_acceptance.update(_SIGNED_STEERING_ACCEPTANCE_TESTS)
+        missing = sorted(required_acceptance - set(acceptance))
         failed = sorted(
-            key for key in _REQUIRED_STORY_ACCEPTANCE_TESTS
+            key for key in required_acceptance
             if acceptance.get(key) != "passed"
         )
         if missing or failed:
@@ -691,6 +802,11 @@ class StoryRuntimeValidationReceipt:
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["acceptance_tests"] = dict(self.acceptance_tests)
+        payload["capabilities"] = {
+            "signed_steering_gain": payload.pop("supports_signed_steering_gain"),
+            "static_force": payload.pop("supports_static_force"),
+            "physics_activation": payload.pop("supports_physics_activation"),
+        }
         payload["license"] = payload.pop("license_name")
         return payload
 
@@ -712,6 +828,10 @@ class RuntimeDependency:
     binary_evidence: PeExportEvidence | None = None
     license_name: str = "GPL-3.0-or-later"
     redistribution_allowed: bool = True
+    supports_axle_support_bias: bool = False
+    supports_signed_steering_gain: bool = False
+    supports_static_force: bool = False
+    supports_physics_activation: bool = False
 
     def validate(self) -> "RuntimeDependency":
         _safe_id(self.name, "Runtime name")
@@ -719,6 +839,26 @@ class RuntimeDependency:
         capability = target_capabilities(self.target_id)
         if self.maximum_schema_version < 1:
             raise ValueError("Runtime maximum schema version must be positive")
+        if capability.family != "story" and (
+            self.supports_axle_support_bias
+            or self.supports_signed_steering_gain
+            or self.supports_static_force
+            or self.supports_physics_activation
+        ):
+            raise ValueError(
+                "FiveM runtime dependencies cannot attest Story-only axle capabilities"
+            )
+        if self.supports_axle_support_bias != (
+            self.supports_static_force and self.supports_physics_activation
+        ):
+            raise ValueError(
+                "Axle support capability must derive from static-force and "
+                "physics-activation attestations"
+            )
+        if self.supports_axle_support_bias and self.maximum_schema_version < 3:
+            raise ValueError("Axle support capability requires schema 3 or newer")
+        if self.supports_signed_steering_gain and self.maximum_schema_version < 2:
+            raise ValueError("Signed steering capability requires schema 2 or newer")
         _relative_file(self.configuration_destination, "Configuration destination")
         if self.binary_path is not None:
             path = _safe_regular_file(
@@ -765,6 +905,9 @@ class RuntimeDependency:
                 binary_evidence=evidence,
                 supported_game_builds=builds,
                 maximum_schema_version=self.maximum_schema_version,
+                supports_signed_steering_gain=self.supports_signed_steering_gain,
+                supports_static_force=self.supports_static_force,
+                supports_physics_activation=self.supports_physics_activation,
                 redistribution_allowed=self.redistribution_allowed,
                 license_name=self.license_name,
             )
@@ -799,7 +942,42 @@ class RuntimeDependency:
             "binary_evidence": evidence.to_dict() if evidence else None,
             "license": self.license_name,
             "redistribution_allowed": self.redistribution_allowed,
+            "supports_axle_support_bias": self.supports_axle_support_bias,
+            "supports_signed_steering_gain": self.supports_signed_steering_gain,
+            "supports_static_force": self.supports_static_force,
+            "supports_physics_activation": self.supports_physics_activation,
         }
+
+
+def _capabilities_for_runtime(
+    target_id: str,
+    runtime: RuntimeDependency | None = None,
+) -> TargetCapabilities:
+    """Bind Story-only capabilities to one fully validated dependency.
+
+    The immutable target table remains a fail-closed description of what an
+    unverified target can do. FiveM never inherits Story ASI attestations.
+    """
+
+    base = target_capabilities(target_id)
+    if runtime is None:
+        return base
+    runtime.validate()
+    if runtime.target_id != base.target_id:
+        raise ValueError("Runtime dependency targets a different edition")
+    if base.family != "story":
+        return base
+    return replace(
+        base,
+        supports_current_axle_schema=(
+            runtime.maximum_schema_version >= LATEST_AXLE_SCHEMA_VERSION
+        ),
+        maximum_axle_schema=runtime.maximum_schema_version,
+        supports_signed_steering_gain=runtime.supports_signed_steering_gain,
+        supports_axle_support_bias=runtime.supports_axle_support_bias,
+        runtime_implementation_version=runtime.version,
+        supported_game_builds=runtime.supported_game_builds,
+    )
 
 
 def select_newest_compatible_runtime(
@@ -856,6 +1034,14 @@ class StoryRuntimeProfile:
     expected_receipt_sha256: str
     redistribution_allowed: bool = False
     license_name: str = "ALLIN1 Vehicle Workbench Axle Runtime"
+    maximum_axle_schema: int = AXLE_SCHEMA_VERSION
+    supports_signed_steering_gain: bool = False
+    supports_static_force: bool = False
+    supports_physics_activation: bool = False
+
+    @property
+    def supports_axle_support_bias(self) -> bool:
+        return self.supports_static_force and self.supports_physics_activation
 
     @classmethod
     def from_dict(
@@ -875,6 +1061,9 @@ class StoryRuntimeProfile:
                 path = base_directory / path
             return path.resolve(strict=False)
 
+        signed, static_force, physics_activation = _runtime_capability_flags(
+            payload, "Story runtime profile",
+        )
         return cls(
             profile_id=str(payload.get("profile_id", "")),
             target_id=str(payload.get("target_id", "")).casefold(),
@@ -895,6 +1084,13 @@ class StoryRuntimeProfile:
             license_name=str(payload.get(
                 "license", "ALLIN1 Vehicle Workbench Axle Runtime",
             )),
+            maximum_axle_schema=_optional_json_int(
+                payload, "maximum_axle_schema", "Story runtime profile",
+                default=AXLE_SCHEMA_VERSION,
+            ),
+            supports_signed_steering_gain=signed,
+            supports_static_force=static_force,
+            supports_physics_activation=physics_activation,
         )
 
     @classmethod
@@ -936,7 +1132,7 @@ class StoryRuntimeProfile:
         return RuntimeDependency(
             name=STORY_RUNTIME_NAME.casefold(),
             version=_validated_version(self.version, "Story runtime version"),
-            maximum_schema_version=AXLE_SCHEMA_VERSION,
+            maximum_schema_version=self.maximum_axle_schema,
             target_id=capability.target_id,
             supported_game_builds=builds,
             configuration_destination=f"{STORY_RUNTIME_NAME}/configs",
@@ -949,6 +1145,10 @@ class StoryRuntimeProfile:
             binary_evidence=evidence,
             license_name=self.license_name,
             redistribution_allowed=self.redistribution_allowed,
+            supports_axle_support_bias=self.supports_axle_support_bias,
+            supports_signed_steering_gain=self.supports_signed_steering_gain,
+            supports_static_force=self.supports_static_force,
+            supports_physics_activation=self.supports_physics_activation,
         ).validate()
 
     def verification_report(self) -> dict[str, Any]:
@@ -960,6 +1160,11 @@ class StoryRuntimeProfile:
             "binary_file": Path(self.binary_path).name,
             "receipt_file": Path(self.validation_receipt_path).name,
             "package_eligible": False,
+            "maximum_axle_schema": self.maximum_axle_schema,
+            "supports_axle_support_bias": self.supports_axle_support_bias,
+            "supports_signed_steering_gain": self.supports_signed_steering_gain,
+            "supports_static_force": self.supports_static_force,
+            "supports_physics_activation": self.supports_physics_activation,
             "verified": False,
             "reason": None,
         }
@@ -1137,16 +1342,15 @@ def _validated_configuration_findings(
 ) -> tuple[object, ...]:
     """Validate an authoring config, authenticating signed/schema-2 evidence.
 
-    Schema-1 configurations retain the historical metadata-only validation
-    path.  A schema-2 or signed-gain configuration instead fails closed unless
-    the caller supplies canonical skeleton-bone evidence; passing the bones to
-    the shared validator checks the authored digest (and reproduces automatic
-    geometry calculations) before any runtime payload can be emitted.
+    Legacy steering retains the metadata-only validation path even when schema
+    3 adds support bias. Signed-gain or custom-layout configurations fail
+    closed unless the caller supplies canonical skeleton-bone evidence;
+    passing the bones to the shared validator checks the authored digest (and
+    reproduces automatic geometry calculations) before runtime payload output.
     """
 
     requires_evidence = (
-        vehicle.configuration.schema_version >= 2
-        or _requires_signed_steering_gain(vehicle.configuration)
+        has_nonlegacy_base_steering_gain(vehicle.configuration)
         or vehicle.configuration.intentional_layout_override is not None
     )
     bones = tuple(vehicle.steering_evidence_bones)
@@ -1211,8 +1415,7 @@ def resolve_runtime_wheel_map(
         )
     if len(configured_bones) != len(set(configured_bones)):
         raise ValueError("A wheel bone is assigned to more than one physical axle")
-    canonical = set(_CANONICAL_WHEEL_SEQUENCE)
-    unknown = sorted(set(configured_bones) - canonical)
+    unknown = sorted(set(configured_bones) - _CANONICAL_WHEEL_BONES)
     if unknown:
         raise ValueError("Runtime wheel mapping contains non-canonical bones: " + ", ".join(unknown))
 
@@ -1231,14 +1434,14 @@ def resolve_runtime_wheel_map(
         mapping = exported
         source = "exported_vehicle_information"
     else:
-        # Target rule is a canonical-name sequence. Filtering it to present bones
-        # handles front/rear, front/middle/rear, and all five canonical pairs
-        # without deriving an index from the axle's display order.
-        semantic_sequence = tuple(
-            bone for bone in _CANONICAL_WHEEL_SEQUENCE if bone in configured_bones
+        mapping = resolve_runtime_wheel_index_map(
+            (
+                (axle.left_bone, axle.right_bone)
+                for axle in vehicle.configuration.axles
+            ),
+            target=capability.target_id,
         )
-        mapping = {bone: index for index, bone in enumerate(semantic_sequence)}
-        source = f"{capability.target_id}_canonical_semantics_v1"
+        source = f"{capability.target_id}_gta_canonical_slots_v2"
 
     indices = tuple(mapping[bone] for bone in configured_bones)
     if len(set(indices)) != len(indices):
@@ -1329,8 +1532,16 @@ def _symbolic_handling(config: AxleConfiguration) -> dict[str, Any]:
 def compatibility_configuration(
     vehicle: VehicleAxleBuildInput,
     target_id: str,
+    *,
+    runtime_dependency: RuntimeDependency | None = None,
 ) -> dict[str, Any]:
-    capability = target_capabilities(target_id)
+    capability = _capabilities_for_runtime(target_id, runtime_dependency)
+    support_bias = requires_axle_support_bias(vehicle.configuration)
+    if support_bias and not capability.supports_axle_support_bias:
+        raise ValueError(
+            f"{capability.target_id} does not expose a validated per-axle "
+            "suspension support accessor"
+        )
     if (
         _requires_signed_steering_gain(vehicle.configuration)
         and not capability.supports_signed_steering_gain
@@ -1355,6 +1566,7 @@ def compatibility_configuration(
         "modelHash": vehicle.normalized_model_hash,
         "expectedWheelCount": wheel_map.reported_wheel_count,
         "minimumRuntimeVersion": runtime_config.minimum_runtime_version,
+        "steeringCommandPolarity": runtime_config.steering_command_polarity,
         "handling": _symbolic_handling(runtime_config),
         "axles": [
             {
@@ -1375,6 +1587,14 @@ def compatibility_configuration(
                 "serviceBrake": axle.service_brake,
                 "handbrake": axle.handbrake,
                 "visualFamily": axle.visual_family,
+                **(
+                    {
+                        "suspension": {
+                            "supportWeight": axle.suspension.support_weight,
+                        },
+                    }
+                    if axle.suspension is not None else {}
+                ),
             }
             for index, axle in enumerate(ordered)
         ],
@@ -1386,10 +1606,10 @@ def compatibility_configuration(
         # rejects unknown/FiveM-only compatibility declarations.
         "compatibility": {target_id: True},
     }
-    if runtime_config.schema_version >= 2:
+    if has_nonlegacy_base_steering_gain(runtime_config):
         calculation = runtime_config.steering_calculation
         if calculation is None:
-            raise ValueError("Schema-2 runtime payload requires steering evidence")
+            raise ValueError("Signed runtime payload requires steering evidence")
         steering_calculation: dict[str, Any] = {
             "mode": (
                 "automaticGeometry"
@@ -1398,6 +1618,11 @@ def compatibility_configuration(
             "algorithmVersion": calculation.algorithm_version,
             "bonePositionSha256": calculation.bone_position_sha256,
         }
+        if calculation.physical_bone_pairs:
+            steering_calculation["physicalBonePairs"] = [
+                [left, right]
+                for left, right in calculation.physical_bone_pairs
+            ]
         if calculation.mode == "automatic_geometry":
             steering_calculation.update({
                 "pivotLongitudinalPosition": (
@@ -1600,9 +1825,50 @@ class AxleRuntimeBundlePlanner:
         dependencies: list[DependencyDeclaration] = []
         runtime: RuntimeDependency | None = None
 
-        if not capability.supports_current_axle_schema:
-            reasons.append("Target runtime does not support the current axle configuration schema")
+        if capability.family == "story":
+            dependencies.append(
+                SCRIPHOOK_ENHANCED_DEPENDENCY
+                if capability.edition == "enhanced" else SCRIPHOOK_DEPENDENCY
+            )
+            if profile is None:
+                reasons.append(
+                    "Missing ASI build profile; no Story runtime binary was fabricated"
+                )
+            else:
+                try:
+                    runtime = profile.runtime_dependency()
+                    if profile.target_id != capability.target_id:
+                        raise ValueError("ASI build profile targets a different edition")
+                    if requested_game_build is not None \
+                            and requested_game_build not in runtime.supported_game_builds:
+                        raise ValueError(
+                            f"ASI build profile does not support game build "
+                            f"{requested_game_build}"
+                        )
+                except ValueError as exc:
+                    reasons.append(str(exc))
+                    runtime = None
+            capability = _capabilities_for_runtime(capability.target_id, runtime)
+        else:
+            runtime = RuntimeDependency(
+                name=FIVEM_RUNTIME_NAME,
+                version=capability.runtime_implementation_version,
+                maximum_schema_version=capability.maximum_axle_schema,
+                target_id=capability.target_id,
+                supported_game_builds=capability.supported_game_builds,
+                configuration_destination="axle-runtime/configs",
+            ).validate()
+
         for vehicle in vehicles:
+            if (
+                requires_axle_support_bias(vehicle.configuration)
+                and not capability.supports_axle_support_bias
+            ):
+                reasons.append(
+                    f"{vehicle.configuration.vehicle_model}: {capability.target_id} "
+                    "does not expose a validated per-axle suspension support "
+                    "accessor; support bias was not packaged"
+                )
             if vehicle.configuration.schema_version > capability.maximum_axle_schema:
                 reasons.append(
                     f"{vehicle.configuration.vehicle_model}: axle schema "
@@ -1631,35 +1897,6 @@ class AxleRuntimeBundlePlanner:
         if requested_game_build is not None and capability.supported_game_builds \
                 and requested_game_build not in capability.supported_game_builds:
             reasons.append(f"Unsupported target game build: {requested_game_build}")
-
-        if capability.family == "story":
-            dependencies.append(
-                SCRIPHOOK_ENHANCED_DEPENDENCY
-                if capability.edition == "enhanced" else SCRIPHOOK_DEPENDENCY
-            )
-            if profile is None:
-                reasons.append("Missing ASI build profile; no Story runtime binary was fabricated")
-            else:
-                try:
-                    runtime = profile.runtime_dependency()
-                    if profile.target_id != capability.target_id:
-                        raise ValueError("ASI build profile targets a different edition")
-                    if requested_game_build is not None \
-                            and requested_game_build not in runtime.supported_game_builds:
-                        raise ValueError(
-                            f"ASI build profile does not support game build {requested_game_build}"
-                        )
-                except ValueError as exc:
-                    reasons.append(str(exc))
-        else:
-            runtime = RuntimeDependency(
-                name=FIVEM_RUNTIME_NAME,
-                version=capability.runtime_implementation_version,
-                maximum_schema_version=capability.maximum_axle_schema,
-                target_id=capability.target_id,
-                supported_game_builds=capability.supported_game_builds,
-                configuration_destination="axle-runtime/configs",
-            ).validate()
 
         has_assets = any(vehicle.asset_source is not None for vehicle in vehicles)
         asset_mode = "none"
@@ -1726,7 +1963,12 @@ class AxleRuntimeBundlePlanner:
                     runtime_config, wheel_map = _runtime_configuration(
                         vehicle, capability.target_id,
                     )
-                    payload = compatibility_configuration(vehicle, capability.target_id)
+                    payload = compatibility_configuration(
+                        vehicle, capability.target_id,
+                        runtime_dependency=(
+                            runtime if capability.family == "story" else None
+                        ),
+                    )
                     configurations.append(PlannedConfiguration(
                         vehicle, runtime_config, payload, wheel_map,
                     ))

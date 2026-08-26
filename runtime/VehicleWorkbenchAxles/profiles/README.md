@@ -13,7 +13,20 @@ and exercised in the target edition:
 - confirmed 16-bit wheel-flag field behavior;
 - vehicle and wheel-lifetime validation;
 - maximum recognized physical axle count;
+- maximum axle configuration schema and explicit capability booleans;
+- signed-steering write/readback/reapplication evidence when that capability
+  is enabled;
+- static-force apply/readback, physics activation fail-closed behavior,
+  normalized total and left/right preservation, transactional rollback,
+  repair reapplication, and unload restore when axle support bias is enabled;
 - automated mock tests and the full in-game acceptance matrix.
+
+Older profile documents remain schema-1-only: omitted `maximum_axle_schema`
+means `1`, while an omitted `capabilities` object means signed steering,
+static-force access, and physics activation are all `false`. Axle support is
+derived only when both static force and physics activation are attested. A
+pinned receipt must mirror the profile values exactly. FiveM targets never
+inherit these Story-only capabilities.
 
 Profiles must not contain or fall back to permanent absolute addresses.  A
 failure to resolve any required accessor disables the entire adapter, logs one

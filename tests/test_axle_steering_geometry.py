@@ -7,11 +7,13 @@ import pytest
 
 from allin1_sdk.axle_configurator import (
     AxleConfiguration,
-    LATEST_AXLE_SCHEMA_VERSION,
+    EXPORT_FIVEM_RUNTIME,
+    SIGNED_STEERING_SCHEMA_VERSION,
     PRESET_ALL_STEER,
     PRESET_STEER_DRIVE_REAR,
     VISUAL_FRONT,
     apply_axle_preset,
+    apply_intentional_layout_override,
     detect_axle_configuration,
     validate_axle_configuration,
 )
@@ -90,18 +92,83 @@ def test_three_axle_solver_inverts_rear_and_uses_exact_lock_geometry() -> None:
     )
 
 
-def test_measured_coach_fixture_pins_f11_countersteer_gain() -> None:
-    bones = skeleton((3.678670, -2.123121, -3.254378))
-    config = detect_axle_configuration(
-        "coach", bones, preset=PRESET_STEER_DRIVE_REAR,
+def test_layout_override_accepts_increasing_y_front_to_rear_geometry() -> None:
+    bones = (
+        Bone("wheel_lm1", (-1.0, -2.0, -0.5)),
+        Bone("wheel_rm1", (1.0, -2.0, -0.5)),
+        Bone("wheel_lf", (-1.0, 0.0, -0.5)),
+        Bone("wheel_rf", (1.0, 0.0, -0.5)),
+        Bone("wheel_lr", (-1.0, 10.0, -0.5)),
+        Bone("wheel_rr", (1.0, 10.0, -0.5)),
+    )
+    detected = detect_axle_configuration(
+        "synthetic_layout_bus",
+        bones,
+        preset=PRESET_STEER_DRIVE_REAR,
+        export_mode=EXPORT_FIVEM_RUNTIME,
+        target="story-enhanced",
+    )
+    overridden = apply_intentional_layout_override(
+        detected,
+        bones,
+        physical_bone_pairs=(
+            ("wheel_lm1", "wheel_rm1"),
+            ("wheel_lf", "wheel_rf"),
+            ("wheel_lr", "wheel_rr"),
+        ),
+        reason="Synthetic wheel-family order: middle, front, rear",
     )
 
-    solution = solve_automatic_steering_geometry(config, bones)
+    solution = solve_automatic_steering_geometry(overridden, bones)
+    applied = apply_steering_geometry_to_configuration(overridden, solution)
 
-    assert solution.pivot_longitudinal_position == pytest.approx(-2.123121)
+    assert solution.pivot_longitudinal_position == pytest.approx(0.0)
+    assert solution.reference_axle_order == 3
+    assert [item.phase for item in solution.axles] == [
+        "same", "fixed", "counter",
+    ]
     assert [item.steering_gain for item in solution.axles] == pytest.approx(
-        [1.0, 0.0, -0.222128], abs=1.0e-6,
+        [0.22776979648028195, 0.0, -1.0], abs=1.0e-9,
     )
+    expected_pairs = (
+        ("wheel_lm1", "wheel_rm1"),
+        ("wheel_lf", "wheel_rf"),
+        ("wheel_lr", "wheel_rr"),
+    )
+    assert applied.steering_calculation is not None
+    assert applied.steering_calculation.physical_bone_pairs == expected_pairs
+    payload = apply_steering_geometry_to_payload(overridden.to_dict(), solution)
+    assert payload["steering_calculation"]["physical_bone_pairs"] == [
+        list(pair) for pair in expected_pairs
+    ]
+    manual = apply_manual_steering_gains_to_configuration(
+        overridden, bones, {1: 0.18, 2: 0.0, 3: -1.0},
+    )
+    assert manual.steering_calculation is not None
+    assert manual.steering_calculation.physical_bone_pairs == expected_pairs
+    assert not [
+        finding
+        for finding in validate_axle_configuration(
+            applied, bones, target="story-enhanced",
+        )
+        if finding.severity == "error"
+    ]
+
+
+def test_declared_physical_order_must_be_monotonic_on_one_y_axis() -> None:
+    bones = skeleton((6.0, -1.5, 0.0))
+    detected = detect_axle_configuration(
+        "folded", bones, preset=PRESET_STEER_DRIVE_REAR,
+    )
+    by_left_bone = {axle.left_bone: axle for axle in detected.axles}
+    config = replace(detected, axles=tuple(
+        replace(by_left_bone[left_bone], physical_order=order)
+        for order, left_bone in enumerate(
+            ("wheel_lf", "wheel_lm1", "wheel_lr"), start=1,
+        )
+    ))
+    with pytest.raises(SteeringGeometryError, match="progress monotonically"):
+        solve_automatic_steering_geometry(config, bones)
 
 
 def test_two_axle_standard_uses_fixed_rear_as_neutral_pivot() -> None:
@@ -200,7 +267,7 @@ def test_payload_helper_preserves_visual_and_dual_tyre_fields() -> None:
     assert updated_sdk["visual_tyre_package"] == {"packageId": "dual_drive"}
     assert updated_sdk["axles"][0]["steering_gain"] == pytest.approx(1.0)
     assert updated_sdk["axles"][2]["steering_gain"] < 0.0
-    assert updated_sdk["schema_version"] == LATEST_AXLE_SCHEMA_VERSION
+    assert updated_sdk["schema_version"] == SIGNED_STEERING_SCHEMA_VERSION
     assert updated_sdk["minimum_runtime_version"] == "2.0.0"
     assert updated_sdk["steering_calculation"]["mode"] == "automatic_geometry"
     assert updated_sdk["steering_calculation"]["bone_position_sha256"] == (
@@ -222,7 +289,7 @@ def test_payload_helper_preserves_visual_and_dual_tyre_fields() -> None:
     assert updated_runtime["dualTyresConsumePhysicalSlots"] is False
     assert updated_runtime["axles"][2]["visualFamily"] == "front"
     assert updated_runtime["axles"][2]["steeringGain"] < 0.0
-    assert updated_runtime["schemaVersion"] == LATEST_AXLE_SCHEMA_VERSION
+    assert updated_runtime["schemaVersion"] == SIGNED_STEERING_SCHEMA_VERSION
     assert updated_runtime["minimumRuntimeVersion"] == "2.0.0"
     assert updated_runtime["steeringCalculation"]["mode"] == "automaticGeometry"
     assert updated_runtime["steeringCalculation"]["bonePositionSha256"] == (
@@ -244,7 +311,7 @@ def test_payload_helper_preserves_visual_and_dual_tyre_fields() -> None:
         1.0, 0.0, solution.axles[-1].steering_gain,
     ])
     assert applied.axles[-1].steering_gain < 0.0
-    assert applied.schema_version == LATEST_AXLE_SCHEMA_VERSION
+    assert applied.schema_version == SIGNED_STEERING_SCHEMA_VERSION
     assert applied.steering_calculation == solution.provenance()
 
 
@@ -279,7 +346,7 @@ def test_near_pivot_steered_axle_keeps_schema_two_when_gain_quantizes_to_zero() 
     assert solution.axles[-1].phase == "neutral"
     assert solution.axles[-1].steering_gain == 0.0
     applied = apply_steering_geometry_to_configuration(config, solution)
-    assert applied.schema_version == LATEST_AXLE_SCHEMA_VERSION
+    assert applied.schema_version == SIGNED_STEERING_SCHEMA_VERSION
     assert applied.steering_calculation is not None
     assert applied.axles[-1].steered is True
     assert applied.axles[-1].steering_gain == 0.0
@@ -358,7 +425,7 @@ def test_manual_nonlegacy_gain_promotes_with_evidence_and_round_trips() -> None:
     manual = apply_manual_steering_gains_to_configuration(
         config, bones, {1: 0.9, 2: 0.0, 3: -0.25},
     )
-    assert manual.schema_version == LATEST_AXLE_SCHEMA_VERSION
+    assert manual.schema_version == SIGNED_STEERING_SCHEMA_VERSION
     assert manual.steering_calculation is not None
     assert manual.steering_calculation.mode == "manual"
     assert manual.steering_calculation.bone_position_sha256 == (

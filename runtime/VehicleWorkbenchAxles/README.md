@@ -37,7 +37,16 @@ steered axle and `0` for a fixed axle. Schema 2 requires an explicit bounded
 gain on every axle, runtime 2.0 or newer, and calculation evidence; negative
 values counter-steer and non-steered axles must use zero. Automatic evidence
 also records the positive `pairPositionTolerance` and `positionEpsilon` inputs
-so the calculation can be reproduced exactly. The runtime maps bones through the exported
+so the calculation can be reproduced exactly. Schema 3 adds optional axle
+support bias: every physical axle supplies a bounded `supportWeight`, and a
+validated build profile must expose reversible per-wheel `StaticForce` access
+plus a host physics-activation hook. The runtime normalizes those weights to
+the vehicle's original total support and verifies or rolls back the complete
+transaction. Schema 4 adds the vehicle-level
+`steeringCommandPolarity` value (`normal` or `inverted`). Per-axle
+`steeringGain` remains the base gain; runtime multiplies it once by `+1` or
+`-1` to produce the effective gain without changing physical axle order. The
+runtime maps bones through the exported
 `wheelIndexMap`; it never assumes `axleOrder * 2`.  Before applying, it validates
 the complete map against the game-reported wheel count and the adapter's
 validated maximum physical axle count.
@@ -90,7 +99,8 @@ no validated profile.
 
 The future bundler integration supplies:
 
-1. a schema-1 legacy or schema-2 signed JSON config in
+1. a schema-1 legacy, schema-2 signed-steering, schema-3 support-bias, or
+   schema-4 steering-polarity JSON config in
    `VehicleWorkbenchAxles/configs/`;
 2. an explicit `wheelIndexMap` emitted from canonical bones and target vehicle
    information;
@@ -113,6 +123,9 @@ profile JSON per edition with:
 - an exact runtime binary and pinned SHA-256;
 - an exact validation receipt and pinned SHA-256;
 - a package-eligible target/build list and confirmed redistribution terms;
+- an exact maximum axle schema plus one explicit `capabilities` object for
+  signed steering, static-force access, and physics activation (an omitted
+  object defaults every capability to unavailable);
 - a receipt showing every required in-game acceptance test passed;
 - evidence that `VehicleWorkbenchAxles_HasValidatedProfile` returned true for
   that exact binary and build.
@@ -121,6 +134,11 @@ The SDK independently parses the `.asi` as an AMD64 PE32+ DLL, walks its export
 table, and requires both runtime exports to resolve into executable sections.
 Renamed text files, ASCII fixtures, 32-bit binaries, forwarded exports, and
 receipts whose hashes or fields drift are rejected.
+
+Schema-2 signed steering and schema-3 axle support are unlocked only by those
+validated dependency capabilities, never by the immutable target defaults.
+Enabling either capability adds its accessor, readback, reapplication or
+rollback, and restoration tests to the required receipt matrix.
 
 The machine-readable formats are
 [`story-runtime-profile.schema.json`](schemas/story-runtime-profile.schema.json)

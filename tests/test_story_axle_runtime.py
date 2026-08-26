@@ -22,7 +22,7 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
     profile = json.loads(
         (RUNTIME / "profiles" / "compatibility.json").read_text(encoding="utf-8")
     )
-    assert profile["runtimeVersion"] == "2.1.0"
+    assert profile["runtimeVersion"] == "4.0.0"
     assert profile["policy"] == {
         "permanentOffsetsAllowed": False,
         "exactBuildMatchRequired": True,
@@ -30,6 +30,7 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
         "packageEligibleReceiptRequired": True,
         "x64PeExportInspectionRequired": True,
         "signedSteeringGainRequiresValidatedAccessor": True,
+        "staticForceRequiresValidatedAccessorAndPhysicsActivation": True,
         "onlineSessionsAllowed": False,
     }
     for target in ("story-legacy", "story-enhanced"):
@@ -41,6 +42,8 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
             "steeringFlags": True,
             "driveFlags": True,
             "signedSteeringGain": False,
+            "staticForce": False,
+            "physicsActivation": False,
         }
 
     package = json.loads(
@@ -56,6 +59,9 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
     assert package["binaryContract"]["capabilities"][
         "signedSteeringGain"
     ] is False
+    assert package["runtime"]["maximumAxleSchemaVersion"] == 4
+    assert package["binaryContract"]["capabilities"]["staticForce"] is False
+    assert package["binaryContract"]["capabilities"]["physicsActivation"] is False
     assert all(
         not target["packageEligible"] and target["supportedGameBuilds"] == []
         for target in package["targets"].values()

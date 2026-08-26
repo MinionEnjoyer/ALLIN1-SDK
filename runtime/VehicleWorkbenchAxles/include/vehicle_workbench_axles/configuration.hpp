@@ -14,7 +14,9 @@
 namespace vwa {
 
 inline constexpr std::uint32_t kLegacyAxleSchemaVersion = 1;
-inline constexpr std::uint32_t kAxleSchemaVersion = 2;
+inline constexpr std::uint32_t kSignedSteeringAxleSchemaVersion = 2;
+inline constexpr std::uint32_t kAxleSupportAxleSchemaVersion = 3;
+inline constexpr std::uint32_t kAxleSchemaVersion = 4;
 inline constexpr std::uint32_t kRuntimeSettingsSchemaVersion = 1;
 inline constexpr std::uint8_t kSteeredBit = 0x08;
 inline constexpr std::uint8_t kDrivenBit = 0x10;
@@ -27,6 +29,10 @@ inline constexpr double kMaximumSteeringGain = 1.0;
 inline constexpr double kSteeringGainEpsilon = 1.0e-9;
 inline constexpr const char* kSignedSteeringMinimumRuntime = "2.0.0";
 inline constexpr const char* kIntentionalLayoutMinimumRuntime = "2.1.0";
+inline constexpr const char* kAxleSupportMinimumRuntime = "3.0.0";
+inline constexpr const char* kSteeringPolarityMinimumRuntime = "4.0.0";
+inline constexpr double kMinimumSupportWeight = 0.75;
+inline constexpr double kMaximumSupportWeight = 1.25;
 
 struct SteeringCalculationEvidence {
     std::string mode;
@@ -39,6 +45,10 @@ struct SteeringCalculationEvidence {
     std::optional<double> reference_lock_degrees;
     std::optional<double> pair_position_tolerance;
     std::optional<double> position_epsilon;
+    // Required when signed/scaled steering is calculated against an
+    // intentional noncanonical physical layout. This binds the evidence to
+    // the exact front-to-rear override order it was calculated from.
+    std::vector<std::pair<std::string, std::string>> physical_bone_pairs;
 };
 
 struct IntentionalLayoutOverride {
@@ -46,6 +56,13 @@ struct IntentionalLayoutOverride {
     std::vector<std::pair<std::string, std::string>> physical_bone_pairs;
     std::string bone_position_sha256;
     std::string reason;
+};
+
+struct AxleSuspension {
+    // Relative support bias for this physical axle. Runtime application
+    // normalizes all weights against the vehicle's original total StaticForce,
+    // so authoring bias never silently adds or removes total support.
+    double support_weight{1.0};
 };
 
 struct AxleDefinition {
@@ -56,6 +73,7 @@ struct AxleDefinition {
     bool steered{false};
     bool powered{false};
     std::optional<double> steering_gain;
+    std::optional<AxleSuspension> suspension;
 };
 
 struct AxleConfiguration {
@@ -65,6 +83,9 @@ struct AxleConfiguration {
     std::uint32_t model_hash{0};
     std::uint32_t expected_wheel_count{0};
     std::string minimum_runtime_version;
+    // Per-axle values are immutable base gains. Runtime multiplies them once
+    // by this vehicle-level command polarity when planning wheel writes.
+    std::string steering_command_polarity{"normal"};
     // Canonical bone name -> target-exported physical wheel index.  Runtime
     // code never derives an index from array order.
     std::map<std::string, std::uint32_t> wheel_index_map;

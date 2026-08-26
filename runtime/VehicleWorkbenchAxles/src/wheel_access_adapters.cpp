@@ -189,6 +189,25 @@ bool WriteSteeringGain(State& state, const VehicleSnapshot& vehicle,
            state.active->WriteWheelSteeringGain(vehicle, index, gain);
 }
 
+template <typename State>
+bool SupportsStaticForce(const State& state) noexcept {
+    return state.active && state.active->SupportsStaticForce();
+}
+
+template <typename State>
+bool ReadStaticForce(State& state, const VehicleSnapshot& vehicle,
+                     std::uint32_t index, double& force) {
+    return SupportsStaticForce(state) &&
+           state.active->ReadWheelStaticForce(vehicle, index, force);
+}
+
+template <typename State>
+bool WriteStaticForce(State& state, const VehicleSnapshot& vehicle,
+                      std::uint32_t index, double force) {
+    return SupportsStaticForce(state) &&
+           state.active->WriteWheelStaticForce(vehicle, index, force);
+}
+
 } // namespace
 
 LegacyWheelAccess::LegacyWheelAccess()
@@ -250,6 +269,17 @@ bool LegacyWheelAccess::WriteWheelSteeringGain(
     const VehicleSnapshot& vehicle, std::uint32_t index, double gain) {
     return WriteSteeringGain(*state_, vehicle, index, gain);
 }
+bool LegacyWheelAccess::SupportsStaticForce() const noexcept {
+    return vwa::SupportsStaticForce(*state_);
+}
+bool LegacyWheelAccess::ReadWheelStaticForce(
+    const VehicleSnapshot& vehicle, std::uint32_t index, double& force) {
+    return ReadStaticForce(*state_, vehicle, index, force);
+}
+bool LegacyWheelAccess::WriteWheelStaticForce(
+    const VehicleSnapshot& vehicle, std::uint32_t index, double force) {
+    return WriteStaticForce(*state_, vehicle, index, force);
+}
 
 EnhancedWheelAccess::EnhancedWheelAccess()
     : EnhancedWheelAccess(
@@ -309,6 +339,17 @@ bool EnhancedWheelAccess::ReadWheelSteeringGain(
 bool EnhancedWheelAccess::WriteWheelSteeringGain(
     const VehicleSnapshot& vehicle, std::uint32_t index, double gain) {
     return WriteSteeringGain(*state_, vehicle, index, gain);
+}
+bool EnhancedWheelAccess::SupportsStaticForce() const noexcept {
+    return vwa::SupportsStaticForce(*state_);
+}
+bool EnhancedWheelAccess::ReadWheelStaticForce(
+    const VehicleSnapshot& vehicle, std::uint32_t index, double& force) {
+    return ReadStaticForce(*state_, vehicle, index, force);
+}
+bool EnhancedWheelAccess::WriteWheelStaticForce(
+    const VehicleSnapshot& vehicle, std::uint32_t index, double force) {
+    return WriteStaticForce(*state_, vehicle, index, force);
 }
 
 } // namespace vwa

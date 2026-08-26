@@ -12,7 +12,9 @@ from click.testing import CliRunner
 from allin1_sdk.agent_api import execute_request
 from allin1_sdk.axle_configurator import (
     AXLE_SCHEMA_VERSION,
-    LATEST_AXLE_SCHEMA_VERSION,
+    AXLE_SUPPORT_RUNTIME_VERSION,
+    AXLE_SUPPORT_SCHEMA_VERSION,
+    SIGNED_STEERING_SCHEMA_VERSION,
     INTENTIONAL_LAYOUT_RUNTIME_VERSION,
     SIGNED_STEERING_RUNTIME_VERSION,
     STEERING_CALCULATION_MANUAL,
@@ -24,6 +26,7 @@ from allin1_sdk.axle_configurator import (
     AxleConfiguration,
     SteeringCalculationProvenance,
     VehicleAxle,
+    apply_axle_support_weights,
     apply_intentional_layout_override,
     joaat_hex,
 )
@@ -240,12 +243,40 @@ def _story_profile(
     *,
     version: str = "1.0.0",
     redistribution_allowed: bool = True,
+    maximum_axle_schema: int = 1,
+    supports_axle_support_bias: bool = False,
+    supports_signed_steering_gain: bool = False,
 ) -> StoryRuntimeProfile:
     binary = tmp_path / f"{target}.asi"
     _write_x64_asi(binary)
     profile_id = f"allin1.{target}.fixture"
     license_name = "ALLIN1 Vehicle Workbench Axle Runtime"
     receipt = tmp_path / f"{target}.receipt.json"
+    acceptance_tests = {
+        "front_steer": "passed",
+        "selective_drive": "passed",
+        "rear_steer": "passed",
+        "unrelated_flags_preserved": "passed",
+        "repair_reapplication": "passed",
+        "unsupported_build_fail_closed": "passed",
+        "online_session_guard": "passed",
+    }
+    if supports_axle_support_bias:
+        acceptance_tests.update({
+            "support_bias_apply_readback": "passed",
+            "support_bias_total_preserved": "passed",
+            "support_bias_left_right_preserved": "passed",
+            "support_bias_repair_reapplication": "passed",
+            "support_bias_transaction_rollback": "passed",
+            "support_bias_unload_restore": "passed",
+            "support_bias_unsupported_fail_closed": "passed",
+            "support_bias_physics_activation_fail_closed": "passed",
+        })
+    if supports_signed_steering_gain:
+        acceptance_tests.update({
+            "signed_steering_gain_apply_readback": "passed",
+            "intentional_layout_override_mapping": "passed",
+        })
     receipt.write_text(json.dumps({
         "schema_version": 1,
         "receipt_id": f"receipt-{target}",
@@ -256,19 +287,16 @@ def _story_profile(
         "binary_sha256": _digest(binary),
         "binary_architecture": "x64",
         "supported_game_builds": ["build-123"],
-        "maximum_axle_schema": 1,
+        "maximum_axle_schema": maximum_axle_schema,
+        "capabilities": {
+            "signed_steering_gain": supports_signed_steering_gain,
+            "static_force": supports_axle_support_bias,
+            "physics_activation": supports_axle_support_bias,
+        },
         "descriptor_abi_version": 1,
         "required_exports": list(STORY_RUNTIME_REQUIRED_EXPORTS),
         "validated_profile_export_result": True,
-        "acceptance_tests": {
-            "front_steer": "passed",
-            "selective_drive": "passed",
-            "rear_steer": "passed",
-            "unrelated_flags_preserved": "passed",
-            "repair_reapplication": "passed",
-            "unsupported_build_fail_closed": "passed",
-            "online_session_guard": "passed",
-        },
+        "acceptance_tests": acceptance_tests,
         "validation_authority": "ALLIN1 native acceptance fixture",
         "accepted_at": "2026-08-25T12:00:00Z",
         "package_eligible": True,
@@ -287,6 +315,10 @@ def _story_profile(
         expected_receipt_sha256=_digest(receipt),
         redistribution_allowed=redistribution_allowed,
         license_name=license_name,
+        maximum_axle_schema=maximum_axle_schema,
+        supports_signed_steering_gain=supports_signed_steering_gain,
+        supports_static_force=supports_axle_support_bias,
+        supports_physics_activation=supports_axle_support_bias,
     )
 
 
@@ -303,6 +335,12 @@ def _write_profile_document(profile: StoryRuntimeProfile, path: Path) -> Path:
         "expected_receipt_sha256": profile.expected_receipt_sha256,
         "redistribution_allowed": profile.redistribution_allowed,
         "license": profile.license_name,
+        "maximum_axle_schema": profile.maximum_axle_schema,
+        "capabilities": {
+            "signed_steering_gain": profile.supports_signed_steering_gain,
+            "static_force": profile.supports_static_force,
+            "physics_activation": profile.supports_physics_activation,
+        },
     }, sort_keys=True), encoding="utf-8")
     return path
 
@@ -343,6 +381,7 @@ def test_four_explicit_capability_targets_are_pending_acceptance() -> None:
         assert capabilities.supports_selective_steering is True
         assert capabilities.supports_selective_drive is True
         assert capabilities.supports_signed_steering_gain is False
+        assert capabilities.supports_current_axle_schema is False
         assert capabilities.minimum_physical_axles == 2
         assert capabilities.maximum_physical_axles == 5
         assert capabilities.acceptance_status == ACCEPTANCE_PENDING
@@ -358,16 +397,16 @@ def test_four_explicit_capability_targets_are_pending_acceptance() -> None:
     [
         (("front", "rear"), ("wheel_lf", "wheel_rf", "wheel_lr", "wheel_rr")),
         (("front", "middle1", "rear"), (
-            "wheel_lf", "wheel_rf", "wheel_lm1", "wheel_rm1", "wheel_lr", "wheel_rr",
+            "wheel_lf", "wheel_rf", "wheel_lr", "wheel_rr", "wheel_lm1", "wheel_rm1",
         )),
         (("front", "middle1", "middle2", "rear"), (
-            "wheel_lf", "wheel_rf", "wheel_lm1", "wheel_rm1",
-            "wheel_lm2", "wheel_rm2", "wheel_lr", "wheel_rr",
+            "wheel_lf", "wheel_rf", "wheel_lr", "wheel_rr",
+            "wheel_lm1", "wheel_rm1", "wheel_lm2", "wheel_rm2",
         )),
         (("front", "middle1", "middle2", "middle3", "rear"), (
-            "wheel_lf", "wheel_rf", "wheel_lm1", "wheel_rm1",
-            "wheel_lm2", "wheel_rm2", "wheel_lm3", "wheel_rm3",
-            "wheel_lr", "wheel_rr",
+            "wheel_lf", "wheel_rf", "wheel_lr", "wheel_rr",
+            "wheel_lm1", "wheel_rm1", "wheel_lm2", "wheel_rm2",
+            "wheel_lm3", "wheel_rm3",
         )),
     ],
 )
@@ -378,7 +417,7 @@ def test_semantic_mapping_supports_two_through_five_physical_axles(
     assert tuple(resolved.by_bone) == expected
     assert tuple(resolved.by_bone.values()) == tuple(range(len(expected)))
     assert resolved.reported_wheel_count == len(expected)
-    assert "canonical_semantics" in resolved.source
+    assert "gta_canonical_slots_v2" in resolved.source
 
 
 def test_explicit_export_mapping_wins_and_is_wheel_count_validated() -> None:
@@ -434,7 +473,7 @@ def test_more_than_five_axles_is_a_cosmetic_or_future_physics_case() -> None:
 def test_six_wheel_fixture_exports_steer_drive_rear_steer_without_index_formula() -> None:
     payload = compatibility_configuration(_vehicle(), TARGET_FIVEM_LEGACY)
     assert payload["compatibility"] == {TARGET_FIVEM_LEGACY: True}
-    assert [axle["wheelIndices"] for axle in payload["axles"]] == [[0, 1], [2, 3], [4, 5]]
+    assert [axle["wheelIndices"] for axle in payload["axles"]] == [[0, 1], [4, 5], [2, 3]]
     assert [axle["steered"] for axle in payload["axles"]] == [True, False, True]
     assert all("steeringGain" not in axle for axle in payload["axles"])
     assert [axle["visualFamily"] for axle in payload["axles"]] == [
@@ -481,7 +520,7 @@ def test_custom_physical_order_is_evidence_bound_and_clears_global_steering_flag
         "wheel_lm1", "wheel_lf", "wheel_lr",
     ]
     assert [row["wheelIndices"] for row in payload["axles"]] == [
-        [2, 3], [0, 1], [4, 5],
+        [4, 5], [0, 1], [2, 3],
     ]
     assert payload["intentionalLayoutOverride"]["physicalBonePairs"] == [
         ["wheel_lm1", "wheel_rm1"],
@@ -510,7 +549,7 @@ def test_signed_gain_is_encoded_but_unsupported_targets_fail_closed() -> None:
         minimum_runtime_version=SIGNED_STEERING_RUNTIME_VERSION,
         configuration=replace(
             vehicle.configuration,
-            schema_version=LATEST_AXLE_SCHEMA_VERSION,
+            schema_version=SIGNED_STEERING_SCHEMA_VERSION,
             minimum_runtime_version=SIGNED_STEERING_RUNTIME_VERSION,
             axles=tuple(axles),
             steering_calculation=SteeringCalculationProvenance(
@@ -529,6 +568,51 @@ def test_signed_gain_is_encoded_but_unsupported_targets_fail_closed() -> None:
         "counter-steer or scaled steering was not packaged" in reason
         for reason in plan.targets[0].reasons
     )
+
+
+def test_axle_support_bias_is_typed_and_requires_explicit_target_capability(
+    monkeypatch,
+) -> None:
+    vehicle = _vehicle()
+    supported = apply_axle_support_weights(
+        vehicle.configuration, {1: 1.10, 2: 0.95, 3: 0.95},
+    )
+    vehicle = replace(
+        vehicle,
+        configuration=supported,
+        minimum_runtime_version=AXLE_SUPPORT_RUNTIME_VERSION,
+    )
+
+    with pytest.raises(ValueError, match="suspension support accessor"):
+        compatibility_configuration(vehicle, TARGET_FIVEM_LEGACY)
+    omitted = AxleRuntimeBundlePlanner().plan(
+        (vehicle,), targets=(TARGET_FIVEM_LEGACY,),
+    )
+    assert omitted.targets[0].status == STATUS_OMITTED
+    assert any(
+        "support bias was not packaged" in reason
+        for reason in omitted.targets[0].reasons
+    )
+
+    monkeypatch.setitem(
+        TARGET_CAPABILITIES,
+        TARGET_FIVEM_LEGACY,
+        replace(
+            TARGET_CAPABILITIES[TARGET_FIVEM_LEGACY],
+            maximum_axle_schema=AXLE_SUPPORT_SCHEMA_VERSION,
+            supports_axle_support_bias=True,
+            runtime_implementation_version=AXLE_SUPPORT_RUNTIME_VERSION,
+        ),
+    )
+    payload = compatibility_configuration(vehicle, TARGET_FIVEM_LEGACY)
+
+    assert payload["schemaVersion"] == AXLE_SUPPORT_SCHEMA_VERSION
+    assert payload["minimumRuntimeVersion"] == AXLE_SUPPORT_RUNTIME_VERSION
+    assert [
+        row["suspension"]["supportWeight"] for row in payload["axles"]
+    ] == pytest.approx([1.10, 0.95, 0.95])
+    assert all("steeringGain" in row for row in payload["axles"])
+    assert "steeringCalculation" not in payload
 
 
 def test_validated_signed_target_emits_schema_two_evidence(monkeypatch) -> None:
@@ -735,6 +819,171 @@ def test_story_profile_requires_real_x64_pe_exports_and_package_receipt(
     )
     with pytest.raises(ValueError, match="enabled build profile export"):
         disabled.runtime_dependency()
+
+
+def test_old_story_profile_and_receipt_default_to_schema_one_capabilities(
+    tmp_path: Path,
+) -> None:
+    profile = _story_profile(tmp_path, TARGET_STORY_LEGACY)
+    receipt_payload = json.loads(profile.validation_receipt_path.read_text("utf-8"))
+    receipt_payload.pop("capabilities")
+    profile.validation_receipt_path.write_text(
+        json.dumps(receipt_payload, sort_keys=True), encoding="utf-8",
+    )
+    profile_path = _write_profile_document(
+        replace(
+            profile,
+            expected_receipt_sha256=_digest(profile.validation_receipt_path),
+        ),
+        tmp_path / "old.profile.json",
+    )
+    profile_payload = json.loads(profile_path.read_text("utf-8"))
+    profile_payload.pop("maximum_axle_schema")
+    profile_payload.pop("capabilities")
+    profile_path.write_text(
+        json.dumps(profile_payload, sort_keys=True), encoding="utf-8",
+    )
+
+    dependency = StoryRuntimeProfile.load(profile_path).runtime_dependency()
+
+    assert dependency.maximum_schema_version == 1
+    assert dependency.supports_signed_steering_gain is False
+    assert dependency.supports_static_force is False
+    assert dependency.supports_physics_activation is False
+    assert dependency.supports_axle_support_bias is False
+
+
+def test_story_support_profile_unlocks_schema_three_only_from_attested_dependency(
+    tmp_path: Path,
+) -> None:
+    profile = _story_profile(
+        tmp_path,
+        TARGET_STORY_LEGACY,
+        version=AXLE_SUPPORT_RUNTIME_VERSION,
+        maximum_axle_schema=AXLE_SUPPORT_SCHEMA_VERSION,
+        supports_axle_support_bias=True,
+    )
+    dependency = profile.runtime_dependency()
+    configured = apply_axle_support_weights(
+        _vehicle().configuration, {1: 1.10, 2: 0.95, 3: 0.95},
+    )
+    vehicle = replace(
+        _vehicle(),
+        configuration=configured,
+        minimum_runtime_version=AXLE_SUPPORT_RUNTIME_VERSION,
+    )
+
+    assert target_capabilities(TARGET_STORY_LEGACY).supports_axle_support_bias is False
+    with pytest.raises(ValueError, match="suspension support accessor"):
+        compatibility_configuration(vehicle, TARGET_STORY_LEGACY)
+    payload = compatibility_configuration(
+        vehicle, TARGET_STORY_LEGACY, runtime_dependency=dependency,
+    )
+    plan = AxleRuntimeBundlePlanner().plan(
+        (vehicle,),
+        targets=(TARGET_STORY_LEGACY,),
+        story_profiles={TARGET_STORY_LEGACY: profile},
+    )
+
+    assert dependency.supports_static_force is True
+    assert dependency.supports_physics_activation is True
+    assert dependency.supports_axle_support_bias is True
+    assert payload["schemaVersion"] == AXLE_SUPPORT_SCHEMA_VERSION
+    assert plan.targets[0].status == STATUS_READY
+    assert plan.targets[0].capabilities.supports_axle_support_bias is True
+    assert plan.targets[0].capabilities.supports_current_axle_schema is False
+
+
+def test_story_signed_steering_requires_attested_profile_capability(
+    tmp_path: Path,
+) -> None:
+    vehicle = _signed_vehicle()
+    profile = _story_profile(
+        tmp_path,
+        TARGET_STORY_LEGACY,
+        version=SIGNED_STEERING_RUNTIME_VERSION,
+        maximum_axle_schema=SIGNED_STEERING_SCHEMA_VERSION,
+        supports_signed_steering_gain=True,
+    )
+    unsigned_root = tmp_path / "unsigned"
+    unsigned_root.mkdir()
+
+    rejected = AxleRuntimeBundlePlanner().plan(
+        (vehicle,),
+        targets=(TARGET_STORY_LEGACY,),
+        story_profiles={
+            TARGET_STORY_LEGACY: _story_profile(
+                unsigned_root,
+                TARGET_STORY_LEGACY,
+                version=SIGNED_STEERING_RUNTIME_VERSION,
+                maximum_axle_schema=SIGNED_STEERING_SCHEMA_VERSION,
+            ),
+        },
+    )
+    accepted = AxleRuntimeBundlePlanner().plan(
+        (vehicle,),
+        targets=(TARGET_STORY_LEGACY,),
+        story_profiles={TARGET_STORY_LEGACY: profile},
+    )
+
+    assert rejected.targets[0].status == STATUS_OMITTED
+    assert any("signed steering-gain accessor" in item for item in rejected.targets[0].reasons)
+    assert accepted.targets[0].status == STATUS_READY
+    assert accepted.targets[0].capabilities.supports_signed_steering_gain is True
+    assert accepted.targets[0].capabilities.supports_current_axle_schema is False
+
+
+def test_story_receipt_capabilities_must_match_and_pass_conditional_tests(
+    tmp_path: Path,
+) -> None:
+    profile = _story_profile(
+        tmp_path,
+        TARGET_STORY_LEGACY,
+        version=AXLE_SUPPORT_RUNTIME_VERSION,
+        maximum_axle_schema=AXLE_SUPPORT_SCHEMA_VERSION,
+        supports_axle_support_bias=True,
+        supports_signed_steering_gain=True,
+    )
+    receipt = json.loads(profile.validation_receipt_path.read_text("utf-8"))
+    receipt["capabilities"]["static_force"] = False
+    profile.validation_receipt_path.write_text(
+        json.dumps(receipt, sort_keys=True), encoding="utf-8",
+    )
+    mismatched = replace(
+        profile,
+        expected_receipt_sha256=_digest(profile.validation_receipt_path),
+    )
+    with pytest.raises(ValueError, match="static-force capability does not match"):
+        mismatched.runtime_dependency()
+
+    receipt["capabilities"]["static_force"] = True
+    receipt["acceptance_tests"].pop("support_bias_transaction_rollback")
+    profile.validation_receipt_path.write_text(
+        json.dumps(receipt, sort_keys=True), encoding="utf-8",
+    )
+    incomplete = replace(
+        profile,
+        expected_receipt_sha256=_digest(profile.validation_receipt_path),
+    )
+    with pytest.raises(ValueError, match="incomplete or failed acceptance tests"):
+        incomplete.runtime_dependency()
+
+
+def test_fivem_dependency_cannot_claim_story_runtime_capabilities() -> None:
+    dependency = RuntimeDependency(
+        name=FIVEM_RUNTIME_NAME,
+        version=AXLE_SUPPORT_RUNTIME_VERSION,
+        maximum_schema_version=AXLE_SUPPORT_SCHEMA_VERSION,
+        target_id=TARGET_FIVEM_LEGACY,
+        supported_game_builds=("fivem-current",),
+        configuration_destination="axle-runtime/configs",
+        supports_axle_support_bias=True,
+        supports_static_force=True,
+        supports_physics_activation=True,
+    )
+
+    with pytest.raises(ValueError, match="FiveM runtime dependencies"):
+        dependency.validate()
 
 
 def test_story_profile_catalog_is_explicit_and_maps_exact_builds(tmp_path: Path) -> None:

@@ -11,7 +11,10 @@ from allin1_sdk.axle_steering_geometry import (
     solve_automatic_steering_geometry,
 )
 from allin1_sdk.axle_configurator import (
+    AXLE_SUPPORT_RUNTIME_VERSION,
+    AXLE_SUPPORT_SCHEMA_VERSION,
     PRESET_STEER_DRIVE_REAR,
+    apply_axle_support_weights,
     detect_axle_configuration,
 )
 from allin1_sdk.vehicle_axles_ui import (
@@ -132,3 +135,31 @@ def test_nonsteering_row_edit_preserves_signed_geometry_evidence() -> None:
     assert [axle.steering_gain for axle in edited.axles] == [
         axle.steering_gain for axle in signed.axles
     ]
+
+
+def test_steering_role_edit_preserves_schema_three_support_weights() -> None:
+    bones = _three_axle_bones()
+    base = detect_axle_configuration(
+        "support_fixture", bones, preset=PRESET_STEER_DRIVE_REAR,
+    )
+    supported = apply_axle_support_weights(
+        base, {1: 1.10, 2: 0.95, 3: 0.95},
+    )
+
+    edited, invalidated = _edit_axle_controls(
+        supported,
+        2,
+        steered=False,
+        powered=supported.axles[2].powered,
+        service_brake=supported.axles[2].service_brake,
+        handbrake=supported.axles[2].handbrake,
+    )
+
+    assert invalidated
+    assert edited.schema_version == AXLE_SUPPORT_SCHEMA_VERSION
+    assert edited.minimum_runtime_version == AXLE_SUPPORT_RUNTIME_VERSION
+    assert edited.steering_calculation is None
+    assert [
+        axle.suspension.support_weight for axle in edited.axles
+        if axle.suspension is not None
+    ] == [1.10, 0.95, 0.95]

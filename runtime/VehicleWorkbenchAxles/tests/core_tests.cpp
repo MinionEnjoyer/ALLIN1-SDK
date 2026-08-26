@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -117,11 +118,21 @@ public:
         }
         return std::nullopt;
     }
+    bool SupportsPhysicsActivation() const noexcept override {
+        return supports_physics_activation;
+    }
+    bool ActivatePhysics(const VehicleSnapshot&) override {
+        ++physics_activation_calls;
+        return physics_activation_succeeds;
+    }
 
     GameIdentity game{Edition::Legacy, 9999, "mock-fingerprint"};
     bool online{false};
     std::optional<std::size_t> online_on_check;
     mutable std::size_t online_checks{0};
+    bool supports_physics_activation{false};
+    bool physics_activation_succeeds{true};
+    std::size_t physics_activation_calls{0};
     std::vector<VehicleSnapshot> vehicles;
 };
 
@@ -216,6 +227,42 @@ public:
         ++gain_writes;
         return true;
     }
+    bool SupportsStaticForce() const noexcept override {
+        return supports_static_force;
+    }
+    bool ReadWheelStaticForce(const VehicleSnapshot&, std::uint32_t index,
+                              double& force) override {
+        if (!resolved || !supports_static_force ||
+            index >= static_forces.size()) {
+            return false;
+        }
+        force = static_forces[index];
+        if ((corrupt_next_static_read_at.has_value() &&
+             *corrupt_next_static_read_at == index) ||
+            (corrupt_static_read_number.has_value() &&
+             *corrupt_static_read_number == static_force_reads)) {
+            corrupt_next_static_read_at.reset();
+            corrupt_static_read_number.reset();
+            force += 1.0;
+        }
+        ++static_force_reads;
+        return true;
+    }
+    bool WriteWheelStaticForce(const VehicleSnapshot&, std::uint32_t index,
+                               double force) override {
+        if (!resolved || !supports_static_force ||
+            index >= static_forces.size()) {
+            return false;
+        }
+        if (fail_next_static_write_at.has_value() &&
+            *fail_next_static_write_at == index) {
+            fail_next_static_write_at.reset();
+            return false;
+        }
+        static_forces[index] = force;
+        ++static_force_writes;
+        return true;
+    }
 
     Edition target{Edition::Legacy};
     bool supported{true};
@@ -224,16 +271,23 @@ public:
     std::string failure;
     std::vector<std::uint16_t> flags;
     std::vector<double> steering_gains;
+    std::vector<double> static_forces;
     bool supports_steering_gain{false};
+    bool supports_static_force{false};
     std::optional<std::uint32_t> fail_next_read_at;
     std::optional<std::uint32_t> fail_next_write_at;
     std::optional<std::uint32_t> fail_next_power_write_at;
     std::optional<std::uint32_t> fail_next_gain_write_at;
+    std::optional<std::uint32_t> fail_next_static_write_at;
+    std::optional<std::uint32_t> corrupt_next_static_read_at;
+    std::optional<std::size_t> corrupt_static_read_number;
     std::size_t reads{0};
     std::size_t writes{0};
     std::size_t powered_writes{0};
     std::size_t gain_reads{0};
     std::size_t gain_writes{0};
+    std::size_t static_force_reads{0};
+    std::size_t static_force_writes{0};
     std::size_t resolve_calls{0};
 };
 
@@ -285,7 +339,7 @@ AxleConfiguration MakeConfiguration(std::size_t axle_count,
 }
 
 void PromoteToSignedSchema(AxleConfiguration& configuration) {
-    configuration.schema_version = kAxleSchemaVersion;
+    configuration.schema_version = kSignedSteeringAxleSchemaVersion;
     configuration.minimum_runtime_version = kSignedSteeringMinimumRuntime;
     SteeringCalculationEvidence evidence;
     evidence.mode = "manual";
@@ -380,6 +434,19 @@ void TestVariableLengthRuntime() {
     }
 }
 
+void PromoteToSupportBias(AxleConfiguration& configuration,
+                          const std::vector<double>& weights = {}) {
+    configuration.schema_version = kAxleSupportAxleSchemaVersion;
+    configuration.minimum_runtime_version = kAxleSupportMinimumRuntime;
+    configuration.steering_calculation.reset();
+    for (std::size_t index = 0; index < configuration.axles.size(); ++index) {
+        auto& axle = configuration.axles[index];
+        axle.steering_gain = axle.steered ? 1.0 : 0.0;
+        axle.suspension = AxleSuspension{
+            weights.empty() ? 1.0 : weights.at(index)};
+    }
+}
+
 void TestIntentionalPhysicalOrderOverride() {
     auto configuration = MakeConfiguration(3, 0x5A17B055U);
     std::swap(configuration.axles[0], configuration.axles[1]);
@@ -412,6 +479,34 @@ void TestIntentionalPhysicalOrderOverride() {
     Check(ValidateConfiguration(configuration, "2.1.0").empty(),
           "valid intentional physical-order override was rejected");
 
+    auto signed_layout = configuration;
+    PromoteToSignedSchema(signed_layout);
+    signed_layout.minimum_runtime_version =
+        kIntentionalLayoutMinimumRuntime;
+    signed_layout.axles.front().steering_gain = 0.8;
+    signed_layout.steering_calculation->physical_bone_pairs =
+        layout.physical_bone_pairs;
+    Check(ValidateConfiguration(signed_layout, "2.1.0").empty(),
+          "signed steering evidence bound to the override order was rejected");
+    auto stale_signed_layout = signed_layout;
+    std::swap(
+        stale_signed_layout.steering_calculation->physical_bone_pairs[0],
+        stale_signed_layout.steering_calculation->physical_bone_pairs[1]);
+    Check(!ValidateConfiguration(stale_signed_layout, "2.1.0").empty(),
+          "signed steering accepted stale physical-order evidence");
+    auto stale_signed_digest = signed_layout;
+    stale_signed_digest.steering_calculation->bone_position_sha256 =
+        std::string(64U, '1');
+    Check(!ValidateConfiguration(stale_signed_digest, "2.1.0").empty(),
+          "signed steering accepted a layout digest mismatch");
+    auto unexpected_signed_pairs = MakeConfiguration(3, 0x5A17B056U);
+    PromoteToSignedSchema(unexpected_signed_pairs);
+    unexpected_signed_pairs.axles.front().steering_gain = 0.8;
+    unexpected_signed_pairs.steering_calculation->physical_bone_pairs =
+        layout.physical_bone_pairs;
+    Check(!ValidateConfiguration(unexpected_signed_pairs, "2.0.0").empty(),
+          "signed steering accepted physical-order evidence without a layout override");
+
     Host host;
     host.vehicles = {{91, configuration.model_hash, 1}};
     WheelAccess access;
@@ -424,7 +519,8 @@ void TestIntentionalPhysicalOrderOverride() {
     Resolver resolver;
     Check(runtime.Start(std::move(catalog), resolver),
           "intentional-layout runtime did not start");
-    runtime.Service(std::chrono::steady_clock::now());
+    const auto first_service = std::chrono::steady_clock::now();
+    runtime.Service(first_service);
     VerifyDesiredFlags(configuration, before, access.flags);
     runtime.Shutdown();
 
@@ -660,6 +756,13 @@ void TestOnlineAndUnsupportedGuards() {
               profiled_adapter.ReadWheelFlags({1, 1, 1}, 0, flags) &&
               flags == 0xA408U,
           "bound build profile did not service wheel access");
+    double static_force = 0.0;
+    Check(!profiled_adapter.SupportsStaticForce() &&
+              !profiled_adapter.ReadWheelStaticForce(
+                  {1, 1, 1}, 0, static_force) &&
+              !profiled_adapter.WriteWheelStaticForce(
+                  {1, 1, 1}, 0, 1.0),
+          "profile without reviewed StaticForce access exposed the capability");
     profiled_adapter.Reset();
     Check(!profiled_adapter.IsResolved() && !profile->bound,
           "profile reset retained resolved accessors");
@@ -771,6 +874,264 @@ void TestSignedSteeringGainCapabilityAndRestore() {
     Check(rollback_runtime.TrackedVehicleCount() == 0,
           "failed steering gain transaction remained tracked");
     rollback_runtime.Shutdown();
+
+    auto inverted = configuration;
+    inverted.schema_version = kAxleSchemaVersion;
+    inverted.minimum_runtime_version = kSteeringPolarityMinimumRuntime;
+    inverted.steering_command_polarity = "inverted";
+    Check(ValidateConfiguration(inverted, "4.0.0").empty(),
+          "valid inverted steering command polarity was rejected");
+    Host inverted_host;
+    inverted_host.vehicles = {{84, inverted.model_hash, 5}};
+    WheelAccess inverted_access;
+    inverted_access.supports_steering_gain = true;
+    inverted_access.flags = InitialFlags(6);
+    inverted_access.steering_gains = gains_before;
+    LogSink inverted_log;
+    ConfigurationCatalog inverted_catalog;
+    inverted_catalog.active.emplace(inverted.model_hash, inverted);
+    AxleRuntime inverted_runtime(
+        inverted_host, inverted_access, inverted_log);
+    Check(inverted_runtime.Start(std::move(inverted_catalog), resolver),
+          "inverted-polarity runtime did not start");
+    inverted_runtime.Service(std::chrono::steady_clock::now());
+    for (const auto& axle : inverted.axles) {
+        const double base = axle.steering_gain.value_or(
+            axle.steered ? 1.0 : 0.0);
+        const double expected = -base;
+        Check(std::abs(inverted_access.steering_gains.at(
+                           inverted.wheel_index_map.at(axle.left_bone)) -
+                       expected) < 0.000001 &&
+                  std::abs(inverted_access.steering_gains.at(
+                               inverted.wheel_index_map.at(axle.right_bone)) -
+                           expected) < 0.000001,
+              "steering command polarity was not applied exactly once");
+    }
+    Check(std::any_of(
+              inverted_log.entries.begin(), inverted_log.entries.end(),
+              [](const auto& entry) {
+                  return entry.first == "steering-gain-resolved" &&
+                         entry.second.find("polarity=inverted") !=
+                             std::string::npos &&
+                         entry.second.find("effective=") != std::string::npos;
+              }),
+          "polarity log omitted base/polarity/effective steering evidence");
+    inverted_runtime.Shutdown();
+
+}
+
+void TestAxleSupportBiasApplyRollbackAndRestore() {
+    auto configuration = MakeConfiguration(3);
+    PromoteToSupportBias(configuration, {1.25, 1.0, 0.75});
+    Check(ValidateConfiguration(configuration, "3.0.0").empty(),
+          "valid schema-3 support bias was rejected");
+
+    Host host;
+    host.supports_physics_activation = true;
+    WheelAccess access;
+    access.supports_static_force = true;
+    access.flags = InitialFlags(6);
+    access.static_forces = {10.0, 20.0, 30.0, 40.0, 50.0, 60.0};
+    const auto original_flags = access.flags;
+    const auto original_forces = access.static_forces;
+    host.vehicles = {{42, configuration.model_hash, 7}};
+    ConfigurationCatalog catalog;
+    catalog.active.emplace(configuration.model_hash, configuration);
+    Resolver resolver;
+    LogSink log;
+    AxleRuntime runtime(host, access, log);
+    Check(runtime.Start(std::move(catalog), resolver),
+          "support-bias runtime did not start");
+    const auto first_service = std::chrono::steady_clock::now();
+    runtime.Service(first_service);
+    // The exported map places rear, middle, then front at indices 0..5.
+    // Bias scales each wheel's original load and normalizes globally; it must
+    // not flatten an axle's existing left/right distribution.
+    const std::vector<double> wheel_weights{
+        0.75, 0.75, 1.0, 1.0, 1.25, 1.25};
+    double weighted_total = 0.0;
+    double original_total = 0.0;
+    for (std::size_t index = 0; index < original_forces.size(); ++index) {
+        weighted_total += original_forces[index] * wheel_weights[index];
+        original_total += original_forces[index];
+    }
+    const double normalization = original_total / weighted_total;
+    std::vector<double> expected;
+    for (std::size_t index = 0; index < original_forces.size(); ++index) {
+        expected.push_back(
+            original_forces[index] * wheel_weights[index] * normalization);
+    }
+    Check(access.static_forces.size() == expected.size(),
+          "support-bias wheel count changed");
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        Check(std::abs(access.static_forces[index] - expected[index]) < 1.0e-8,
+              "normalized support bias did not follow the mapped physical axle");
+    }
+    double applied_total = 0.0;
+    for (const auto value : access.static_forces) applied_total += value;
+    Check(std::abs(original_total - applied_total) < 1.0e-8,
+          "support bias changed total vehicle StaticForce");
+    for (std::size_t left = 0; left < expected.size(); left += 2U) {
+        Check(std::abs(
+                  access.static_forces[left] /
+                      access.static_forces[left + 1U] -
+                  original_forces[left] / original_forces[left + 1U]) <
+                  1.0e-8,
+              "support bias flattened an axle's original left/right load distribution");
+    }
+    Check(host.physics_activation_calls == 1,
+          "support-bias apply did not activate physics exactly once");
+
+    for (auto& force : access.static_forces) force *= 2.0;
+    runtime.Service(first_service + std::chrono::seconds(3));
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        Check(std::abs(access.static_forces[index] - expected[index]) < 1.0e-8,
+              "support recovery drifted from the original total StaticForce");
+    }
+    Check(host.physics_activation_calls == 2,
+          "support recovery did not reactivate physics");
+
+    runtime.Shutdown();
+    Check(access.static_forces == original_forces &&
+              access.flags == original_flags,
+          "support-bias shutdown did not restore original wheel state");
+    Check(host.physics_activation_calls == 3,
+          "support-bias restoration did not reactivate physics");
+
+    Host unsupported_host;
+    WheelAccess unsupported_access;
+    unsupported_access.flags = original_flags;
+    unsupported_access.static_forces = original_forces;
+    unsupported_host.vehicles = {{43, configuration.model_hash, 1}};
+    ConfigurationCatalog unsupported_catalog;
+    unsupported_catalog.active.emplace(configuration.model_hash, configuration);
+    LogSink unsupported_log;
+    AxleRuntime unsupported_runtime(
+        unsupported_host, unsupported_access, unsupported_log);
+    Check(!unsupported_runtime.Start(
+              std::move(unsupported_catalog), resolver),
+          "support bias started without validated StaticForce capability");
+    Check(unsupported_access.static_force_writes == 0,
+          "unsupported profile attempted a StaticForce write");
+
+    Host activation_host;
+    activation_host.supports_physics_activation = true;
+    activation_host.physics_activation_succeeds = false;
+    WheelAccess activation_access;
+    activation_access.supports_static_force = true;
+    activation_access.flags = original_flags;
+    activation_access.static_forces = original_forces;
+    activation_host.vehicles = {{45, configuration.model_hash, 1}};
+    ConfigurationCatalog activation_catalog;
+    activation_catalog.active.emplace(configuration.model_hash, configuration);
+    LogSink activation_log;
+    AxleRuntime activation_runtime(
+        activation_host, activation_access, activation_log);
+    Check(activation_runtime.Start(std::move(activation_catalog), resolver),
+          "physics-activation rollback runtime did not start");
+    activation_runtime.Service(std::chrono::steady_clock::now());
+    Check(activation_access.static_forces == original_forces,
+          "physics activation failure did not restore StaticForce values");
+    Check(activation_runtime.TrackedVehicleCount() == 1,
+          "failed rollback activation discarded the restoration baseline");
+    activation_host.physics_activation_succeeds = true;
+    activation_runtime.Shutdown();
+    Check(activation_runtime.TrackedVehicleCount() == 0,
+          "restoration retry did not clear the support baseline");
+
+    Host rollback_host;
+    rollback_host.supports_physics_activation = true;
+    WheelAccess rollback_access;
+    rollback_access.supports_static_force = true;
+    rollback_access.flags = original_flags;
+    rollback_access.static_forces = original_forces;
+    rollback_access.fail_next_static_write_at = 2;
+    rollback_host.vehicles = {{44, configuration.model_hash, 1}};
+    ConfigurationCatalog rollback_catalog;
+    rollback_catalog.active.emplace(configuration.model_hash, configuration);
+    LogSink rollback_log;
+    AxleRuntime rollback_runtime(
+        rollback_host, rollback_access, rollback_log);
+    Check(rollback_runtime.Start(std::move(rollback_catalog), resolver),
+          "support rollback runtime did not start");
+    rollback_runtime.Service(std::chrono::steady_clock::now());
+    Check(rollback_access.static_forces == original_forces &&
+              rollback_access.flags == original_flags,
+          "failed support-bias transaction did not restore all wheel state");
+    Check(rollback_runtime.TrackedVehicleCount() == 0,
+          "completed support rollback retained a stale baseline");
+    rollback_runtime.Shutdown();
+
+    Host verification_host;
+    verification_host.supports_physics_activation = true;
+    WheelAccess verification_access;
+    verification_access.supports_static_force = true;
+    verification_access.flags = original_flags;
+    verification_access.static_forces = original_forces;
+    // Six construction reads succeed; the first post-activation readback is
+    // corrupted once to exercise verified rollback.
+    verification_access.corrupt_static_read_number = 6;
+    verification_host.vehicles = {{46, configuration.model_hash, 1}};
+    ConfigurationCatalog verification_catalog;
+    verification_catalog.active.emplace(
+        configuration.model_hash, configuration);
+    LogSink verification_log;
+    AxleRuntime verification_runtime(
+        verification_host, verification_access, verification_log);
+    Check(verification_runtime.Start(
+              std::move(verification_catalog), resolver),
+          "support verification runtime did not start");
+    verification_runtime.Service(std::chrono::steady_clock::now());
+    Check(verification_access.static_forces == original_forces &&
+              verification_runtime.TrackedVehicleCount() == 0,
+          "failed StaticForce verification did not complete rollback");
+    verification_runtime.Shutdown();
+}
+
+void TestAxleSupportBiasParsingAndValidation() {
+    const std::string json_text = R"json({
+      "schemaVersion":3,
+      "configurationId":"support-fixture",
+      "modelName":"support_fixture",
+      "modelHash":"0x10203040",
+      "expectedWheelCount":4,
+      "minimumRuntimeVersion":"3.0.0",
+      "wheelIndexMap":{"wheel_lf":0,"wheel_rf":1,"wheel_lr":2,"wheel_rr":3},
+      "axles":[
+        {"order":0,"role":"front","leftBone":"wheel_lf","rightBone":"wheel_rf","steered":true,"powered":false,"steeringGain":1.0,"suspension":{"supportWeight":1.25}},
+        {"order":1,"role":"rear","leftBone":"wheel_lr","rightBone":"wheel_rr","steered":false,"powered":true,"steeringGain":0.0,"suspension":{"supportWeight":0.75}}
+      ],
+      "compatibility":{"storyLegacy":true}
+    })json";
+    std::vector<ValidationIssue> issues;
+    const auto parsed = ParseConfigurationJson(
+        json_text, "3.0.0", issues, "support.json");
+    Check(parsed.has_value() && issues.empty() &&
+              parsed->axles.front().suspension.has_value() &&
+              parsed->axles.front().suspension->support_weight == 1.25,
+          "typed supportWeight did not parse");
+
+    auto partial = *parsed;
+    partial.axles.back().suspension.reset();
+    Check(!ValidateConfiguration(partial, "3.0.0").empty(),
+          "partial axle support bias was accepted");
+    auto below_range = *parsed;
+    below_range.axles.front().suspension->support_weight = 0.749;
+    Check(!ValidateConfiguration(below_range, "3.0.0").empty(),
+          "out-of-range support weight was accepted");
+    auto above_range = *parsed;
+    above_range.axles.front().suspension->support_weight = 1.251;
+    Check(!ValidateConfiguration(above_range, "3.0.0").empty(),
+          "out-of-range support weight was accepted");
+    auto nonfinite = *parsed;
+    nonfinite.axles.front().suspension->support_weight =
+        std::numeric_limits<double>::quiet_NaN();
+    Check(!ValidateConfiguration(nonfinite, "3.0.0").empty(),
+          "non-finite support weight was accepted");
+    auto old_minimum = *parsed;
+    old_minimum.minimum_runtime_version = "2.1.0";
+    Check(!ValidateConfiguration(old_minimum, "3.0.0").empty(),
+          "support bias accepted a pre-3.0 minimum runtime");
 }
 
 void TestValidationAndParsing() {
@@ -1007,7 +1368,7 @@ void TestValidationAndParsing() {
     std::vector<ValidationIssue> newer_issues;
     const auto newer = ParseConfigurationJson(
         std::string(json_text).replace(json_text.find("\"schemaVersion\": 1"),
-                                       18, "\"schemaVersion\": 3"),
+                                       18, "\"schemaVersion\": 5"),
         "2.0.0", newer_issues, "future.json");
     Check(!newer.has_value(), "newer schema did not fail closed");
 
@@ -1072,6 +1433,8 @@ int main() {
         TestShutdownReleasesObsoleteVehicleIdentities();
         TestOnlineAndUnsupportedGuards();
         TestSignedSteeringGainCapabilityAndRestore();
+        TestAxleSupportBiasApplyRollbackAndRestore();
+        TestAxleSupportBiasParsingAndValidation();
         TestValidationAndParsing();
         std::cout << "VehicleWorkbenchAxles core tests passed\n";
         return EXIT_SUCCESS;

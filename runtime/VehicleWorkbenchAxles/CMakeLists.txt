@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(VehicleWorkbenchAxles VERSION 2.1.0 LANGUAGES CXX)
+project(VehicleWorkbenchAxles VERSION 4.0.0 LANGUAGES CXX)
 
 option(VWA_BUILD_ASI_SKELETONS "Build the non-deployable Story Mode ASI skeleton targets" ON)
 option(VWA_BUILD_TESTS "Build platform-neutral runtime tests" ON)

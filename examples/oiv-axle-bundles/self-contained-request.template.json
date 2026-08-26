@@ -9,7 +9,7 @@
     "version": "1.0.0",
     "author": "<AUTHOR>",
     "description": "Installs My Bus and a validated shared axle runtime.",
-    "workbench_version": "0.5.8"
+    "workbench_version": "0.5.9"
   },
   "vehicle_dlcs": [
     {

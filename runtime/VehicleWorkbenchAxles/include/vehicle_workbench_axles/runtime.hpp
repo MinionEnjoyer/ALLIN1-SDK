@@ -20,6 +20,11 @@ public:
     virtual std::vector<VehicleSnapshot> EnumerateVehicles() = 0;
     virtual std::optional<VehicleSnapshot>
     LookupVehicle(std::uint64_t entity_id) = 0;
+    // Suspension writes are never assumed safe merely because wheel access is
+    // available. Hosts opt in only after an exact-build physics activation
+    // path has been validated.
+    virtual bool SupportsPhysicsActivation() const noexcept { return false; }
+    virtual bool ActivatePhysics(const VehicleSnapshot&) { return false; }
 };
 
 enum class RuntimeState {

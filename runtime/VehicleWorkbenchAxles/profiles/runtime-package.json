@@ -2,8 +2,8 @@
   "manifestVersion": 1,
   "runtime": {
     "name": "VehicleWorkbenchAxles",
-    "version": "2.1.0",
-    "maximumAxleSchemaVersion": 2,
+    "version": "4.0.0",
+    "maximumAxleSchemaVersion": 4,
     "settingsSchemaVersion": 1,
     "binaryFileName": "VehicleWorkbenchAxles.asi",
     "settingsDestination": "VehicleWorkbenchAxles/runtime.json",
@@ -17,7 +17,9 @@
     "capabilities": {
       "steeringFlags": true,
       "driveFlags": true,
-      "signedSteeringGain": false
+      "signedSteeringGain": false,
+      "staticForce": false,
+      "physicsActivation": false
     },
     "packagingRequiresValidatedProfile": true
   },

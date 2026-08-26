@@ -4,6 +4,39 @@
   "title": "Vehicle Workbench Story runtime profile",
   "type": "object",
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "required": ["capabilities"],
+        "properties": {
+          "capabilities": {
+            "properties": {
+              "static_force": { "const": true },
+              "physics_activation": { "const": true }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": ["maximum_axle_schema"],
+        "properties": { "maximum_axle_schema": { "minimum": 3 } }
+      }
+    },
+    {
+      "if": {
+        "required": ["capabilities"],
+        "properties": {
+          "capabilities": {
+            "properties": { "signed_steering_gain": { "const": true } }
+          }
+        }
+      },
+      "then": {
+        "required": ["maximum_axle_schema"],
+        "properties": { "maximum_axle_schema": { "minimum": 2 } }
+      }
+    }
+  ],
   "required": [
     "profile_id",
     "target_id",
@@ -32,6 +65,24 @@
     "package_eligible": { "const": true },
     "validation_receipt_path": { "type": "string", "minLength": 1 },
     "expected_receipt_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "maximum_axle_schema": { "type": "integer", "minimum": 1, "default": 1 },
+    "capabilities": {
+      "type": "object",
+      "default": {
+        "signed_steering_gain": false,
+        "static_force": false,
+        "physics_activation": false
+      },
+      "additionalProperties": false,
+      "required": [
+        "signed_steering_gain", "static_force", "physics_activation"
+      ],
+      "properties": {
+        "signed_steering_gain": { "type": "boolean" },
+        "static_force": { "type": "boolean" },
+        "physics_activation": { "type": "boolean" }
+      }
+    },
     "redistribution_allowed": { "const": true },
     "license": { "type": "string", "minLength": 1 }
   }

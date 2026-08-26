@@ -4,6 +4,59 @@
   "title": "Vehicle Workbench Story runtime validation receipt",
   "type": "object",
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "required": ["capabilities"],
+        "properties": {
+          "capabilities": {
+            "properties": {
+              "static_force": { "const": true },
+              "physics_activation": { "const": true }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "maximum_axle_schema": { "minimum": 3 },
+          "acceptance_tests": {
+            "required": [
+              "support_bias_apply_readback",
+              "support_bias_total_preserved",
+              "support_bias_left_right_preserved",
+              "support_bias_repair_reapplication",
+              "support_bias_transaction_rollback",
+              "support_bias_unload_restore",
+              "support_bias_unsupported_fail_closed",
+              "support_bias_physics_activation_fail_closed"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["capabilities"],
+        "properties": {
+          "capabilities": {
+            "properties": { "signed_steering_gain": { "const": true } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "maximum_axle_schema": { "minimum": 2 },
+          "acceptance_tests": {
+            "required": [
+              "signed_steering_gain_apply_readback",
+              "intentional_layout_override_mapping"
+            ]
+          }
+        }
+      }
+    }
+  ],
   "required": [
     "schema_version",
     "receipt_id",
@@ -41,6 +94,23 @@
       "items": { "type": "string", "minLength": 1, "maxLength": 96 }
     },
     "maximum_axle_schema": { "type": "integer", "minimum": 1 },
+    "capabilities": {
+      "type": "object",
+      "default": {
+        "signed_steering_gain": false,
+        "static_force": false,
+        "physics_activation": false
+      },
+      "additionalProperties": false,
+      "required": [
+        "signed_steering_gain", "static_force", "physics_activation"
+      ],
+      "properties": {
+        "signed_steering_gain": { "type": "boolean" },
+        "static_force": { "type": "boolean" },
+        "physics_activation": { "type": "boolean" }
+      }
+    },
     "descriptor_abi_version": { "const": 1 },
     "required_exports": {
       "type": "array",
@@ -70,7 +140,17 @@
         "unrelated_flags_preserved": { "const": "passed" },
         "repair_reapplication": { "const": "passed" },
         "unsupported_build_fail_closed": { "const": "passed" },
-        "online_session_guard": { "const": "passed" }
+        "online_session_guard": { "const": "passed" },
+        "support_bias_apply_readback": { "const": "passed" },
+        "support_bias_total_preserved": { "const": "passed" },
+        "support_bias_left_right_preserved": { "const": "passed" },
+        "support_bias_repair_reapplication": { "const": "passed" },
+        "support_bias_transaction_rollback": { "const": "passed" },
+        "support_bias_unload_restore": { "const": "passed" },
+        "support_bias_unsupported_fail_closed": { "const": "passed" },
+        "support_bias_physics_activation_fail_closed": { "const": "passed" },
+        "signed_steering_gain_apply_readback": { "const": "passed" },
+        "intentional_layout_override_mapping": { "const": "passed" }
       }
     },
     "validation_authority": { "type": "string", "minLength": 1, "maxLength": 160 },

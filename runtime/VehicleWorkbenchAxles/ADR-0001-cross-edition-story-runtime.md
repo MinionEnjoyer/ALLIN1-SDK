@@ -26,6 +26,11 @@ Runtime contract 2.0 keeps schema 1 as the legacy boolean `+1/0` format and
 accepts schema 2 only when every gain is explicit, minimum runtime 2.0 is
 declared, and calculation evidence is present. Exact-build adapters still have
 to attest the separate signed-gain accessor before such a config is deployable.
+Runtime contract 3.0 adds schema-3 axle support bias. Every physical axle must
+declare a bounded support weight, and the exact-build bridge must independently
+attest reversible `StaticForce` access and physics activation. Total original
+support is preserved through normalization, readback verification, rollback,
+and unload restoration.
 
 The runtime core depends only on `IWheelAccess`, `IVehicleHost`, and `ILogSink`.
 It maps canonical bone semantics to wheel indices from the exported
