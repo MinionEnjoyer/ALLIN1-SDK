@@ -17,6 +17,7 @@ from allin1_sdk.axle_steering_geometry import (
 from allin1_sdk.axle_configurator import (
     AXLE_SUPPORT_RUNTIME_VERSION,
     AXLE_SUPPORT_SCHEMA_VERSION,
+    EXPORT_FIVEM_RUNTIME,
     PRESET_STEER_DRIVE_REAR,
     apply_axle_support_weights,
     detect_axle_configuration,
@@ -25,6 +26,8 @@ from allin1_sdk.vehicle_axles_ui import (
     VehicleAxlesPanel,
     _edit_axle_controls,
     _format_steering_gain,
+    _guided_physical_layout_configuration,
+    _has_unreviewed_physical_layout,
     _requires_selective_steering_runtime,
     _steering_solution_summary,
 )
@@ -185,6 +188,46 @@ def test_steering_role_edit_preserves_schema_three_support_weights() -> None:
         axle.suspension.support_weight for axle in edited.axles
         if axle.suspension is not None
     ] == [1.10, 0.95, 0.95]
+
+
+def _remapped_bus_bones() -> tuple[Bone, ...]:
+    return (
+        Bone("wheel_lm1", (-1.0, 8.0, 0.0)),
+        Bone("wheel_rm1", (1.0, 8.0, 0.0)),
+        Bone("wheel_lf", (-1.0, 2.0, 0.0)),
+        Bone("wheel_rf", (1.0, 2.0, 0.0)),
+        Bone("wheel_lr", (-1.0, -4.0, 0.0)),
+        Bone("wheel_rr", (1.0, -4.0, 0.0)),
+    )
+
+
+def test_guided_setup_preserves_detected_bus_order_and_builds_rear_steer() -> None:
+    wheel_bones = _remapped_bus_bones()
+    detected = detect_axle_configuration("metrobusxl2", wheel_bones)
+
+    assert _has_unreviewed_physical_layout(detected)
+    configured, solution = _guided_physical_layout_configuration(
+        detected, wheel_bones,
+    )
+
+    assert not _has_unreviewed_physical_layout(configured)
+    assert configured.intentional_layout_override is not None
+    assert configured.export_mode == EXPORT_FIVEM_RUNTIME
+    assert configured.preset == PRESET_STEER_DRIVE_REAR
+    assert [
+        (item.left_bone, item.right_bone) for item in configured.axles
+    ] == [
+        ("wheel_lm1", "wheel_rm1"),
+        ("wheel_lf", "wheel_rf"),
+        ("wheel_lr", "wheel_rr"),
+    ]
+    assert [(item.steered, item.powered) for item in configured.axles] == [
+        (True, False), (False, True), (True, False),
+    ]
+    assert configured.axles[0].steering_gain > 0.0
+    assert configured.axles[1].steering_gain == 0.0
+    assert configured.axles[2].steering_gain < 0.0
+    assert solution.axles[0].physical_order == 1
 
 
 def test_panel_load_apply_export_and_clear_lifecycle(tk_root) -> None:

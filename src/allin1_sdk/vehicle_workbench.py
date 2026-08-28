@@ -345,6 +345,10 @@ class VehicleWorkbenchFrame(ttk.Frame):
         self.project_assets: dict[str, str] = {}
         self.selected_model: VehicleProjectModel | None = None
         self.authoring_workspace: VehicleAuthoringWorkspace | None = None
+        # Direct RPFs remain immutable, but axle behavior can be authored as a
+        # portable sidecar. Keep applied drafts alive while the RPF is open so
+        # users can move between vehicles without losing reviewed work.
+        self._session_axle_configurations: dict[str, AxleConfiguration] = {}
         self.authoring_values: dict[str, tk.StringVar] = {}
         self.authoring_inputs: dict[str, ttk.Entry] = {}
         self.author_view = tk.StringVar(value="general")
@@ -1471,6 +1475,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
         # Create it with the first scene request on the loader thread instead.
         self.reader = None
         self.authoring_workspace = authoring_workspace
+        self._session_axle_configurations.clear()
         self._scene_cache.clear()
         self._scene_revision += 1
         self._active_scene_key = (self._scene_revision, "")
@@ -1698,10 +1703,16 @@ class VehicleWorkbenchFrame(ttk.Frame):
     def confirm_navigation(self) -> bool:
         """Prevent model/package navigation from silently discarding form edits."""
         if (
-            self.authoring_workspace is None
-            or self._loaded_editor_snapshot is None
+            self._loaded_editor_snapshot is None
             or self._editor_snapshot() == self._loaded_editor_snapshot
         ):
+            return True
+        direct_rpf_axles = (
+            self.authoring_workspace is None
+            and self.scan is not None
+            and self.scan.source_kind == "rpf"
+        )
+        if self.authoring_workspace is None and not direct_rpf_axles:
             return True
         return messagebox.askyesno(
             "Discard unsaved vehicle edits?",
@@ -2047,6 +2058,9 @@ class VehicleWorkbenchFrame(ttk.Frame):
     def _load_authoring_fields(self, model: VehicleProjectModel) -> None:
         workspace = self.authoring_workspace
         if workspace is None:
+            direct_rpf_axles = (
+                self.scan is not None and self.scan.source_kind == "rpf"
+            )
             visible = {
                 "vehicle.gameName": model.display_name,
                 "vehicle.vehicleMakeName": model.make_name,
@@ -2063,7 +2077,12 @@ class VehicleWorkbenchFrame(ttk.Frame):
             self.save_author_button.configure(state="disabled")
             self.undo_author_button.configure(state="disabled")
             self.authoring_status.set(
-                "Create an authoring workspace to edit this copied package safely."
+                (
+                    "RPF assets stay read-only. Axle behavior can be authored and "
+                    "saved as a sidecar configuration."
+                    if direct_rpf_axles else
+                    "Create an authoring workspace to edit this copied package safely."
+                )
             )
             self.identity_model.set(model.model)
             self.identity_handling.set(model.handling_id)
@@ -2072,7 +2091,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
             self.identity_button.configure(state="disabled")
             self._load_distribution(model, editable=False)
             self._load_appearance(model, editable=False)
-            self._load_axle_fields(model, editable=False)
+            self._load_axle_fields(model, editable=direct_rpf_axles)
             return
         try:
             authored = workspace.values(model.model)
@@ -2119,7 +2138,12 @@ class VehicleWorkbenchFrame(ttk.Frame):
         drive_bias: float | None = None
         workspace = self.authoring_workspace
         try:
-            if workspace is not None:
+            session_configuration = self._session_axle_configurations.get(
+                model.model.casefold(),
+            )
+            if session_configuration is not None:
+                configuration = session_configuration
+            elif workspace is not None:
                 configuration = workspace.axle_configuration(model.model)
                 evidence = workspace.axle_handling_evidence(model.model)
                 raw_flags = evidence.get("strHandlingFlags", "")
@@ -2147,6 +2171,12 @@ class VehicleWorkbenchFrame(ttk.Frame):
             model.model, configuration, editable=editable,
             asset_names=asset_names, handling_flags=flags,
             drive_bias_front=drive_bias,
+            target=(
+                "story-enhanced"
+                if self.project is not None
+                and self.project.edition.casefold() == "enhanced"
+                else "story-legacy"
+            ),
         )
 
     def _load_distribution(
@@ -3009,7 +3039,21 @@ class VehicleWorkbenchFrame(ttk.Frame):
     def _apply_axle_configuration(self, configuration: AxleConfiguration) -> None:
         workspace = self.authoring_workspace
         model = self.selected_model
-        if workspace is None or model is None:
+        if model is None:
+            return
+        if workspace is None:
+            if self.scan is None or self.scan.source_kind != "rpf":
+                return
+            self._session_axle_configurations[model.model.casefold()] = configuration
+            self._loaded_editor_snapshot = self._editor_snapshot()
+            self.axles_panel.status.set(
+                "Applied to this RPF session. Use Config ▾ > Save axle config… "
+                "to create the portable JSON sidecar."
+            )
+            self.status.set(
+                f"Applied {len(configuration.axles)} axle pairs to the "
+                f"{model.model} sidecar draft; the RPF was not modified."
+            )
             return
         try:
             result = workspace.set_axle_configuration(

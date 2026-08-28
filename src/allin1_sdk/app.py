@@ -17,9 +17,12 @@ from allin1_sdk.paths import project_root
 from allin1_sdk.rpf_graph import RpfPackageGraph
 from allin1_sdk.rpf_graph_ui import RpfPackageGraphDialog
 from allin1_sdk.ui_foundation import (
-    configure_sdk_style,
+    apply_sdk_theme,
     configure_tk_scaling,
     enable_windows_dpi_awareness,
+    install_theme_window_hook,
+    load_ui_theme,
+    start_system_theme_polling,
 )
 
 _INSTANCE_MUTEX: int | None = None
@@ -82,10 +85,10 @@ def _claim_single_instance() -> bool:
     return True
 
 
-def _configure_style(root: tk.Tk) -> None:
+def _configure_style(root: tk.Tk, theme: object = "light") -> None:
     """Backward-compatible test and extension hook for the shared SDK theme."""
 
-    configure_sdk_style(root)
+    apply_sdk_theme(root, theme)
 
 
 def _launch_arguments(argv: list[str] | None = None) -> argparse.Namespace:
@@ -159,7 +162,9 @@ def main(argv: list[str] | None = None) -> None:
     root.withdraw()
     configure_tk_scaling(root)
     apply_sdk_window_icon(root, project_root())
-    _configure_style(root)
+    _configure_style(root, load_ui_theme())
+    install_theme_window_hook(root)
+    start_system_theme_polling(root)
     detected = (
         arguments.gta_path.expanduser().resolve()
         if arguments.gta_path is not None else detect_gta_path()

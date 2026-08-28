@@ -19,11 +19,15 @@ from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 from allin1_sdk.axle_configurator import (
     AXLE_SCHEMA_VERSION,
+    AXLE_SUPPORT_SCHEMA_VERSION,
     CANONICAL_WHEEL_PAIRS,
     EXPORT_FIVEM_RUNTIME,
     EXPORT_MODES,
     PRESET_CUSTOM,
     SHARED_VISUAL_WARNING,
+    STEERING_COMMAND_POLARITY_INVERTED,
+    STEERING_COMMAND_POLARITY_NORMAL,
+    STEERING_POLARITY_SCHEMA_VERSION,
     VISUAL_FRONT,
     VISUAL_SHARED_MIDDLE_REAR,
     AxleAddonGeometry,
@@ -556,7 +560,9 @@ class PrefabAxleConfiguration(AxleConfiguration):
             minimum_runtime_version=config.minimum_runtime_version,
             compatibility=config.compatibility,
             handbrake_rear_steering=config.handbrake_rear_steering,
+            steering_command_polarity=config.steering_command_polarity,
             steering_calculation=config.steering_calculation,
+            intentional_layout_override=config.intentional_layout_override,
             visual_tyre_selection=(
                 visual_tyre_selection
                 if visual_tyre_selection is not None else existing
@@ -1258,7 +1264,23 @@ def apply_prefab(
     selected_catalog = catalog or AxlePrefabCatalog.load_builtin(project_root)
     prefab = selected_catalog.get(prefab_id)
     bone_rows = tuple(bones)
-    pairs = required_canonical_pairs(prefab.axle_count)
+    canonical_pairs = required_canonical_pairs(prefab.axle_count)
+    # A reviewed visual-instancing override changes physical presentation,
+    # not GTA's canonical runtime indices.  Behavior prefabs are authored by
+    # physical axle order, so preserve that reviewed order instead of silently
+    # snapping the draft back to canonical bone order.
+    pairs = (
+        tuple(
+            (item.left_bone, item.right_bone)
+            for item in sorted(
+                base_config.axles, key=lambda value: value.physical_order,
+            )
+        )
+        if base_config is not None
+        and base_config.intentional_layout_override is not None
+        and len(base_config.axles) == prefab.axle_count
+        else canonical_pairs
+    )
     runtime_resolver = resolver or CanonicalTargetResolver()
     findings = _physical_order_findings(pairs, bone_rows)
     try:
@@ -1314,8 +1336,12 @@ def apply_prefab(
             powered=authored.powered,
             service_brake=existing.service_brake if existing else True,
             handbrake=existing.handbrake if existing else order == prefab.axle_count - 1,
-            visual_family=VISUAL_FRONT if order == 0 else VISUAL_SHARED_MIDDLE_REAR,
+            visual_family=(
+                existing.visual_family if existing is not None
+                else VISUAL_FRONT if order == 0 else VISUAL_SHARED_MIDDLE_REAR
+            ),
             addon_geometry=existing.addon_geometry if existing else (),
+            suspension=existing.suspension if existing else None,
         )
         axles.append(axle)
         mapping_rows.append(AxleMappingRow(
@@ -1324,8 +1350,20 @@ def apply_prefab(
             authored.steered, authored.powered,
         ))
     model = str(vehicle_model).strip().casefold()
+    support_enabled = bool(axles) and all(
+        item.suspension is not None for item in axles
+    )
+    inverted = (
+        base_config is not None
+        and base_config.steering_command_polarity
+        == STEERING_COMMAND_POLARITY_INVERTED
+    )
     proposed = PrefabAxleConfiguration(
-        schema_version=AXLE_SCHEMA_VERSION,
+        schema_version=(
+            STEERING_POLARITY_SCHEMA_VERSION if inverted
+            else AXLE_SUPPORT_SCHEMA_VERSION if support_enabled
+            else AXLE_SCHEMA_VERSION
+        ),
         vehicle_model=model,
         configuration_id=(
             base_config.configuration_id if base_config else f"{model}-axles"
@@ -1352,6 +1390,13 @@ def apply_prefab(
         ),
         handbrake_rear_steering=(
             base_config.handbrake_rear_steering if base_config else False
+        ),
+        steering_command_polarity=(
+            base_config.steering_command_polarity
+            if base_config else STEERING_COMMAND_POLARITY_NORMAL
+        ),
+        intentional_layout_override=(
+            base_config.intentional_layout_override if base_config else None
         ),
         visual_tyre_selection=visual_selection,
     )

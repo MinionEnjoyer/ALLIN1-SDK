@@ -49,6 +49,7 @@ def test_release_package_contains_launcher_contract_and_checksums(tmp_path):
     (app / "ALLIN1-SDK-Desktop.exe").write_bytes(b"MZapp")
     (app / "allin1-sdk.exe").write_bytes(b"MZcli")
     (app / "ALLIN1-SDK-Agent.exe").write_bytes(b"MZagent")
+    (app / "ALLIN1-SDK-Updater.exe").write_bytes(b"MZupdater")
     (app / "_internal").mkdir()
     (app / "_internal" / "python312.dll").write_bytes(b"runtime")
     (rpf / "RpfPatcher.exe").write_bytes(b"MZhelper")
@@ -64,6 +65,7 @@ def test_release_package_contains_launcher_contract_and_checksums(tmp_path):
         names = set(package.namelist())
         assert {
             "ALLIN1-SDK-Desktop.exe", "allin1-sdk.exe", "ALLIN1-SDK-Agent.exe",
+            "ALLIN1-SDK-Updater.exe",
             "release.json", "checksums.json",
             "sdk/addon.schema.json", "sdk/runtime-api-contract.schema.json",
             "tools/RpfPatcher/RpfPatcher.exe",
@@ -91,6 +93,7 @@ def test_release_package_contains_launcher_contract_and_checksums(tmp_path):
             "entrypoint": "ALLIN1-SDK-Desktop.exe", "platform": "win-x64",
             "cli_entrypoint": "allin1-sdk.exe",
             "agent_entrypoint": "ALLIN1-SDK-Agent.exe",
+            "updater_entrypoint": "ALLIN1-SDK-Updater.exe",
             "product": "ALLIN1-SDK", "version": "0.5.0",
         }
         assert set(checksums) == names - {"checksums.json"}

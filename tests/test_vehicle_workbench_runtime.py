@@ -4,11 +4,13 @@ import tkinter as tk
 from dataclasses import replace
 from pathlib import Path
 from tkinter import ttk
+from types import SimpleNamespace
 
 import pytest
 
 import allin1_sdk.addon_sdk_ui as sdk_ui
 from allin1_sdk.app import _configure_style
+from allin1_sdk.axle_configurator import detect_axle_configuration
 from allin1_sdk.vehicle_authoring import VehicleAuthoringWorkspace
 from allin1_sdk.axle_oiv_export import (
     MODE_RUNTIME_ONLY,
@@ -569,6 +571,40 @@ def test_vehicle_authoring_controls_follow_workspace_state_and_route_findings(
     frame._open_tuning_finding()
     assert frame.tuning_pages.select() == str(frame.tuning_parts_page)
     assert frame.tuning_part_tree.selection() == ("visibleMods:0",)
+    frame.destroy()
+
+
+def test_direct_rpf_axle_apply_keeps_a_session_sidecar_draft(
+    tmp_path, tk_root,
+) -> None:
+    source = _source(tmp_path)
+    frame = VehicleWorkbenchFrame(
+        tk_root, Path(__file__).resolve().parents[1],
+    )
+    frame.pack(fill="both", expand=True)
+    frame.open_source(source)
+    assert frame.scan is not None
+    assert frame.selected_model is not None
+    frame.scan = replace(frame.scan, source_kind="rpf")
+    frame._load_authoring_fields(frame.selected_model)
+    assert frame.axles_panel._editable is True
+    assert "sidecar configuration" in frame.authoring_status.get()
+    configuration = detect_axle_configuration(
+        "runtimecar",
+        (
+            SimpleNamespace(name="wheel_lf", position=(-1.0, 2.0, 0.0)),
+            SimpleNamespace(name="wheel_rf", position=(1.0, 2.0, 0.0)),
+            SimpleNamespace(name="wheel_lr", position=(-1.0, -2.0, 0.0)),
+            SimpleNamespace(name="wheel_rr", position=(1.0, -2.0, 0.0)),
+        ),
+    )
+
+    frame._apply_axle_configuration(configuration)
+
+    assert frame._session_axle_configurations["runtimecar"] == configuration
+    assert "RPF was not modified" in frame.status.get()
+    assert "Save axle config" in frame.axles_panel.status.get()
+    assert frame._loaded_editor_snapshot == frame._editor_snapshot()
     frame.destroy()
 
 

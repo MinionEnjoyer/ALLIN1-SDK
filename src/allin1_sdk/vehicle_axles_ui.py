@@ -25,6 +25,8 @@ from allin1_sdk.axle_configurator import (
     EXPORT_FIVEM_RUNTIME,
     EXPORT_STOCK_METADATA,
     PRESET_CUSTOM,
+    PRESET_FRONT_STEER,
+    PRESET_STEER_DRIVE_REAR,
     STEERING_COMMAND_POLARITY_INVERTED,
     STEERING_COMMAND_POLARITY_NORMAL,
     STEERING_POLARITY_SCHEMA_VERSION,
@@ -178,6 +180,63 @@ def _edit_axle_controls(
     return replace(config, preset=PRESET_CUSTOM, axles=tuple(rows)), False
 
 
+def _physical_pairs(config: AxleConfiguration) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (item.left_bone, item.right_bone)
+        for item in sorted(config.axles, key=lambda value: value.physical_order)
+    )
+
+
+def _has_unreviewed_physical_layout(config: AxleConfiguration) -> bool:
+    """Return whether detected wheel positions disagree with canonical roles."""
+
+    if config.intentional_layout_override is not None:
+        return False
+    canonical = _physical_pairs(clear_intentional_layout_override(config))
+    return _physical_pairs(config) != canonical
+
+
+def _guided_physical_layout_configuration(
+    config: AxleConfiguration,
+    bones: Iterable[NativeModelBone],
+) -> tuple[AxleConfiguration, SteeringGeometrySolution]:
+    """Build the safe one-click draft for a spatially remapped skeleton.
+
+    Three-axle visual-instancing layouts receive the common steer/drive/
+    counter-steer behavior. Other supported layouts receive ordinary physical
+    front steering. In both cases, signed geometry is calculated only after
+    the exact physical order has been fingerprinted.
+    """
+
+    bone_rows = tuple(bones)
+    if not _has_unreviewed_physical_layout(config):
+        raise ValueError("The detected skeleton does not require a physical-order override")
+    remapped = apply_intentional_layout_override(
+        config,
+        bone_rows,
+        physical_bone_pairs=_physical_pairs(config),
+        reason=(
+            "Workbench-guided physical order for intentional GTA wheel-mesh "
+            "family instancing"
+        ),
+    )
+    behavior = (
+        PRESET_STEER_DRIVE_REAR
+        if len(remapped.axles) == 3 else PRESET_FRONT_STEER
+    )
+    remapped = replace(
+        apply_axle_preset(remapped, behavior),
+        export_mode=EXPORT_FIVEM_RUNTIME,
+    )
+    solution = solve_automatic_steering_geometry(remapped, bone_rows)
+    configured = replace(
+        apply_steering_geometry_to_configuration(remapped, solution),
+        preset=behavior,
+        export_mode=EXPORT_FIVEM_RUNTIME,
+    )
+    return configured, solution
+
+
 class _PhysicalAxleOrderDialog(simpledialog.Dialog):
     """Small, explicit front-to-rear ordering editor for unusual skeletons."""
 
@@ -291,6 +350,7 @@ class VehicleAxlesPanel(ttk.Frame):
         self._prefab_ids: dict[str, str] = {}
         self._visual_ids: dict[str, str] = {}
         self._prefab_catalog = None
+        self._finding_messages: dict[str, str] = {}
         self._wrap_labels: list[ttk.Label] = []
         self._action_layout: str | None = None
         self._filter_values = {
@@ -389,6 +449,36 @@ class VehicleAxlesPanel(ttk.Frame):
             command=self._set_physical_axle_order,
         )
         self.order_button.pack(side="left", padx=(5, 0))
+        self.config_menu = tk.Menu(preset_actions, tearoff=False)
+        self.config_menu.add_command(
+            label="Load axle config…", command=self._import_configuration,
+        )
+        self.config_menu.add_command(
+            label="Save axle config…", command=self._save_configuration,
+        )
+        self.config_button = ttk.Menubutton(
+            preset_actions, text="Config ▾", menu=self.config_menu,
+        )
+        self.config_button.pack(side="left", padx=(5, 0))
+
+        self.guided_setup = ttk.Frame(setup, padding=(6, 5))
+        self.guided_setup.grid(
+            row=5, column=0, columnspan=2, sticky="ew", pady=(7, 0),
+        )
+        self.guided_setup.columnconfigure(0, weight=1)
+        self.guided_setup_text = tk.StringVar()
+        guided_label = ttk.Label(
+            self.guided_setup, textvariable=self.guided_setup_text,
+            foreground="#246b43", wraplength=350, justify="left",
+        )
+        guided_label.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self._wrap_labels.append(guided_label)
+        self.guided_setup_button = ttk.Button(
+            self.guided_setup, text="Set up detected layout",
+            command=self._configure_detected_layout,
+        )
+        self.guided_setup_button.grid(row=0, column=1, sticky="e")
+        self.guided_setup.grid_remove()
 
         prefab_frame = ttk.LabelFrame(body, text="2 · Prefab library", padding=7)
         prefab_frame.pack(fill="x", pady=(7, 0))
@@ -592,6 +682,20 @@ class VehicleAxlesPanel(ttk.Frame):
         self.finding_tree.grid(row=0, column=0, sticky="nsew")
         finding_scroll.grid(row=0, column=1, sticky="ns")
         findings.columnconfigure(0, weight=1)
+        self.finding_detail = tk.StringVar(
+            value="Validation details appear here when an issue is selected.",
+        )
+        finding_detail_label = ttk.Label(
+            findings, textvariable=self.finding_detail, foreground="#52635c",
+            wraplength=400, justify="left",
+        )
+        finding_detail_label.grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0),
+        )
+        self._wrap_labels.append(finding_detail_label)
+        self.finding_tree.bind(
+            "<<TreeviewSelect>>", self._show_selected_finding,
+        )
 
         ttk.Separator(self).grid(row=1, column=0, sticky="ew", pady=(3, 0))
         self.footer = ttk.Frame(self)
@@ -904,6 +1008,7 @@ class VehicleAxlesPanel(ttk.Frame):
         asset_names: Iterable[str] = (),
         handling_flags: int | None = None,
         drive_bias_front: float | None = None,
+        target: str | None = None,
     ) -> None:
         self._model = model
         self._bones = tuple(bones)
@@ -913,6 +1018,8 @@ class VehicleAxlesPanel(ttk.Frame):
         self._editable = editable
         self._draft = config
         self._steering_solution = None
+        if target in TARGET_LABELS:
+            self.target.set(TARGET_LABELS[target])
         if config is not None:
             enabled_targets = [
                 target for target, enabled in config.compatibility if enabled
@@ -947,6 +1054,11 @@ class VehicleAxlesPanel(ttk.Frame):
         self._steering_solution = None
         self.tree.delete(*self.tree.get_children())
         self.finding_tree.delete(*self.finding_tree.get_children())
+        self._finding_messages.clear()
+        self.finding_detail.set(
+            "Validation details appear here when an issue is selected."
+        )
+        self.guided_setup.grid_remove()
         self.geometry_summary.set(
             "Uses wheel-bone Y only; tyre appearance stays independent."
         )
@@ -964,6 +1076,163 @@ class VehicleAxlesPanel(ttk.Frame):
 
     def _target_key(self) -> str:
         return TARGET_KEYS.get(self.target.get(), "story-legacy")
+
+    def _load_configuration_path(self, path: str | Path) -> AxleConfiguration:
+        source = Path(path).expanduser().resolve(strict=True)
+        try:
+            payload = json.loads(source.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Axle configuration could not be read: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("Axle configuration root must be an object")
+        try:
+            from allin1_sdk.axle_prefabs import load_prefab_axle_configuration
+
+            configuration = load_prefab_axle_configuration(payload)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Axle configuration is invalid: {exc}") from exc
+        if configuration.vehicle_model != self._model.casefold():
+            raise ValueError(
+                "Axle configuration belongs to "
+                f"'{configuration.vehicle_model}', not '{self._model}'."
+            )
+        return configuration
+
+    def _import_configuration(self) -> None:
+        if not self._model or not self._editable:
+            return
+        selected = filedialog.askopenfilename(
+            parent=self,
+            title=f"Load axle configuration for {self._model}",
+            filetypes=(
+                ("ALLIN1 axle configuration", "*.json"),
+                ("All files", "*.*"),
+            ),
+        )
+        if not selected:
+            return
+        try:
+            configuration = self._load_configuration_path(selected)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror(
+                "Axle configuration could not be loaded", str(exc), parent=self,
+            )
+            return
+        self._draft = configuration
+        self._steering_solution = None
+        self._preview_findings = ()
+        self._preview_blocked = False
+        enabled_targets = [
+            key for key, enabled in configuration.compatibility if enabled
+        ]
+        if len(enabled_targets) == 1 and enabled_targets[0] in TARGET_LABELS:
+            self.target.set(TARGET_LABELS[enabled_targets[0]])
+        self._sync_from_draft()
+        self._set_enabled(True, editable=True)
+        self.status.set(
+            f"Loaded {Path(selected).name}. Review validation, then Apply to "
+            "keep it with this workbench session."
+        )
+
+    def _save_configuration(self) -> None:
+        if self._draft is None:
+            return
+        selected = filedialog.asksaveasfilename(
+            parent=self,
+            title=f"Save axle configuration for {self._draft.vehicle_model}",
+            defaultextension=".json",
+            initialfile=f"{self._draft.vehicle_model}.axles.json",
+            filetypes=(("ALLIN1 axle configuration", "*.json"),),
+        )
+        if not selected:
+            return
+        destination = Path(selected).expanduser().resolve(strict=False)
+        temporary = destination.with_name(f".{destination.name}.tmp")
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(
+                json.dumps(self._draft.to_dict(), indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(destination)
+        except OSError as exc:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            messagebox.showerror(
+                "Axle configuration could not be saved", str(exc), parent=self,
+            )
+            return
+        self.status.set(f"Saved axle configuration: {destination}")
+
+    def _configure_detected_layout(self) -> None:
+        if self._draft is None or not self._bones or not self._editable:
+            return
+        try:
+            proposed, solution = _guided_physical_layout_configuration(
+                self._draft, self._bones,
+            )
+        except (SteeringGeometryError, TypeError, ValueError) as exc:
+            messagebox.showerror(
+                "Detected layout could not be configured", str(exc), parent=self,
+            )
+            return
+        self._draft = proposed
+        self._steering_solution = solution
+        self._preview_findings = ()
+        self._preview_blocked = False
+        self.preset.set(proposed.preset)
+        self.export_mode.set("Selective runtime")
+        if len(proposed.axles) == 3:
+            label = next((
+                name for name, prefab_id in self._prefab_ids.items()
+                if prefab_id == "6x2_rear_steer_bus"
+            ), None)
+            if label is not None:
+                self.prefab.set(label)
+                self._show_prefab_details()
+        self._sync_from_draft()
+        self._set_enabled(True, editable=True)
+        self.status.set(
+            "Detected physical order configured with selective runtime and "
+            "geometry-derived steering. Test direction in game; use Steering "
+            "polarity only if the complete steering command is reversed."
+        )
+
+    def _update_guided_setup(self) -> None:
+        available = (
+            self._draft is not None
+            and bool(self._bones)
+            and _has_unreviewed_physical_layout(self._draft)
+        )
+        if available:
+            pairs = " → ".join(
+                f"{left.removeprefix('wheel_')}/{right.removeprefix('wheel_')}"
+                for left, right in _physical_pairs(self._draft)
+            )
+            behavior = (
+                "steer → drive → counter-steer"
+                if len(self._draft.axles) == 3 else "physical-front steering"
+            )
+            self.guided_setup_text.set(
+                f"Detected nonstandard physical order: {pairs}. Configure the "
+                f"reviewed override, selective runtime, and {behavior} in one step."
+            )
+            self.guided_setup.grid()
+        else:
+            self.guided_setup.grid_remove()
+        self.guided_setup_button.configure(
+            state="normal" if available and self._editable else "disabled",
+        )
+
+    def _show_selected_finding(self, _event=None) -> None:
+        selected = self.finding_tree.selection()
+        if not selected:
+            return
+        self.finding_detail.set(
+            self._finding_messages.get(selected[0], "Validation detail unavailable."),
+        )
 
     def _set_enabled(self, available: bool, *, editable: bool = False) -> None:
         state = "normal" if available and editable else "disabled"
@@ -1010,6 +1279,18 @@ class VehicleAxlesPanel(ttk.Frame):
         )
         self.more_menu.entryconfigure("Export…", state="disabled")
         self.more_button.configure(state=history_state)
+        self.config_button.configure(
+            state="normal" if available and editable else "disabled",
+        )
+        self.config_menu.entryconfigure(
+            "Load axle config…",
+            state="normal" if self._model and editable else "disabled",
+        )
+        self.config_menu.entryconfigure(
+            "Save axle config…",
+            state="normal" if available else "disabled",
+        )
+        self._update_guided_setup()
         if available and self._draft is not None:
             self._validate()
 
@@ -1102,9 +1383,8 @@ class VehicleAxlesPanel(ttk.Frame):
             and self._draft.intentional_layout_override is not None
         ):
             return
-        canonical = tuple(
-            (axle.left_bone, axle.right_bone)
-            for axle in sorted(self._draft.axles, key=lambda item: item.left_runtime_index)
+        canonical = _physical_pairs(
+            clear_intentional_layout_override(self._draft)
         )
         try:
             if selected == canonical:
@@ -1400,6 +1680,7 @@ class VehicleAxlesPanel(ttk.Frame):
             self.geometry_summary.set(
                 self.geometry_summary.get() + " · custom physical order"
             )
+        self._update_guided_setup()
         if self._draft.axles:
             axle_choices = (
                 "All applicable",
@@ -1416,6 +1697,7 @@ class VehicleAxlesPanel(ttk.Frame):
 
     def _validate(self) -> None:
         self.finding_tree.delete(*self.finding_tree.get_children())
+        self._finding_messages.clear()
         if self._draft is None:
             return
         findings = list(validate_axle_configuration(
@@ -1461,8 +1743,11 @@ class VehicleAxlesPanel(ttk.Frame):
             if (item.severity, item.code, item.message) not in existing
         )
         for index, finding in enumerate(findings):
+            item_id = f"finding-{index}"
+            detail = f"{finding.severity.title()}: {finding.message}"
+            self._finding_messages[item_id] = detail
             self.finding_tree.insert(
-                "", "end", iid=f"finding-{index}",
+                "", "end", iid=item_id,
                 values=(finding.severity.title(), finding.message),
             )
         errors = sum(item.severity == "error" for item in findings)
@@ -1470,10 +1755,28 @@ class VehicleAxlesPanel(ttk.Frame):
         runtime = "authoring only; target runtime unavailable" if deployment_blocked else "runtime required" if any(
             item.code.endswith("runtime_required") for item in findings
         ) else "stock-compatible pattern"
-        self.status.set(
+        summary = (
             f"{len(self._draft.axles)} axle pairs · {errors} errors · "
             f"{warnings} warnings · {runtime}."
         )
+        first_error = next(
+            (item for item in findings if item.severity == "error"), None,
+        )
+        self.status.set(
+            summary
+            + (f" First error: {first_error.message}" if first_error else "")
+        )
+        first_finding = next((
+            f"finding-{index}" for index, item in enumerate(findings)
+            if item.severity == "error"
+        ), "finding-0" if findings else "")
+        if first_finding:
+            self.finding_tree.selection_set(first_finding)
+            self.finding_tree.focus(first_finding)
+            self.finding_tree.see(first_finding)
+            self.finding_detail.set(self._finding_messages[first_finding])
+        else:
+            self.finding_detail.set("No validation findings for this axle draft.")
         self.apply_button.configure(
             state=(
                 "normal"

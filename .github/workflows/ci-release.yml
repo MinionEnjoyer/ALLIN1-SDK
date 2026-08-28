@@ -67,6 +67,7 @@ jobs:
           python -m PyInstaller --noconfirm --clean --windowed --onedir --name ALLIN1-SDK-Desktop --icon "${{ github.workspace }}/assets/favicon.ico" --add-data "${{ github.workspace }}/assets;assets" --distpath build/app --workpath build/pyinstaller --specpath build src/allin1_sdk/app.py
           python -m PyInstaller --noconfirm --clean --console --onefile --name allin1-sdk --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK-Desktop --workpath build/pyinstaller-cli --specpath build src/allin1_sdk/console_entry.py
           python -m PyInstaller --noconfirm --clean --console --onefile --name ALLIN1-SDK-Agent --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK-Desktop --workpath build/pyinstaller-agent --specpath build src/allin1_sdk/agent_host.py
+          python -m PyInstaller --noconfirm --clean --windowed --onefile --name ALLIN1-SDK-Updater --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK-Desktop --workpath build/pyinstaller-updater --specpath build src/allin1_sdk/updater_host.py
 
       - name: Smoke test frozen console entry point
         shell: pwsh
@@ -142,6 +143,7 @@ jobs:
           python -m PyInstaller --noconfirm --clean --windowed --onedir --name ALLIN1-SDK-Desktop --icon "${{ github.workspace }}/assets/favicon.ico" --add-data "${{ github.workspace }}/assets;assets" --distpath build/app --workpath build/pyinstaller --specpath build src/allin1_sdk/app.py
           python -m PyInstaller --noconfirm --clean --console --onefile --name allin1-sdk --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK-Desktop --workpath build/pyinstaller-cli --specpath build src/allin1_sdk/console_entry.py
           python -m PyInstaller --noconfirm --clean --console --onefile --name ALLIN1-SDK-Agent --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK-Desktop --workpath build/pyinstaller-agent --specpath build src/allin1_sdk/agent_host.py
+          python -m PyInstaller --noconfirm --clean --windowed --onefile --name ALLIN1-SDK-Updater --icon "${{ github.workspace }}/assets/favicon.ico" --distpath build/app/ALLIN1-SDK-Desktop --workpath build/pyinstaller-updater --specpath build src/allin1_sdk/updater_host.py
 
       - name: Smoke test frozen console entry point
         shell: pwsh

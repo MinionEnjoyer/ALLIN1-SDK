@@ -140,6 +140,7 @@ def _copy_authoring_resources(root: Path, app_dir: Path) -> None:
 def _copy_runtime(root: Path, app_dir: Path, rpf_dir: Path) -> None:
     for name in (
         "ALLIN1-SDK-Desktop.exe", "allin1-sdk.exe", "ALLIN1-SDK-Agent.exe",
+        "ALLIN1-SDK-Updater.exe",
     ):
         executable = app_dir / name
         signature = b""
@@ -178,6 +179,7 @@ def package_release(
         "entrypoint": "ALLIN1-SDK-Desktop.exe",
         "cli_entrypoint": "allin1-sdk.exe",
         "agent_entrypoint": "ALLIN1-SDK-Agent.exe",
+        "updater_entrypoint": "ALLIN1-SDK-Updater.exe",
     }
     (app_dir / "release.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"

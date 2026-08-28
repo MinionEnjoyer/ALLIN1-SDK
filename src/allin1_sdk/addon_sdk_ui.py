@@ -33,6 +33,13 @@ from allin1_sdk.ui_foundation import (
     BODY_BACKGROUND,
     BRAND_DEEP_GREEN,
     SURFACE_BACKGROUND,
+    THEME_DARK,
+    THEME_LIGHT,
+    THEME_SYSTEM,
+    apply_native_widget_theme,
+    apply_sdk_theme,
+    current_effective_theme,
+    current_theme_mode,
     place_window,
     shell_status_presentation,
 )
@@ -104,6 +111,7 @@ class AddonSdkDialog(tk.Toplevel):
         self._logo_photo: ImageTk.PhotoImage | None = None
         self._navigation_history: list[str] = []
         self.sidebar_visible = tk.BooleanVar(self, value=True)
+        self.theme_mode = tk.StringVar(self, value=current_theme_mode(self))
         self.title("ALLIN1 SDK — Developer Workspace")
         self.configure(background=BODY_BACKGROUND)
         place_window(self, preferred=(1320, 840), minimum=(980, 640))
@@ -111,6 +119,9 @@ class AddonSdkDialog(tk.Toplevel):
             self.transient(parent)
         apply_sdk_window_icon(self, self.project_root)
         self._build()
+        # Classic Tk header/menu widgets retain explicit legacy colors. Apply
+        # the startup palette before the window is presented to the user.
+        apply_sdk_theme(self, self.theme_mode.get())
         self._load_examples()
 
     def _package_inspector(self) -> AddonPackageInspector:
@@ -165,8 +176,21 @@ class AddonSdkDialog(tk.Toplevel):
         # the menu entry. Reassert the declared default after registration so
         # the first window is deterministic across themes/platform builds.
         self.sidebar_visible.set(True)
+        view.add_separator()
+        theme = tk.Menu(view, tearoff=False)
+        for label, value in (
+            ("Light", THEME_LIGHT),
+            ("Dark", THEME_DARK),
+            ("System", THEME_SYSTEM),
+        ):
+            theme.add_radiobutton(
+                label=label, variable=self.theme_mode, value=value,
+                command=self._set_theme_mode,
+            )
+        view.add_cascade(label="Theme", menu=theme)
         menu.add_cascade(label="View", menu=view)
         self.view_menu = view
+        self.theme_menu = theme
         tools = tk.Menu(menu, tearoff=False)
         tools.add_command(
             label="Focus / expand SDK Console", accelerator="Ctrl+`",
@@ -187,6 +211,11 @@ class AddonSdkDialog(tk.Toplevel):
         help_menu.add_command(
             label="Keyboard shortcuts",
             command=lambda: self._open_help("input"),
+        )
+        help_menu.add_separator()
+        help_menu.add_command(
+            label="Check for updates…",
+            command=self._open_updater,
         )
         menu.add_cascade(label="Help", menu=help_menu)
         self.help_menu = help_menu
@@ -351,6 +380,29 @@ class AddonSdkDialog(tk.Toplevel):
             "recipes": "package-recipes", "help": "input",
         }.get(getattr(self, "current_workspace", "linker"), "sdk")
         self._open_help(topic)
+
+    def _open_updater(self) -> None:
+        from allin1_sdk.update_ui import SdkUpdateDialog
+
+        existing = getattr(self, "update_dialog", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
+        self.update_dialog = SdkUpdateDialog(
+            self, close_sdk=self._close_for_update,
+        )
+
+    def _close_for_update(self) -> bool:
+        """Honor active-work guards, then let the detached updater take over."""
+        parent = self.master
+        if not self.request_close():
+            return False
+        # The updater is scheduled immediately after this returns. Give that
+        # call a short window before ending the hidden Tk root/main loop.
+        if parent is not None:
+            parent.after(150, parent.destroy)
+        return True
 
     def request_close(self) -> bool:
         """Close the SDK only when guarded authoring work is no longer active."""
@@ -555,6 +607,19 @@ class AddonSdkDialog(tk.Toplevel):
     def _toggle_sidebar(self, _event: object | None = None) -> str:
         return self._set_sidebar_visible(not self.sidebar_visible.get())
 
+    def _set_theme_mode(self) -> None:
+        """Apply and persist the shared Launcher/SDK appearance preference."""
+
+        try:
+            apply_sdk_theme(self, self.theme_mode.get(), persist=True)
+        except OSError as exc:
+            messagebox.showerror(
+                "Could not save theme",
+                f"The SDK could not update the shared appearance setting:\n{exc}",
+                parent=self,
+            )
+            self.theme_mode.set(current_theme_mode(self))
+
     def _sync_status_presentation(self, *_args: object) -> None:
         """Keep routine progress and errors visible without another popup."""
 
@@ -652,6 +717,7 @@ class AddonSdkDialog(tk.Toplevel):
             return None
         if not workspace.winfo_manager():
             workspace.pack(fill="both", expand=True)
+        apply_native_widget_theme(workspace, current_effective_theme(self))
         self._workspace_instances[key] = workspace
         return workspace
 

@@ -35,7 +35,8 @@ def test_navigation_help_matches_the_unified_shell_shortcuts():
     assert "Ctrl+I" in topic.body
     assert "Alt+Left" in topic.body
     assert "Ctrl+Tab" in topic.body
-    assert "white product header" in topic.body
+    assert "product header" in topic.body
+    assert "white product header" not in topic.body
     assert "activity strip" in topic.body
     assert "Ctrl+O" in topic.body
     assert "F5" in topic.body

@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from allin1_sdk.axle_configurator import AxleConfiguration, EXPORT_FIVEM_RUNTIME
+from allin1_sdk.axle_configurator import (
+    AxleConfiguration,
+    EXPORT_FIVEM_RUNTIME,
+    apply_intentional_layout_override,
+    detect_axle_configuration,
+)
 from allin1_sdk.axle_steering_geometry import (
     apply_steering_geometry_to_configuration,
     solve_automatic_steering_geometry,
@@ -54,6 +59,19 @@ def bones(count: int, *, reversed_order: bool = False) -> tuple[Bone, ...]:
         Bone(name, (x, positions[index], 0.0))
         for index, pair in enumerate(pairs)
         for name, x in ((pair[0], -1.25), (pair[1], 1.25))
+    )
+
+
+def remapped_bus_bones() -> tuple[Bone, ...]:
+    """Actual shared-wheel layout: middle bones are physically at the front."""
+
+    return (
+        Bone("wheel_lm1", (-1.25, 8.0, 0.0)),
+        Bone("wheel_rm1", (1.25, 8.0, 0.0)),
+        Bone("wheel_lf", (-1.25, 2.0, 0.0)),
+        Bone("wheel_rf", (1.25, 2.0, 0.0)),
+        Bone("wheel_lr", (-1.25, -4.0, 0.0)),
+        Bone("wheel_rr", (1.25, -4.0, 0.0)),
     )
 
 
@@ -128,6 +146,49 @@ def test_behavior_prefab_preserves_stronger_runtime_floor(catalog):
     )
 
     assert preview.proposed.minimum_runtime_version == "3.1.0"
+
+
+def test_behavior_prefab_preserves_reviewed_noncanonical_physical_order(catalog):
+    wheel_bones = remapped_bus_bones()
+    detected = detect_axle_configuration("remapped_bus", wheel_bones)
+    reviewed = apply_intentional_layout_override(
+        detected,
+        wheel_bones,
+        physical_bone_pairs=(
+            ("wheel_lm1", "wheel_rm1"),
+            ("wheel_lf", "wheel_rf"),
+            ("wheel_lr", "wheel_rr"),
+        ),
+        reason="Regression fixture for shared middle/rear wheel instancing",
+    )
+
+    preview = apply_prefab(
+        "6x2_rear_steer_bus",
+        "remapped_bus",
+        wheel_bones,
+        "fivem-legacy",
+        EXPORT_FIVEM_RUNTIME,
+        base_config=reviewed,
+        catalog=catalog,
+    )
+
+    assert [
+        (item.left_bone, item.right_bone) for item in preview.proposed.axles
+    ] == [
+        ("wheel_lm1", "wheel_rm1"),
+        ("wheel_lf", "wheel_rf"),
+        ("wheel_lr", "wheel_rr"),
+    ]
+    assert preview.proposed.intentional_layout_override == (
+        reviewed.intentional_layout_override
+    )
+    assert [(item.steered, item.powered) for item in preview.proposed.axles] == [
+        (True, False), (False, True), (True, False),
+    ]
+    assert not [
+        item for item in preview.findings
+        if item.severity == "error" and item.code == "physical_order"
+    ]
 
 
 def test_visual_catalog_is_complete(tyres):

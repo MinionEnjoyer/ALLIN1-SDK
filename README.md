@@ -12,7 +12,7 @@ make weapons, vehicles, archives, and other add-ons work coherently.
 ALLIN1 SDK supports GTA V Legacy and GTA V Enhanced. Its inspection and planning
 workflows are designed for Story Mode mod development.
 
-> **Current public release:** **0.5.9**. Install it from ALLIN1 Launcher or
+> **Current public release:** **0.6.0**. Install it from ALLIN1 Launcher or
 > download the self-contained Windows package from
 > [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases).
 
@@ -20,6 +20,22 @@ workflows are designed for Story Mode mod development.
 
 If ALLIN1 Launcher and SDK are useful to you, project support is available through
 [Buy Me a Coffee](https://buymeacoffee.com/minionenjoyer).
+
+## What's new in 0.6.0
+
+- **Built-in updates** let packaged SDK installations check GitHub Releases,
+  verify the external archive checksum and complete internal file manifest,
+  stage a replacement with rollback protection, and reopen the updated SDK.
+- **Light, Dark, and System themes** are shared throughout the persistent SDK
+  shell, workbenches, dialogs, menus, and native controls.
+- **A guided axle happy path** recognizes reviewed nonstandard wheel-family
+  layouts, preserves physical ordering, and offers one focused setup action
+  before signed steering geometry is calculated and validated.
+- Axle configurations can be loaded and saved directly from the Workbench, and
+  validation findings expose readable detail without forcing another window.
+- Packaged releases now include a dedicated updater host alongside the desktop,
+  CLI, Agent API, and RPF tooling; the first updater-enabled SDK must still be
+  installed once through ALLIN1 Launcher or from its release archive.
 
 ## What's new in 0.5.9
 
@@ -457,7 +473,8 @@ submodule, and RPF helper.
 
 - Windows 10 or Windows 11 for the self-contained desktop release.
 - GTA V Legacy or GTA V Enhanced when inspecting installed game content.
-- ALLIN1 Launcher 0.5.0 or newer for managed install, update, repair, and removal.
+- ALLIN1 Launcher 0.5.0 or newer is optional for managed installation, repair,
+  and removal. Packaged SDK builds can check for and install their own updates.
 - Python 3.10 or newer only when running the SDK from source.
 - .NET 8 SDK only when rebuilding `RpfPatcher` from source.
 
@@ -487,6 +504,12 @@ Download `ALLIN1-SDK-<version>-win-x64.zip` and its matching `.sha256` file from
 [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases). Verify
 the checksum, extract the archive to a fresh directory, and run
 `ALLIN1-SDK-Desktop.exe`.
+
+After the first updater-enabled release is installed, use **Help → Check for
+updates** inside the SDK. The SDK verifies the public release tag, archive
+checksum, internal checksum manifest, product identity, and Windows entrypoints;
+it stages the new build beside the current installation, closes cleanly, swaps
+the directories with rollback protection, and reopens the updated SDK.
 
 ## Desktop SDK
 

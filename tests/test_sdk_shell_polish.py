@@ -76,6 +76,8 @@ def test_sdk_shell_uses_unified_header_navigation_and_action_hierarchy(
         assert "Inspect & Export" in _menu_labels(dialog.package_menu)
         assert "Authoring & Utilities" in _menu_labels(dialog.package_menu)
         assert "Keyboard shortcuts" in _menu_labels(dialog.help_menu)
+        assert "Theme" in _menu_labels(dialog.view_menu)
+        assert _menu_labels(dialog.theme_menu) == ["Light", "Dark", "System"]
         assert dialog.bind("<Control-o>")
         assert dialog.bind("<F5>")
         assert dialog.refresh_audit_button.winfo_manager() == ""
@@ -93,6 +95,28 @@ def test_sdk_shell_uses_unified_header_navigation_and_action_hierarchy(
         dialog.update()
         assert dialog.workspace_context.get() == "Help Center"
         assert dialog.context_back_button.cget("text") == "‹ Package Linker"
+    finally:
+        dialog.destroy()
+
+
+def test_sdk_shell_theme_menu_applies_and_persists_shared_mode(
+    tmp_path, monkeypatch, tk_root,
+):
+    monkeypatch.setattr(sdk_ui, "user_data_root", lambda: tmp_path / "state")
+    monkeypatch.setattr(
+        sdk_ui.AddonSdkDialog, "_load_examples",
+        lambda self: self.status.set("SDK shell ready"),
+    )
+    dialog = sdk_ui.AddonSdkDialog(tk_root, ROOT, standalone=True)
+    applied = []
+    monkeypatch.setattr(
+        sdk_ui, "apply_sdk_theme",
+        lambda widget, mode, **options: applied.append((widget, mode, options)),
+    )
+    try:
+        dialog.theme_mode.set("dark")
+        dialog._set_theme_mode()
+        assert applied == [(dialog, "dark", {"persist": True})]
     finally:
         dialog.destroy()
 
