@@ -23,13 +23,13 @@ $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Compo
 if (-not $install -or -not (Test-Path -LiteralPath $install)) {
     throw 'A supported Visual Studio C++ x64 toolchain was not found.'
 }
-if ($install -notmatch '[\\/](2019|2022|2026)[\\/]') {
-    throw "Could not identify the Visual Studio product year from $install."
+if ($install -notmatch '[\\/](16|17|18|2019|2022|2026)[\\/]') {
+    throw "Could not identify the Visual Studio product version from $install."
 }
 $generator = switch ($Matches[1]) {
-    '2019' { 'Visual Studio 16 2019' }
-    '2022' { 'Visual Studio 17 2022' }
-    '2026' { 'Visual Studio 18 2026' }
+    { $_ -in '16','2019' } { 'Visual Studio 16 2019'; break }
+    { $_ -in '17','2022' } { 'Visual Studio 17 2022'; break }
+    { $_ -in '18','2026' } { 'Visual Studio 18 2026'; break }
 }
 
 cmake -S $source -B $build -G $generator -A x64 `

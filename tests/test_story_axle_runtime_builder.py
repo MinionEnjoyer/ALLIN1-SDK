@@ -78,13 +78,19 @@ def _toolchain() -> builder.NativeAxleToolchainReport:
 
 
 def test_visual_studio_product_year_selects_matching_cmake_generator() -> None:
-    for year, expected in (
+    for year_or_major, expected in (
+        ("16", "Visual Studio 16 2019"),
+        ("17", "Visual Studio 17 2022"),
+        ("18", "Visual Studio 18 2026"),
         ("2019", "Visual Studio 16 2019"),
         ("2022", "Visual Studio 17 2022"),
         ("2026", "Visual Studio 18 2026"),
     ):
         generator, problem = builder._visual_studio_cmake_generator(
-            Path(f"C:/Program Files/Microsoft Visual Studio/{year}/BuildTools"),
+            Path(
+                f"C:/Program Files/Microsoft Visual Studio/"
+                f"{year_or_major}/BuildTools"
+            ),
         )
         assert generator == expected
         assert problem is None

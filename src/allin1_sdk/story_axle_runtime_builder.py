@@ -204,20 +204,23 @@ def _visual_studio_installation() -> tuple[Path | None, str | None]:
         return None, f"Visual Studio Build Tools discovery failed: {exc}"
     raw_path = completed.stdout.strip() if completed.returncode == 0 else ""
     if not raw_path or "\n" in raw_path or "\r" in raw_path:
-        return None, "Visual Studio 2022 C++ x64 Build Tools are not installed"
+        return None, "A supported Visual Studio C++ x64 toolchain is not installed"
     path = Path(raw_path)
     if not path.is_dir():
-        return None, "Visual Studio 2022 C++ x64 Build Tools are not installed"
+        return None, "A supported Visual Studio C++ x64 toolchain is not installed"
     return path.resolve(), None
 
 
 def _visual_studio_cmake_generator(installation: Path) -> tuple[str | None, str | None]:
-    """Map supported Visual Studio product years to CMake generators."""
+    """Map supported Visual Studio product years or major folders to CMake."""
 
-    match = re.search(r"[\\/](2019|2022|2026)[\\/]", str(installation))
+    match = re.search(r"[\\/](16|17|18|2019|2022|2026)[\\/]", str(installation))
     if match is None:
-        return None, "Visual Studio product year could not be identified"
+        return None, "Visual Studio product version could not be identified"
     generators = {
+        "16": "Visual Studio 16 2019",
+        "17": "Visual Studio 17 2022",
+        "18": "Visual Studio 18 2026",
         "2019": "Visual Studio 16 2019",
         "2022": "Visual Studio 17 2022",
         "2026": "Visual Studio 18 2026",
