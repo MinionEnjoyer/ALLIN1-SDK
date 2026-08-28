@@ -47,7 +47,7 @@ def test_frozen_workbench_launcher_targets_packaged_desktop_sibling(tmp_path, mo
     launched = []
     scan = SimpleNamespace(
         vehicles=(object(),), weapons=(), weapon_enhancements=(),
-        scripted_weapon_systems=(), peds=(),
+        scripted_weapon_systems=(), peds=(), workbench_entries=(),
     )
 
     monkeypatch.setattr(cli.sys, "frozen", True, raising=False)
@@ -66,7 +66,7 @@ def test_frozen_workbench_launcher_targets_packaged_desktop_sibling(tmp_path, mo
 
     pid, counts = cli._open_workbench_window(package, "vehicles")
     assert pid == 4102
-    assert counts == {"vehicles": 1, "weapons": 0, "peds": 0}
+    assert counts == {"vehicles": 1, "weapons": 0, "peds": 0, "maps": 0}
     assert Path(launched[0][0][0]) == desktop.resolve()
     assert launched[0][0][1:] == [
         "--workbench-package", str(package.resolve()),
@@ -283,6 +283,19 @@ def test_desktop_accepts_direct_unified_workbench_arguments(tmp_path):
     assert parsed.workbench_package == package
     assert parsed.workbench_category == "peds"
     assert parsed.rpf_graph is None
+
+
+def test_desktop_accepts_maps_and_direct_map_project_arguments(tmp_path):
+    descriptor = tmp_path / "allin1.map.json"
+    parsed = _launch_arguments(["--map-project", str(descriptor)])
+    assert parsed.map_project == descriptor
+    assert parsed.workbench_package is None
+
+    package = tmp_path / "map.zip"
+    parsed = _launch_arguments([
+        "--workbench-package", str(package), "--workbench-category", "maps",
+    ])
+    assert parsed.workbench_category == "maps"
 
 
 def test_desktop_accepts_direct_model_material_arguments(tmp_path):

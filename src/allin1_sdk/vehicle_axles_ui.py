@@ -8,12 +8,14 @@ authoring operation.
 from __future__ import annotations
 
 import json
+import queue
 import re
+import threading
 import tkinter as tk
 from dataclasses import dataclass, replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 from allin1_sdk.axle_configurator import (
     AXLE_SCHEMA_VERSION,
@@ -56,6 +58,14 @@ from allin1_sdk.axle_steering_geometry import (
     solve_automatic_steering_geometry,
 )
 from allin1_sdk.native_assets import NativeModelBone, NativeModelScene
+from allin1_sdk.story_axle_runtime_builder import (
+    NativeAxleToolchainReport,
+    StoryAxleRuntimeBuildRequest,
+    StoryAxleRuntimeSettings,
+    default_story_axle_runtime_settings,
+    inspect_native_axle_toolchain,
+    portable_runtime_path,
+)
 from allin1_sdk.ui_foundation import BODY_BACKGROUND
 
 
@@ -368,6 +378,10 @@ class VehicleAxlesPanel(ttk.Frame):
             ],
             None,
         ] | None = None,
+        gta_roots: tuple[Path, ...] = (),
+        controller_toolchain_inspector: Callable[
+            [], NativeAxleToolchainReport
+        ] = inspect_native_axle_toolchain,
     ) -> None:
         super().__init__(parent)
         self._on_apply = on_apply
@@ -375,6 +389,10 @@ class VehicleAxlesPanel(ttk.Frame):
         self._on_redo = on_redo
         self._on_export = on_export
         self._on_build_controller = on_build_controller
+        self._gta_roots = tuple(
+            Path(root).expanduser().resolve(strict=False) for root in gta_roots
+        )
+        self._controller_toolchain_inspector = controller_toolchain_inspector
         self._model = ""
         self._bones: tuple[NativeModelBone, ...] = ()
         self._asset_names: tuple[str, ...] = ()
@@ -393,6 +411,14 @@ class VehicleAxlesPanel(ttk.Frame):
         self._wrap_labels: list[ttk.Label] = []
         self._action_layout: str | None = None
         self._controller_build_running = False
+        self._controller_paths_model: str | None = None
+        self._controller_preflight_running = False
+        self._controller_preflight_report: NativeAxleToolchainReport | None = None
+        self._controller_preflight_events: queue.SimpleQueue[
+            tuple[str, object]
+        ] = queue.SimpleQueue()
+        self._controller_preflight_thread: threading.Thread | None = None
+        self._controller_preflight_poll_job: str | None = None
         self._validation_error_count = 0
         self._filter_values = {
             "axle_count": tk.StringVar(value="Any"),
@@ -791,8 +817,26 @@ class VehicleAxlesPanel(ttk.Frame):
                     self.controller_builder, textvariable=variable, width=24,
                 )
             control.grid(row=row, column=1, sticky="ew", padx=(6, 0), pady=2)
+            if label == "Config folder":
+                self.controller_configuration_entry = control
+            elif label == "Log file":
+                self.controller_log_entry = control
             if label == "Output folder":
                 self.controller_output_entry = control
+        self.controller_configuration_button = ttk.Button(
+            self.controller_builder, text="Browse…",
+            command=self._browse_controller_configuration,
+        )
+        self.controller_configuration_button.grid(
+            row=2, column=2, sticky="e", padx=(5, 0), pady=2,
+        )
+        self.controller_log_button = ttk.Button(
+            self.controller_builder, text="Browse…",
+            command=self._browse_controller_log,
+        )
+        self.controller_log_button.grid(
+            row=3, column=2, sticky="e", padx=(5, 0), pady=2,
+        )
         self.controller_output_button = ttk.Button(
             self.controller_builder, text="Browse…",
             command=self._browse_controller_output,
@@ -800,14 +844,84 @@ class VehicleAxlesPanel(ttk.Frame):
         self.controller_output_button.grid(
             row=4, column=2, sticky="e", padx=(5, 0), pady=2,
         )
+
+        preflight = ttk.LabelFrame(
+            self.controller_builder, text="Toolchain readiness", padding=6,
+        )
+        preflight.grid(
+            row=5, column=0, columnspan=3, sticky="ew", pady=(7, 0),
+        )
+        preflight.columnconfigure(0, weight=1)
+        preflight.rowconfigure(1, weight=1)
+        preflight_actions = ttk.Frame(preflight)
+        preflight_actions.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        self.controller_preflight_summary = tk.StringVar(
+            value="Not checked · open this panel or choose Recheck.",
+        )
+        ttk.Label(
+            preflight_actions, textvariable=self.controller_preflight_summary,
+            foreground="#52635c", anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+        self.controller_recheck_button = ttk.Button(
+            preflight_actions, text="Recheck", command=self._start_controller_preflight,
+        )
+        self.controller_recheck_button.pack(side="right", padx=(6, 0))
+        preflight_table = ttk.Frame(preflight)
+        preflight_table.grid(row=1, column=0, sticky="nsew")
+        preflight_table.columnconfigure(0, weight=1)
+        preflight_table.rowconfigure(0, weight=1)
+        self.controller_preflight_tree = ttk.Treeview(
+            preflight_table, columns=("status", "detected"),
+            show="tree headings", height=6, selectmode="browse",
+        )
+        self.controller_preflight_tree.heading("#0", text="Check")
+        self.controller_preflight_tree.heading("status", text="Result")
+        self.controller_preflight_tree.heading("detected", text="Detected")
+        self.controller_preflight_tree.column(
+            "#0", width=105, minwidth=80, stretch=False,
+        )
+        self.controller_preflight_tree.column(
+            "status", width=70, minwidth=62, stretch=False,
+        )
+        self.controller_preflight_tree.column(
+            "detected", width=215, minwidth=120, stretch=True,
+        )
+        preflight_scroll = ttk.Scrollbar(
+            preflight_table, orient="vertical",
+            command=self.controller_preflight_tree.yview,
+        )
+        preflight_xscroll = ttk.Scrollbar(
+            preflight_table, orient="horizontal",
+            command=self.controller_preflight_tree.xview,
+        )
+        self.controller_preflight_tree.configure(
+            yscrollcommand=preflight_scroll.set,
+            xscrollcommand=preflight_xscroll.set,
+        )
+        self.controller_preflight_tree.grid(row=0, column=0, sticky="nsew")
+        preflight_scroll.grid(row=0, column=1, sticky="ns")
+        preflight_xscroll.grid(row=1, column=0, sticky="ew")
+        self.controller_preflight_guidance = tk.StringVar(
+            value=(
+                "Build stays locked until the native source, CMake, CTest, and "
+                "Visual Studio x64 toolchain all pass."
+            ),
+        )
+        preflight_guidance = ttk.Label(
+            preflight, textvariable=self.controller_preflight_guidance,
+            foreground="#52635c", wraplength=400, justify="left",
+        )
+        preflight_guidance.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+        self._wrap_labels.append(preflight_guidance)
+
         controller_actions = ttk.Frame(self.controller_builder)
         controller_actions.grid(
-            row=5, column=0, columnspan=3, sticky="ew", pady=(6, 0),
+            row=6, column=0, columnspan=3, sticky="ew", pady=(6, 0),
         )
         self.controller_build_button = ttk.Button(
             controller_actions, text="Build validated package",
             command=self._build_story_controller,
-            style="Axle.Accent.TButton",
+            style="Axle.Accent.TButton", state="disabled",
         )
         self.controller_build_button.pack(side="left")
         ttk.Button(
@@ -816,8 +930,8 @@ class VehicleAxlesPanel(ttk.Frame):
         ).pack(side="right")
         self.controller_build_status = tk.StringVar(
             value=(
-                "Select Selective runtime behavior, resolve validation findings, "
-                "then build. In-game acceptance remains a separate test."
+                "Run the readiness check, select portable runtime paths, and "
+                "resolve validation findings before building."
             ),
         )
         controller_status = ttk.Label(
@@ -825,9 +939,16 @@ class VehicleAxlesPanel(ttk.Frame):
             foreground="#52635c", wraplength=400, justify="left",
         )
         controller_status.grid(
-            row=6, column=0, columnspan=3, sticky="ew", pady=(5, 0),
+            row=7, column=0, columnspan=3, sticky="ew", pady=(5, 0),
         )
         self._wrap_labels.append(controller_status)
+        for variable in (
+            self.controller_edition,
+            self.controller_configuration_directory,
+            self.controller_log_file,
+            self.controller_output_directory,
+        ):
+            variable.trace_add("write", self._controller_form_changed)
 
         ttk.Separator(self).grid(row=1, column=0, sticky="ew", pady=(3, 0))
         self.footer = ttk.Frame(self)
@@ -1142,6 +1263,23 @@ class VehicleAxlesPanel(ttk.Frame):
         drive_bias_front: float | None = None,
         target: str | None = None,
     ) -> None:
+        previous_defaults = default_story_axle_runtime_settings(
+            self._controller_paths_model,
+        )
+        selected_defaults = default_story_axle_runtime_settings(model)
+        if (
+            self.controller_configuration_directory.get().strip()
+            == previous_defaults.configuration_directory
+        ):
+            self.controller_configuration_directory.set(
+                selected_defaults.configuration_directory,
+            )
+        if (
+            self.controller_log_file.get().strip()
+            == previous_defaults.log_file
+        ):
+            self.controller_log_file.set(selected_defaults.log_file)
+        self._controller_paths_model = model
         self._model = model
         self._bones = tuple(bones)
         self._asset_names = tuple(asset_names)
@@ -1437,7 +1575,73 @@ class VehicleAxlesPanel(ttk.Frame):
         self.controller_builder.pack(
             fill="x", pady=(7, 0), after=self.findings_section,
         )
+        self._start_controller_preflight()
         self.after_idle(self._editor_content_configured)
+
+    def _controller_initial_location(self, value: str, *, file: bool) -> Path | None:
+        root = next((path for path in self._gta_roots if path.is_dir()), None)
+        if root is None:
+            return None
+        parts = tuple(
+            part for part in value.replace("\\", "/").split("/") if part
+        )
+        candidate = root.joinpath(*parts) if parts else root
+        folder = candidate.parent if file else candidate
+        while folder != root and not folder.is_dir():
+            folder = folder.parent
+        return folder if folder.is_dir() else root
+
+    def _apply_portable_runtime_selection(
+        self, selection: str, variable: tk.StringVar, label: str,
+    ) -> bool:
+        try:
+            portable = portable_runtime_path(
+                Path(selection), self._gta_roots, label,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            roots = "\n".join(f"• {root}" for root in self._gta_roots)
+            messagebox.showerror(
+                f"Invalid {label.casefold()}",
+                f"{exc}\n\nChoose a location inside a configured GTA root."
+                + (f"\n\nConfigured roots:\n{roots}" if roots else "\n\nNo GTA roots are configured."),
+                parent=self,
+            )
+            return False
+        variable.set(portable)
+        return True
+
+    def _browse_controller_configuration(self) -> None:
+        initial = self._controller_initial_location(
+            self.controller_configuration_directory.get(), file=False,
+        )
+        selected = filedialog.askdirectory(
+            parent=self,
+            title="Choose the runtime config folder inside GTA V",
+            initialdir=str(initial) if initial is not None else None,
+            mustexist=True,
+        )
+        if selected:
+            self._apply_portable_runtime_selection(
+                selected, self.controller_configuration_directory,
+                "Configuration directory",
+            )
+
+    def _browse_controller_log(self) -> None:
+        value = self.controller_log_file.get().strip()
+        initial = self._controller_initial_location(value, file=True)
+        initial_name = Path(value.replace("\\", "/")).name or "Axles.log"
+        selected = filedialog.asksaveasfilename(
+            parent=self,
+            title="Choose the runtime log file inside GTA V",
+            initialdir=str(initial) if initial is not None else None,
+            initialfile=initial_name,
+            defaultextension=".log",
+            filetypes=(("Log files", "*.log"), ("All files", "*.*")),
+        )
+        if selected:
+            self._apply_portable_runtime_selection(
+                selected, self.controller_log_file, "Log file",
+            )
 
     def _browse_controller_output(self) -> None:
         selected = filedialog.askdirectory(
@@ -1450,20 +1654,268 @@ class VehicleAxlesPanel(ttk.Frame):
         suggested = self._available_controller_output(self._model).name
         self.controller_output_directory.set(str(Path(selected) / suggested))
 
+    def _controller_form_changed(self, *_args: object) -> None:
+        self._refresh_controller_build_state()
+
+    def _controller_options_error(self) -> str | None:
+        targets = CONTROLLER_EDITION_TARGETS.get(self.controller_edition.get())
+        output = self.controller_output_directory.get().strip()
+        if targets is None:
+            return "Choose Legacy, Enhanced, or both editions."
+        if not output:
+            return "Choose a new output folder outside GTA V."
+        try:
+            StoryAxleRuntimeBuildRequest(
+                output_directory=Path(output),
+                targets=targets,
+                settings=StoryAxleRuntimeSettings(
+                    configuration_directory=(
+                        self.controller_configuration_directory.get().strip()
+                    ),
+                    log_file=self.controller_log_file.get().strip(),
+                ),
+                protected_gta_roots=self._gta_roots,
+            ).validate()
+        except (OSError, TypeError, ValueError) as exc:
+            return str(exc)
+        return None
+
+    @staticmethod
+    def _controller_check_mapping(value: object) -> dict[str, object]:
+        if isinstance(value, Mapping):
+            return dict(value)
+        serializer = getattr(value, "to_dict", None)
+        if callable(serializer):
+            payload = serializer()
+            if isinstance(payload, Mapping):
+                return dict(payload)
+        try:
+            return dict(vars(value))
+        except TypeError:
+            return {}
+
+    def _start_controller_preflight(self) -> None:
+        if self._controller_preflight_running:
+            return
+        self._controller_preflight_running = True
+        self._controller_preflight_report = None
+        self._controller_preflight_events = queue.SimpleQueue()
+        self.controller_preflight_tree.delete(
+            *self.controller_preflight_tree.get_children(),
+        )
+        self.controller_preflight_tree.insert(
+            "", "end", text="Toolchain", values=("CHECKING", "Running complete probe…"),
+        )
+        self.controller_preflight_summary.set("CHECKING · native toolchain preflight")
+        self.controller_preflight_guidance.set(
+            "Checking the bundled source, platform, CMake, CTest, and Visual Studio x64 toolchain."
+        )
+        self.controller_recheck_button.configure(state="disabled")
+        self._refresh_controller_build_state()
+        events = self._controller_preflight_events
+
+        def worker() -> None:
+            try:
+                report = self._controller_toolchain_inspector()
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                events.put(("error", exc))
+            else:
+                events.put(("complete", report))
+
+        self._controller_preflight_thread = threading.Thread(
+            target=worker,
+            name="allin1-story-controller-preflight",
+            daemon=True,
+        )
+        self._controller_preflight_thread.start()
+        self._schedule_controller_preflight_poll()
+
+    def _schedule_controller_preflight_poll(self) -> None:
+        if self._controller_preflight_poll_job is None:
+            self._controller_preflight_poll_job = self.after(
+                40, self._poll_controller_preflight,
+            )
+
+    def _poll_controller_preflight(self) -> None:
+        self._controller_preflight_poll_job = None
+        terminal = False
+        while True:
+            try:
+                kind, value = self._controller_preflight_events.get_nowait()
+            except queue.Empty:
+                break
+            terminal = True
+            if kind == "complete":
+                self._apply_controller_preflight_report(value)
+            else:
+                self._controller_preflight_report = None
+                self.controller_preflight_tree.delete(
+                    *self.controller_preflight_tree.get_children(),
+                )
+                self.controller_preflight_tree.insert(
+                    "", "end", text="Toolchain",
+                    values=("BLOCKED", f"Probe failed: {value}"),
+                )
+                self.controller_preflight_summary.set("BLOCKED · preflight failed")
+                self.controller_preflight_guidance.set(
+                    f"Recheck after repairing the SDK toolchain probe: {value}"
+                )
+        thread = self._controller_preflight_thread
+        if not terminal and thread is not None and thread.is_alive():
+            self._schedule_controller_preflight_poll()
+            return
+        self._controller_preflight_running = False
+        self._controller_preflight_thread = None
+        self.controller_recheck_button.configure(state="normal")
+        self._refresh_controller_build_state()
+
+    def _apply_controller_preflight_report(self, report: object) -> None:
+        self._controller_preflight_report = report  # type: ignore[assignment]
+        serializer = getattr(report, "to_dict", None)
+        payload = serializer() if callable(serializer) else vars(report)
+        if not isinstance(payload, Mapping):
+            payload = {}
+        self.controller_preflight_tree.delete(
+            *self.controller_preflight_tree.get_children(),
+        )
+        raw_checks = payload.get("checks", getattr(report, "checks", ()))
+        checks = raw_checks if isinstance(raw_checks, (list, tuple)) else ()
+        rendered = 0
+        for index, raw in enumerate(checks):
+            check = self._controller_check_mapping(raw)
+            label = str(
+                check.get("label") or check.get("name")
+                or check.get("id") or f"Check {index + 1}"
+            )
+            passed = check.get("passed", check.get("ready"))
+            status = str(check.get("status") or check.get("result") or (
+                "READY" if passed is True else "BLOCKED" if passed is False else "INFO"
+            )).upper()
+            detected_parts: list[str] = []
+            for key in ("version", "detected", "path", "detail", "evidence"):
+                value = check.get(key)
+                if value not in (None, "", (), []):
+                    text = str(value)
+                    if text not in detected_parts:
+                        detected_parts.append(text)
+            self.controller_preflight_tree.insert(
+                "", "end", iid=f"controller-check-{index}", text=label,
+                values=(status, " · ".join(detected_parts) or "—"),
+            )
+            rendered += 1
+        if not rendered:
+            fallback = (
+                (
+                    "Bundled source",
+                    bool(
+                        payload.get("source_root")
+                        and Path(str(payload["source_root"])).is_dir()
+                    ),
+                    payload.get("source_root"),
+                ),
+                ("Platform", payload.get("platform") == "nt", payload.get("platform")),
+                (
+                    "CMake", bool(payload.get("cmake_path") and payload.get("cmake_version")),
+                    " · ".join(str(value) for value in (
+                        payload.get("cmake_version"), payload.get("cmake_path"),
+                    ) if value),
+                ),
+                (
+                    "CTest", bool(payload.get("ctest_path")),
+                    " · ".join(str(value) for value in (
+                        payload.get("ctest_version"), payload.get("ctest_path"),
+                    ) if value),
+                ),
+                (
+                    "Visual Studio", bool(
+                        payload.get("visual_studio_path") and payload.get("cmake_generator")
+                    ),
+                    " · ".join(str(value) for value in (
+                        payload.get("visual_studio_version"),
+                        payload.get("cmake_generator"),
+                        payload.get("visual_studio_path"),
+                    ) if value),
+                ),
+            )
+            for index, (label, passed, detected) in enumerate(fallback):
+                self.controller_preflight_tree.insert(
+                    "", "end", iid=f"controller-check-{index}", text=label,
+                    values=("READY" if passed else "BLOCKED", detected or "Not detected"),
+                )
+        ready = bool(getattr(report, "ready", payload.get("ready", False)))
+        self.controller_preflight_tree.insert(
+            "", "end", text="Overall",
+            values=("READY" if ready else "BLOCKED", "All required checks passed" if ready else "Repair required"),
+        )
+        problems = tuple(getattr(report, "problems", payload.get("problems", ())) or ())
+        guidance = getattr(report, "guidance", payload.get("guidance", ())) or ()
+        if isinstance(guidance, str):
+            guidance_lines = (guidance,)
+        else:
+            guidance_lines = tuple(str(value) for value in guidance)
+        if not guidance_lines:
+            guidance_lines = tuple(str(value) for value in problems)
+        if not guidance_lines and ready:
+            guidance_lines = (
+                "Native build prerequisites are ready. In-game acceptance remains a separate test.",
+            )
+        self.controller_preflight_summary.set(
+            "READY · complete toolchain passed"
+            if ready else f"BLOCKED · {max(1, len(problems))} issue(s)"
+        )
+        self.controller_preflight_guidance.set("\n".join(guidance_lines))
+
     def _refresh_controller_build_state(self) -> None:
+        report = self._controller_preflight_report
+        toolchain_ready = bool(report is not None and report.ready)
+        options_error = self._controller_options_error()
         ready = (
             self._on_build_controller is not None
             and self._draft is not None
             and _native_story_export_ready(self._draft)
             and self._validation_error_count == 0
             and not self._preview_blocked
+            and toolchain_ready
+            and options_error is None
+            and not self._controller_preflight_running
             and not self._controller_build_running
         )
         self.controller_build_button.configure(
             state="normal" if ready else "disabled",
         )
+        if self._controller_build_running:
+            return
+        if self._controller_preflight_running:
+            self.controller_build_status.set(
+                "Build locked while the complete toolchain preflight runs…",
+            )
+        elif report is None:
+            self.controller_build_status.set(
+                "Build locked: run Recheck and wait for every toolchain check to pass.",
+            )
+        elif not toolchain_ready:
+            self.controller_build_status.set(
+                "Build locked: repair the blocked toolchain checks shown above.",
+            )
+        elif options_error is not None:
+            self.controller_build_status.set(f"Build locked: {options_error}")
+        elif self._draft is None or not _native_story_export_ready(self._draft):
+            self.controller_build_status.set(
+                "Build locked: select a native Story target and Selective runtime behavior.",
+            )
+        elif self._validation_error_count or self._preview_blocked:
+            self.controller_build_status.set(
+                "Build locked: resolve the axle validation findings above.",
+            )
+        else:
+            self.controller_build_status.set(
+                "Ready to build a validated candidate outside GTA V. In-game acceptance remains separate.",
+            )
 
     def _build_story_controller(self) -> None:
+        self._refresh_controller_build_state()
+        if self.controller_build_button.instate(["disabled"]):
+            return
         configuration = self._draft
         callback = self._on_build_controller
         if configuration is None or callback is None:
@@ -1501,8 +1953,8 @@ class VehicleAxlesPanel(ttk.Frame):
 
     def controller_build_finished(self, succeeded: bool, message: str) -> None:
         self._controller_build_running = False
-        self.controller_build_status.set(str(message))
         self._refresh_controller_build_state()
+        self.controller_build_status.set(str(message))
         if succeeded:
             self.status.set("Story controller package built and validated.")
 

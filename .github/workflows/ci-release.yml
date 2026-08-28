@@ -265,20 +265,31 @@ jobs:
           }
           foreach ($edition in @('Legacy','Enhanced')) {
             $asi = "build/native/stage/$edition/VehicleWorkbenchAxles.asi"
+            $settingsEditor = "build/native/stage/$edition/VehicleWorkbenchAxles.Settings.exe"
             $receiptPath = "build/native/stage/$edition/build-validation-receipt.json"
             $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
             $receipt.sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $asi).Hash.ToLowerInvariant()
             $receipt.authenticode_certificate_present = $true
+            $receipt.settings_editor.sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsEditor).Hash.ToLowerInvariant()
+            $receipt.settings_editor.authenticode_certificate_present = $true
             $receipt.unsigned = $false
             $receipt | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $receiptPath -Encoding utf8
             $metadataPath = "build/native/stage/$edition/VehicleWorkbenchAxles/runtime-metadata.json"
             $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
             $metadata.binary_sha256 = $receipt.sha256
+            $metadata.settings_editor_sha256 = $receipt.settings_editor.sha256
+            $metadata.settings_editor_authenticode_certificate_present = $true
             $metadata | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $metadataPath -Encoding utf8
           }
-          python scripts/package_release.py --app-dir build/app/ALLIN1-SDK-Desktop --rpf-dir build/rpf --output build/releases --version "${{ github.ref_name }}" --build-id "$env:GITHUB_SHA"
+          $releaseVersion = "${{ github.ref_name }}".TrimStart('v', 'V')
+          $cmake = Get-Content runtime/VehicleWorkbenchAxles/CMakeLists.txt -Raw
+          if ($cmake -notmatch 'project\(VehicleWorkbenchAxles\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
+            throw 'Could not derive the native axle runtime version.'
+          }
+          $runtimeVersion = $Matches[1]
+          python scripts/package_release.py --app-dir build/app/ALLIN1-SDK-Desktop --rpf-dir build/rpf --output build/releases --version "$releaseVersion" --build-id "$env:GITHUB_SHA"
           foreach ($edition in @('Legacy','Enhanced')) {
-            $archive = "build/releases/VehicleWorkbenchAxles-$edition-${{ github.ref_name }}-win-x64.zip"
+            $archive = "build/releases/VehicleWorkbenchAxles-$edition-$runtimeVersion-win-x64.zip"
             Compress-Archive -Path "build/native/stage/$edition/*" -DestinationPath $archive
             $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
             "$digest  $([IO.Path]::GetFileName($archive))" | Set-Content "$archive.sha256" -Encoding ascii

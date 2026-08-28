@@ -791,6 +791,7 @@ class _RegistryCandidate:
     source: str
     runtime_files: tuple[dict[str, str], ...] = ()
     catalog_files: tuple[dict[str, str], ...] = ()
+    map_files: tuple[dict[str, str], ...] = ()
     blocked_reason: str = ""
     requirements: tuple[_ContentRequirement, ...] = ()
 
@@ -966,6 +967,7 @@ class ExtensionRegistry:
                 }
                 runtime_files: list[dict[str, str]] = []
                 catalog_files: list[dict[str, str]] = []
+                map_files: list[dict[str, str]] = []
                 blocked = ""
                 for assembly in manifest.runtime_assemblies:
                     relative = assembly.path.as_posix()
@@ -1007,12 +1009,36 @@ class ExtensionRegistry:
                         blocked = blocked or (
                             f"GBAY catalog failed its receipt hash: {relative}"
                         )
+                if "world.maps" in manifest.capabilities:
+                    relative = (
+                        f"scripts/ALLIN1/Maps/{manifest.extension_id}/maps.json"
+                    )
+                    record = records.get(relative.casefold())
+                    expected = str(record.get("sha256", "")) if record else ""
+                    if not record or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                        blocked = blocked or (
+                            f"Map descriptor lacks a receipt hash: {relative}"
+                        )
+                    else:
+                        map_files.append({"path": relative, "sha256": expected})
+                        installed = self.gta_path / Path(*PurePosixPath(relative).parts)
+                        current = installed if enabled else installed.with_name(
+                            installed.name + ".disabled"
+                        )
+                        if enabled and (
+                            not current.is_file()
+                            or self._file_sha256(current) != expected
+                        ):
+                            blocked = blocked or (
+                                f"Map descriptor failed its receipt hash: {relative}"
+                            )
                 result.append(_RegistryCandidate(
                     manifest=manifest,
                     requested_enabled=enabled,
                     source="package",
                     runtime_files=tuple(runtime_files),
                     catalog_files=tuple(catalog_files),
+                    map_files=tuple(map_files),
                     blocked_reason=blocked,
                     requirements=requirements,
                 ))
@@ -1085,6 +1111,7 @@ class ExtensionRegistry:
             ]
             item["runtime_files"] = list(candidate.runtime_files)
             item["catalog_files"] = list(candidate.catalog_files)
+            item["map_files"] = list(candidate.map_files)
             if blocked:
                 item["blocked_reason"] = blocked
             normalized.append(item)

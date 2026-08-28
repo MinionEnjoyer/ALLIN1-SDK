@@ -115,11 +115,15 @@ def _launch_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="Open a model or package directly in Models & Materials.",
     )
     direct_open.add_argument(
+        "--map-project", type=Path,
+        help="Open an ALLIN1 map project directly in the Workbench's Maps tab.",
+    )
+    direct_open.add_argument(
         "--addon-manifest", type=Path,
         help="Open an addon.json or allin1.workspace.json in the Package Linker.",
     )
     parser.add_argument(
-        "--workbench-category", choices=("auto", "vehicles", "weapons", "peds"),
+        "--workbench-category", choices=("auto", "vehicles", "weapons", "peds", "maps"),
         default="auto", help="Workbench tab selected after opening a package.",
     )
     parser.add_argument(
@@ -154,6 +158,7 @@ def main(argv: list[str] | None = None) -> None:
         and arguments.axle_workspace is None
         and arguments.workbench_package is None
         and arguments.model_material_source is None
+        and arguments.map_project is None
         and arguments.addon_manifest is None
         and not _claim_single_instance()
     ):
@@ -221,6 +226,9 @@ def main(argv: list[str] | None = None) -> None:
     elif arguments.model_material_source is not None:
         source = arguments.model_material_source
         dialog.after_idle(lambda: dialog.open_model_material_source(source))
+    elif arguments.map_project is not None:
+        descriptor = arguments.map_project
+        dialog.after_idle(lambda: dialog.open_map_project(descriptor))
     elif arguments.addon_manifest is not None:
         manifest = arguments.addon_manifest
         # Direct CLI/API opens are transient inspections. Manual opens inside

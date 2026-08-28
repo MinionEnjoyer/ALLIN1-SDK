@@ -74,6 +74,7 @@ visual instancing limit is unchanged.
 
 ```text
 VehicleWorkbenchAxles.asi
+VehicleWorkbenchAxles.Settings.exe
 VehicleWorkbenchAxles/
   runtime.json
   runtime-metadata.json
@@ -102,6 +103,14 @@ the failure appears in the ASI loader log instead of remaining silent.
 Schema-1 settings remain readable with their original paths relative to
 `VehicleWorkbenchAxles/`; root-relative custom paths require schema 2.
 
+Recipients can run `VehicleWorkbenchAxles.Settings.exe` beside the ASI to edit
+the configuration folder and log destination without hand-editing JSON. The
+utility preserves the other runtime settings, validates through the same native
+parser as the controller, upgrades legacy paths without changing where they
+resolve, and writes schema-2 GTA-root-relative values atomically. An invalid
+existing document is never silently overwritten; **Use defaults** provides an
+explicit repair path.
+
 The bundled `example_bus` configuration is intentionally non-deployable. Its
 companion bone fixture documents the illustrative vehicle-local positions used
 to produce the provenance digest; real packages must recalculate that digest
@@ -127,6 +136,9 @@ Enhanced native `.asi` host artifacts. The historical option name is retained
 for build compatibility. These remain unaccepted development artifacts. A true
 compiled-profile export is necessary but not sufficient for staging; the exact
 target build must also have a pinned, passing in-game receipt.
+`VWA_BUILD_SETTINGS_EDITOR=ON` (the default on Windows) also builds
+`VehicleWorkbenchAxles.Settings.exe`; both the PowerShell and SDK controller
+packagers place it at the root of every edition archive beside the ASI.
 
 The installed SDK exposes this as **Config > Build Story controller package**
 in the Axle Configurator and as `build-story-axle-runtime` in the console and

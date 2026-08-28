@@ -1,5 +1,6 @@
 #include "vehicle_workbench_axles/configuration.hpp"
 #include "vehicle_workbench_axles/runtime.hpp"
+#include "vehicle_workbench_axles/runtime_settings_document.hpp"
 #include "vehicle_workbench_axles/wheel_access.hpp"
 
 #include <algorithm>
@@ -1766,6 +1767,81 @@ void TestRuntimeSettingsContract() {
     }
 }
 
+void TestPortableRuntimeSettingsDocument() {
+    RuntimeSettings settings;
+    settings.enabled = false;
+    settings.discovery_interval_ms = 400U;
+    settings.recovery_interval_ms = 3200U;
+    settings.restore_on_unload = false;
+    settings.configuration_directory =
+        "scripts\\ExampleTransitPack\\VehicleSettings";
+    settings.log_file = "scripts\\ExampleTransitPack\\Axles.log";
+    std::vector<ValidationIssue> issues;
+    const auto document = SerializePortableRuntimeSettingsJson(
+        settings, issues, "runtime.json");
+    Check(document.has_value() && issues.empty(),
+          "valid portable runtime settings were not serialized");
+    Check(document->find("scripts/ExampleTransitPack/VehicleSettings") !=
+              std::string::npos &&
+              document->find("scripts/ExampleTransitPack/Axles.log") !=
+                  std::string::npos &&
+              document->find('\\') == std::string::npos,
+          "serialized runtime paths were not portable");
+    std::vector<ValidationIssue> round_trip_issues;
+    const auto round_trip = ParseRuntimeSettingsJson(
+        *document, round_trip_issues, "runtime.json");
+    Check(round_trip.has_value() && round_trip_issues.empty() &&
+              round_trip->schema_version == 2U && !round_trip->enabled &&
+              round_trip->discovery_interval_ms == 400U &&
+              round_trip->recovery_interval_ms == 3200U &&
+              !round_trip->restore_on_unload,
+          "portable settings round trip changed non-path values");
+
+    std::vector<ValidationIssue> legacy_issues;
+    const auto legacy = ParseRuntimeSettingsJson(
+        R"json({"schemaVersion":1,"configurationDirectory":"configs","logFile":"logs/Axles.log"})json",
+        legacy_issues, "legacy-runtime.json");
+    Check(!legacy.has_value(),
+          "schema-1 fixture unexpectedly accepted schema-2-only configurationDirectory");
+    legacy_issues.clear();
+    const auto valid_legacy = ParseRuntimeSettingsJson(
+        R"json({"schemaVersion":1,"logFile":"logs/Axles.log"})json",
+        legacy_issues, "legacy-runtime.json");
+    Check(valid_legacy.has_value() && legacy_issues.empty(),
+          "valid schema-1 settings fixture was rejected");
+    const auto migrated = SerializePortableRuntimeSettingsJson(
+        *valid_legacy, legacy_issues, "runtime.json");
+    Check(migrated.has_value() &&
+              migrated->find("VehicleWorkbenchAxles/configs") !=
+                  std::string::npos &&
+              migrated->find("VehicleWorkbenchAxles/logs/Axles.log") !=
+                  std::string::npos,
+          "schema-1 paths were not migrated without changing their base");
+
+    RuntimeSettings unsafe;
+    unsafe.configuration_directory = "../outside";
+    std::vector<ValidationIssue> unsafe_issues;
+    Check(!SerializePortableRuntimeSettingsJson(
+               unsafe, unsafe_issues, "runtime.json")
+               .has_value() &&
+              std::any_of(
+                  unsafe_issues.begin(), unsafe_issues.end(),
+                  [](const ValidationIssue& issue) {
+                      return issue.code == "unsafe-configuration-directory" &&
+                             issue.fatal;
+                  }),
+          "portable settings serializer accepted parent traversal");
+
+    RuntimeSettings future;
+    future.schema_version = kRuntimeSettingsSchemaVersion + 1U;
+    std::vector<ValidationIssue> future_issues;
+    Check(!SerializePortableRuntimeSettingsJson(
+               future, future_issues, "runtime.json")
+               .has_value() &&
+              !future_issues.empty(),
+          "portable settings serializer downgraded an unknown schema");
+}
+
 void TestValidationAndParsing() {
     const std::string json_text = R"json({
       "schemaVersion": 1,
@@ -2101,6 +2177,7 @@ int main() {
         TestAxleSupportBiasApplyRollbackAndRestore();
         TestAxleSupportBiasParsingAndValidation();
         TestRuntimeSettingsContract();
+        TestPortableRuntimeSettingsDocument();
         TestValidationAndParsing();
         std::cout << "VehicleWorkbenchAxles core tests passed\n";
         return EXIT_SUCCESS;

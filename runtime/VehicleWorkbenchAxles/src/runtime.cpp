@@ -13,7 +13,7 @@
 #include <utility>
 
 #ifndef VWA_RUNTIME_VERSION
-#define VWA_RUNTIME_VERSION "4.4.0"
+#define VWA_RUNTIME_VERSION "4.5.0"
 #endif
 
 namespace vwa {

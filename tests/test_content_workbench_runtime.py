@@ -126,13 +126,14 @@ def test_workbench_shares_one_scan_across_weapon_and_ped_tabs(tmp_path, tk_root)
     assert frame.scan is frame.vehicle_workspace.scan
     assert frame.scan is frame.weapon_workspace.scan
     assert frame.scan is frame.ped_workspace.scan
+    assert frame.scan is frame.map_workspace.scan
     assert frame.scan.weapon_animation_records[0].source == (
         "weaponanimations.meta"
     )
     assert frame.scan.weapon_shop_records[0].source == "weapon_shop.meta"
     assert frame.current_category() == "weapons"
     assert [frame.tabs.tab(page, "text") for page in frame.tabs.tabs()] == [
-        "Vehicles (0)", "Weapons (1)", "Peds (1)",
+        "Vehicles (0)", "Weapons (1)", "Peds (1)", "Maps (0)",
     ]
     assert frame.select_weapon("WEAPON_WORKBENCH")
     assert frame.weapon_workspace.selected_weapon is not None

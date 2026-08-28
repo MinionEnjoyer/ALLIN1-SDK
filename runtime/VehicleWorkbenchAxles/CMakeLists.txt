@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(VehicleWorkbenchAxles VERSION 4.4.0 LANGUAGES CXX)
+project(VehicleWorkbenchAxles VERSION 4.5.0 LANGUAGES CXX)
 
 # Story hosts are distributed as self-contained native plug-ins.  Keep the
 # runtime library choice explicit so a developer machine's CMake defaults do
@@ -22,10 +22,13 @@ set(VWA_BUILD_ASI_SKELETONS "${VWA_BUILD_STORY_HOSTS}" CACHE BOOL
 option(VWA_BUILD_TESTS "Build platform-neutral runtime tests" ON)
 option(VWA_BUILD_CONFIG_VALIDATOR
     "Build the native axle configuration validation helper" ON)
+option(VWA_BUILD_SETTINGS_EDITOR
+    "Build the recipient-facing portable runtime settings editor" ON)
 
 add_library(VehicleWorkbenchAxlesCore STATIC
     src/json.cpp
     src/configuration.cpp
+    src/runtime_settings_document.cpp
     src/runtime.cpp
     src/wheel_access_adapters.cpp
 )
@@ -83,6 +86,37 @@ if(WIN32 AND VWA_BUILD_STORY_HOSTS)
     )
     vwa_add_story_host(
         VehicleWorkbenchAxlesEnhanced Enhanced VWA_ASI_EDITION_Enhanced
+    )
+endif()
+
+if(WIN32 AND VWA_BUILD_SETTINGS_EDITOR)
+    add_executable(VehicleWorkbenchAxlesSettings WIN32
+        tools/settings_editor.cpp
+    )
+    target_link_libraries(VehicleWorkbenchAxlesSettings
+        PRIVATE VehicleWorkbenchAxlesCore
+    )
+    target_compile_features(VehicleWorkbenchAxlesSettings PRIVATE cxx_std_17)
+    target_compile_definitions(VehicleWorkbenchAxlesSettings PRIVATE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+        UNICODE
+        _UNICODE
+    )
+    if(MSVC)
+        target_compile_options(VehicleWorkbenchAxlesSettings
+            PRIVATE /W4 /permissive-
+        )
+    else()
+        target_compile_options(VehicleWorkbenchAxlesSettings
+            PRIVATE -Wall -Wextra -Wpedantic
+        )
+        target_link_options(VehicleWorkbenchAxlesSettings
+            PRIVATE -static-libgcc -static-libstdc++
+        )
+    endif()
+    set_target_properties(VehicleWorkbenchAxlesSettings PROPERTIES
+        OUTPUT_NAME "VehicleWorkbenchAxles.Settings"
     )
 endif()
 

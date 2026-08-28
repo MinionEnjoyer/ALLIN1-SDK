@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from pathlib import Path
 from types import SimpleNamespace
 
 from dataclasses import dataclass, replace
@@ -195,6 +196,56 @@ def test_steering_role_edit_preserves_schema_three_support_weights() -> None:
     ] == [1.10, 0.95, 0.95]
 
 
+def _toolchain_report(tmp_path: Path, *, ready: bool = True):
+    source = tmp_path / "runtime-source"
+    source.mkdir(exist_ok=True)
+    check = {
+        "key": "compile_probe",
+        "label": "Isolated compile probe",
+        "ready": ready,
+        "detected": (
+            "C++17 x64 compile/link passed with static MSVC runtime"
+            if ready else "cl.exe was not found"
+        ),
+        "requirement": "Successful isolated C++17 x64 compile/link",
+        "guidance": "Install the Visual Studio C++ x64 workload." if not ready else "",
+    }
+    payload = {
+        "ready": ready,
+        "platform": "nt",
+        "source_root": str(source),
+        "cmake_path": "C:/Tools/cmake.exe",
+        "cmake_version": "3.30.0",
+        "ctest_path": "C:/Tools/ctest.exe",
+        "ctest_version": "3.30.0",
+        "visual_studio_path": "C:/BuildTools",
+        "visual_studio_version": "17.12.0",
+        "cmake_generator": "Visual Studio 17 2022",
+        "problems": [] if ready else ["MSVC compiler: cl.exe was not found"],
+        "checks": [check],
+        "guidance": [] if ready else [check["guidance"]],
+    }
+    return SimpleNamespace(
+        ready=ready,
+        problems=tuple(payload["problems"]),
+        guidance=tuple(payload["guidance"]),
+        checks=(check,),
+        to_dict=lambda: payload,
+    )
+
+
+def _finish_preflight(panel: VehicleAxlesPanel) -> None:
+    thread = panel._controller_preflight_thread
+    assert thread is not None
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    job = panel._controller_preflight_poll_job
+    if job is not None:
+        panel.after_cancel(job)
+        panel._controller_preflight_poll_job = None
+    panel._poll_controller_preflight()
+
+
 def _remapped_bus_bones() -> tuple[Bone, ...]:
     return (
         Bone("wheel_lm1", (-1.0, 4.4533, 0.0)),
@@ -372,6 +423,7 @@ def test_panel_builds_story_controller_from_compact_inline_form(
         on_build_controller=lambda configuration, bones, options: captured.append(
             (configuration, bones, options)
         ),
+        controller_toolchain_inspector=lambda: _toolchain_report(tmp_path),
     )
     try:
         bones = _three_axle_bones()
@@ -389,6 +441,8 @@ def test_panel_builds_story_controller_from_compact_inline_form(
         panel._toggle_controller_builder()
         tk_root.update_idletasks()
         assert panel.controller_builder.winfo_manager() == "pack"
+        assert panel.controller_build_button.instate(["disabled"])
+        _finish_preflight(panel)
         assert panel.controller_build_button.instate(["!disabled"])
 
         output = tmp_path / "controller-candidate"
@@ -427,5 +481,185 @@ def test_panel_builds_story_controller_from_compact_inline_form(
 
         panel._toggle_controller_builder()
         assert not panel.controller_builder.winfo_manager()
+    finally:
+        panel.destroy()
+
+
+def test_story_controller_panel_browses_only_portable_paths_below_gta(
+    tmp_path, tk_root, monkeypatch,
+) -> None:
+    gta = tmp_path / "Grand Theft Auto V"
+    config = gta / "scripts" / "TransitExpansionPack" / "VehicleSettings"
+    log = gta / "scripts" / "TransitExpansionPack" / "Axles.log"
+    config.mkdir(parents=True)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    panel = VehicleAxlesPanel(
+        tk_root,
+        on_apply=lambda _configuration: None,
+        on_undo=lambda: None,
+        on_redo=lambda: None,
+        on_export=lambda _configuration: None,
+        gta_roots=(gta,),
+    )
+    try:
+        monkeypatch.setattr(
+            "allin1_sdk.vehicle_axles_ui.filedialog.askdirectory",
+            lambda **_kwargs: str(config),
+        )
+        panel._browse_controller_configuration()
+        assert panel.controller_configuration_directory.get() == (
+            "scripts/TransitExpansionPack/VehicleSettings"
+        )
+
+        monkeypatch.setattr(
+            "allin1_sdk.vehicle_axles_ui.filedialog.asksaveasfilename",
+            lambda **_kwargs: str(log),
+        )
+        panel._browse_controller_log()
+        assert panel.controller_log_file.get() == (
+            "scripts/TransitExpansionPack/Axles.log"
+        )
+
+        errors = []
+        monkeypatch.setattr(
+            "allin1_sdk.vehicle_axles_ui.messagebox.showerror",
+            lambda title, message, **_kwargs: errors.append((title, message)),
+        )
+        outside = tmp_path / "outside" / "VehicleSettings"
+        outside.mkdir(parents=True)
+        monkeypatch.setattr(
+            "allin1_sdk.vehicle_axles_ui.filedialog.askdirectory",
+            lambda **_kwargs: str(outside),
+        )
+        panel._browse_controller_configuration()
+        assert panel.controller_configuration_directory.get() == (
+            "scripts/TransitExpansionPack/VehicleSettings"
+        )
+        assert errors
+        assert "configured GTA installations" in errors[0][1]
+    finally:
+        panel.destroy()
+
+
+def test_metrobusxl2_initializes_transit_paths_without_overwriting_user_choice(
+    tk_root,
+) -> None:
+    panel = VehicleAxlesPanel(
+        tk_root,
+        on_apply=lambda _configuration: None,
+        on_undo=lambda: None,
+        on_redo=lambda: None,
+        on_export=lambda _configuration: None,
+    )
+    try:
+        panel.load("metrobusxl2", None, editable=False)
+        assert panel.controller_configuration_directory.get() == (
+            "scripts/TransitExpansionPack/VehicleSettings"
+        )
+        assert panel.controller_log_file.get() == (
+            "scripts/TransitExpansionPack/Axles.log"
+        )
+
+        panel.controller_log_file.set("scripts/CustomPack/Custom.log")
+        panel.load("another_bus", None, editable=False)
+        assert panel.controller_configuration_directory.get() == (
+            "VehicleWorkbenchAxles/configs"
+        )
+        assert panel.controller_log_file.get() == "scripts/CustomPack/Custom.log"
+    finally:
+        panel.destroy()
+
+
+def test_story_controller_preflight_runs_on_open_and_recheck_and_fails_closed(
+    tmp_path, tk_root,
+) -> None:
+    calls = []
+
+    def inspect():
+        calls.append("inspect")
+        return _toolchain_report(tmp_path, ready=False)
+
+    panel = VehicleAxlesPanel(
+        tk_root,
+        on_apply=lambda _configuration: None,
+        on_undo=lambda: None,
+        on_redo=lambda: None,
+        on_export=lambda _configuration: None,
+        on_build_controller=lambda *_args: None,
+        controller_toolchain_inspector=inspect,
+    )
+    try:
+        bones = _three_axle_bones()
+        panel.load(
+            "fixture_bus",
+            detect_axle_configuration(
+                "fixture_bus", bones,
+                preset=PRESET_STEER_DRIVE_REAR,
+                export_mode=EXPORT_FIVEM_RUNTIME,
+                target="story-legacy",
+            ),
+            bones=bones,
+            editable=True,
+        )
+        panel._toggle_controller_builder()
+        assert panel.controller_build_button.instate(["disabled"])
+        _finish_preflight(panel)
+        assert calls == ["inspect"]
+        assert panel.controller_build_button.instate(["disabled"])
+        assert panel.controller_preflight_summary.get().startswith("BLOCKED")
+        assert "Visual Studio C++ x64 workload" in (
+            panel.controller_preflight_guidance.get()
+        )
+        first = panel.controller_preflight_tree.get_children()[0]
+        assert panel.controller_preflight_tree.item(first, "values")[0] == "BLOCKED"
+        assert "cl.exe was not found" in panel.controller_preflight_tree.item(
+            first, "values",
+        )[1]
+
+        panel.controller_recheck_button.invoke()
+        _finish_preflight(panel)
+        assert calls == ["inspect", "inspect"]
+        assert panel.controller_build_button.instate(["disabled"])
+    finally:
+        panel.destroy()
+
+
+def test_story_controller_build_requires_toolchain_and_valid_output(
+    tmp_path, tk_root,
+) -> None:
+    panel = VehicleAxlesPanel(
+        tk_root,
+        on_apply=lambda _configuration: None,
+        on_undo=lambda: None,
+        on_redo=lambda: None,
+        on_export=lambda _configuration: None,
+        on_build_controller=lambda *_args: None,
+        controller_toolchain_inspector=lambda: _toolchain_report(tmp_path),
+    )
+    try:
+        bones = _three_axle_bones()
+        panel.load(
+            "fixture_bus",
+            detect_axle_configuration(
+                "fixture_bus", bones,
+                preset=PRESET_STEER_DRIVE_REAR,
+                export_mode=EXPORT_FIVEM_RUNTIME,
+                target="story-legacy",
+            ),
+            bones=bones,
+            editable=True,
+        )
+        panel._toggle_controller_builder()
+        _finish_preflight(panel)
+        assert panel.controller_build_button.instate(["!disabled"])
+
+        existing = tmp_path / "existing-output"
+        existing.mkdir()
+        panel.controller_output_directory.set(str(existing))
+        assert panel.controller_build_button.instate(["disabled"])
+        assert "already exists" in panel.controller_build_status.get()
+
+        panel.controller_output_directory.set(str(tmp_path / "new-output"))
+        assert panel.controller_build_button.instate(["!disabled"])
     finally:
         panel.destroy()

@@ -19,6 +19,8 @@ The default Workbench action creates a staged package.  It does not modify the
 game directory.  A validated Story package contains only:
 
 - one generic `VehicleWorkbenchAxles.asi` matching the exact target edition;
+- `VehicleWorkbenchAxles.Settings.exe` beside the ASI for recipient-safe path
+  editing without hand-editing `runtime.json`;
 - `VehicleWorkbenchAxles/runtime.json`;
 - `VehicleWorkbenchAxles/runtime-metadata.json` for release identity and validation metadata;
 - one JSON file per model below the guarded `configurationDirectory` selected

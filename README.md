@@ -12,7 +12,7 @@ make weapons, vehicles, archives, and other add-ons work coherently.
 ALLIN1 SDK supports GTA V Legacy and GTA V Enhanced. Its inspection and planning
 workflows are designed for Story Mode mod development.
 
-> **Current public release:** **0.6.2**. Install it from ALLIN1 Launcher or
+> **Current public release:** **0.6.3**. Install it from ALLIN1 Launcher or
 > download the self-contained Windows package from
 > [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases).
 
@@ -20,6 +20,24 @@ workflows are designed for Story Mode mod development.
 
 If ALLIN1 Launcher and SDK are useful to you, project support is available through
 [Buy Me a Coffee](https://buymeacoffee.com/minionenjoyer).
+
+## What's new in 0.6.3
+
+- The Story controller builder now performs its complete compiler and x64
+  toolchain preflight before enabling Build, exposes every detected version,
+  and provides actionable setup guidance instead of failing late in CMake.
+- Portable controller settings use package-specific configuration and log
+  locations, include Browse controls, reject staging-path leakage, and ship a
+  recipient-facing `VehicleWorkbenchAxles.Settings.exe` editor.
+- The reviewed `metrobusxl2` workflow now preserves its intentional physical
+  order (`lm1/rm1 -> lf/rf -> lr/rr`), inverted command polarity, middle-axle
+  drive, and counter-steering through authoring, validation, and both edition
+  packages.
+- A guarded map-project contract, example garage project, CLI operations, Agent
+  API surface, and package builder establish the first reusable map-authoring
+  foundation without writing directly into a live game installation.
+- VehicleWorkbenchAxles **4.5.0** distinguishes the new portable settings editor
+  and hardened package contract from previously published 4.4.0 artifacts.
 
 ## What's new in 0.6.2
 
@@ -31,7 +49,7 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
 - The desktop Workbench, CLI, and Agent API share one guarded build contract,
   with toolchain checks, native tests, configuration parsing, PE/export checks,
   checksums, receipts, and protected live-game destinations.
-- VehicleWorkbenchAxles **4.4.0** adds edition-specific ScriptHookV hosts,
+- VehicleWorkbenchAxles **4.4.0** added edition-specific ScriptHookV hosts,
   signature-gated wheel access, physical-order and polarity support, detailed
   axle logging, and fail-closed build compatibility. Generated candidates still
   require explicit in-game acceptance before they are marked supported.

@@ -64,6 +64,9 @@ def test_catalog_is_structured_and_classifies_risk():
     assert catalog["open-rpf-graph"]["risk"] == "read_only"
     assert catalog["open-workbench"]["risk"] == "read_only"
     assert catalog["inspect-workbench"]["risk"] == "read_only"
+    assert catalog["validate-map-project"]["risk"] == "read_only"
+    assert catalog["inspect-map-project"]["risk"] == "read_only"
+    assert catalog["build-map-package"]["risk"] == "authoring_write"
     assert catalog["plan-managed-vehicle-package"]["risk"] == "read_only"
     assert catalog["export-managed-vehicle-package"]["risk"] == "authoring_write"
     assert catalog["publish-managed-vehicle-package"]["risk"] == "authoring_write"
@@ -277,6 +280,27 @@ def test_game_write_requires_process_opt_in_and_command_acknowledgement(tmp_path
     assert alias_denied["ok"] is False
     assert alias_denied["risk"] == "game_write"
     assert "--allow-game-writes" in alias_denied["error"]
+
+
+def test_map_package_output_inside_gta_is_elevated_to_game_write(tmp_path):
+    game = tmp_path / "Grand Theft Auto V Enhanced"
+    game.mkdir()
+    (game / "GTA5_Enhanced.exe").write_bytes(b"MZ")
+    source = tmp_path / "source.rpf"
+    source.write_bytes(b"RPF8")
+    descriptor = tmp_path / "maps.json"
+    descriptor.write_text("{}", encoding="utf-8")
+    denied = execute_request({
+        "id": "map-build-denied", "action": "execute",
+        "command": "build-map-package",
+        "args": [
+            "--edition", "enhanced", str(source), str(descriptor),
+            str(game / "generated-map"),
+        ],
+    }, audit_path=tmp_path / "audit.jsonl")
+    assert denied["ok"] is False
+    assert denied["risk"] == "game_write"
+    assert "--allow-game-writes" in denied["error"]
 
 
 def test_api_lists_and_uninstalls_receipt_owned_package(tmp_path, monkeypatch):

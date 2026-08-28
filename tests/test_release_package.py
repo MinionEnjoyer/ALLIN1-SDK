@@ -79,11 +79,14 @@ def test_release_package_contains_launcher_contract_and_checksums(tmp_path):
             "runtime/VehicleWorkbenchAxles/CMakeLists.txt",
             "runtime/VehicleWorkbenchAxles/README.md",
             "runtime/VehicleWorkbenchAxles/include/vehicle_workbench_axles/types.hpp",
+            "runtime/VehicleWorkbenchAxles/include/vehicle_workbench_axles/runtime_settings_document.hpp",
             "runtime/VehicleWorkbenchAxles/profiles/compatibility.json",
             "runtime/VehicleWorkbenchAxles/schemas/axle-config.schema.json",
             "runtime/VehicleWorkbenchAxles/src/runtime.cpp",
+            "runtime/VehicleWorkbenchAxles/src/runtime_settings_document.cpp",
             "runtime/VehicleWorkbenchAxles/tests/core_tests.cpp",
             "runtime/VehicleWorkbenchAxles/tools/config_validator.cpp",
+            "runtime/VehicleWorkbenchAxles/tools/settings_editor.cpp",
         } <= names
         assert "runtime/VehicleWorkbenchAxles/out/VehicleWorkbenchAxles.asi" not in names
         assert "runtime/VehicleWorkbenchAxles/src/generated.dll" not in names
@@ -129,6 +132,17 @@ def test_release_workflow_rewrites_signed_native_receipt_truthfully():
     )
     unsigned_update = workflow.index("$receipt.unsigned = $false")
     assert signature_gate < certificate_update < unsigned_update
+
+
+def test_release_workflow_rehashes_signed_axle_settings_editor():
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci-release.yml"
+    ).read_text(encoding="utf-8")
+
+    assert 'VehicleWorkbenchAxles.Settings.exe"' in workflow
+    assert "$receipt.settings_editor.sha256 = (Get-FileHash" in workflow
+    assert "$receipt.settings_editor.authenticode_certificate_present = $true" in workflow
+    assert "$metadata.settings_editor_sha256 = $receipt.settings_editor.sha256" in workflow
 
 
 def test_release_rejects_bundled_example_with_missing_source(tmp_path):

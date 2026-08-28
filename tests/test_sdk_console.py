@@ -68,7 +68,7 @@ def test_command_catalog_combines_cli_and_console_builtins():
 def test_progressive_command_option_and_alias_suggestions(tmp_path):
     commands = suggestions_for("ins", cwd=tmp_path, limit=30)
     assert [item.replacement for item in commands] == [
-            "inspect-binary-workspace ", "inspect-log ",
+            "inspect-binary-workspace ", "inspect-log ", "inspect-map-project ",
             "inspect-material-workspace ", "inspect-model-materials ",
             "inspect-native-asset ",
         "inspect-package-graph-relations ",

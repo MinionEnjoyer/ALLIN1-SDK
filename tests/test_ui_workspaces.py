@@ -161,6 +161,7 @@ def test_unified_workbench_is_integrated_and_exposes_vehicle_viewport_controls()
     assert "VehicleWorkbenchFrame(" in unified
     assert "WeaponWorkbenchFrame(" in unified
     assert "PedWorkbenchFrame(" in unified
+    assert "MapWorkbenchFrame(" in unified
     weapon = _source("weapon_workbench.py")
     for control in (
         'text="Create authoring workspace…"',
@@ -209,6 +210,7 @@ def test_unified_workbench_is_integrated_and_exposes_vehicle_viewport_controls()
     assert 'self.tabs.add(vehicle_page, text="Vehicles")' in unified
     assert 'self.tabs.add(weapon_page, text="Weapons")' in unified
     assert 'self.tabs.add(ped_page, text="Peds")' in unified
+    assert 'self.tabs.add(map_page, text="Maps")' in unified
     assert 'workspace.pack(fill="both", expand=True)' in shell
     assert 'label="Open in Workbench…"' in shell
     assert "class VehicleWorkbenchFrame(ttk.Frame)" in workbench

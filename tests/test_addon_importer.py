@@ -993,6 +993,18 @@ def test_empty_package_reports_no_content_records(tmp_path):
     assert [item["kind"] for item in draft.manifest["nodes"]] == ["package"]
 
 
+def test_loose_map_assets_are_classified_without_false_no_content_notice(tmp_path):
+    package = tmp_path / "custom-map"
+    package.mkdir()
+    (package / "garage.ymap").write_bytes(b"map")
+    (package / "garage.ytyp").write_bytes(b"type")
+
+    scan = AddonPackageInspector().inspect(package)
+
+    assert "map_addon" in scan.package_kinds
+    assert "no_content_records" not in {item.code for item in scan.findings}
+
+
 @pytest.mark.parametrize(
     ("readme", "hints", "tag"),
     [

@@ -33,7 +33,8 @@ $generator = switch ($Matches[1]) {
 }
 
 cmake -S $source -B $build -G $generator -A x64 `
-    -DVWA_BUILD_STORY_HOSTS=ON -DVWA_BUILD_TESTS=ON
+    -DVWA_BUILD_STORY_HOSTS=ON -DVWA_BUILD_TESTS=ON `
+    -DVWA_BUILD_CONFIG_VALIDATOR=ON -DVWA_BUILD_SETTINGS_EDITOR=ON
 if ($LASTEXITCODE -ne 0) { throw 'Native ASI configure failed.' }
 cmake --build $build --config Release --parallel
 if ($LASTEXITCODE -ne 0) { throw 'Native ASI build failed.' }
@@ -50,6 +51,25 @@ $expectedExports = @(
     'VehicleWorkbenchAxles_HasScriptHookHost'
 )
 $forbiddenImports = @('VCRUNTIME140.dll','VCRUNTIME140_1.dll','MSVCP140.dll','ucrtbase.dll')
+$settingsEditor = Join-Path $build 'Release\VehicleWorkbenchAxles.Settings.exe'
+if (-not (Test-Path -LiteralPath $settingsEditor)) {
+    $settingsEditor = Join-Path $build 'VehicleWorkbenchAxles.Settings.exe'
+}
+if (-not (Test-Path -LiteralPath $settingsEditor)) {
+    throw 'VehicleWorkbenchAxles.Settings.exe was not produced.'
+}
+$settingsHeaders = (& dumpbin /headers $settingsEditor 2>&1) -join "`n"
+if ($LASTEXITCODE -ne 0 -or $settingsHeaders -notmatch 'machine \(x64\)') {
+    throw 'VehicleWorkbenchAxles.Settings.exe is not a valid x64 PE image.'
+}
+$settingsImports = (& dumpbin /imports $settingsEditor 2>&1) -join "`n"
+if ($LASTEXITCODE -ne 0) { throw 'Settings editor import inspection failed.' }
+foreach ($name in $forbiddenImports) {
+    if ($settingsImports -match [regex]::Escape($name)) {
+        throw "Settings editor imports dynamic CRT $name."
+    }
+}
+$settingsHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsEditor).Hash.ToLowerInvariant()
 $editions = @('Legacy','Enhanced')
 $editionHashes = @{}
 foreach ($edition in $editions) {
@@ -83,6 +103,8 @@ foreach ($edition in $editions) {
     $editionStage = Join-Path $stage $edition
     New-Item -ItemType Directory -Force $editionStage | Out-Null
     Copy-Item -LiteralPath $asi -Destination (Join-Path $editionStage 'VehicleWorkbenchAxles.asi')
+    Copy-Item -LiteralPath $settingsEditor `
+        -Destination (Join-Path $editionStage 'VehicleWorkbenchAxles.Settings.exe')
     $runtimeStage = Join-Path $editionStage 'VehicleWorkbenchAxles'
     $profileStage = Join-Path $runtimeStage 'profiles'
     $schemaStage = Join-Path $runtimeStage 'schemas'
@@ -116,6 +138,13 @@ foreach ($edition in $editions) {
         pe_validated = $true
         exports_validated = $expectedExports
         dynamic_crt_imports_rejected = $true
+        settings_editor = [ordered]@{
+            artifact = 'VehicleWorkbenchAxles.Settings.exe'
+            sha256 = $settingsHash
+            pe_x64_validated = $true
+            dynamic_crt_imports_rejected = $true
+            authenticode_certificate_present = $false
+        }
         game_acceptance = 'not-tested'
         supported = $false
         unsigned = [bool]$Unsigned
@@ -129,6 +158,8 @@ foreach ($edition in $editions) {
         target = $descriptorTarget
         build_id = $BuildId
         binary_sha256 = $hash
+        settings_editor_sha256 = $settingsHash
+        settings_editor_authenticode_certificate_present = $false
         game_acceptance = 'not-tested'
         supported = $false
         configuration_directory = 'VehicleWorkbenchAxles/configs'

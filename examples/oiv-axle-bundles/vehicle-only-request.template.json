@@ -9,7 +9,7 @@
     "version": "1.0.0",
     "author": "<AUTHOR>",
     "description": "Installs My Bus and its axle configuration.",
-    "workbench_version": "0.6.2"
+    "workbench_version": "0.6.3"
   },
   "vehicle_dlcs": [
     {

@@ -2,10 +2,11 @@
   "manifestVersion": 1,
   "runtime": {
     "name": "VehicleWorkbenchAxles",
-    "version": "4.4.0",
+    "version": "4.5.0",
     "maximumAxleSchemaVersion": 4,
     "settingsSchemaVersion": 2,
     "binaryFileName": "VehicleWorkbenchAxles.asi",
+    "settingsEditorFileName": "VehicleWorkbenchAxles.Settings.exe",
     "settingsDestination": "VehicleWorkbenchAxles/runtime.json",
     "metadataDestination": "VehicleWorkbenchAxles/runtime-metadata.json",
     "configurationDestination": "VehicleWorkbenchAxles/configs",

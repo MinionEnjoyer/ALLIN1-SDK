@@ -888,6 +888,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
             on_redo=self._redo_authoring_edit,
             on_export=self._export_axle_configuration,
             on_build_controller=self._build_story_axle_controller_package,
+            gta_roots=self.installation_roots,
         )
         self.axles_panel.pack(fill="both", expand=True)
 

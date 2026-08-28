@@ -1131,6 +1131,12 @@ class AddonPackageInspector:
             package_kinds.append("scripted_weapon_enhancement")
         if peds:
             package_kinds.append("ped_addon")
+        map_suffixes = {".ymap", ".ytyp"}
+        if any(
+            entry.suffix in map_suffixes
+            for entry in tuple(entries) + tuple(rpf_indexed_entries)
+        ):
+            package_kinds.append("map_addon")
         if not package_kinds:
             package_kinds.append("data_or_unknown")
 
@@ -1171,7 +1177,7 @@ class AddonPackageInspector:
             ))
         content_addons = {
             "vehicle_addon", "weapon_addon", "ped_addon",
-            "scripted_weapon_enhancement",
+            "scripted_weapon_enhancement", "map_addon",
         }.intersection(package_kinds)
         integration_shapes = [
             kind for kind in package_kinds
@@ -1477,6 +1483,7 @@ class AddonPackageInspector:
         if (
             not weapons and not vehicles and not peds
             and not weapon_enhancements and not scripted_weapon_systems
+            and "map_addon" not in package_kinds
         ):
             recognized_non_content = bool(
                 binary_plugins or config_files or shader_assets

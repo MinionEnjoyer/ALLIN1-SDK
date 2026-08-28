@@ -40,6 +40,7 @@ AUTHORING_COMMANDS = frozenset({
     "audit-folder",
     "build-native-workspace",
     "build-material-workspace",
+    "build-map-package",
     "build-binary-workspace",
     "build-gxt2-workspace",
     "build-rpf-tree",
@@ -169,6 +170,7 @@ READ_ONLY_COMMANDS = frozenset({
     "inspect-log",
     "inspect-model-materials",
     "inspect-material-workspace",
+    "inspect-map-project",
     "inspect-package-graph-relations",
     "inspect-package-receipt",
     "inspect-product-workspace",
@@ -214,6 +216,7 @@ READ_ONLY_COMMANDS = frozenset({
     "search-rpf-catalog",
     "validate",
     "validate-package",
+    "validate-map-project",
     "validate-package-settings-proposal",
     "validate-rpf-graph",
     "verify-package-ownership",
@@ -247,6 +250,10 @@ _PATH_SENSITIVE_AXLE_OUTPUTS = {
     "build-axle-runtime-bundle": ("--output-dir", "-o"),
     "build-story-axle-runtime": ("--output-dir", "-o"),
     "export-story-axle-runtime-config": ("--output", "-o"),
+}
+_PATH_SENSITIVE_POSITIONAL_OUTPUTS = {
+    # build-map-package SOURCE DESCRIPTOR OUTPUT
+    "build-map-package": 2,
 }
 
 
@@ -285,15 +292,46 @@ def _option_values(arguments: list[str], flags: tuple[str, ...]) -> tuple[str, .
     return tuple(value for value in values if value)
 
 
+def _positional_values(
+    arguments: list[str], value_flags: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return positionals while skipping reviewed options and their values."""
+
+    values: list[str] = []
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token == "--":
+            values.extend(arguments[index + 1:])
+            break
+        if token in value_flags:
+            index += 2
+            continue
+        if any(token.startswith(f"{flag}=") for flag in value_flags):
+            index += 1
+            continue
+        if not token.startswith("-"):
+            values.append(token)
+        index += 1
+    return tuple(values)
+
+
 def _effective_command_risk(
     command: str, arguments: list[str], base_risk: str,
 ) -> str:
-    """Elevate path-sensitive axle output aimed at a live GTA installation."""
+    """Elevate authoring output aimed at a live GTA installation."""
     output_flags = _PATH_SENSITIVE_AXLE_OUTPUTS.get(command)
-    if base_risk != "authoring_write" or output_flags is None:
+    positional_index = _PATH_SENSITIVE_POSITIONAL_OUTPUTS.get(command)
+    if base_risk != "authoring_write":
         return base_risk
     explicit_roots = _option_values(arguments, ("--gta-path",))
-    outputs = _option_values(arguments, output_flags)
+    outputs = _option_values(arguments, output_flags) if output_flags else ()
+    if positional_index is not None:
+        positional = _positional_values(
+            arguments, ("--project-root", "--gta-path", "--edition"),
+        )
+        if len(positional) > positional_index:
+            outputs += (positional[positional_index],)
     if any(
         gta_root_containing(value, explicit_roots=explicit_roots) is not None
         for value in outputs

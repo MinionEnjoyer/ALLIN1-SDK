@@ -1,6 +1,6 @@
 {
   "manifestVersion": 1,
-  "runtimeVersion": "4.4.0",
+  "runtimeVersion": "4.5.0",
   "profiles": {
     "story-legacy": {
       "status": "compiled-awaiting-in-game-acceptance",

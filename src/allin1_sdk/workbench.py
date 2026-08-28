@@ -7,6 +7,11 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from allin1_sdk.addon_importer import AddonPackageInspector, PackageScan
+from allin1_sdk.map_workbench import (
+    MapWorkbenchFrame,
+    looks_like_map_project,
+    map_asset_entries,
+)
 from allin1_sdk.ped_workbench import PedWorkbenchFrame
 from allin1_sdk.vehicle_authoring import VehicleAuthoringWorkspace
 from allin1_sdk.vehicle_workbench import VehicleWorkbenchFrame
@@ -14,9 +19,9 @@ from allin1_sdk.weapon_workbench import WeaponWorkbenchFrame
 
 
 class WorkbenchFrame(ttk.Frame):
-    """Keep vehicle, weapon, and ped projects in one shared package context."""
+    """Keep vehicle, weapon, ped, and map projects in one package context."""
 
-    CATEGORIES = ("vehicles", "weapons", "peds")
+    CATEGORIES = ("vehicles", "weapons", "peds", "maps")
 
     def __init__(
         self,
@@ -39,7 +44,7 @@ class WorkbenchFrame(ttk.Frame):
         self.vehicle_authoring_workspace: VehicleAuthoringWorkspace | None = None
         self.status = tk.StringVar(
             value="Open a DLC RPF, package archive, or extracted folder once; "
-            "the Workbench routes its vehicles, weapons, and peds."
+            "the Workbench routes its vehicles, weapons, peds, and maps."
         )
         self._build()
 
@@ -83,14 +88,17 @@ class WorkbenchFrame(ttk.Frame):
         vehicle_page = ttk.Frame(self.tabs)
         weapon_page = ttk.Frame(self.tabs)
         ped_page = ttk.Frame(self.tabs)
+        map_page = ttk.Frame(self.tabs)
         self.pages = {
             "vehicles": vehicle_page,
             "weapons": weapon_page,
             "peds": ped_page,
+            "maps": map_page,
         }
         self.tabs.add(vehicle_page, text="Vehicles")
         self.tabs.add(weapon_page, text="Weapons")
         self.tabs.add(ped_page, text="Peds")
+        self.tabs.add(map_page, text="Maps")
 
         self.vehicle_workspace = VehicleWorkbenchFrame(
             vehicle_page, self.project_root,
@@ -106,8 +114,14 @@ class WorkbenchFrame(ttk.Frame):
             installation_roots=self.installation_roots,
             on_open_asset=self._route_asset, on_help=self._on_help,
         )
+        self.map_workspace = MapWorkbenchFrame(
+            map_page, self.project_root,
+            installation_roots=self.installation_roots,
+            on_open_asset=self._route_asset, on_help=self._on_help,
+        )
         for workspace in (
             self.vehicle_workspace, self.weapon_workspace, self.ped_workspace,
+            self.map_workspace,
         ):
             workspace.pack(fill="both", expand=True)
 
@@ -142,7 +156,7 @@ class WorkbenchFrame(ttk.Frame):
         *, category: str = "auto",
         vehicle_authoring_workspace: VehicleAuthoringWorkspace | None = None,
     ) -> bool:
-        """Inspect a package once and route the shared result to all three tabs."""
+        """Inspect a package once and route one shared result to all four tabs."""
         if self.source is not None and not self.confirm_navigation():
             return False
         try:
@@ -165,6 +179,7 @@ class WorkbenchFrame(ttk.Frame):
         )
         self.weapon_workspace.open_source(resolved, loaded_scan)
         self.ped_workspace.open_source(resolved, loaded_scan)
+        self.map_workspace.open_source(resolved, loaded_scan)
         counts = {
             "vehicles": len(loaded_scan.vehicles),
             "weapons": (
@@ -173,9 +188,14 @@ class WorkbenchFrame(ttk.Frame):
                 + len(loaded_scan.scripted_weapon_systems)
             ),
             "peds": len(loaded_scan.peds),
+            "maps": (
+                len(map_asset_entries(loaded_scan))
+                if looks_like_map_project(resolved, loaded_scan) else 0
+            ),
         }
         for key, label in (
-            ("vehicles", "Vehicles"), ("weapons", "Weapons"), ("peds", "Peds"),
+            ("vehicles", "Vehicles"), ("weapons", "Weapons"),
+            ("peds", "Peds"), ("maps", "Maps"),
         ):
             self.tabs.tab(self.pages[key], text=f"{label} ({counts[key]})")
         self.reload_button.configure(state="normal")
@@ -184,6 +204,7 @@ class WorkbenchFrame(ttk.Frame):
             + f"{resolved.name} · {len(loaded_scan.workbench_entries):,} indexed files · "
             f"{counts['vehicles']} vehicles · "
             f"{counts['weapons']} weapons · {counts['peds']} peds · "
+            f"{counts['maps']} map assets · "
             f"{loaded_scan.error_count} errors / {loaded_scan.warning_count} warnings"
             + (
                 f" · target: {loaded_scan.inspection_target_edition}"
@@ -207,6 +228,7 @@ class WorkbenchFrame(ttk.Frame):
             self.vehicle_workspace.confirm_navigation()
             and self.weapon_workspace.confirm_navigation()
             and self.ped_workspace.confirm_navigation()
+            and self.map_workspace.confirm_navigation()
         )
 
     def reload(self) -> bool:
@@ -243,6 +265,14 @@ class WorkbenchFrame(ttk.Frame):
     def select_ped(self, name: str) -> bool:
         self.select_category("peds")
         return self.ped_workspace.select_ped(name)
+
+    def open_map_project(
+        self, descriptor: str | Path, *, source: str | Path | None = None,
+    ) -> bool:
+        """Open an explicit map descriptor without requiring a package scan."""
+
+        self.select_category("maps")
+        return self.map_workspace.open_descriptor(descriptor, source=source)
 
     def _route_asset(self, path: str) -> None:
         if self._on_open_asset is not None:

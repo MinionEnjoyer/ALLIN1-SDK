@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "id": "example.harmony-garage",
+  "package_id": "example.harmony-garage",
+  "name": "Harmony Custom Garage",
+  "version": "1.0.0",
+  "editions": [
+    "legacy",
+    "enhanced"
+  ],
+  "streaming": {
+    "pack_name": "example_harmony_garage",
+    "content_group": "EXAMPLE_HARMONY_GARAGE",
+    "ipls": [
+      "example_harmony_garage_placement"
+    ],
+    "activation_radius": 250.0,
+    "release_radius": 450.0,
+    "keep_resident": false
+  },
+  "levels": [
+    {
+      "id": "garage-floor",
+      "name": "Harmony Garage Floor",
+      "center": {
+        "x": 1178.4,
+        "y": 2642.8,
+        "z": -35.0,
+        "heading": 0.0
+      },
+      "ipls": [
+        "example_harmony_garage_interior"
+      ]
+    }
+  ],
+  "portals": [
+    {
+      "id": "main-door",
+      "name": "Main Garage Door",
+      "mode": "both",
+      "from": {
+        "level": "world",
+        "position": {
+          "x": 1174.8,
+          "y": 2640.7,
+          "z": 37.75,
+          "heading": 0.0
+        }
+      },
+      "to": {
+        "level": "garage-floor",
+        "position": {
+          "x": 1178.4,
+          "y": 2645.0,
+          "z": -35.0,
+          "heading": 180.0
+        }
+      },
+      "radius": 4.0,
+      "one_way": false
+    }
+  ],
+  "garages": [
+    {
+      "id": "vehicle-storage",
+      "name": "Harmony Vehicle Storage",
+      "level_id": "garage-floor",
+      "entrance_portal_id": "main-door",
+      "capacity": 2,
+      "vehicle_types": [
+        "land"
+      ],
+      "slots": [
+        {
+          "id": "slot-01",
+          "position": {
+            "x": 1174.6,
+            "y": 2640.2,
+            "z": -35.0,
+            "heading": 90.0
+          }
+        },
+        {
+          "id": "slot-02",
+          "position": {
+            "x": 1182.2,
+            "y": 2640.2,
+            "z": -35.0,
+            "heading": 90.0
+          }
+        }
+      ],
+      "rules": {
+        "allow_store": true,
+        "allow_retrieve": true,
+        "save_policy": "story_save_only"
+      }
+    }
+  ]
+}

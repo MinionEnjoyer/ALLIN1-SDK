@@ -51,6 +51,10 @@ from allin1_sdk.native_assets import (
     NativeAssetInspector, NativeAssetReport, load_native_model_scene,
 )
 from allin1_sdk.mods import ModIntegrationService, open_mod_package
+from allin1_sdk.map_contract import MapProject
+from allin1_sdk.map_package import MapAddonPackageBuilder
+from allin1_sdk.map_project import MapProjectResolver
+from allin1_sdk.map_workbench import looks_like_map_project, map_asset_entries
 from allin1_sdk.oiv_workbench import OivWorkbench
 from allin1_sdk.package_graph import PackageGraphWorkspace
 from allin1_sdk.package_relations import PackageRelationshipAnalyzer
@@ -568,12 +572,16 @@ def _open_workbench_window(
             + len(scan.scripted_weapon_systems)
         ),
         "peds": len(scan.peds),
+        "maps": (
+            len(map_asset_entries(scan))
+            if looks_like_map_project(resolved, scan) else 0
+        ),
     }
     if category not in {"auto", *counts}:
         raise ValueError(f"Unsupported Workbench category: {category}")
     if not any(counts.values()):
         raise ValueError(
-            "The selected package does not contain vehicle, weapon, or ped metadata."
+            "The selected package does not contain vehicle, weapon, ped, or map content."
         )
     if category != "auto" and not counts[category]:
         raise ValueError(f"The selected package does not contain {category} metadata.")
@@ -1247,7 +1255,7 @@ def open_axle_configurator(
 )
 @click.option(
     "--category",
-    type=click.Choice(("auto", "vehicles", "weapons", "peds"), case_sensitive=False),
+    type=click.Choice(("auto", "vehicles", "weapons", "peds", "maps"), case_sensitive=False),
     default="auto", show_default=True,
     help="Select a Workbench tab after the package opens.",
 )
@@ -1256,7 +1264,7 @@ def open_axle_configurator(
     help="Matching GTA installation for encrypted/native asset previews.",
 )
 def open_workbench(source: Path, category: str, gta_path: Path | None) -> None:
-    """Open vehicle, weapon, and ped add-on projects in one desktop workspace."""
+    """Open vehicle, weapon, ped, and map projects in one desktop workspace."""
     try:
         pid, counts = _open_workbench_window(source, category.casefold(), gta_path)
     except (OSError, ValueError) as exc:
@@ -1296,7 +1304,7 @@ def open_model_material_workbench(
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.option(
     "--category",
-    type=click.Choice(("all", "vehicles", "weapons", "peds"), case_sensitive=False),
+    type=click.Choice(("all", "vehicles", "weapons", "peds", "maps"), case_sensitive=False),
     default="all", show_default=True,
     help="Limit the structured report to one Workbench content family.",
 )
@@ -1333,6 +1341,10 @@ def inspect_workbench(
             "weapon_enhancements": len(scan.weapon_enhancements),
             "scripted_weapon_systems": len(scan.scripted_weapon_systems),
             "peds": len(scan.peds),
+            "map_assets": (
+                len(map_asset_entries(scan))
+                if looks_like_map_project(resolved, scan) else 0
+            ),
             "rpf_archives": len(scan.rpf_archives),
             "indexed_files": len(scan.workbench_entries),
             "rpf_indexed_entries": len(scan.rpf_indexed_entries),
@@ -1370,6 +1382,10 @@ def inspect_workbench(
         payload["shop_weapons"] = list(scan.shop_weapons)
     if selected in {"all", "peds"}:
         payload["peds"] = [asdict(item) for item in scan.peds]
+    if selected == "maps" or (
+        selected == "all" and looks_like_map_project(resolved, scan)
+    ):
+        payload["maps"] = MapProjectResolver.inspect_scan(scan).to_dict()
     if selected == "all":
         payload["rpf_archives"] = [asdict(item) for item in scan.rpf_archives]
         payload["rpf_native_assets"] = [
@@ -2215,6 +2231,91 @@ def compile_vehicle_data(
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Compiled {len(report.vehicles)} vehicles into {written[-1].parent}")
+
+
+@main.command("validate-map-project")
+@click.argument(
+    "descriptor", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+def validate_map_project(descriptor: Path) -> None:
+    """Validate a declarative map, level, portal, and garage project."""
+
+    try:
+        project = MapProject.load(descriptor)
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    payload = project.to_dict()
+    click.echo(json.dumps({
+        "operation": "validate_map_project",
+        "status": "valid",
+        "descriptor": str(descriptor.expanduser().resolve()),
+        "project": payload,
+        "summary": {
+            "levels": len(project.levels),
+            "portals": len(project.portals),
+            "garages": len(project.garages),
+            "garage_slots": sum(len(item.slots) for item in project.garages),
+        },
+    }, indent=2))
+
+
+@main.command("inspect-map-project")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation when SOURCE is a direct RPF.",
+)
+def inspect_map_project(source: Path, gta_path: Path | None) -> None:
+    """Inventory map-native assets from a folder, archive, or direct RPF."""
+
+    try:
+        report = MapProjectResolver().inspect(
+            source, project_root=PROJECT_ROOT,
+            gta_path=_inspection_game_path(source, gta_path),
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(report.to_dict(), indent=2))
+
+
+@main.command("build-map-package")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.argument(
+    "descriptor", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.argument("output", type=click.Path(path_type=Path))
+@click.option(
+    "--project-root", "sdk_project_root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=PROJECT_ROOT, show_default=True,
+    help="SDK source/tool root used by the native RPF builder.",
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation; required for dlc.rpf.source builds.",
+)
+@click.option(
+    "--edition", required=True,
+    type=click.Choice(("legacy", "enhanced"), case_sensitive=False),
+    help="Publish one explicit game-edition package.",
+)
+def build_map_package(
+    source: Path,
+    descriptor: Path,
+    output: Path,
+    sdk_project_root: Path,
+    gta_path: Path | None,
+    edition: str,
+) -> None:
+    """Build a new validated map DLC and ALLIN1 runtime descriptor package."""
+
+    try:
+        result = MapAddonPackageBuilder(
+            sdk_project_root, gta_path,
+        ).build(source, descriptor, output, edition=edition.casefold())
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
 
 
 @main.command("inspect-vehicle-project")

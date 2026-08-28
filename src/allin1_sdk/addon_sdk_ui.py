@@ -371,6 +371,7 @@ class AddonSdkDialog(tk.Toplevel):
                 "vehicles": "vehicle-workbench",
                 "weapons": "weapon-workbench",
                 "peds": "ped-workbench",
+                "maps": "map-workbench",
             }.get(category, "workbench")
         topic = {
             "linker": "sdk", "assets": "asset-viewer",
@@ -666,6 +667,7 @@ class AddonSdkDialog(tk.Toplevel):
             self.vehicle_workspace = workspace.vehicle_workspace
             self.weapon_workspace = workspace.weapon_workspace
             self.ped_workspace = workspace.ped_workspace
+            self.map_workspace = workspace.map_workspace
         elif key == "quick_import":
             from allin1_sdk.quick_import_ui import QuickImportFrame
             workspace = QuickImportFrame(
@@ -1485,6 +1487,8 @@ class AddonSdkDialog(tk.Toplevel):
                 "Could not open package in Workbench", str(exc), parent=self,
             )
             return False
+        from allin1_sdk.map_workbench import looks_like_map_project
+
         available = {
             "vehicles": bool(scan.vehicles),
             "weapons": bool(
@@ -1492,6 +1496,7 @@ class AddonSdkDialog(tk.Toplevel):
                 or scan.scripted_weapon_systems
             ),
             "peds": bool(scan.peds),
+            "maps": looks_like_map_project(resolved, scan),
         }
         if category not in {"auto", *available}:
             messagebox.showerror(
@@ -1502,8 +1507,8 @@ class AddonSdkDialog(tk.Toplevel):
         if not any(available.values()):
             messagebox.showerror(
                 "No Workbench content found",
-                "The selected package does not contain vehicle, weapon, ped, or "
-                "script-driven vanilla weapon relationships.",
+                "The selected package does not contain vehicle, weapon, ped, map, "
+                "or script-driven vanilla weapon relationships.",
                 parent=self,
             )
             return False
@@ -1532,6 +1537,22 @@ class AddonSdkDialog(tk.Toplevel):
     def open_vehicle_package(self, source: str | Path) -> bool:
         """Compatibility alias for direct vehicle Workbench launches."""
         return self.open_workbench_package(source, "vehicles")
+
+    def open_map_project(self, descriptor: str | Path) -> bool:
+        """Open an explicit declarative map project in the unified Workbench."""
+
+        try:
+            resolved = Path(descriptor).expanduser().resolve(strict=True)
+        except OSError as exc:
+            messagebox.showerror(
+                "Could not open map project", str(exc), parent=self,
+            )
+            return False
+        self._select_workspace("workbench")
+        opened = self.workbench_workspace.open_map_project(resolved)
+        if opened:
+            self.status.set(f"Map Workbench · {resolved.name}")
+        return opened
 
     def open_axle_configurator(
         self, workspace_root: str | Path, model: str | None = None,

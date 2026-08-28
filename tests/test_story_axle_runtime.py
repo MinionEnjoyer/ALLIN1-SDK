@@ -35,6 +35,10 @@ def test_native_build_stages_self_contained_runtime_contract() -> None:
         assert source_path.name in build_script
 
     assert "axle-config.schema.json" in build_script
+    assert package["runtime"]["settingsEditorFileName"] == (
+        "VehicleWorkbenchAxles.Settings.exe"
+    )
+    assert package["runtime"]["settingsEditorFileName"] in build_script
 
 
 def test_story_runtime_profiles_are_compiled_but_distribution_stays_fail_closed(
@@ -42,7 +46,7 @@ def test_story_runtime_profiles_are_compiled_but_distribution_stays_fail_closed(
     profile = json.loads(
         (RUNTIME / "profiles" / "compatibility.json").read_text(encoding="utf-8")
     )
-    assert profile["runtimeVersion"] == "4.4.0"
+    assert profile["runtimeVersion"] == "4.5.0"
     assert profile["policy"] == {
         "permanentOffsetsAllowed": False,
         "runtimeProfileIdentityPolicy": (

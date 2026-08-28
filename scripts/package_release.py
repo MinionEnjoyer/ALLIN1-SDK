@@ -45,11 +45,16 @@ _REQUIRED_AUTHORING_RESOURCES = (
     Path("runtime") / "VehicleWorkbenchAxles" / "README.md",
     Path("runtime") / "VehicleWorkbenchAxles" / "include"
     / "vehicle_workbench_axles" / "types.hpp",
+    Path("runtime") / "VehicleWorkbenchAxles" / "include"
+    / "vehicle_workbench_axles" / "runtime_settings_document.hpp",
     Path("runtime") / "VehicleWorkbenchAxles" / "profiles" / "compatibility.json",
     Path("runtime") / "VehicleWorkbenchAxles" / "schemas" / "axle-config.schema.json",
     Path("runtime") / "VehicleWorkbenchAxles" / "src" / "runtime.cpp",
+    Path("runtime") / "VehicleWorkbenchAxles" / "src"
+    / "runtime_settings_document.cpp",
     Path("runtime") / "VehicleWorkbenchAxles" / "tests" / "core_tests.cpp",
     Path("runtime") / "VehicleWorkbenchAxles" / "tools" / "config_validator.cpp",
+    Path("runtime") / "VehicleWorkbenchAxles" / "tools" / "settings_editor.cpp",
 )
 
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "allin1-sdk"
-version = "0.6.2"
+version = "0.6.3"
 description = "Standalone GTA V add-on authoring, package auditing, and native asset inspection SDK"
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"
@@ -34,6 +34,10 @@ where = ["src"]
 # catalogs are runtime inputs; the remaining files are authoring references and
 # the auditable, fail-closed Story runtime source—not prebuilt game binaries.
 [tool.setuptools.data-files]
+"share/allin1-sdk/sdk" = ["sdk/map-project.schema.json"]
+"share/allin1-sdk/sdk/examples/custom_garage" = [
+    "sdk/examples/custom_garage/maps.json",
+]
 "share/allin1-sdk/assets" = [
     "assets/axle-prefabs.json",
     "assets/visual-tyre-packages.json",
