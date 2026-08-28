@@ -54,7 +54,7 @@ from allin1_sdk.mods import ModIntegrationService, open_mod_package
 from allin1_sdk.oiv_workbench import OivWorkbench
 from allin1_sdk.package_graph import PackageGraphWorkspace
 from allin1_sdk.package_relations import PackageRelationshipAnalyzer
-from allin1_sdk.paths import project_root
+from allin1_sdk.paths import gta_root_containing, project_root
 from allin1_sdk.ped_authoring import PedAuthoringWorkspace
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.product_workspace import (
@@ -84,6 +84,8 @@ from allin1_sdk.vehicle_authoring import (
 )
 from allin1_sdk.axle_configurator import (
     EXPORT_MODES,
+    EXPORT_SELECTIVE_RUNTIME,
+    STEERING_CALCULATION_AUTOMATIC,
     STEERING_COMMAND_POLARITY_INVERTED,
     STEERING_COMMAND_POLARITY_NORMAL,
     AxleConfiguration,
@@ -112,6 +114,7 @@ from allin1_sdk.axle_runtime_bundler import (
     AxleRuntimeBundlePlanner,
     StoryRuntimeProfile,
     VehicleAxleBuildInput,
+    story_native_runtime_configuration,
     story_runtime_profile_report,
     target_capabilities,
 )
@@ -2751,7 +2754,10 @@ def list_axle_prefabs(
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
 @click.option("--target", required=True, type=click.Choice(TARGET_IDS))
-@click.option("--export-mode", default="fivem_runtime", type=click.Choice(EXPORT_MODES))
+@click.option(
+    "--export-mode", default=EXPORT_SELECTIVE_RUNTIME,
+    type=click.Choice(EXPORT_MODES),
+)
 @click.option(
     "--base-config", type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
@@ -2866,12 +2872,21 @@ def plan_axle_runtime_bundle(
     "--output-dir", "-o", required=True,
     type=click.Path(file_okay=False, path_type=Path),
 )
+@click.option(
+    "--gta-path", "protected_gta_roots", multiple=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help=(
+        "Explicit GTA installation root to protect from staged output; repeat "
+        "for multiple installations."
+    ),
+)
 @click.option("--acknowledge-edit", is_flag=True, required=True)
 def build_axle_runtime_bundle(
     config_json: tuple[Path, ...], targets: tuple[str, ...],
     skeleton_xml_files: tuple[Path, ...],
     story_profile_files: tuple[Path, ...], target_build_values: tuple[str, ...],
-    output_dir: Path, acknowledge_edit: bool,
+    output_dir: Path, protected_gta_roots: tuple[Path, ...],
+    acknowledge_edit: bool,
 ) -> None:
     """Build ready runtime targets into a new atomic staging directory."""
     del acknowledge_edit
@@ -2883,7 +2898,9 @@ def build_axle_runtime_bundle(
             targets=targets or TARGET_IDS,
             story_profiles=profiles, requested_game_builds=builds,
         )
-        result = AxleRuntimeBundleBuilder().build(plan, output_dir)
+        result = AxleRuntimeBundleBuilder().build(
+            plan, output_dir, protected_gta_roots=protected_gta_roots,
+        )
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(result.to_dict(), indent=2))
@@ -3105,6 +3122,11 @@ def preview_axle_steering(
         errors = sum(item.severity == "error" for item in findings)
         signed = requires_signed_steering_gain(proposed)
         support_bias = requires_axle_support_bias(proposed)
+        runtime_geometry = (
+            proposed.steering_calculation is not None
+            and proposed.steering_calculation.mode
+            == STEERING_CALCULATION_AUTOMATIC
+        )
         deployment_supported: bool | None = None
         deployment_reason = "Choose a target to evaluate deployment support."
         if target is not None:
@@ -3115,6 +3137,11 @@ def preview_axle_steering(
                 and (
                     not support_bias or capability.supports_axle_support_bias
                 )
+                and (
+                    capability.family != "story"
+                    or not runtime_geometry
+                    or capability.supports_wheel_local_position
+                )
             )
             deployment_reason = (
                 "Target exposes the required axle contract."
@@ -3124,6 +3151,12 @@ def preview_axle_steering(
                     if signed and not capability.supports_signed_steering_gain
                     else "Target has no validated per-axle suspension support accessor."
                     if support_bias and not capability.supports_axle_support_bias
+                    else "Target has no validated wheel-local-position accessor."
+                    if (
+                        capability.family == "story"
+                        and runtime_geometry
+                        and not capability.supports_wheel_local_position
+                    )
                     else "Target does not support the required axle schema."
                 )
             )
@@ -3190,6 +3223,106 @@ def set_vehicle_axles(
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@main.command("export-story-axle-runtime-config")
+@click.argument(
+    "config_json", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--output", "output_path", "-o", required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--skeleton-xml", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help=(
+        "Optional CodeWalker YFT XML used to revalidate the authored wheel "
+        "bones and a custom physical order."
+    ),
+)
+@click.option(
+    "--gta-path", "protected_gta_roots", multiple=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help=(
+        "Explicit GTA installation root to protect; repeat for multiple "
+        "installations."
+    ),
+)
+@click.option("--update", is_flag=True, help="Replace the selected output file.")
+@click.option(
+    "--acknowledge-game-write", is_flag=True,
+    help="Explicitly acknowledge writing this config inside a GTA installation.",
+)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def export_story_axle_runtime_config(
+    config_json: Path,
+    output_path: Path,
+    skeleton_xml: Path | None,
+    protected_gta_roots: tuple[Path, ...],
+    update: bool,
+    acknowledge_game_write: bool,
+    acknowledge_edit: bool,
+) -> None:
+    """Translate a Workbench document into the native Story runtime schema."""
+    del acknowledge_edit
+    try:
+        authored_destination = Path(os.path.abspath(output_path.expanduser()))
+        if authored_destination.exists() and authored_destination.is_symlink():
+            raise ValueError("Runtime configuration output cannot be a symbolic link")
+        destination = output_path.expanduser().resolve(strict=False)
+        game_root = gta_root_containing(
+            output_path, explicit_roots=protected_gta_roots,
+        )
+        if game_root is not None and not acknowledge_game_write:
+            raise ValueError(
+                "Writing an axle runtime configuration inside GTA V requires "
+                f"--acknowledge-game-write: {game_root}"
+            )
+        configuration = _axle_configuration_file(config_json)
+        bones = ()
+        if skeleton_xml is not None:
+            scene, _metadata, warning = load_native_model_scene(skeleton_xml)
+            if scene is None:
+                raise ValueError(
+                    warning or "Skeleton XML did not contain a model scene"
+                )
+            bones = tuple(scene.bones)
+        payload = story_native_runtime_configuration(
+            configuration, bones=bones,
+        )
+        if destination.exists() and not update:
+            raise FileExistsError(
+                f"Output already exists; pass --update to replace it: {destination}"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", newline="\n", delete=False,
+                dir=destination.parent, prefix=f".{destination.name}.",
+                suffix=".tmp",
+            ) as stream:
+                temporary = Path(stream.name)
+                stream.write(json.dumps(payload, indent=2) + "\n")
+            temporary.replace(destination)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "schema_version": 1,
+        "operation": "export_story_axle_runtime_config",
+        "source_format": "allin1_workbench_axle_configuration",
+        "output_format": "allin1_native_story_axle_runtime_configuration",
+        "model": configuration.vehicle_model,
+        "target": next(
+            target for target, enabled in configuration.compatibility
+            if enabled and target.startswith("story-")
+        ),
+        "output": str(destination),
+        "game_write_performed": game_root is not None,
+    }, indent=2))
 
 
 @main.command("export-vehicle-axles")

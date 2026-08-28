@@ -74,8 +74,14 @@ def _semantic_version_core(value: str, label: str) -> tuple[int, int, int]:
     return tuple(int(match.group(index)) for index in (1, 2, 3))
 
 EXPORT_STOCK_METADATA = "stock_metadata"
-EXPORT_FIVEM_RUNTIME = "fivem_runtime"
-EXPORT_MODES = (EXPORT_STOCK_METADATA, EXPORT_FIVEM_RUNTIME)
+# Selective per-axle behavior is used by both Story and FiveM runtimes.  Older
+# Workbench documents called this ``fivem_runtime`` even when their explicit
+# compatibility target was Story Mode.  Keep the public alias for source
+# compatibility, but serialize the target-neutral value going forward.
+EXPORT_SELECTIVE_RUNTIME = "selective_runtime"
+LEGACY_EXPORT_FIVEM_RUNTIME = "fivem_runtime"
+EXPORT_FIVEM_RUNTIME = EXPORT_SELECTIVE_RUNTIME
+EXPORT_MODES = (EXPORT_STOCK_METADATA, EXPORT_SELECTIVE_RUNTIME)
 
 VISUAL_FRONT = "front"
 VISUAL_SHARED_MIDDLE_REAR = "shared_middle_rear"
@@ -493,6 +499,44 @@ class SteeringCalculationProvenance:
         cls, payload: Mapping[str, Any],
     ) -> "SteeringCalculationProvenance":
         values = dict(payload)
+        # Native Story configurations carry two transport-only hints used by
+        # the ASI after the vehicle is streamed.  They are not authoring
+        # provenance and must not leak back into a portable Workbench sidecar,
+        # but accepting them is required for a native config to round-trip
+        # through the SDK's existing import/inspection path.
+        runtime_recompute_present = "runtimeRecompute" in values
+        runtime_recompute = values.pop("runtimeRecompute", None)
+        reference_selection_present = "referenceSelection" in values
+        reference_selection = values.pop("referenceSelection", None)
+        if runtime_recompute_present and not isinstance(runtime_recompute, bool):
+            raise ValueError("Runtime steering recompute state must be a boolean")
+        if reference_selection_present and (
+            not isinstance(reference_selection, str)
+            or reference_selection.strip().casefold()
+            != "farthest_steered_axle"
+        ):
+            raise ValueError(
+                "Runtime steering reference selection must be "
+                "farthest_steered_axle"
+            )
+        if reference_selection_present and runtime_recompute is not True:
+            raise ValueError(
+                "Runtime steering reference selection requires runtime recompute"
+            )
+        raw_mode = str(values.get("mode", "")).strip().casefold()
+        automatic_mode = raw_mode in {
+            STEERING_CALCULATION_AUTOMATIC, "automaticgeometry",
+        }
+        if runtime_recompute is True:
+            if not automatic_mode:
+                raise ValueError(
+                    "Runtime steering recompute requires automatic geometry mode"
+                )
+            if not reference_selection_present:
+                raise ValueError(
+                    "Runtime steering recompute requires farthest-steered-axle "
+                    "reference selection"
+                )
         runtime_orders = "pivotAxleOrders" in values
         runtime_reference = "referenceAxleOrder" in values
         aliases = {
@@ -829,7 +873,9 @@ class AxleConfiguration:
             raise ValueError("Unsupported axle preset")
         mode = str(migrated.get("export_mode", EXPORT_STOCK_METADATA)).strip().casefold()
         if mode not in EXPORT_MODES:
-            raise ValueError("Axle export mode must be stock_metadata or fivem_runtime")
+            raise ValueError(
+                "Axle export mode must be stock_metadata or selective_runtime"
+            )
         raw_axles = migrated.get("axles")
         if not isinstance(raw_axles, list) or not (
             MINIMUM_AXLE_PAIRS <= len(raw_axles) <= MAXIMUM_AXLE_PAIRS
@@ -1057,6 +1103,13 @@ def _identifier_path(value: Any, label: str) -> str:
 def migrate_axle_configuration(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize legacy/v2/v3 spellings without silently promoting schema."""
     data = dict(payload)
+    native_runtime_shape = all(
+        key in data
+        for key in (
+            "schemaVersion", "modelName", "expectedWheelCount",
+            "wheelIndexMapping", "handling",
+        )
+    )
     # Accept the documented cross-runtime spelling at the import boundary;
     # SDK reports remain consistent with the repository's snake_case schemas.
     aliases = {
@@ -1180,7 +1233,14 @@ def migrate_axle_configuration(payload: Mapping[str, Any]) -> dict[str, Any]:
     data["axles"] = migrated_axles
     data["schema_version"] = schema
     data.setdefault("preset", PRESET_CUSTOM)
-    data.setdefault("export_mode", EXPORT_STOCK_METADATA)
+    data.setdefault(
+        "export_mode",
+        EXPORT_SELECTIVE_RUNTIME if native_runtime_shape else EXPORT_STOCK_METADATA,
+    )
+    if str(data.get("export_mode", "")).strip().casefold() == (
+        LEGACY_EXPORT_FIVEM_RUNTIME
+    ):
+        data["export_mode"] = EXPORT_SELECTIVE_RUNTIME
     data.setdefault("runtime_reapplication", asdict(RuntimeReapplicationPolicy()))
     model = str(data.get("vehicle_model", "")).strip().casefold()
     data.setdefault("configuration_id", f"{model}-axles")
@@ -1662,6 +1722,19 @@ def validate_axle_configuration(
     findings.extend(layout_override_findings)
     calculation = config.steering_calculation
     by_order = {item.physical_order: item for item in config.axles}
+    if (
+        target is not None
+        and str(target).strip().casefold().startswith("story-")
+        and config.intentional_layout_override is not None
+        and sum(1 for axle in config.axles if axle.steered) > 1
+        and calculation is None
+    ):
+        findings.append(AxleFinding(
+            "error", "layout_override_steering_calculation_required",
+            "A custom physical order with multiple steering axles requires "
+            "a fresh automatic calculation or explicit manual steering gains "
+            "before applying or exporting.",
+        ))
     ordered_physical_pairs = tuple(
         (axle.left_bone, axle.right_bone)
         for axle in sorted(config.axles, key=lambda item: item.physical_order)
@@ -2491,7 +2564,7 @@ def _enabled_fivem_target(config: AxleConfiguration) -> str:
 def fivem_client_lua(config: AxleConfiguration) -> str:
     """Generate an event-driven, model-specific client resource."""
     if config.export_mode != EXPORT_FIVEM_RUNTIME:
-        raise ValueError("FiveM resource export requires fivem_runtime mode")
+        raise ValueError("FiveM resource export requires selective_runtime mode")
     if requires_signed_steering_gain(config):
         raise ValueError(
             "FiveM export cannot apply signed or scaled per-axle steering gain; "
@@ -2629,7 +2702,7 @@ end)
 def fivem_server_lua(config: AxleConfiguration) -> str:
     """Use the documented server entity event only as a bounded creation hint."""
     if config.export_mode != EXPORT_FIVEM_RUNTIME:
-        raise ValueError("FiveM resource export requires fivem_runtime mode")
+        raise ValueError("FiveM resource export requires selective_runtime mode")
     if not config.runtime_reapplication.on_entity_created:
         return "-- Entity-created axle hints are disabled for this configuration.\n"
     model_hash = int((config.model_hash or joaat_hex(config.vehicle_model))[2:], 16)
@@ -2719,7 +2792,8 @@ __all__ = [
     "CANONICAL_WHEEL_PAIRS",
     "GTA_RUNTIME_WHEEL_PAIR_ORDER", "MAXIMUM_AXLE_PAIRS", "MINIMUM_AXLE_PAIRS",
     "TARGET_CANONICAL_PAIR_ORDER",
-    "EXPORT_FIVEM_RUNTIME", "EXPORT_MODES", "EXPORT_STOCK_METADATA",
+    "EXPORT_FIVEM_RUNTIME", "EXPORT_MODES", "EXPORT_SELECTIVE_RUNTIME",
+    "EXPORT_STOCK_METADATA", "LEGACY_EXPORT_FIVEM_RUNTIME",
     "FLAG_IS_DRIVEN", "FLAG_IS_STEERED", "HF_HANDBRAKE_REARWHEELSTEER",
     "HF_STEER_ALL_WHEELS", "HF_STEER_REARWHEELS", "PRESET_ALL_STEER",
     "PRESET_CUSTOM", "PRESET_FRONT_STEER", "PRESET_REAR_STEER",

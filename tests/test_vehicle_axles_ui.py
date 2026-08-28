@@ -18,16 +18,20 @@ from allin1_sdk.axle_configurator import (
     AXLE_SUPPORT_RUNTIME_VERSION,
     AXLE_SUPPORT_SCHEMA_VERSION,
     EXPORT_FIVEM_RUNTIME,
+    EXPORT_STOCK_METADATA,
     PRESET_STEER_DRIVE_REAR,
     apply_axle_support_weights,
     detect_axle_configuration,
+    set_steering_command_polarity,
 )
+from allin1_sdk.axle_runtime_bundler import story_native_runtime_configuration
 from allin1_sdk.vehicle_axles_ui import (
     VehicleAxlesPanel,
     _edit_axle_controls,
     _format_steering_gain,
     _guided_physical_layout_configuration,
     _has_unreviewed_physical_layout,
+    _native_story_export_ready,
     _requires_selective_steering_runtime,
     _steering_solution_summary,
 )
@@ -192,12 +196,12 @@ def test_steering_role_edit_preserves_schema_three_support_weights() -> None:
 
 def _remapped_bus_bones() -> tuple[Bone, ...]:
     return (
-        Bone("wheel_lm1", (-1.0, 8.0, 0.0)),
-        Bone("wheel_rm1", (1.0, 8.0, 0.0)),
-        Bone("wheel_lf", (-1.0, 2.0, 0.0)),
-        Bone("wheel_rf", (1.0, 2.0, 0.0)),
-        Bone("wheel_lr", (-1.0, -4.0, 0.0)),
-        Bone("wheel_rr", (1.0, -4.0, 0.0)),
+        Bone("wheel_lm1", (-1.0, 4.4533, 0.0)),
+        Bone("wheel_rm1", (1.0, 4.4533, 0.0)),
+        Bone("wheel_lf", (-1.0, -4.0748, 0.0)),
+        Bone("wheel_rf", (1.0, -4.0748, 0.0)),
+        Bone("wheel_lr", (-1.0, -5.4140, 0.0)),
+        Bone("wheel_rr", (1.0, -5.4140, 0.0)),
     )
 
 
@@ -228,6 +232,71 @@ def test_guided_setup_preserves_detected_bus_order_and_builds_rear_steer() -> No
     assert configured.axles[1].steering_gain == 0.0
     assert configured.axles[2].steering_gain < 0.0
     assert solution.axles[0].physical_order == 1
+
+
+def test_guided_bus_exports_controller_ready_native_story_contract() -> None:
+    wheel_bones = _remapped_bus_bones()
+    detected = detect_axle_configuration(
+        "metrobusxl2", wheel_bones, target="story-legacy",
+    )
+    configured, _solution = _guided_physical_layout_configuration(
+        detected, wheel_bones,
+    )
+    configured = apply_axle_support_weights(
+        configured, {1: 0.95, 2: 1.10, 3: 0.95},
+    )
+    configured = set_steering_command_polarity(configured, "inverted")
+
+    payload = story_native_runtime_configuration(configured, bones=wheel_bones)
+
+    assert payload["schemaVersion"] == 4
+    assert payload["modelName"] == "metrobusxl2"
+    assert payload["expectedWheelCount"] == 6
+    assert payload["compatibility"] == {"story-legacy": True}
+    assert [row["wheelIndices"] for row in payload["axles"]] == [
+        [4, 5], [0, 1], [2, 3],
+    ]
+    assert payload["steeringCommandPolarity"] == "inverted"
+    assert [row["powered"] for row in payload["axles"]] == [
+        False, True, False,
+    ]
+    assert [row["suspension"]["supportWeight"] for row in payload["axles"]] == [
+        0.95, 1.10, 0.95,
+    ]
+    assert [row["steeringGain"] for row in payload["axles"]] == pytest.approx(
+        [1.0, 0.0, -0.17928062909474354], abs=1.0e-9,
+    )
+    calculation = payload["steeringCalculation"]
+    assert calculation["runtimeRecompute"] is True
+    assert calculation["referenceSelection"] == "farthest_steered_axle"
+    assert calculation["referenceAxleOrder"] == 0
+    assert calculation["pivotAxleOrders"] == [1]
+    assert calculation["physicalBonePairs"] == [
+        ["wheel_lm1", "wheel_rm1"],
+        ["wheel_lf", "wheel_rf"],
+        ["wheel_lr", "wheel_rr"],
+    ]
+
+
+def test_native_story_export_availability_matches_serializer_contract() -> None:
+    bones = _three_axle_bones()
+    story = detect_axle_configuration(
+        "story_bus", bones, export_mode=EXPORT_FIVEM_RUNTIME,
+        target="story-legacy",
+    )
+    fivem = detect_axle_configuration(
+        "fivem_bus", bones, export_mode=EXPORT_FIVEM_RUNTIME,
+        target="fivem-legacy",
+    )
+    stock = detect_axle_configuration(
+        "stock_bus", bones, export_mode=EXPORT_STOCK_METADATA,
+        target="story-legacy",
+    )
+
+    assert _native_story_export_ready(story) is True
+    assert _native_story_export_ready(fivem) is False
+    assert _native_story_export_ready(stock) is False
+    assert _native_story_export_ready(None) is False
 
 
 def test_panel_load_apply_export_and_clear_lifecycle(tk_root) -> None:

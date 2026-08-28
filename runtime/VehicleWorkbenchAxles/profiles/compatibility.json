@@ -1,30 +1,36 @@
 {
   "manifestVersion": 1,
-  "runtimeVersion": "4.0.0",
+  "runtimeVersion": "4.1.0",
   "profiles": {
     "story-legacy": {
       "status": "implemented-awaiting-validation",
+      "hostBridgeStatus": "implemented",
+      "wheelProfileStatus": "missing",
       "supportedGameBuilds": [],
       "capabilities": {
         "steeringFlags": true,
         "driveFlags": true,
         "signedSteeringGain": false,
+        "wheelLocalPosition": false,
         "staticForce": false,
         "physicsActivation": false
       },
-      "reason": "No validated Legacy wheel-access signature profile is shipped. The adapter disables before memory access."
+      "reason": "The native ScriptHookV host is implemented, but no validated Legacy wheel-access signature profile is shipped. The adapter disables before memory access."
     },
     "story-enhanced": {
       "status": "implemented-awaiting-validation",
+      "hostBridgeStatus": "implemented",
+      "wheelProfileStatus": "missing",
       "supportedGameBuilds": [],
       "capabilities": {
         "steeringFlags": true,
         "driveFlags": true,
         "signedSteeringGain": false,
+        "wheelLocalPosition": false,
         "staticForce": false,
         "physicsActivation": false
       },
-      "reason": "No validated Enhanced wheel-access signature profile is shipped. The adapter disables before memory access."
+      "reason": "The native ScriptHookV host is implemented, but no validated Enhanced wheel-access signature profile is shipped. The adapter disables before memory access."
     }
   },
   "policy": {
@@ -34,6 +40,7 @@
     "packageEligibleReceiptRequired": true,
     "x64PeExportInspectionRequired": true,
     "signedSteeringGainRequiresValidatedAccessor": true,
+    "runtimeGeometryRequiresValidatedWheelLocalPositionAccessor": true,
     "staticForceRequiresValidatedAccessorAndPhysicsActivation": true,
     "onlineSessionsAllowed": false
   }

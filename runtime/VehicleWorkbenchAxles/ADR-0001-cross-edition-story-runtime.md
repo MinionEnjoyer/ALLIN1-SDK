@@ -54,8 +54,10 @@ The runtime:
    when the exact-build adapter cannot read, write, and restore it;
 7. rolls back a partial application when the adapter reports failure and
    retains the original pre-application baseline when recovery must retry;
-8. reapplies on explicit lifecycle events or a bounded recovery pass, never an
-   unconditional frame write loop;
+8. reapplies flags, drive state, and suspension on explicit lifecycle events or
+   a bounded recovery pass; because GTA rewrites the steering-limit field during
+   vehicle simulation, only tracked gains for explicitly steered wheels receive
+   bounded maintenance on each host service tick, with deduplicated logging;
 9. rechecks the online guard immediately before every mutating adapter call;
 10. restores modified bits and any capability-backed gain only when the entity
    and wheel generation can be
@@ -83,4 +85,6 @@ The runtime:
 - Bone swapping, left/right inversion, or negative steering lock: corrupts
   vehicle semantics and player steering.
 - Full wheel-flag replacement: destroys unknown game state.
-- A per-frame write loop: unnecessary, expensive, and warning-prone.
+- An unconditional per-frame rewrite of all wheel state: expensive and
+  warning-prone. The accepted narrow exception is read-before-write maintenance
+  of volatile gain fields for tracked, explicitly steered wheels only.

@@ -80,6 +80,7 @@ def test_catalog_is_structured_and_classifies_risk():
         assert catalog[command]["risk"] == "authoring_write"
     assert catalog["open-vehicle-workbench"]["risk"] == "read_only"
     assert catalog["open-axle-configurator"]["risk"] == "read_only"
+    assert catalog["export-story-axle-runtime-config"]["risk"] == "authoring_write"
     assert catalog["preview-axle-steering"]["risk"] == "read_only"
     assert catalog["open-model-material-workbench"]["risk"] == "read_only"
     assert catalog["open-package-graph"]["risk"] == "authoring_write"
@@ -108,6 +109,23 @@ def test_catalog_is_structured_and_classifies_risk():
     }
     assert native_parameters["gta_path"]["kind"] == "option"
     assert "audio" in native_parameters["gta_path"]["help"].casefold()
+    prefab_parameters = {
+        item["name"]: item
+        for item in catalog["list-axle-prefabs"]["parameters"]
+    }
+    axle_count = prefab_parameters["axle_count"]
+    assert axle_count["type"] == "integer range"
+    assert axle_count["minimum"] == 2
+    assert axle_count["maximum"] == 5
+    assert axle_count["nargs"] == 1
+    assert axle_count["default"] is None
+    assert axle_count["default_provided"] is False
+    plan_parameters = {
+        item["name"]: item
+        for item in catalog["plan-axle-runtime-bundle"]["parameters"]
+    }
+    assert plan_parameters["config_json"]["nargs"] == -1
+    assert plan_parameters["config_json"]["default_provided"] is False
     assert set(catalog) == set(COMMAND_RISKS)
     with pytest.raises(ValueError, match="no explicit Agent API risk"):
         command_risk("unknown-future-command")

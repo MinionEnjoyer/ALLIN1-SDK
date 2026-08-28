@@ -227,6 +227,24 @@ public:
         ++gain_writes;
         return true;
     }
+    bool SupportsWheelLocalPosition() const noexcept override {
+        return supports_wheel_local_position;
+    }
+    bool ReadWheelLocalPosition(const VehicleSnapshot&, std::uint32_t index,
+                                WheelLocalPosition& position) override {
+        if (!resolved || !supports_wheel_local_position ||
+            index >= wheel_local_positions.size()) {
+            return false;
+        }
+        if (fail_next_position_read_at.has_value() &&
+            *fail_next_position_read_at == index) {
+            fail_next_position_read_at.reset();
+            return false;
+        }
+        position = wheel_local_positions[index];
+        ++position_reads;
+        return true;
+    }
     bool SupportsStaticForce() const noexcept override {
         return supports_static_force;
     }
@@ -271,13 +289,16 @@ public:
     std::string failure;
     std::vector<std::uint16_t> flags;
     std::vector<double> steering_gains;
+    std::vector<WheelLocalPosition> wheel_local_positions;
     std::vector<double> static_forces;
     bool supports_steering_gain{false};
+    bool supports_wheel_local_position{false};
     bool supports_static_force{false};
     std::optional<std::uint32_t> fail_next_read_at;
     std::optional<std::uint32_t> fail_next_write_at;
     std::optional<std::uint32_t> fail_next_power_write_at;
     std::optional<std::uint32_t> fail_next_gain_write_at;
+    std::optional<std::uint32_t> fail_next_position_read_at;
     std::optional<std::uint32_t> fail_next_static_write_at;
     std::optional<std::uint32_t> corrupt_next_static_read_at;
     std::optional<std::size_t> corrupt_static_read_number;
@@ -286,6 +307,7 @@ public:
     std::size_t powered_writes{0};
     std::size_t gain_reads{0};
     std::size_t gain_writes{0};
+    std::size_t position_reads{0};
     std::size_t static_force_reads{0};
     std::size_t static_force_writes{0};
     std::size_t resolve_calls{0};
@@ -814,13 +836,19 @@ void TestSignedSteeringGainCapabilityAndRestore() {
     for (const auto& axle : configuration.axles) {
         const double expected = axle.steering_gain.value_or(
             axle.steered ? 1.0 : 0.0);
-        Check(std::abs(access.steering_gains.at(
-                           configuration.wheel_index_map.at(axle.left_bone)) -
-                       expected) < 0.000001 &&
-                  std::abs(access.steering_gains.at(
-                               configuration.wheel_index_map.at(axle.right_bone)) -
-                           expected) < 0.000001,
-              "signed steering gain did not follow the canonical wheel map");
+        const auto left = configuration.wheel_index_map.at(axle.left_bone);
+        const auto right = configuration.wheel_index_map.at(axle.right_bone);
+        if (axle.steered) {
+            Check(std::abs(access.steering_gains.at(left) - expected) <
+                      0.000001 &&
+                      std::abs(access.steering_gains.at(right) - expected) <
+                          0.000001,
+                  "signed steering gain did not follow the canonical wheel map");
+        } else {
+            Check(access.steering_gains.at(left) == gains_before.at(left) &&
+                      access.steering_gains.at(right) == gains_before.at(right),
+                  "fixed axle steering gain was unnecessarily managed");
+        }
     }
     runtime.Shutdown();
     Check(access.steering_gains == gains_before,
@@ -899,13 +927,21 @@ void TestSignedSteeringGainCapabilityAndRestore() {
         const double base = axle.steering_gain.value_or(
             axle.steered ? 1.0 : 0.0);
         const double expected = -base;
-        Check(std::abs(inverted_access.steering_gains.at(
-                           inverted.wheel_index_map.at(axle.left_bone)) -
-                       expected) < 0.000001 &&
-                  std::abs(inverted_access.steering_gains.at(
-                               inverted.wheel_index_map.at(axle.right_bone)) -
-                           expected) < 0.000001,
-              "steering command polarity was not applied exactly once");
+        const auto left = inverted.wheel_index_map.at(axle.left_bone);
+        const auto right = inverted.wheel_index_map.at(axle.right_bone);
+        if (axle.steered) {
+            Check(std::abs(inverted_access.steering_gains.at(left) - expected) <
+                      0.000001 &&
+                      std::abs(inverted_access.steering_gains.at(right) - expected) <
+                          0.000001,
+                  "steering command polarity was not applied exactly once");
+        } else {
+            Check(inverted_access.steering_gains.at(left) ==
+                      gains_before.at(left) &&
+                      inverted_access.steering_gains.at(right) ==
+                          gains_before.at(right),
+                  "inverted polarity managed a fixed axle gain");
+        }
     }
     Check(std::any_of(
               inverted_log.entries.begin(), inverted_log.entries.end(),
@@ -918,6 +954,191 @@ void TestSignedSteeringGainCapabilityAndRestore() {
           "polarity log omitted base/polarity/effective steering evidence");
     inverted_runtime.Shutdown();
 
+}
+
+void TestVolatileSteeringMaintenanceIgnoresFixedWheels() {
+    auto configuration = MakeConfiguration(3, 0x5A17B060U);
+    PromoteToSignedSchema(configuration);
+    configuration.axles[0].steering_gain = 1.0;
+    configuration.axles[1].steering_gain = 0.0;
+    configuration.axles[2].steering_gain = -0.22;
+
+    Host host;
+    host.vehicles = {{85, configuration.model_hash, 1}};
+    WheelAccess access;
+    access.supports_steering_gain = true;
+    access.flags = InitialFlags(6);
+    access.steering_gains = {0.11, 0.12, 0.13, 0.14, 0.15, 0.16};
+    LogSink log;
+    ConfigurationCatalog catalog;
+    catalog.active.emplace(configuration.model_hash, configuration);
+    Resolver resolver;
+    AxleRuntime runtime(host, access, log);
+    Check(runtime.Start(std::move(catalog), resolver),
+          "volatile steering maintenance fixture did not start");
+    const auto first = std::chrono::steady_clock::now();
+    runtime.Service(first);
+
+    const auto managed =
+        configuration.wheel_index_map.at(configuration.axles[0].left_bone);
+    const auto fixed =
+        configuration.wheel_index_map.at(configuration.axles[1].left_bone);
+    access.steering_gains[managed] = 13.7362;
+    access.steering_gains[fixed] = 7.25;
+    const auto writes_before = access.gain_writes;
+
+    // Less than the discovery interval: only the bounded per-frame volatile
+    // maintenance path can repair this engine-owned field.
+    runtime.Service(first + std::chrono::milliseconds(1));
+    Check(std::abs(access.steering_gains[managed] - 1.0) < 0.000001,
+          "per-frame maintenance did not repair GTA steering gain drift");
+    Check(access.steering_gains[fixed] == 7.25,
+          "fixed wheel gain drift was treated as controller-owned state");
+    Check(access.gain_writes == writes_before + 1U,
+          "volatile maintenance wrote more than the one drifting managed wheel");
+
+    access.steering_gains[managed] = 9.0;
+    runtime.Service(first + std::chrono::milliseconds(2));
+    Check(std::count_if(
+              log.entries.begin(), log.entries.end(),
+              [](const auto& entry) {
+                  return entry.first == "steering-gain-reasserted";
+              }) == 1,
+          "repeated gain drift produced frame-spam logging");
+    runtime.Shutdown();
+}
+
+void TestRuntimeGeometryUsesAuthoritativePhysicalOrder() {
+    auto configuration = MakeConfiguration(3, 0x5A17B061U);
+    std::swap(configuration.axles[0], configuration.axles[1]);
+    for (std::size_t position = 0;
+         position < configuration.axles.size(); ++position) {
+        auto& axle = configuration.axles[position];
+        axle.order = static_cast<std::uint32_t>(position);
+        axle.role = position == 0U
+                        ? "front"
+                        : (position + 1U == configuration.axles.size()
+                               ? "rear"
+                               : "middle");
+        axle.steered = position != 1U;
+        axle.powered = position == 1U;
+    }
+    IntentionalLayoutOverride layout;
+    layout.mode = "visual_instancing_remap";
+    layout.physical_bone_pairs = {
+        {"wheel_lm1", "wheel_rm1"},
+        {"wheel_lf", "wheel_rf"},
+        {"wheel_lr", "wheel_rr"},
+    };
+    layout.bone_position_sha256 = std::string(64U, '0');
+    layout.reason = "Author-reviewed single/dual/single wheel-family layout";
+    configuration.intentional_layout_override = layout;
+    PromoteToSignedSchema(configuration);
+    configuration.minimum_runtime_version = kRuntimeGeometryMinimumRuntime;
+    configuration.axles[0].steering_gain = 0.179;
+    configuration.axles[1].steering_gain = 0.0;
+    configuration.axles[2].steering_gain = -1.0;
+    auto& evidence = *configuration.steering_calculation;
+    evidence.mode = "automaticGeometry";
+    evidence.runtime_recompute = true;
+    evidence.reference_selection = "farthest_steered_axle";
+    evidence.pivot_longitudinal_position = -4.0748;
+    evidence.pivot_source = "selected_fixed_axles";
+    evidence.pivot_axle_orders = {1};
+    evidence.reference_axle_order = 2;
+    evidence.reference_lock_degrees = 35.0;
+    evidence.pair_position_tolerance = 0.01;
+    evidence.position_epsilon = 0.0001;
+    evidence.physical_bone_pairs = layout.physical_bone_pairs;
+    Check(ValidateConfiguration(configuration, "4.1.0").empty(),
+          "runtime geometry fixture did not validate");
+
+    Host unsupported_host;
+    WheelAccess unsupported_access;
+    unsupported_access.supports_steering_gain = true;
+    unsupported_access.flags = InitialFlags(6);
+    unsupported_access.steering_gains =
+        {0.11, 0.12, 0.13, 0.14, 0.15, 0.16};
+    ConfigurationCatalog unsupported_catalog;
+    unsupported_catalog.active.emplace(configuration.model_hash, configuration);
+    LogSink unsupported_log;
+    Resolver resolver;
+    AxleRuntime unsupported_runtime(
+        unsupported_host, unsupported_access, unsupported_log);
+    Check(!unsupported_runtime.Start(
+              std::move(unsupported_catalog), resolver) &&
+              unsupported_access.gain_writes == 0,
+          "runtime geometry ran without authoritative position capability");
+    unsupported_runtime.Shutdown();
+
+    Host host;
+    host.vehicles = {{86, configuration.model_hash, 1}};
+    WheelAccess access;
+    access.supports_steering_gain = true;
+    access.supports_wheel_local_position = true;
+    access.flags = InitialFlags(6);
+    access.steering_gains = {0.11, 0.12, 0.13, 0.14, 0.15, 0.16};
+    const auto gains_before = access.steering_gains;
+    access.wheel_local_positions.resize(6);
+    const auto set_pair = [&](const AxleDefinition& axle,
+                              double longitudinal) {
+        const auto left = configuration.wheel_index_map.at(axle.left_bone);
+        const auto right = configuration.wheel_index_map.at(axle.right_bone);
+        access.wheel_local_positions[left] =
+            {-1.0, longitudinal, 0.0};
+        access.wheel_local_positions[right] =
+            {1.0, longitudinal, 0.0};
+    };
+    set_pair(configuration.axles[0], 4.4533);
+    set_pair(configuration.axles[1], -4.0748);
+    set_pair(configuration.axles[2], -5.4140);
+
+    LogSink log;
+    ConfigurationCatalog catalog;
+    catalog.active.emplace(configuration.model_hash, configuration);
+    AxleRuntime runtime(host, access, log);
+    Check(runtime.Start(std::move(catalog), resolver),
+          "authoritative runtime geometry fixture did not start");
+    runtime.Service(std::chrono::steady_clock::now());
+
+    const auto front_left =
+        configuration.wheel_index_map.at(configuration.axles[0].left_bone);
+    const auto front_right =
+        configuration.wheel_index_map.at(configuration.axles[0].right_bone);
+    const auto fixed_left =
+        configuration.wheel_index_map.at(configuration.axles[1].left_bone);
+    const auto fixed_right =
+        configuration.wheel_index_map.at(configuration.axles[1].right_bone);
+    const auto rear_left =
+        configuration.wheel_index_map.at(configuration.axles[2].left_bone);
+    const auto rear_right =
+        configuration.wheel_index_map.at(configuration.axles[2].right_bone);
+    const double lock = 35.0 * std::acos(-1.0) / 180.0;
+    const double radius = (4.4533 - (-4.0748)) / std::tan(lock);
+    const double expected_rear =
+        std::atan((-5.4140 - (-4.0748)) / radius) / lock;
+    Check(std::abs(access.steering_gains[front_left] - 1.0) < 0.000001 &&
+              std::abs(access.steering_gains[front_right] - 1.0) < 0.000001,
+          "physical front was not selected as the farthest reference axle");
+    Check(access.steering_gains[fixed_left] == gains_before[fixed_left] &&
+              access.steering_gains[fixed_right] == gains_before[fixed_right],
+          "runtime geometry wrote gain state to the fixed physical axle");
+    Check(std::abs(access.steering_gains[rear_left] - expected_rear) <
+                  0.000001 &&
+              std::abs(access.steering_gains[rear_right] - expected_rear) <
+                  0.000001 &&
+              std::abs(expected_rear + 0.179) < 0.01,
+          "physical rear did not receive the expected bounded counter-steer gain");
+    Check(access.position_reads == 6,
+          "runtime geometry did not read exactly one authoritative position per wheel");
+    Check(std::any_of(
+              log.entries.begin(), log.entries.end(),
+              [](const auto& entry) {
+                  return entry.first ==
+                         "runtime-steering-geometry-corrected";
+              }),
+          "runtime geometry correction was not reported");
+    runtime.Shutdown();
 }
 
 void TestAxleSupportBiasApplyRollbackAndRestore() {
@@ -1134,6 +1355,63 @@ void TestAxleSupportBiasParsingAndValidation() {
           "support bias accepted a pre-3.0 minimum runtime");
 }
 
+void TestRuntimeSettingsContract() {
+    const std::string packaged_settings = R"json({
+      "schemaVersion": 1,
+      "enabled": true,
+      "discoveryIntervalMs": 250,
+      "recoveryIntervalMs": 2000,
+      "restoreOnUnload": true,
+      "logFile": "logs/VehicleWorkbenchAxles.log"
+    })json";
+    std::vector<ValidationIssue> issues;
+    const auto parsed = ParseRuntimeSettingsJson(
+        packaged_settings, issues, "runtime.json");
+    Check(parsed.has_value() && issues.empty(),
+          "packaged native runtime settings were rejected");
+    Check(parsed->enabled && parsed->discovery_interval_ms == 250U &&
+              parsed->recovery_interval_ms == 2000U &&
+              parsed->restore_on_unload &&
+              parsed->log_file == "logs/VehicleWorkbenchAxles.log",
+          "packaged native runtime settings changed values while parsing");
+
+    std::vector<ValidationIssue> disabled_issues;
+    const auto disabled = ParseRuntimeSettingsJson(
+        R"json({"schemaVersion":1,"enabled":false})json",
+        disabled_issues, "runtime.json");
+    Check(disabled.has_value() && disabled_issues.empty() &&
+              !disabled->enabled,
+          "runtime enabled=false was not preserved");
+
+    std::vector<ValidationIssue> default_issues;
+    const auto defaulted = ParseRuntimeSettingsJson(
+        R"json({"schemaVersion":1})json", default_issues,
+        "runtime.json");
+    Check(defaulted.has_value() && default_issues.empty() &&
+              defaulted->enabled,
+          "omitted runtime enabled setting did not default on");
+
+    std::vector<ValidationIssue> typed_issues;
+    Check(!ParseRuntimeSettingsJson(
+               R"json({"schemaVersion":1,"enabled":1})json",
+               typed_issues, "runtime.json")
+               .has_value(),
+          "runtime enabled accepted a non-boolean value");
+
+    std::vector<ValidationIssue> unknown_issues;
+    Check(!ParseRuntimeSettingsJson(
+               R"json({"schemaVersion":1,"runtime_name":"bad-shape"})json",
+               unknown_issues, "runtime.json")
+               .has_value(),
+          "runtime settings accepted release metadata fields");
+    Check(std::any_of(
+              unknown_issues.begin(), unknown_issues.end(),
+              [](const ValidationIssue& issue) {
+                  return issue.code == "unknown-runtime-setting" && issue.fatal;
+              }),
+          "unknown runtime settings were not reported fail-closed");
+}
+
 void TestValidationAndParsing() {
     const std::string json_text = R"json({
       "schemaVersion": 1,
@@ -1295,17 +1573,38 @@ void TestValidationAndParsing() {
           "automatic evidence parser fixture was not found");
     automatic_json.insert(
         evidence_end_position + 1U,
-        ",\"pivotLongitudinalPosition\":-1.0,"
+        ",\"runtimeRecompute\":true,"
+        "\"referenceSelection\":\"farthest_steered_axle\","
+        "\"pivotLongitudinalPosition\":-1.0,"
         "\"pivotSource\":\"selected_fixed_axles\","
         "\"pivotAxleOrders\":[1],\"referenceAxleOrder\":0,"
         "\"referenceLockDegrees\":35.0,"
         "\"pairPositionTolerance\":0.01,"
         "\"positionEpsilon\":0.0001");
+    std::vector<ValidationIssue> old_automatic_issues;
+    const auto old_automatic = ParseConfigurationJson(
+        automatic_json, "4.1.0", old_automatic_issues,
+        "automatic-old-runtime.json");
+    Check(!old_automatic.has_value() && std::any_of(
+              old_automatic_issues.begin(), old_automatic_issues.end(),
+              [](const ValidationIssue& issue) {
+                  return issue.code == "runtime-geometry-version-too-old";
+              }),
+          "runtime recompute accepted minimumRuntimeVersion 2.0.0");
+    const std::string automatic_old_minimum =
+        "\"minimumRuntimeVersion\": \"2.0.0\"";
+    automatic_json.replace(
+        automatic_json.find(automatic_old_minimum),
+        automatic_old_minimum.size(),
+        "\"minimumRuntimeVersion\": \"4.1.0\"");
     std::vector<ValidationIssue> automatic_issues;
     const auto parsed_automatic = ParseConfigurationJson(
-        automatic_json, "2.0.0", automatic_issues, "automatic.json");
+        automatic_json, "4.1.0", automatic_issues, "automatic.json");
     Check(parsed_automatic.has_value() && automatic_issues.empty() &&
               parsed_automatic->steering_calculation.has_value() &&
+              parsed_automatic->steering_calculation->runtime_recompute &&
+              parsed_automatic->steering_calculation
+                      ->reference_selection == "farthest_steered_axle" &&
               parsed_automatic->steering_calculation
                   ->pair_position_tolerance == 0.01 &&
               parsed_automatic->steering_calculation->position_epsilon ==
@@ -1349,6 +1648,12 @@ void TestValidationAndParsing() {
     invalid_manual.steering_calculation->pair_position_tolerance = 0.01;
     Check(!ValidateConfiguration(invalid_manual, "2.0.0").empty(),
           "manual provenance accepted an automatic-only tolerance");
+    auto invalid_manual_recompute = signed_gain;
+    invalid_manual_recompute.steering_calculation->runtime_recompute = true;
+    invalid_manual_recompute.steering_calculation->reference_selection =
+        "farthest_steered_axle";
+    Check(!ValidateConfiguration(invalid_manual_recompute, "2.0.0").empty(),
+          "manual provenance accepted runtime geometry recompute");
 
     auto cosmetic = *parsed;
     cosmetic.wheel_index_map.emplace("wheel_dual_lf", 6);
@@ -1433,8 +1738,11 @@ int main() {
         TestShutdownReleasesObsoleteVehicleIdentities();
         TestOnlineAndUnsupportedGuards();
         TestSignedSteeringGainCapabilityAndRestore();
+        TestVolatileSteeringMaintenanceIgnoresFixedWheels();
+        TestRuntimeGeometryUsesAuthoritativePhysicalOrder();
         TestAxleSupportBiasApplyRollbackAndRestore();
         TestAxleSupportBiasParsingAndValidation();
+        TestRuntimeSettingsContract();
         TestValidationAndParsing();
         std::cout << "VehicleWorkbenchAxles core tests passed\n";
         return EXIT_SUCCESS;

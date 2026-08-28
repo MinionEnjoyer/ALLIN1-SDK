@@ -530,7 +530,9 @@ ValidateConfiguration(const AxleConfiguration& configuration,
                          source_name);
             }
             if (evidence.mode == "manual") {
-                if (evidence.pivot_longitudinal_position.has_value() ||
+                if (evidence.runtime_recompute ||
+                    !evidence.reference_selection.empty() ||
+                    evidence.pivot_longitudinal_position.has_value() ||
                     !evidence.pivot_source.empty() ||
                     !evidence.pivot_axle_orders.empty() ||
                     evidence.reference_axle_order.has_value() ||
@@ -538,7 +540,7 @@ ValidateConfiguration(const AxleConfiguration& configuration,
                     evidence.pair_position_tolerance.has_value() ||
                     evidence.position_epsilon.has_value()) {
                     AddIssue(issues, "manual-steering-evidence-fields",
-                             "Manual steering evidence cannot contain automatic geometry fields",
+                             "Manual steering evidence cannot contain runtime recompute or automatic geometry fields",
                              source_name);
                 }
             } else if (evidence.mode == "automaticGeometry") {
@@ -559,6 +561,27 @@ ValidateConfiguration(const AxleConfiguration& configuration,
                 if (!automatic_fields) {
                     AddIssue(issues, "incomplete-automatic-steering-evidence",
                              "Automatic steering evidence requires finite pivot, reference, lock, pairPositionTolerance, and positionEpsilon fields",
+                             source_name);
+                }
+                if (evidence.runtime_recompute &&
+                    evidence.reference_selection !=
+                        "farthest_steered_axle") {
+                    AddIssue(issues, "invalid-runtime-reference-selection",
+                             "Runtime steering recompute requires referenceSelection farthest_steered_axle",
+                             source_name);
+                }
+                if (evidence.runtime_recompute &&
+                    !RuntimeSatisfies(configuration.minimum_runtime_version,
+                                      kRuntimeGeometryMinimumRuntime)) {
+                    AddIssue(
+                        issues, "runtime-geometry-version-too-old",
+                        "Runtime steering recompute requires minimumRuntimeVersion 4.1.0 or newer",
+                        source_name);
+                }
+                if (!evidence.runtime_recompute &&
+                    !evidence.reference_selection.empty()) {
+                    AddIssue(issues, "unexpected-runtime-reference-selection",
+                             "referenceSelection is only valid when runtimeRecompute is true",
                              source_name);
                 }
                 if (evidence.reference_axle_order.has_value() &&
@@ -744,6 +767,14 @@ ParseConfigurationJson(const std::string& json_text,
                 *calculation, "algorithmVersion");
             evidence.bone_position_sha256 = RequiredString(
                 *calculation, "bonePositionSha256");
+            if (const auto* recompute =
+                    calculation->Find("runtimeRecompute")) {
+                evidence.runtime_recompute = recompute->AsBool();
+            }
+            if (const auto* selection =
+                    calculation->Find("referenceSelection")) {
+                evidence.reference_selection = selection->AsString();
+            }
             if (const auto* pivot =
                     calculation->Find("pivotLongitudinalPosition")) {
                 evidence.pivot_longitudinal_position = pivot->AsNumber();
@@ -937,13 +968,29 @@ ParseRuntimeSettingsJson(const std::string& json_text,
     const auto first_issue = issues.size();
     try {
         const auto root = json::Parse(json_text);
-        root.AsObject();
+        const auto& object = root.AsObject();
+        static const std::set<std::string> kAllowedRuntimeSettings{
+            "schemaVersion", "enabled", "discoveryIntervalMs",
+            "recoveryIntervalMs", "restoreOnUnload", "logFile",
+        };
+        for (const auto& [key, _value] : object) {
+            if (kAllowedRuntimeSettings.find(key) ==
+                kAllowedRuntimeSettings.end()) {
+                AddIssue(issues, "unknown-runtime-setting",
+                         "runtime.json contains unsupported field '" + key +
+                             "'",
+                         source_name);
+            }
+        }
         RuntimeSettings result;
         result.schema_version = RequiredUInt32(root, "schemaVersion");
         if (result.schema_version != kRuntimeSettingsSchemaVersion) {
             AddIssue(issues, "unsupported-runtime-settings-schema",
                      "runtime.json requires schema version 1", source_name);
             return std::nullopt;
+        }
+        if (const auto* value = root.Find("enabled")) {
+            result.enabled = value->AsBool();
         }
         if (const auto* value = root.Find("discoveryIntervalMs")) {
             result.discovery_interval_ms =

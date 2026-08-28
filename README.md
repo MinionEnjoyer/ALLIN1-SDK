@@ -50,7 +50,8 @@ If ALLIN1 Launcher and SDK are useful to you, project support is available throu
   physical axle pairs. The runtime contract normalizes them against the
   vehicle's original total support and requires reversible readback, physics
   activation, rollback, and restoration capabilities before permitting writes.
-- VehicleWorkbenchAxles 4.0.0 carries the schema-4 configuration, target wheel
+- VehicleWorkbenchAxles 4.1.0 carries the schema-4 configuration, authoritative
+  runtime geometry recomputation, target wheel
   mapping, capability, receipt, logging, CLI, Agent API, and desktop Workbench
   contracts. Story runtime exports remain fail-closed unless an exact build has
   an independently validated profile.

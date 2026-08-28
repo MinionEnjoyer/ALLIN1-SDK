@@ -31,6 +31,7 @@ from allin1_sdk.axle_runtime_bundler import (
     STORY_RUNTIME_NAME,
     TARGET_STORY_ENHANCED,
     TARGET_STORY_LEGACY,
+    default_story_runtime_settings,
 )
 
 
@@ -1084,6 +1085,12 @@ class OivContentPlanner:
             "runtime_validation_receipt",
             replaces=True,
         ))
+        # ``runtime.json`` is read directly by the native ASI and therefore
+        # must remain the strict camelCase RuntimeSettings contract. Release
+        # identity/receipt information lives beside it under a distinct name;
+        # combining the two shapes made every installed runtime fail settings
+        # parsing and silently fall back to defaults.
+        settings = default_story_runtime_settings()
         metadata = {
             "schema_version": 1,
             "runtime_name": STORY_RUNTIME_NAME,
@@ -1106,6 +1113,13 @@ class OivContentPlanner:
         files.append(self._payload_file(
             "content/runtime/runtime.json",
             f"{STORY_RUNTIME_NAME}\\runtime.json",
+            "runtime_settings",
+            json.dumps(settings, indent=2).encode("utf-8") + b"\n",
+            replaces=True,
+        ))
+        files.append(self._payload_file(
+            "content/runtime/runtime-metadata.json",
+            f"{STORY_RUNTIME_NAME}\\runtime-metadata.json",
             "runtime_metadata",
             json.dumps(metadata, indent=2).encode("utf-8") + b"\n",
             replaces=True,

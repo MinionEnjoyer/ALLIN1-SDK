@@ -6,7 +6,7 @@
   "visualTyreParameters": {},
   "visualStatus": "design_only_until_geometry_is_bound",
   "target": "fivem-legacy",
-  "exportMode": "fivem_runtime",
+  "exportMode": "selective_runtime",
   "reportedWheelCount": 6,
   "bones": [
     {"name": "wheel_lf", "position": [-1.25, 8.0, 0.0]},

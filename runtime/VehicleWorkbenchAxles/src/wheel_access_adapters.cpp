@@ -190,6 +190,19 @@ bool WriteSteeringGain(State& state, const VehicleSnapshot& vehicle,
 }
 
 template <typename State>
+bool SupportsWheelLocalPosition(const State& state) noexcept {
+    return state.active && state.active->SupportsWheelLocalPosition();
+}
+
+template <typename State>
+bool ReadWheelLocalPosition(State& state, const VehicleSnapshot& vehicle,
+                            std::uint32_t index,
+                            WheelLocalPosition& position) {
+    return SupportsWheelLocalPosition(state) &&
+           state.active->ReadWheelLocalPosition(vehicle, index, position);
+}
+
+template <typename State>
 bool SupportsStaticForce(const State& state) noexcept {
     return state.active && state.active->SupportsStaticForce();
 }
@@ -269,6 +282,14 @@ bool LegacyWheelAccess::WriteWheelSteeringGain(
     const VehicleSnapshot& vehicle, std::uint32_t index, double gain) {
     return WriteSteeringGain(*state_, vehicle, index, gain);
 }
+bool LegacyWheelAccess::SupportsWheelLocalPosition() const noexcept {
+    return vwa::SupportsWheelLocalPosition(*state_);
+}
+bool LegacyWheelAccess::ReadWheelLocalPosition(
+    const VehicleSnapshot& vehicle, std::uint32_t index,
+    WheelLocalPosition& position) {
+    return vwa::ReadWheelLocalPosition(*state_, vehicle, index, position);
+}
 bool LegacyWheelAccess::SupportsStaticForce() const noexcept {
     return vwa::SupportsStaticForce(*state_);
 }
@@ -339,6 +360,14 @@ bool EnhancedWheelAccess::ReadWheelSteeringGain(
 bool EnhancedWheelAccess::WriteWheelSteeringGain(
     const VehicleSnapshot& vehicle, std::uint32_t index, double gain) {
     return WriteSteeringGain(*state_, vehicle, index, gain);
+}
+bool EnhancedWheelAccess::SupportsWheelLocalPosition() const noexcept {
+    return vwa::SupportsWheelLocalPosition(*state_);
+}
+bool EnhancedWheelAccess::ReadWheelLocalPosition(
+    const VehicleSnapshot& vehicle, std::uint32_t index,
+    WheelLocalPosition& position) {
+    return vwa::ReadWheelLocalPosition(*state_, vehicle, index, position);
 }
 bool EnhancedWheelAccess::SupportsStaticForce() const noexcept {
     return vwa::SupportsStaticForce(*state_);

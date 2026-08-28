@@ -1,7 +1,9 @@
 # Validated wheel-access profiles
 
-No profile ships in this source release.  Consequently the Legacy and Enhanced
-adapters always fail closed before reading or writing game memory.
+The native ScriptHookV host bridge ships in source form and handles lifecycle,
+Story/Online gating, configuration discovery, entity enumeration, and logging.
+No wheel-access profile ships in this source release. Consequently the Legacy
+and Enhanced adapters still fail closed before reading or writing game memory.
 
 A future profile is accepted only after all of these are independently reviewed
 and exercised in the target edition:
@@ -16,6 +18,8 @@ and exercised in the target edition:
 - maximum axle configuration schema and explicit capability booleans;
 - signed-steering write/readback/reapplication evidence when that capability
   is enabled;
+- vehicle-local wheel-position readback, automatic geometry recomputation, and
+  unsupported-access fail-closed evidence when runtime geometry is enabled;
 - static-force apply/readback, physics activation fail-closed behavior,
   normalized total and left/right preservation, transactional rollback,
   repair reapplication, and unload restore when axle support bias is enabled;
@@ -23,7 +27,8 @@ and exercised in the target edition:
 
 Older profile documents remain schema-1-only: omitted `maximum_axle_schema`
 means `1`, while an omitted `capabilities` object means signed steering,
-static-force access, and physics activation are all `false`. Axle support is
+static-force access, physics activation, and vehicle-local wheel positions are
+all `false`. Axle support is
 derived only when both static force and physics activation are attested. A
 pinned receipt must mirror the profile values exactly. FiveM targets never
 inherit these Story-only capabilities.

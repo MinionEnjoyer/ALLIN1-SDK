@@ -187,7 +187,6 @@ def test_axle_configuration_updates_flags_bias_and_manifest_with_undo_redo(tmp_p
         workspace.source / "handling.meta"
     ).read_text("utf-8")
 
-
 def test_preview_axle_steering_cli_returns_read_only_signed_proposal(
     tmp_path, monkeypatch,
 ):
@@ -232,6 +231,28 @@ def test_preview_axle_steering_cli_returns_read_only_signed_proposal(
     assert "fDriveBiasFront value=\"0.5\"" in (
         workspace.source / "handling.meta"
     ).read_text("utf-8")
+
+    monkeypatch.setattr(
+        "allin1_sdk.cli.target_capabilities",
+        lambda _target: SimpleNamespace(
+            family="story",
+            maximum_axle_schema=2,
+            supports_signed_steering_gain=True,
+            supports_axle_support_bias=True,
+            supports_wheel_local_position=False,
+        ),
+    )
+    story_result = CliRunner().invoke(main, [
+        "preview-axle-steering", str(workspace.root), "authorcar",
+        "--skeleton-xml", str(skeleton_xml), "--reference-lock", "35",
+        "--target", "story-legacy",
+    ])
+    assert story_result.exit_code == 0, story_result.output
+    assert json.loads(story_result.output)["deployment"] == {
+        "target": "story-legacy",
+        "supported": False,
+        "reason": "Target has no validated wheel-local-position accessor.",
+    }
 
 
 def test_signed_axle_authoring_requires_and_verifies_skeleton_evidence(tmp_path):

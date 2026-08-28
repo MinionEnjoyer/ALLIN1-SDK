@@ -16,7 +16,7 @@ from typing import IO, Any, Iterable
 import click
 from click.testing import CliRunner
 
-from allin1_sdk.paths import user_data_root
+from allin1_sdk.paths import gta_root_containing, user_data_root
 
 
 PROTOCOL_VERSION = "1.0"
@@ -79,6 +79,7 @@ AUTHORING_COMMANDS = frozenset({
     "export-legacy-vehicle-oiv",
     "export-vehicle-project",
     "export-vehicle-axles",
+    "export-story-axle-runtime-config",
     "export-rpf-binary-workspace",
     "export-rpf-gxt2-workspace",
     "export-rpf-native-workspace",
@@ -240,6 +241,63 @@ COMMAND_RISKS = {
     for command in commands
 }
 
+_PATH_SENSITIVE_AXLE_OUTPUTS = {
+    "build-axle-runtime-bundle": ("--output-dir", "-o"),
+    "export-story-axle-runtime-config": ("--output", "-o"),
+}
+
+
+def _option_values(arguments: list[str], flags: tuple[str, ...]) -> tuple[str, ...]:
+    """Extract every Click option value relevant to a safety preflight."""
+    values: list[str] = []
+    index = 0
+    long_flags = tuple(flag for flag in flags if flag.startswith("--"))
+    short_flags = tuple(
+        flag for flag in flags if flag.startswith("-") and not flag.startswith("--")
+    )
+    while index < len(arguments):
+        token = arguments[index]
+        if token == "--":
+            break
+        if token in flags:
+            if index + 1 < len(arguments):
+                values.append(arguments[index + 1])
+            index += 2
+            continue
+        matched = False
+        for flag in long_flags:
+            prefix = f"{flag}="
+            if token.startswith(prefix):
+                values.append(token[len(prefix):])
+                matched = True
+                break
+        if not matched:
+            for flag in short_flags:
+                if token.startswith(flag) and len(token) > len(flag):
+                    value = token[len(flag):]
+                    values.append(value[1:] if value.startswith("=") else value)
+                    matched = True
+                    break
+        index += 1
+    return tuple(value for value in values if value)
+
+
+def _effective_command_risk(
+    command: str, arguments: list[str], base_risk: str,
+) -> str:
+    """Elevate path-sensitive axle output aimed at a live GTA installation."""
+    output_flags = _PATH_SENSITIVE_AXLE_OUTPUTS.get(command)
+    if base_risk != "authoring_write" or output_flags is None:
+        return base_risk
+    explicit_roots = _option_values(arguments, ("--gta-path",))
+    outputs = _option_values(arguments, output_flags)
+    if any(
+        gta_root_containing(value, explicit_roots=explicit_roots) is not None
+        for value in outputs
+    ):
+        return "game_write"
+    return base_risk
+
 
 def _cli_group() -> click.Group:
     from allin1_sdk.cli import main
@@ -258,10 +316,30 @@ def command_risk(command: str) -> str:
 
 
 def _parameter_schema(parameter: click.Parameter) -> dict[str, Any]:
+    raw_default = parameter.default
+    default_provided = not (
+        type(raw_default).__name__ == "Sentinel"
+        and getattr(raw_default, "name", "") == "UNSET"
+    )
+    if not default_provided:
+        catalog_default: Any = None
+    elif isinstance(raw_default, (str, int, float, bool)) or raw_default is None:
+        catalog_default = raw_default
+    elif isinstance(raw_default, (list, tuple)):
+        catalog_default = list(raw_default)
+    elif isinstance(raw_default, Path):
+        catalog_default = str(raw_default)
+    else:
+        # Keep the catalog JSON-safe without silently dropping a future Click
+        # default type. No current top-level command reaches this fallback.
+        catalog_default = str(raw_default)
     item: dict[str, Any] = {
         "name": parameter.name,
         "required": bool(parameter.required),
         "type": parameter.type.name,
+        "nargs": parameter.nargs,
+        "default": catalog_default,
+        "default_provided": default_provided,
     }
     if isinstance(parameter, click.Option):
         item.update({
@@ -276,6 +354,12 @@ def _parameter_schema(parameter: click.Parameter) -> dict[str, Any]:
     if isinstance(parameter.type, click.Choice):
         item["choices"] = [str(value) for value in parameter.type.choices]
         item["case_sensitive"] = parameter.type.case_sensitive
+    if isinstance(parameter.type, click.IntRange):
+        item["minimum"] = parameter.type.min
+        item["maximum"] = parameter.type.max
+        item["minimum_open"] = parameter.type.min_open
+        item["maximum_open"] = parameter.type.max_open
+        item["clamp"] = parameter.type.clamp
     return item
 
 
@@ -374,7 +458,9 @@ def execute_request(
     if command is None:
         return _response(request_id, ok=False, error=f"unknown command: {command_name}")
     try:
-        risk = command_risk(command_name)
+        risk = _effective_command_risk(
+            command_name, arguments, command_risk(command_name),
+        )
     except UnclassifiedCommandError as exc:
         response = _response(
             request_id, ok=False, risk="unclassified", error=str(exc),

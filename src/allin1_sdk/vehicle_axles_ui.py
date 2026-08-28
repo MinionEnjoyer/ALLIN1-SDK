@@ -27,6 +27,7 @@ from allin1_sdk.axle_configurator import (
     PRESET_CUSTOM,
     PRESET_FRONT_STEER,
     PRESET_STEER_DRIVE_REAR,
+    STEERING_CALCULATION_AUTOMATIC,
     STEERING_COMMAND_POLARITY_INVERTED,
     STEERING_COMMAND_POLARITY_NORMAL,
     STEERING_POLARITY_SCHEMA_VERSION,
@@ -46,6 +47,7 @@ from allin1_sdk.axle_configurator import (
     set_steering_command_polarity,
     validate_axle_configuration,
 )
+from allin1_sdk.axle_runtime_bundler import story_native_runtime_configuration
 from allin1_sdk.axle_steering_geometry import (
     SteeringGeometryError,
     SteeringGeometryRequest,
@@ -68,6 +70,18 @@ EXPORT_LABELS = {
     "Stock metadata": EXPORT_STOCK_METADATA,
     "Selective runtime": EXPORT_FIVEM_RUNTIME,
 }
+
+
+def _native_story_export_ready(config: AxleConfiguration | None) -> bool:
+    """Return whether the current draft matches the native Story serializer."""
+
+    if config is None or config.export_mode != EXPORT_FIVEM_RUNTIME:
+        return False
+    story_targets = [
+        target for target, enabled in config.compatibility
+        if enabled and target in {"story-legacy", "story-enhanced"}
+    ]
+    return len(story_targets) == 1
 
 
 def _format_steering_gain(gain: float) -> str:
@@ -454,7 +468,11 @@ class VehicleAxlesPanel(ttk.Frame):
             label="Load axle config…", command=self._import_configuration,
         )
         self.config_menu.add_command(
-            label="Save axle config…", command=self._save_configuration,
+            label="Save workbench config…", command=self._save_configuration,
+        )
+        self.config_menu.add_command(
+            label="Export native Story config…",
+            command=self._save_runtime_configuration,
         )
         self.config_button = ttk.Menubutton(
             preset_actions, text="Config ▾", menu=self.config_menu,
@@ -1139,10 +1157,10 @@ class VehicleAxlesPanel(ttk.Frame):
             return
         selected = filedialog.asksaveasfilename(
             parent=self,
-            title=f"Save axle configuration for {self._draft.vehicle_model}",
+            title=f"Save Workbench configuration for {self._draft.vehicle_model}",
             defaultextension=".json",
-            initialfile=f"{self._draft.vehicle_model}.axles.json",
-            filetypes=(("ALLIN1 axle configuration", "*.json"),),
+            initialfile=f"{self._draft.vehicle_model}.sdk.axles.json",
+            filetypes=(("ALLIN1 Workbench configuration", "*.json"),),
         )
         if not selected:
             return
@@ -1164,7 +1182,54 @@ class VehicleAxlesPanel(ttk.Frame):
                 "Axle configuration could not be saved", str(exc), parent=self,
             )
             return
-        self.status.set(f"Saved axle configuration: {destination}")
+        self.status.set(f"Saved portable Workbench configuration: {destination}")
+
+    def _save_runtime_configuration(self) -> None:
+        if self._draft is None:
+            return
+        try:
+            payload = story_native_runtime_configuration(
+                self._draft, bones=self._bones,
+            )
+        except ValueError as exc:
+            messagebox.showerror(
+                "Runtime configuration could not be exported", str(exc), parent=self,
+            )
+            return
+        selected = filedialog.asksaveasfilename(
+            parent=self,
+            title=(
+                "Export native Story runtime configuration for "
+                f"{self._draft.vehicle_model}"
+            ),
+            defaultextension=".json",
+            initialfile=f"{self._draft.vehicle_model}.axles.json",
+            filetypes=(("ALLIN1 native Story runtime configuration", "*.json"),),
+        )
+        if not selected:
+            return
+        destination = Path(selected).expanduser().resolve(strict=False)
+        temporary = destination.with_name(f".{destination.name}.tmp")
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(
+                json.dumps(payload, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(destination)
+        except OSError as exc:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            messagebox.showerror(
+                "Runtime configuration could not be saved", str(exc), parent=self,
+            )
+            return
+        self.status.set(
+            "Exported controller-ready native Story runtime configuration: "
+            f"{destination}"
+        )
 
     def _configure_detected_layout(self) -> None:
         if self._draft is None or not self._bones or not self._editable:
@@ -1287,8 +1352,16 @@ class VehicleAxlesPanel(ttk.Frame):
             state="normal" if self._model and editable else "disabled",
         )
         self.config_menu.entryconfigure(
-            "Save axle config…",
+            "Save workbench config…",
             state="normal" if available else "disabled",
+        )
+        self.config_menu.entryconfigure(
+            "Export native Story config…",
+            state=(
+                "normal"
+                if available and _native_story_export_ready(self._draft)
+                else "disabled"
+            ),
         )
         self._update_guided_setup()
         if available and self._draft is not None:
@@ -1718,7 +1791,9 @@ class VehicleAxlesPanel(ttk.Frame):
                     "warning",
                     "signed_steering_target_unavailable",
                     "Signed steering is saved as authoring data, but this target "
-                    "has no validated steering-gain accessor and cannot be exported yet.",
+                    "has no validated steering-gain accessor, so a deployable "
+                    "runtime bundle cannot be built yet. The portable native "
+                    "configuration can still be exported for review.",
                 ))
         if requires_axle_support_bias(self._draft):
             try:
@@ -1735,7 +1810,32 @@ class VehicleAxlesPanel(ttk.Frame):
                     "axle_support_target_unavailable",
                     "Axle support bias is saved as experimental authoring data, "
                     "but this target has no validated per-wheel support accessor "
-                    "and cannot be exported yet.",
+                    "so a deployable runtime bundle cannot be built yet. The "
+                    "portable native configuration can still be exported for review.",
+                ))
+        calculation = self._draft.steering_calculation
+        if (
+            self._target_key().startswith("story-")
+            and calculation is not None
+            and calculation.mode == STEERING_CALCULATION_AUTOMATIC
+        ):
+            try:
+                from allin1_sdk.axle_runtime_bundler import target_capabilities
+
+                capability = target_capabilities(self._target_key())
+                position_blocked = not capability.supports_wheel_local_position
+            except (KeyError, TypeError, ValueError):
+                position_blocked = True
+            deployment_blocked = deployment_blocked or position_blocked
+            if position_blocked:
+                findings.append(AxleFinding(
+                    "warning",
+                    "wheel_local_position_target_unavailable",
+                    "Automatic steering geometry is saved as authoring data, "
+                    "but this Story target has no validated wheel-local-position "
+                    "accessor, so a deployable runtime bundle cannot be built yet. "
+                    "The portable native configuration can still be exported for "
+                    "review.",
                 ))
         existing = {(item.severity, item.code, item.message) for item in findings}
         findings.extend(

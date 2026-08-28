@@ -603,7 +603,7 @@ def test_direct_rpf_axle_apply_keeps_a_session_sidecar_draft(
 
     assert frame._session_axle_configurations["runtimecar"] == configuration
     assert "RPF was not modified" in frame.status.get()
-    assert "Save axle config" in frame.axles_panel.status.get()
+    assert "Save workbench config" in frame.axles_panel.status.get()
     assert frame._loaded_editor_snapshot == frame._editor_snapshot()
     frame.destroy()
 

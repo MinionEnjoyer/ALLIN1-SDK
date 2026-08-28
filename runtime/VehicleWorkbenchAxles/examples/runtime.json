@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "enabled": true,
   "discoveryIntervalMs": 250,
   "recoveryIntervalMs": 2000,
   "restoreOnUnload": true,

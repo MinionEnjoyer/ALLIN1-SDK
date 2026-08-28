@@ -44,6 +44,14 @@ from allin1_sdk.cli import main
 
 
 MODEL_HASH = joaat_hex("mybus")
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+NATIVE_RUNTIME_SETTINGS_EXAMPLE = (
+    REPOSITORY_ROOT
+    / "runtime"
+    / "VehicleWorkbenchAxles"
+    / "examples"
+    / "runtime.json"
+)
 
 
 def _sha(path: Path) -> str:
@@ -393,13 +401,22 @@ def test_runtime_only_oiv_contains_generic_asi_and_no_vehicle_content(tmp_path: 
         assert f"content/runtime/{STORY_RUNTIME_NAME}.asi" in names
         assert not any("dlcpacks/" in name for name in names)
         assert not any("configs/mybus.json" in name for name in names)
-        runtime_meta = json.loads(archive.read("content/runtime/runtime.json"))
+        runtime_settings = json.loads(archive.read("content/runtime/runtime.json"))
+        # This is the same strict settings shape parsed by the native host,
+        # not the snake_case release receipt stored beside it.
+        assert runtime_settings == json.loads(
+            NATIVE_RUNTIME_SETTINGS_EXAMPLE.read_text(encoding="utf-8")
+        )
+        runtime_meta = json.loads(
+            archive.read("content/runtime/runtime-metadata.json")
+        )
         assert runtime_meta["binary_sha256"] == _runtime(stage, TARGET_STORY_LEGACY).binary_sha256
         assert runtime_meta["scripthook_bundled"] is False
     assert result.installation_preview["files_replaced"] == [
         f"{STORY_RUNTIME_NAME}.asi",
         f"{STORY_RUNTIME_NAME}\\validation-receipt.json",
         f"{STORY_RUNTIME_NAME}\\runtime.json",
+        f"{STORY_RUNTIME_NAME}\\runtime-metadata.json",
     ]
 
 

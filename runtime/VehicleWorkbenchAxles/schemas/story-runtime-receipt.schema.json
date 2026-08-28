@@ -55,6 +55,29 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "required": ["capabilities"],
+        "properties": {
+          "capabilities": {
+            "required": ["wheel_local_position"],
+            "properties": { "wheel_local_position": { "const": true } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "maximum_axle_schema": { "minimum": 2 },
+          "acceptance_tests": {
+            "required": [
+              "wheel_local_position_readback",
+              "runtime_geometry_recompute",
+              "runtime_geometry_unsupported_fail_closed"
+            ]
+          }
+        }
+      }
     }
   ],
   "required": [
@@ -99,7 +122,8 @@
       "default": {
         "signed_steering_gain": false,
         "static_force": false,
-        "physics_activation": false
+        "physics_activation": false,
+        "wheel_local_position": false
       },
       "additionalProperties": false,
       "required": [
@@ -108,7 +132,11 @@
       "properties": {
         "signed_steering_gain": { "type": "boolean" },
         "static_force": { "type": "boolean" },
-        "physics_activation": { "type": "boolean" }
+        "physics_activation": { "type": "boolean" },
+        "wheel_local_position": {
+          "type": "boolean",
+          "default": false
+        }
       }
     },
     "descriptor_abi_version": { "const": 1 },
@@ -116,7 +144,8 @@
       "type": "array",
       "allOf": [
         { "contains": { "const": "VehicleWorkbenchAxles_GetDescriptor" } },
-        { "contains": { "const": "VehicleWorkbenchAxles_HasValidatedProfile" } }
+        { "contains": { "const": "VehicleWorkbenchAxles_HasValidatedProfile" } },
+        { "contains": { "const": "VehicleWorkbenchAxles_HasScriptHookHost" } }
       ],
       "uniqueItems": true,
       "items": { "type": "string" }
@@ -150,7 +179,10 @@
         "support_bias_unsupported_fail_closed": { "const": "passed" },
         "support_bias_physics_activation_fail_closed": { "const": "passed" },
         "signed_steering_gain_apply_readback": { "const": "passed" },
-        "intentional_layout_override_mapping": { "const": "passed" }
+        "intentional_layout_override_mapping": { "const": "passed" },
+        "wheel_local_position_readback": { "const": "passed" },
+        "runtime_geometry_recompute": { "const": "passed" },
+        "runtime_geometry_unsupported_fail_closed": { "const": "passed" }
       }
     },
     "validation_authority": { "type": "string", "minLength": 1, "maxLength": 160 },

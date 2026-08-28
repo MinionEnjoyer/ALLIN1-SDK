@@ -1,8 +1,17 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(VehicleWorkbenchAxles VERSION 4.0.0 LANGUAGES CXX)
+project(VehicleWorkbenchAxles VERSION 4.1.0 LANGUAGES CXX)
 
-option(VWA_BUILD_ASI_SKELETONS "Build the non-deployable Story Mode ASI skeleton targets" ON)
+if(DEFINED VWA_BUILD_ASI_SKELETONS AND NOT DEFINED VWA_BUILD_STORY_HOSTS)
+    set(VWA_BUILD_STORY_HOSTS "${VWA_BUILD_ASI_SKELETONS}" CACHE BOOL
+        "Build the non-deployable Story Mode native host targets")
+else()
+    option(VWA_BUILD_STORY_HOSTS
+        "Build the non-deployable Story Mode native host targets" ON)
+endif()
+# Compatibility alias for existing CI commands and downstream build scripts.
+set(VWA_BUILD_ASI_SKELETONS "${VWA_BUILD_STORY_HOSTS}" CACHE BOOL
+    "Deprecated alias for VWA_BUILD_STORY_HOSTS" FORCE)
 option(VWA_BUILD_TESTS "Build platform-neutral runtime tests" ON)
 
 add_library(VehicleWorkbenchAxlesCore STATIC
@@ -26,14 +35,27 @@ else()
     target_compile_options(VehicleWorkbenchAxlesCore PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-if(WIN32 AND VWA_BUILD_ASI_SKELETONS)
-    function(vwa_add_asi_skeleton target edition edition_define)
-        add_library(${target} MODULE src/asi_entry.cpp)
+if(WIN32 AND VWA_BUILD_STORY_HOSTS)
+    function(vwa_add_story_host target edition edition_define)
+        add_library(${target} MODULE
+            src/asi_entry.cpp
+            src/story_host_bridge.cpp
+        )
         target_link_libraries(${target} PRIVATE VehicleWorkbenchAxlesCore)
+        target_link_libraries(${target} PRIVATE bcrypt version)
+        target_include_directories(${target} PRIVATE src)
         target_compile_features(${target} PRIVATE cxx_std_17)
         target_compile_definitions(${target} PRIVATE
             ${edition_define}=1
+            WIN32_LEAN_AND_MEAN
+            NOMINMAX
         )
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /W4 /permissive-)
+        else()
+            target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+            target_link_options(${target} PRIVATE -static-libgcc -static-libstdc++)
+        endif()
         set_target_properties(${target} PROPERTIES
             PREFIX ""
             OUTPUT_NAME "VehicleWorkbenchAxles"
@@ -42,10 +64,10 @@ if(WIN32 AND VWA_BUILD_ASI_SKELETONS)
             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/story-${edition}"
         )
     endfunction()
-    vwa_add_asi_skeleton(
+    vwa_add_story_host(
         VehicleWorkbenchAxlesLegacy Legacy VWA_ASI_EDITION_Legacy
     )
-    vwa_add_asi_skeleton(
+    vwa_add_story_host(
         VehicleWorkbenchAxlesEnhanced Enhanced VWA_ASI_EDITION_Enhanced
     )
 endif()

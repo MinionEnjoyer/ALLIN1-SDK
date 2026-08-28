@@ -31,6 +31,7 @@ inline constexpr const char* kSignedSteeringMinimumRuntime = "2.0.0";
 inline constexpr const char* kIntentionalLayoutMinimumRuntime = "2.1.0";
 inline constexpr const char* kAxleSupportMinimumRuntime = "3.0.0";
 inline constexpr const char* kSteeringPolarityMinimumRuntime = "4.0.0";
+inline constexpr const char* kRuntimeGeometryMinimumRuntime = "4.1.0";
 inline constexpr double kMinimumSupportWeight = 0.75;
 inline constexpr double kMaximumSupportWeight = 1.25;
 
@@ -38,6 +39,11 @@ struct SteeringCalculationEvidence {
     std::string mode;
     std::uint32_t algorithm_version{0};
     std::string bone_position_sha256;
+    // When enabled, the runtime discards the exported signed gains and solves
+    // them again from validated, vehicle-local wheel positions.  Manual mode
+    // never permits runtime recomputation.
+    bool runtime_recompute{false};
+    std::string reference_selection;
     std::optional<double> pivot_longitudinal_position;
     std::string pivot_source;
     std::vector<std::uint32_t> pivot_axle_orders;
@@ -103,6 +109,9 @@ struct AxleConfiguration {
 
 struct RuntimeSettings {
     std::uint32_t schema_version{kRuntimeSettingsSchemaVersion};
+    // The controller is installed enabled by default, but an owner can stop
+    // all discovery/profile/wheel work without moving or renaming the ASI.
+    bool enabled{true};
     std::uint32_t discovery_interval_ms{250};
     std::uint32_t recovery_interval_ms{2000};
     bool restore_on_unload{true};

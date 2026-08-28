@@ -7,11 +7,12 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from allin1_sdk.agent_api import command_catalog
+from allin1_sdk.agent_api import command_catalog, execute_request
 from allin1_sdk.axle_configurator import (
     EXPORT_FIVEM_RUNTIME,
     PRESET_STEER_DRIVE_REAR,
     detect_axle_configuration,
+    retarget_axle_configuration,
 )
 from allin1_sdk.cli import main
 from allin1_sdk.axle_runtime_bundler import (
@@ -45,6 +46,165 @@ def _config(tmp_path: Path) -> tuple[Path, object]:
     path = tmp_path / "bus.json"
     path.write_text(json.dumps(config.to_dict()), encoding="utf-8")
     return path, config
+
+
+def test_story_runtime_config_export_translates_workbench_document(
+    tmp_path: Path,
+) -> None:
+    path, config = _config(tmp_path)
+    story = retarget_axle_configuration(config, "story-legacy")
+    path.write_text(json.dumps(story.to_dict()), encoding="utf-8")
+    output = tmp_path / "metrobus.axles.json"
+
+    result = CliRunner().invoke(main, [
+        "export-story-axle-runtime-config", str(path),
+        "--output", str(output), "--acknowledge-edit",
+    ])
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    assert report["operation"] == "export_story_axle_runtime_config"
+    assert report["target"] == "story-legacy"
+    assert report["game_write_performed"] is False
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["modelName"] == "allin1_cli_bus"
+    assert payload["expectedWheelCount"] == 6
+    assert payload["compatibility"] == {"story-legacy": True}
+    assert payload["wheelIndexMapping"]["by_bone"] == {
+        "wheel_lf": 0,
+        "wheel_rf": 1,
+        "wheel_lr": 2,
+        "wheel_rr": 3,
+        "wheel_lm1": 4,
+        "wheel_rm1": 5,
+    }
+
+    duplicate = CliRunner().invoke(main, [
+        "export-story-axle-runtime-config", str(path),
+        "--output", str(output), "--acknowledge-edit",
+    ])
+    assert duplicate.exit_code != 0
+    assert "--update" in duplicate.output
+
+
+def test_story_runtime_config_live_output_requires_agent_api_authority(
+    tmp_path: Path,
+) -> None:
+    path, config = _config(tmp_path)
+    story = retarget_axle_configuration(config, "story-legacy")
+    path.write_text(json.dumps(story.to_dict()), encoding="utf-8")
+    game = tmp_path / "Grand Theft Auto V"
+    game.mkdir()
+    (game / "GTA5.exe").write_bytes(b"MZ")
+    output = game / "VehicleWorkbenchAxles" / "configs" / "metrobus.axles.json"
+    output.parent.mkdir(parents=True)
+    output.write_text('{"old": true}\n', encoding="utf-8")
+    arguments = [
+        str(path), "--output", str(output), "--update", "--acknowledge-edit",
+    ]
+
+    direct = CliRunner().invoke(main, [
+        "export-story-axle-runtime-config", *arguments,
+    ])
+    assert direct.exit_code != 0
+    assert "--acknowledge-game-write" in direct.output
+    assert json.loads(output.read_text(encoding="utf-8")) == {"old": True}
+
+    acknowledged_arguments = [*arguments, "--acknowledge-game-write"]
+    denied = execute_request({
+        "id": "live-config-denied", "action": "execute",
+        "command": "export-story-axle-runtime-config",
+        "args": acknowledged_arguments,
+    }, audit_path=tmp_path / "agent-audit.jsonl")
+    assert denied["ok"] is False
+    assert denied["risk"] == "game_write"
+    assert "--allow-game-writes" in denied["error"]
+    assert json.loads(output.read_text(encoding="utf-8")) == {"old": True}
+
+    missing_acknowledgement = execute_request({
+        "id": "live-config-missing-ack", "action": "execute",
+        "command": "export-story-axle-runtime-config", "args": arguments,
+    }, allow_game_writes=True, audit_path=tmp_path / "agent-audit.jsonl")
+    assert missing_acknowledgement["ok"] is False
+    assert missing_acknowledgement["risk"] == "game_write"
+    assert "--acknowledge-game-write" in (
+        missing_acknowledgement["result"]["output"]
+    )
+    assert json.loads(output.read_text(encoding="utf-8")) == {"old": True}
+
+    legacy_temporary = output.with_name(f".{output.name}.tmp")
+    legacy_temporary.write_text("do-not-touch", encoding="utf-8")
+    allowed = execute_request({
+        "id": "live-config-allowed", "action": "execute",
+        "command": "export-story-axle-runtime-config",
+        "args": acknowledged_arguments,
+    }, allow_game_writes=True, audit_path=tmp_path / "agent-audit.jsonl")
+    assert allowed["ok"] is True, allowed
+    assert allowed["risk"] == "game_write"
+    report = json.loads(allowed["result"]["output"])
+    assert report["game_write_performed"] is True
+    assert json.loads(output.read_text(encoding="utf-8"))["modelName"] == (
+        "allin1_cli_bus"
+    )
+    assert legacy_temporary.read_text(encoding="utf-8") == "do-not-touch"
+
+    declared_game = tmp_path / "declared-game-root"
+    declared_game.mkdir()
+    declared_output = declared_game / "scripts" / "metrobus.axles.json"
+    explicit = CliRunner().invoke(main, [
+        "export-story-axle-runtime-config", str(path),
+        "--output", str(declared_output), "--gta-path", str(declared_game),
+        "--acknowledge-edit",
+    ])
+    assert explicit.exit_code != 0
+    assert "--acknowledge-game-write" in explicit.output
+    assert not declared_output.exists()
+
+    explicit_acknowledged = CliRunner().invoke(main, [
+        "export-story-axle-runtime-config", str(path),
+        "--output", str(declared_output), "--gta-path", str(declared_game),
+        "--acknowledge-game-write", "--acknowledge-edit",
+    ])
+    assert explicit_acknowledged.exit_code == 0, explicit_acknowledged.output
+    explicit_report = json.loads(explicit_acknowledged.output)
+    assert explicit_report["game_write_performed"] is True
+    assert declared_output.is_file()
+
+
+def test_axle_bundle_live_destination_is_staged_only_and_path_sensitive(
+    tmp_path: Path,
+) -> None:
+    path, _configuration = _config(tmp_path)
+    game = tmp_path / "Grand Theft Auto V Enhanced"
+    game.mkdir()
+    (game / "GTA5_Enhanced.exe").write_bytes(b"MZ")
+    output = game / "axle-bundle"
+    arguments = [
+        str(path), "--target", "fivem-legacy", "--output-dir", str(output),
+        "--acknowledge-edit",
+    ]
+
+    direct = CliRunner().invoke(main, ["build-axle-runtime-bundle", *arguments])
+    assert direct.exit_code != 0
+    assert "staged-only" in direct.output
+    assert not output.exists()
+
+    denied = execute_request({
+        "id": "live-bundle-denied", "action": "execute",
+        "command": "build-axle-runtime-bundle", "args": arguments,
+    }, audit_path=tmp_path / "agent-audit.jsonl")
+    assert denied["ok"] is False
+    assert denied["risk"] == "game_write"
+    assert "--allow-game-writes" in denied["error"]
+
+    still_refused = execute_request({
+        "id": "live-bundle-authorized", "action": "execute",
+        "command": "build-axle-runtime-bundle", "args": arguments,
+    }, allow_game_writes=True, audit_path=tmp_path / "agent-audit.jsonl")
+    assert still_refused["ok"] is False
+    assert still_refused["risk"] == "game_write"
+    assert "staged-only" in still_refused["result"]["output"]
+    assert not output.exists()
 
 
 def test_prefab_and_bundle_commands_are_structured_and_api_classified(tmp_path: Path) -> None:
@@ -81,6 +241,7 @@ def test_prefab_and_bundle_commands_are_structured_and_api_classified(tmp_path: 
     assert risks["inspect-story-axle-runtimes"] == "read_only"
     assert risks["plan-axle-oiv"] == "authoring_write"
     assert risks["build-axle-oiv"] == "authoring_write"
+    assert risks["export-story-axle-runtime-config"] == "authoring_write"
 
     story = runner.invoke(main, [
         "inspect-story-axle-runtimes",

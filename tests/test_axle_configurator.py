@@ -9,6 +9,7 @@ from allin1_sdk.axle_configurator import (
     AXLE_SUPPORT_RUNTIME_VERSION,
     AXLE_SUPPORT_SCHEMA_VERSION,
     EXPORT_FIVEM_RUNTIME,
+    EXPORT_SELECTIVE_RUNTIME,
     EXPORT_STOCK_METADATA,
     FLAG_IS_DRIVEN,
     FLAG_IS_STEERED,
@@ -787,3 +788,16 @@ def test_joaat_is_stable_and_serialized() -> None:
     config = detect_axle_configuration("example_bus", skeleton(2))
     assert config.model_hash == joaat_hex("example_bus")
     assert config.to_dict()["model_hash"] == joaat_hex("example_bus")
+
+
+def test_legacy_fivem_runtime_spelling_migrates_to_target_neutral_mode() -> None:
+    payload = detect_axle_configuration(
+        "legacy_named_bus", skeleton(3),
+        export_mode=EXPORT_SELECTIVE_RUNTIME,
+    ).to_dict()
+    payload["export_mode"] = "fivem_runtime"
+
+    loaded = AxleConfiguration.from_dict(payload)
+
+    assert loaded.export_mode == EXPORT_SELECTIVE_RUNTIME
+    assert loaded.to_dict()["export_mode"] == "selective_runtime"

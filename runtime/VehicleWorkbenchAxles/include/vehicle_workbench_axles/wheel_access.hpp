@@ -65,6 +65,12 @@ public:
                                        double&) { return false; }
     virtual bool WriteWheelSteeringGain(const VehicleSnapshot&, std::uint32_t,
                                         double) { return false; }
+    // Vehicle-local wheel positions are an optional exact-build capability.
+    // Automatic geometry recomputation is fail-closed when a configuration
+    // requests it and the active profile cannot provide authoritative data.
+    virtual bool SupportsWheelLocalPosition() const noexcept { return false; }
+    virtual bool ReadWheelLocalPosition(const VehicleSnapshot&, std::uint32_t,
+                                        WheelLocalPosition&) { return false; }
     // Per-wheel suspension StaticForce is an optional exact-build capability.
     // Profiles must expose read and write together after their offsets and
     // semantics have been reviewed for that executable identity.
@@ -106,6 +112,10 @@ public:
     virtual bool WriteWheelSteeringGain(const VehicleSnapshot& vehicle,
                                         std::uint32_t index,
                                         double gain) = 0;
+    virtual bool SupportsWheelLocalPosition() const noexcept { return false; }
+    virtual bool ReadWheelLocalPosition(const VehicleSnapshot&,
+                                        std::uint32_t,
+                                        WheelLocalPosition&) { return false; }
     virtual bool SupportsStaticForce() const noexcept = 0;
     virtual bool ReadWheelStaticForce(const VehicleSnapshot& vehicle,
                                       std::uint32_t index,
@@ -142,6 +152,9 @@ public:
                                double&) override;
     bool WriteWheelSteeringGain(const VehicleSnapshot&, std::uint32_t,
                                 double) override;
+    bool SupportsWheelLocalPosition() const noexcept override;
+    bool ReadWheelLocalPosition(const VehicleSnapshot&, std::uint32_t,
+                                WheelLocalPosition&) override;
     bool SupportsStaticForce() const noexcept override;
     bool ReadWheelStaticForce(const VehicleSnapshot&, std::uint32_t,
                               double&) override;
@@ -180,6 +193,9 @@ public:
                                double&) override;
     bool WriteWheelSteeringGain(const VehicleSnapshot&, std::uint32_t,
                                 double) override;
+    bool SupportsWheelLocalPosition() const noexcept override;
+    bool ReadWheelLocalPosition(const VehicleSnapshot&, std::uint32_t,
+                                WheelLocalPosition&) override;
     bool SupportsStaticForce() const noexcept override;
     bool ReadWheelStaticForce(const VehicleSnapshot&, std::uint32_t,
                               double&) override;

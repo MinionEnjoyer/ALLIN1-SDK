@@ -426,6 +426,15 @@
           "type": "string",
           "pattern": "^[0-9a-fA-F]{64}$"
         },
+        "runtimeRecompute": {
+          "type": "boolean",
+          "default": false,
+          "description": "Recalculate automatic steering gains from authoritative vehicle-local wheel positions at runtime."
+        },
+        "referenceSelection": {
+          "type": "string",
+          "enum": ["farthest_steered_axle"]
+        },
         "pivotLongitudinalPosition": { "type": "number" },
         "pivotSource": {
           "type": "string",
@@ -464,6 +473,18 @@
         },
         {
           "if": {
+            "required": ["runtimeRecompute"],
+            "properties": { "runtimeRecompute": { "const": true } }
+          },
+          "then": {
+            "required": ["referenceSelection"]
+          },
+          "else": {
+            "not": { "required": ["referenceSelection"] }
+          }
+        },
+        {
+          "if": {
             "required": ["mode"],
             "properties": { "mode": { "const": "manual" } }
           },
@@ -476,7 +497,8 @@
                 { "required": ["referenceAxleOrder"] },
                 { "required": ["referenceLockDegrees"] },
                 { "required": ["pairPositionTolerance"] },
-                { "required": ["positionEpsilon"] }
+                { "required": ["positionEpsilon"] },
+                { "required": ["referenceSelection"] }
               ]
             }
           }

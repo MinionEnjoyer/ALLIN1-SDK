@@ -2,10 +2,11 @@
 
 ## Current source release
 
-Do not install the generated `.asi` skeletons into GTA V.  Both descriptors say
-that no validated profile exists, and the Workbench bundler must reject them.
-They exist so the shared binary shape, edition isolation, and build pipeline can
-be tested without inventing game-memory support.
+Do not install the generated native `.asi` host artifacts into GTA V.  Both
+descriptors say that no validated wheel-access profile exists, and the Workbench
+bundler must reject them.  They exist so the ScriptHook host boundary, shared
+binary shape, edition isolation, and build pipeline can be tested without
+inventing game-memory support.
 
 ## Future validated release
 
@@ -14,6 +15,7 @@ game directory.  A validated Story package contains only:
 
 - one generic `VehicleWorkbenchAxles.asi` matching the exact target edition;
 - `VehicleWorkbenchAxles/runtime.json`;
+- `VehicleWorkbenchAxles/runtime-metadata.json` for release identity and validation metadata;
 - one JSON file per model below `VehicleWorkbenchAxles/configs/`;
 - a compatibility manifest, checksum, README, and uninstall receipt.
 

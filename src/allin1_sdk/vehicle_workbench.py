@@ -3047,8 +3047,9 @@ class VehicleWorkbenchFrame(ttk.Frame):
             self._session_axle_configurations[model.model.casefold()] = configuration
             self._loaded_editor_snapshot = self._editor_snapshot()
             self.axles_panel.status.set(
-                "Applied to this RPF session. Use Config ▾ > Save axle config… "
-                "to create the portable JSON sidecar."
+                "Applied to this RPF session. Use Config ▾ > Save workbench "
+                "config… for an editable sidecar, or Export native Story "
+                "config… for the in-game ASI controller."
             )
             self.status.set(
                 f"Applied {len(configuration.axles)} axle pairs to the "

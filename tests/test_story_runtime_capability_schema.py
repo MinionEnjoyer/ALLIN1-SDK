@@ -51,6 +51,7 @@ def _receipt() -> dict[str, object]:
         "required_exports": [
             "VehicleWorkbenchAxles_GetDescriptor",
             "VehicleWorkbenchAxles_HasValidatedProfile",
+            "VehicleWorkbenchAxles_HasScriptHookHost",
         ],
         "validated_profile_export_result": True,
         "acceptance_tests": {
@@ -131,6 +132,36 @@ def test_signed_steering_capability_requires_schema_two_and_mapping_tests() -> N
         "intentional_layout_override_mapping": "passed",
     })
     assert list(validator.iter_errors(receipt)) == []
+
+
+def test_wheel_position_capability_requires_schema_two_and_runtime_tests() -> None:
+    profile = _profile()
+    profile["capabilities"] = {
+        "signed_steering_gain": True,
+        "static_force": False,
+        "physics_activation": False,
+        "wheel_local_position": True,
+    }
+    profile_validator = _validator("story-runtime-profile.schema.json")
+    assert list(profile_validator.iter_errors(profile))
+    profile["maximum_axle_schema"] = 2
+    assert list(profile_validator.iter_errors(profile)) == []
+
+    receipt = _receipt()
+    receipt["maximum_axle_schema"] = 2
+    receipt["capabilities"] = deepcopy(profile["capabilities"])
+    receipt["acceptance_tests"].update({
+        "signed_steering_gain_apply_readback": "passed",
+        "intentional_layout_override_mapping": "passed",
+    })
+    receipt_validator = _validator("story-runtime-receipt.schema.json")
+    assert list(receipt_validator.iter_errors(receipt))
+    receipt["acceptance_tests"].update({
+        "wheel_local_position_readback": "passed",
+        "runtime_geometry_recompute": "passed",
+        "runtime_geometry_unsupported_fail_closed": "passed",
+    })
+    assert list(receipt_validator.iter_errors(receipt)) == []
 
 
 def test_asi_descriptor_uses_the_central_runtime_schema_version() -> None:

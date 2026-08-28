@@ -12,15 +12,17 @@ updates, online guard, and mock tests are implemented.  The two Windows targets
 compile from shared source.
 
 **Neither Story Mode edition is deployable or marked supported yet.**  The
-Legacy and Enhanced adapters intentionally contain no game signatures, fixed
-offsets, layouts, or callable accessors.  `Resolve()` always fails before game
-memory access, and the compatibility manifest lists zero supported builds.  The
-compiled skeleton exports `VehicleWorkbenchAxles_HasValidatedProfile() == false`
-so the bundler can refuse it.
+Legacy and Enhanced wheel-access adapters intentionally contain no game
+signatures, fixed offsets, layouts, or callable wheel accessors.  `Resolve()`
+always fails before game memory access, and the compatibility manifest lists
+zero supported builds.  The compiled native host artifacts export
+`VehicleWorkbenchAxles_HasValidatedProfile() == false` so the bundler can refuse
+them.
 
 This is intentional.  CitizenFX behavior does not establish a safe Story Mode
-memory ABI.  Each edition needs a separately reviewed signature profile,
-ScriptHookV host bridge, and in-game acceptance run before packaging.
+memory ABI.  The ScriptHookV host bridge is implemented, but each edition still
+needs a separately reviewed wheel-access signature profile and in-game
+acceptance run before packaging.
 
 ## Canonical physical axles
 
@@ -37,7 +39,14 @@ steered axle and `0` for a fixed axle. Schema 2 requires an explicit bounded
 gain on every axle, runtime 2.0 or newer, and calculation evidence; negative
 values counter-steer and non-steered axles must use zero. Automatic evidence
 also records the positive `pairPositionTolerance` and `positionEpsilon` inputs
-so the calculation can be reproduced exactly. Schema 3 adds optional axle
+so the calculation can be reproduced exactly. An automatic configuration can
+set `runtimeRecompute: true` with
+`referenceSelection: "farthest_steered_axle"`; a validated adapter then reads
+the live vehicle-local wheel positions, rebuilds the pivot from the selected
+fixed axles, and normalizes against the farthest physical steering axle. This
+corrects stale authoring gains after an intentional physical-order override and
+requires `minimumRuntimeVersion` 4.1.0 or newer.
+Manual calculations always retain their authored gains. Schema 3 adds optional axle
 support bias: every physical axle supplies a bounded `supportWeight`, and a
 validated build profile must expose reversible per-wheel `StaticForce` access
 plus a host physics-activation hook. The runtime normalizes those weights to
@@ -63,12 +72,21 @@ visual instancing limit is unchanged.
 VehicleWorkbenchAxles.asi
 VehicleWorkbenchAxles/
   runtime.json
+  runtime-metadata.json
   configs/
     example_bus.json
     example_bus.bones.json
   logs/
     VehicleWorkbenchAxles.log
 ```
+
+`runtime.json` uses the strict native settings contract shown in
+[`examples/runtime.json`](examples/runtime.json). The generic controller is
+enabled by default; set `"enabled": false` to leave it installed while
+preventing configuration discovery, profile resolution, vehicle enumeration,
+and wheel access on the next game launch. Invalid settings also stop the host
+before those operations; a missing settings file alone uses the documented
+enabled defaults.
 
 The bundled `example_bus` configuration is intentionally non-deployable. Its
 companion bone fixture documents the illustrative vehicle-local positions used
@@ -91,13 +109,14 @@ ctest --test-dir out/core --output-on-failure
 ```
 
 On Windows, `VWA_BUILD_ASI_SKELETONS=ON` also creates separate Legacy and
-Enhanced `.asi` skeleton artifacts.  They are development artifacts only and
-must not be staged into a game or release bundle while the descriptor reports
-no validated profile.
+Enhanced native `.asi` host artifacts.  The historical option name is retained
+for build compatibility.  These are development artifacts only and must not be
+staged into a game or release bundle while the descriptor reports no validated
+profile.
 
 ## Workbench integration contract
 
-The future bundler integration supplies:
+The Workbench bundler integration supplies:
 
 1. a schema-1 legacy, schema-2 signed-steering, schema-3 support-bias, or
    schema-4 steering-polarity JSON config in
@@ -124,20 +143,22 @@ profile JSON per edition with:
 - an exact validation receipt and pinned SHA-256;
 - a package-eligible target/build list and confirmed redistribution terms;
 - an exact maximum axle schema plus one explicit `capabilities` object for
-  signed steering, static-force access, and physics activation (an omitted
-  object defaults every capability to unavailable);
+  signed steering, static-force access, physics activation, and authoritative
+  vehicle-local wheel positions (an omitted object defaults every capability
+  to unavailable);
 - a receipt showing every required in-game acceptance test passed;
 - evidence that `VehicleWorkbenchAxles_HasValidatedProfile` returned true for
   that exact binary and build.
 
 The SDK independently parses the `.asi` as an AMD64 PE32+ DLL, walks its export
-table, and requires both runtime exports to resolve into executable sections.
+table, and requires all runtime and ScriptHook-host evidence exports to resolve
+into executable sections.
 Renamed text files, ASCII fixtures, 32-bit binaries, forwarded exports, and
 receipts whose hashes or fields drift are rejected.
 
-Schema-2 signed steering and schema-3 axle support are unlocked only by those
+Schema-2 signed steering/runtime geometry and schema-3 axle support are unlocked only by those
 validated dependency capabilities, never by the immutable target defaults.
-Enabling either capability adds its accessor, readback, reapplication or
+Enabling any capability adds its accessor, readback, reapplication or
 rollback, and restoration tests to the required receipt matrix.
 
 The machine-readable formats are
@@ -161,23 +182,29 @@ on `plan-axle-runtime-bundle` and `build-axle-runtime-bundle`, including through
 the structured local Agent API.  Without an explicit verified profile, Story
 targets remain omitted.
 
-The future ScriptHook host bridge implements `IVehicleHost` and
-`ISignatureResolver`.  A validated edition adapter implements `IWheelAccess`.
-The shared core never takes a ScriptHook dependency and never retains a raw
-vehicle/wheel pointer.
+The native ScriptHook host bridge implements `IVehicleHost` and
+`ISignatureResolver`.  A separately validated edition/build adapter implements
+`IWheelAccess`.  The shared core never takes a ScriptHook dependency and never
+retains a raw vehicle/wheel pointer.
 
 Signed gain is a separate adapter capability. The current profiles expose only
 steering/drive flag access, so a config requesting counter-steer or scaled
 steering is disabled before vehicle writes. A future exact-build profile must
 provide validated gain read/write access; the core then captures, transactionally
 applies, rolls back, recovers, and restores that state alongside managed flags.
+Runtime geometry recomputation additionally requires validated vehicle-local
+wheel-position reads; requesting it without that capability disables the
+configuration before any vehicle write.
 
 ## Lifecycle
 
 - Startup: online guard, exact edition/build detection, fail-closed adapter
   resolution, bounded config loading, duplicate-model isolation, concise report.
 - Gameplay: event application for create/ownership/repair/wheel recreation plus
-  a configurable 2-second recovery verification.  No per-frame write loop.
+  a configurable recovery verification. Because GTA rebuilds its steering-limit
+  field during simulation, only already-tracked, explicitly steered wheel gains
+  receive bounded maintenance on each host service tick. Flags, drive state,
+  suspension, discovery, and full recovery remain event/interval driven.
 - Apply: reacquire entity snapshot, validate generation/count/map, read all
   16-bit flags, modify only `0x08` and `0x10`, and—only with an explicit
   validated capability—apply signed gain; rollback partial failure.
@@ -192,7 +219,8 @@ target in `compatibility`; omission, unknown keys, and false-only declarations
 fail closed.
 
 Logs use model hashes, build numbers, target identifiers, config basenames, and
-reason codes.  They do not include absolute user paths or repeated frame spam.
+reason codes.  They do not include absolute user paths; repeated volatile-gain
+maintenance is deduplicated instead of producing frame spam.
 
 See [ADR-0001](ADR-0001-cross-edition-story-runtime.md) and
 [SUPPORTED_BUILDS.md](SUPPORTED_BUILDS.md) before extending an adapter.  Staged

@@ -3,7 +3,7 @@
   "vehicleModel": "allin1_acceptance_crane",
   "prefabId": "10x4_multi_steer",
   "target": "fivem-enhanced",
-  "exportMode": "fivem_runtime",
+  "exportMode": "selective_runtime",
   "reportedWheelCount": 10,
   "bones": [
     {"name": "wheel_lf", "position": [-1.25, 8.0, 0.0]},

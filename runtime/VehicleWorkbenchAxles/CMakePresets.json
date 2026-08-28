@@ -13,18 +13,18 @@
       "binaryDir": "${sourceDir}/out/core-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "VWA_BUILD_ASI_SKELETONS": "OFF",
+        "VWA_BUILD_STORY_HOSTS": "OFF",
         "VWA_BUILD_TESTS": "ON"
       }
     },
     {
       "name": "windows-release",
-      "displayName": "Windows ASI skeletons (Release)",
+      "displayName": "Windows ScriptHook host artifacts (Release, non-deployable)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/out/windows-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "VWA_BUILD_ASI_SKELETONS": "ON",
+        "VWA_BUILD_STORY_HOSTS": "ON",
         "VWA_BUILD_TESTS": "ON"
       }
     }

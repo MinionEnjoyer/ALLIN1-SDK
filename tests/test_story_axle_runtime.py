@@ -22,7 +22,7 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
     profile = json.loads(
         (RUNTIME / "profiles" / "compatibility.json").read_text(encoding="utf-8")
     )
-    assert profile["runtimeVersion"] == "4.0.0"
+    assert profile["runtimeVersion"] == "4.1.0"
     assert profile["policy"] == {
         "permanentOffsetsAllowed": False,
         "exactBuildMatchRequired": True,
@@ -30,6 +30,7 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
         "packageEligibleReceiptRequired": True,
         "x64PeExportInspectionRequired": True,
         "signedSteeringGainRequiresValidatedAccessor": True,
+        "runtimeGeometryRequiresValidatedWheelLocalPositionAccessor": True,
         "staticForceRequiresValidatedAccessorAndPhysicsActivation": True,
         "onlineSessionsAllowed": False,
     }
@@ -42,6 +43,7 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
             "steeringFlags": True,
             "driveFlags": True,
             "signedSteeringGain": False,
+            "wheelLocalPosition": False,
             "staticForce": False,
             "physicsActivation": False,
         }
@@ -59,6 +61,12 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
     assert package["binaryContract"]["capabilities"][
         "signedSteeringGain"
     ] is False
+    assert package["binaryContract"]["capabilities"][
+        "wheelLocalPosition"
+    ] is False
+    assert "VehicleWorkbenchAxles_HasScriptHookHost" in package[
+        "receiptContract"
+    ]["executableExportsRequired"]
     assert package["runtime"]["maximumAxleSchemaVersion"] == 4
     assert package["binaryContract"]["capabilities"]["staticForce"] is False
     assert package["binaryContract"]["capabilities"]["physicsActivation"] is False

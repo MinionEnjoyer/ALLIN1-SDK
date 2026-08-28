@@ -37,6 +37,12 @@ struct VehicleSnapshot {
     std::uint64_t wheel_generation{0};
 };
 
+struct WheelLocalPosition {
+    double lateral{0.0};
+    double longitudinal{0.0};
+    double vertical{0.0};
+};
+
 enum class LogLevel {
     Debug,
     Info,

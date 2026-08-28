@@ -35,6 +35,21 @@
         "required": ["maximum_axle_schema"],
         "properties": { "maximum_axle_schema": { "minimum": 2 } }
       }
+    },
+    {
+      "if": {
+        "required": ["capabilities"],
+        "properties": {
+          "capabilities": {
+            "required": ["wheel_local_position"],
+            "properties": { "wheel_local_position": { "const": true } }
+          }
+        }
+      },
+      "then": {
+        "required": ["maximum_axle_schema"],
+        "properties": { "maximum_axle_schema": { "minimum": 2 } }
+      }
     }
   ],
   "required": [
@@ -71,7 +86,8 @@
       "default": {
         "signed_steering_gain": false,
         "static_force": false,
-        "physics_activation": false
+        "physics_activation": false,
+        "wheel_local_position": false
       },
       "additionalProperties": false,
       "required": [
@@ -80,7 +96,12 @@
       "properties": {
         "signed_steering_gain": { "type": "boolean" },
         "static_force": { "type": "boolean" },
-        "physics_activation": { "type": "boolean" }
+        "physics_activation": { "type": "boolean" },
+        "wheel_local_position": {
+          "type": "boolean",
+          "default": false,
+          "description": "The exact-build adapter can safely read authoritative vehicle-local physical wheel positions."
+        }
       }
     },
     "redistribution_allowed": { "const": true },

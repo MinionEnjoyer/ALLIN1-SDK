@@ -13,7 +13,7 @@
 #include <utility>
 
 #ifndef VWA_RUNTIME_VERSION
-#define VWA_RUNTIME_VERSION "4.0.0"
+#define VWA_RUNTIME_VERSION "4.1.0"
 #endif
 
 namespace vwa {
@@ -45,8 +45,23 @@ double EffectiveSteeringGain(const AxleConfiguration& configuration,
     return BaseSteeringGain(axle) * polarity;
 }
 
+double EffectiveSteeringGain(const AxleConfiguration& configuration,
+                             double base_gain) noexcept {
+    const double polarity =
+        configuration.steering_command_polarity == "inverted" ? -1.0 : 1.0;
+    return base_gain * polarity;
+}
+
+bool RequestsRuntimeGeometry(
+    const AxleConfiguration& configuration) noexcept {
+    return configuration.steering_calculation.has_value() &&
+           configuration.steering_calculation->mode == "automaticGeometry" &&
+           configuration.steering_calculation->runtime_recompute;
+}
+
 bool RequiresSteeringGainAccess(
     const AxleConfiguration& configuration) noexcept {
+    if (RequestsRuntimeGeometry(configuration)) return true;
     return std::any_of(
         configuration.axles.begin(), configuration.axles.end(),
         [&configuration](const AxleDefinition& axle) {
@@ -103,6 +118,7 @@ struct AxleRuntime::Implementation {
     struct OriginalWheelState {
         std::uint16_t flags{0};
         double steering_gain{0.0};
+        double desired_steering_gain{0.0};
         bool has_steering_gain{false};
         double static_force{0.0};
         bool has_static_force{false};
@@ -161,6 +177,189 @@ struct AxleRuntime::Implementation {
                (edition == Edition::Enhanced && configuration.story_enhanced);
     }
 
+    std::optional<std::map<std::uint32_t, double>>
+    ResolveBaseSteeringGains(
+        const VehicleSnapshot& vehicle,
+        const AxleConfiguration& configuration) {
+        std::map<std::uint32_t, double> result;
+        for (const auto& axle : configuration.axles) {
+            result.emplace(axle.order, BaseSteeringGain(axle));
+        }
+        if (!RequestsRuntimeGeometry(configuration)) return result;
+
+        if (!access.SupportsWheelLocalPosition()) {
+            LogOnce(LogLevel::Error,
+                    "wheel-local-position-capability-missing",
+                    "Model " + HashText(configuration.model_hash) +
+                        " requests runtime steering geometry, but this exact "
+                        "build profile cannot read authoritative vehicle-local "
+                        "wheel positions; no changes were applied");
+            return std::nullopt;
+        }
+
+        const auto& evidence = *configuration.steering_calculation;
+        const double pair_tolerance = *evidence.pair_position_tolerance;
+        const double epsilon = *evidence.position_epsilon;
+        std::map<std::uint32_t, double> axle_positions;
+        for (const auto& axle : configuration.axles) {
+            const auto left_mapping =
+                configuration.wheel_index_map.find(axle.left_bone);
+            const auto right_mapping =
+                configuration.wheel_index_map.find(axle.right_bone);
+            if (left_mapping == configuration.wheel_index_map.end() ||
+                right_mapping == configuration.wheel_index_map.end()) {
+                LogOnce(LogLevel::Error, "runtime-geometry-wheel-map-invalid",
+                        "Runtime steering geometry could not resolve every "
+                        "configured wheel index; no changes were applied");
+                return std::nullopt;
+            }
+            WheelLocalPosition left;
+            WheelLocalPosition right;
+            if (!access.ReadWheelLocalPosition(
+                    vehicle, left_mapping->second, left) ||
+                !access.ReadWheelLocalPosition(
+                    vehicle, right_mapping->second, right) ||
+                !std::isfinite(left.lateral) ||
+                !std::isfinite(left.longitudinal) ||
+                !std::isfinite(left.vertical) ||
+                !std::isfinite(right.lateral) ||
+                !std::isfinite(right.longitudinal) ||
+                !std::isfinite(right.vertical)) {
+                LogOnce(LogLevel::Error,
+                        "runtime-wheel-position-read-failed",
+                        "Authoritative vehicle-local wheel positions could not "
+                        "be read safely for model " +
+                            HashText(configuration.model_hash) +
+                            "; no changes were applied");
+                return std::nullopt;
+            }
+            if (std::abs(left.longitudinal - right.longitudinal) >
+                pair_tolerance) {
+                LogOnce(LogLevel::Error,
+                        "runtime-wheel-pair-position-mismatch",
+                        "Left and right wheel positions exceed the authored "
+                        "pair tolerance for model " +
+                            HashText(configuration.model_hash) +
+                            "; no changes were applied");
+                return std::nullopt;
+            }
+            axle_positions.emplace(
+                axle.order,
+                (left.longitudinal + right.longitudinal) * 0.5);
+        }
+
+        const double first_position =
+            axle_positions.at(configuration.axles.front().order);
+        const double last_position =
+            axle_positions.at(configuration.axles.back().order);
+        if (std::abs(first_position - last_position) <= epsilon) {
+            LogOnce(LogLevel::Error, "runtime-geometry-axis-degenerate",
+                    "Runtime wheel positions do not establish a longitudinal "
+                    "front-to-rear axis; no changes were applied");
+            return std::nullopt;
+        }
+        const double forward_axis =
+            first_position > last_position ? 1.0 : -1.0;
+
+        double pivot = *evidence.pivot_longitudinal_position;
+        if (evidence.pivot_source != "explicit") {
+            double total = 0.0;
+            for (const auto order : evidence.pivot_axle_orders) {
+                const auto found = axle_positions.find(order);
+                if (found == axle_positions.end()) {
+                    LogOnce(LogLevel::Error,
+                            "runtime-geometry-pivot-invalid",
+                            "Runtime steering pivot references an unavailable "
+                            "physical axle; no changes were applied");
+                    return std::nullopt;
+                }
+                total += found->second;
+            }
+            pivot = total /
+                    static_cast<double>(evidence.pivot_axle_orders.size());
+        }
+
+        const AxleDefinition* reference = nullptr;
+        double reference_distance = -1.0;
+        double reference_forward_offset = 0.0;
+        for (const auto& axle : configuration.axles) {
+            if (!axle.steered) continue;
+            const double offset = axle_positions.at(axle.order) - pivot;
+            const double distance = std::abs(offset);
+            const double forward_offset = forward_axis * offset;
+            if (distance <= epsilon) {
+                LogOnce(LogLevel::Error,
+                        "runtime-geometry-steered-at-pivot",
+                        "A steered physical axle coincides with the runtime "
+                        "steering pivot; no changes were applied");
+                return std::nullopt;
+            }
+            if (reference == nullptr ||
+                distance > reference_distance + epsilon ||
+                (std::abs(distance - reference_distance) <= epsilon &&
+                 forward_offset > reference_forward_offset)) {
+                reference = &axle;
+                reference_distance = distance;
+                reference_forward_offset = forward_offset;
+            }
+        }
+        if (reference == nullptr) {
+            LogOnce(LogLevel::Error, "runtime-geometry-no-steered-axle",
+                    "Runtime steering geometry has no usable steered axle; no "
+                    "changes were applied");
+            return std::nullopt;
+        }
+
+        const double pi = std::acos(-1.0);
+        const double lock_radians =
+            *evidence.reference_lock_degrees * pi / 180.0;
+        const double turn_radius =
+            reference_distance / std::tan(lock_radians);
+        if (!std::isfinite(turn_radius) || turn_radius <= epsilon) {
+            LogOnce(LogLevel::Error, "runtime-geometry-radius-invalid",
+                    "Runtime steering geometry could not establish a stable "
+                    "turn radius; no changes were applied");
+            return std::nullopt;
+        }
+
+        bool corrected_exported_gain = false;
+        for (const auto& axle : configuration.axles) {
+            double gain = 0.0;
+            if (axle.steered) {
+                const double offset = axle_positions.at(axle.order) - pivot;
+                gain = std::atan(forward_axis * offset / turn_radius) /
+                       lock_radians;
+                if (!std::isfinite(gain) || std::abs(gain) > 1.0 + epsilon) {
+                    LogOnce(LogLevel::Error,
+                            "runtime-geometry-gain-invalid",
+                            "Runtime steering geometry produced an unsafe gain; "
+                            "no changes were applied");
+                    return std::nullopt;
+                }
+                gain = std::max(-1.0, std::min(1.0, gain));
+                if (std::abs(gain) <= epsilon) gain = 0.0;
+            }
+            corrected_exported_gain = corrected_exported_gain ||
+                std::abs(gain - BaseSteeringGain(axle)) >
+                    kGainComparisonEpsilon;
+            result[axle.order] = gain;
+        }
+        LogOnce(LogLevel::Info, "runtime-steering-geometry-resolved",
+                "Model " + HashText(configuration.model_hash) +
+                    " recalculated steering from authoritative vehicle-local "
+                    "wheel positions using physical axle " +
+                    std::to_string(reference->order) +
+                    " as the farthest steering reference");
+        if (corrected_exported_gain) {
+            LogOnce(LogLevel::Warning,
+                    "runtime-steering-geometry-corrected",
+                    "Runtime wheel positions changed one or more exported "
+                    "steering gains for model " +
+                        HashText(configuration.model_hash));
+        }
+        return result;
+    }
+
     std::optional<std::vector<WheelPlan>>
     BuildPlan(const VehicleSnapshot& vehicle,
               const AxleConfiguration& configuration,
@@ -209,6 +408,9 @@ struct AxleRuntime::Implementation {
                         "physics activation; no changes were applied");
             return std::nullopt;
         }
+        const auto base_steering_gains =
+            ResolveBaseSteeringGains(vehicle, configuration);
+        if (!base_steering_gains.has_value()) return std::nullopt;
         std::set<std::uint32_t> unique_indices;
         for (const auto& axle : configuration.axles) {
             for (const auto* bone : {&axle.left_bone, &axle.right_bone}) {
@@ -227,8 +429,14 @@ struct AxleRuntime::Implementation {
                 wheel.steered = axle.steered;
                 wheel.powered = axle.powered;
                 wheel.desired_steering_gain =
-                    EffectiveSteeringGain(configuration, axle);
-                wheel.manages_steering_gain = manage_steering_gain;
+                    EffectiveSteeringGain(
+                        configuration,
+                        base_steering_gains->at(axle.order));
+                // GTA owns a volatile gain field even for fixed wheels.  Do
+                // not interpret its ordinary updates as drift and never write
+                // gain state for an axle which is explicitly non-steering.
+                wheel.manages_steering_gain =
+                    manage_steering_gain && axle.steered;
                 wheel.manages_static_force = manage_static_force;
                 if (manage_static_force) {
                     wheel.support_weight =
@@ -479,6 +687,7 @@ struct AxleRuntime::Implementation {
                     OriginalWheelState{
                         wheel.original_flags,
                         wheel.original_steering_gain,
+                        wheel.desired_steering_gain,
                         wheel.manages_steering_gain,
                         wheel.original_static_force,
                         wheel.manages_static_force,
@@ -596,6 +805,65 @@ struct AxleRuntime::Implementation {
         if (!host.IsOnlineSession()) return true;
         DisableForOnline();
         return false;
+    }
+
+    void MaintainVolatileSteeringGains() {
+        if (!access.SupportsSteeringGain()) return;
+        for (const auto& [entity_id, saved] : tracked) {
+            const auto current = host.LookupVehicle(entity_id);
+            if (!current.has_value() ||
+                current->model_hash != saved.model_hash ||
+                current->wheel_generation != saved.wheel_generation) {
+                continue;
+            }
+            for (const auto& [index, original] : saved.originals) {
+                if (!original.has_steering_gain) continue;
+                double observed = 0.0;
+                if (!access.ReadWheelSteeringGain(
+                        *current, index, observed) ||
+                    !std::isfinite(observed)) {
+                    LogOnce(LogLevel::Warning,
+                            "steering-gain-maintenance-read-failed",
+                            "Could not read volatile steering gain for model " +
+                                HashText(saved.model_hash) + " wheel " +
+                                std::to_string(index));
+                    continue;
+                }
+                if (std::abs(observed - original.desired_steering_gain) <=
+                    kGainComparisonEpsilon) {
+                    continue;
+                }
+                if (!ConfirmOfflineBeforeWrite()) return;
+                if (!access.WriteWheelSteeringGain(
+                        *current, index,
+                        original.desired_steering_gain)) {
+                    LogOnce(LogLevel::Warning,
+                            "steering-gain-maintenance-write-failed",
+                            "Could not reassert volatile steering gain for "
+                            "model " + HashText(saved.model_hash) + " wheel " +
+                                std::to_string(index));
+                    continue;
+                }
+                double verified = 0.0;
+                if (!access.ReadWheelSteeringGain(
+                        *current, index, verified) ||
+                    !std::isfinite(verified) ||
+                    std::abs(verified - original.desired_steering_gain) >
+                        kGainComparisonEpsilon) {
+                    LogOnce(LogLevel::Warning,
+                            "steering-gain-maintenance-verify-failed",
+                            "Volatile steering gain did not survive immediate "
+                            "readback for model " +
+                                HashText(saved.model_hash) + " wheel " +
+                                std::to_string(index));
+                    continue;
+                }
+                LogOnce(LogLevel::Debug, "steering-gain-reasserted",
+                        "Reasserted engine-owned steering gain for model " +
+                            HashText(saved.model_hash) + " wheel " +
+                            std::to_string(index));
+            }
+        }
     }
 
     void DisableForOnline() {
@@ -831,6 +1099,18 @@ bool AxleRuntime::Start(ConfigurationCatalog catalog,
                     "the configuration was disabled before vehicle writes");
             continue;
         }
+        if (RequestsRuntimeGeometry(configuration) &&
+            !runtime.access.SupportsWheelLocalPosition()) {
+            runtime.log.Write(
+                LogLevel::Warning,
+                "wheel-local-position-capability-missing",
+                "Model " + HashText(model_hash) +
+                    " requests runtime steering geometry, but this exact "
+                    "build profile cannot read authoritative vehicle-local "
+                    "wheel positions; the configuration was disabled before "
+                    "vehicle writes");
+            continue;
+        }
         if (RequiresStaticForceAccess(configuration) &&
             (!runtime.access.SupportsStaticForce() ||
              !runtime.host.SupportsPhysicsActivation())) {
@@ -899,6 +1179,11 @@ void AxleRuntime::Service(std::chrono::steady_clock::time_point now) {
         runtime.DisableForOnline();
         return;
     }
+    // GTA rebuilds its per-wheel steering-limit field during ordinary vehicle
+    // simulation. Keep only explicitly steered, tracked gains current on every
+    // host service tick; discovery and flag recovery remain rate-limited.
+    runtime.MaintainVolatileSteeringGains();
+    if (runtime.state != RuntimeState::Running) return;
     const auto discovery_interval =
         std::chrono::milliseconds(runtime.settings.discovery_interval_ms);
     if (runtime.last_discovery.time_since_epoch().count() != 0 &&

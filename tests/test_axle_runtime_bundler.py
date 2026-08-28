@@ -33,6 +33,7 @@ from allin1_sdk.axle_configurator import (
 from allin1_sdk.axle_runtime_bundler import (
     ACCEPTANCE_PENDING,
     FIVEM_RUNTIME_NAME,
+    RUNTIME_GEOMETRY_RUNTIME_VERSION,
     STATUS_OMITTED,
     STATUS_READY,
     STORY_RUNTIME_REQUIRED_EXPORTS,
@@ -163,6 +164,23 @@ def _signed_vehicle() -> VehicleAxleBuildInput:
     )
 
 
+def _manual_signed_vehicle() -> VehicleAxleBuildInput:
+    vehicle = _signed_vehicle()
+    calculation = vehicle.configuration.steering_calculation
+    assert calculation is not None
+    return replace(
+        vehicle,
+        configuration=replace(
+            vehicle.configuration,
+            steering_calculation=SteeringCalculationProvenance(
+                mode=STEERING_CALCULATION_MANUAL,
+                algorithm_version=calculation.algorithm_version,
+                bone_position_sha256=calculation.bone_position_sha256,
+            ),
+        ),
+    )
+
+
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -246,6 +264,7 @@ def _story_profile(
     maximum_axle_schema: int = 1,
     supports_axle_support_bias: bool = False,
     supports_signed_steering_gain: bool = False,
+    supports_wheel_local_position: bool = False,
 ) -> StoryRuntimeProfile:
     binary = tmp_path / f"{target}.asi"
     _write_x64_asi(binary)
@@ -277,6 +296,12 @@ def _story_profile(
             "signed_steering_gain_apply_readback": "passed",
             "intentional_layout_override_mapping": "passed",
         })
+    if supports_wheel_local_position:
+        acceptance_tests.update({
+            "wheel_local_position_readback": "passed",
+            "runtime_geometry_recompute": "passed",
+            "runtime_geometry_unsupported_fail_closed": "passed",
+        })
     receipt.write_text(json.dumps({
         "schema_version": 1,
         "receipt_id": f"receipt-{target}",
@@ -292,6 +317,7 @@ def _story_profile(
             "signed_steering_gain": supports_signed_steering_gain,
             "static_force": supports_axle_support_bias,
             "physics_activation": supports_axle_support_bias,
+            "wheel_local_position": supports_wheel_local_position,
         },
         "descriptor_abi_version": 1,
         "required_exports": list(STORY_RUNTIME_REQUIRED_EXPORTS),
@@ -319,6 +345,7 @@ def _story_profile(
         supports_signed_steering_gain=supports_signed_steering_gain,
         supports_static_force=supports_axle_support_bias,
         supports_physics_activation=supports_axle_support_bias,
+        supports_wheel_local_position=supports_wheel_local_position,
     )
 
 
@@ -340,6 +367,7 @@ def _write_profile_document(profile: StoryRuntimeProfile, path: Path) -> Path:
             "signed_steering_gain": profile.supports_signed_steering_gain,
             "static_force": profile.supports_static_force,
             "physics_activation": profile.supports_physics_activation,
+            "wheel_local_position": profile.supports_wheel_local_position,
         },
     }, sort_keys=True), encoding="utf-8")
     return path
@@ -901,9 +929,10 @@ def test_story_signed_steering_requires_attested_profile_capability(
     profile = _story_profile(
         tmp_path,
         TARGET_STORY_LEGACY,
-        version=SIGNED_STEERING_RUNTIME_VERSION,
+        version=RUNTIME_GEOMETRY_RUNTIME_VERSION,
         maximum_axle_schema=SIGNED_STEERING_SCHEMA_VERSION,
         supports_signed_steering_gain=True,
+        supports_wheel_local_position=True,
     )
     unsigned_root = tmp_path / "unsigned"
     unsigned_root.mkdir()
@@ -915,7 +944,7 @@ def test_story_signed_steering_requires_attested_profile_capability(
             TARGET_STORY_LEGACY: _story_profile(
                 unsigned_root,
                 TARGET_STORY_LEGACY,
-                version=SIGNED_STEERING_RUNTIME_VERSION,
+                version=RUNTIME_GEOMETRY_RUNTIME_VERSION,
                 maximum_axle_schema=SIGNED_STEERING_SCHEMA_VERSION,
             ),
         },
@@ -925,12 +954,58 @@ def test_story_signed_steering_requires_attested_profile_capability(
         targets=(TARGET_STORY_LEGACY,),
         story_profiles={TARGET_STORY_LEGACY: profile},
     )
+    no_position_root = tmp_path / "no-position"
+    no_position_root.mkdir()
+    no_position = AxleRuntimeBundlePlanner().plan(
+        (vehicle,),
+        targets=(TARGET_STORY_LEGACY,),
+        story_profiles={
+            TARGET_STORY_LEGACY: _story_profile(
+                no_position_root,
+                TARGET_STORY_LEGACY,
+                version=RUNTIME_GEOMETRY_RUNTIME_VERSION,
+                maximum_axle_schema=SIGNED_STEERING_SCHEMA_VERSION,
+                supports_signed_steering_gain=True,
+            ),
+        },
+    )
 
     assert rejected.targets[0].status == STATUS_OMITTED
     assert any("signed steering-gain accessor" in item for item in rejected.targets[0].reasons)
     assert accepted.targets[0].status == STATUS_READY
     assert accepted.targets[0].capabilities.supports_signed_steering_gain is True
+    assert accepted.targets[0].capabilities.supports_wheel_local_position is True
     assert accepted.targets[0].capabilities.supports_current_axle_schema is False
+    assert accepted.targets[0].configurations[0].runtime_payload[
+        "minimumRuntimeVersion"
+    ] == RUNTIME_GEOMETRY_RUNTIME_VERSION
+    assert no_position.targets[0].status == STATUS_OMITTED
+    assert any(
+        "wheel-local-position accessor" in item
+        for item in no_position.targets[0].reasons
+    )
+
+    old_root = tmp_path / "old-runtime"
+    old_root.mkdir()
+    old_runtime = AxleRuntimeBundlePlanner().plan(
+        (vehicle,),
+        targets=(TARGET_STORY_LEGACY,),
+        story_profiles={
+            TARGET_STORY_LEGACY: _story_profile(
+                old_root,
+                TARGET_STORY_LEGACY,
+                version="4.0.0",
+                maximum_axle_schema=SIGNED_STEERING_SCHEMA_VERSION,
+                supports_signed_steering_gain=True,
+                supports_wheel_local_position=True,
+            ),
+        },
+    )
+    assert old_runtime.targets[0].status == STATUS_OMITTED
+    assert any(
+        "Runtime 4.0.0 is older" in item
+        for item in old_runtime.targets[0].reasons
+    )
 
 
 def test_story_receipt_capabilities_must_match_and_pass_conditional_tests(
@@ -967,6 +1042,28 @@ def test_story_receipt_capabilities_must_match_and_pass_conditional_tests(
     )
     with pytest.raises(ValueError, match="incomplete or failed acceptance tests"):
         incomplete.runtime_dependency()
+
+
+def test_story_manual_steering_retains_its_existing_runtime_minimum(
+    tmp_path: Path,
+) -> None:
+    vehicle = _manual_signed_vehicle()
+    profile = _story_profile(
+        tmp_path,
+        TARGET_STORY_LEGACY,
+        version=RUNTIME_GEOMETRY_RUNTIME_VERSION,
+        maximum_axle_schema=SIGNED_STEERING_SCHEMA_VERSION,
+        supports_signed_steering_gain=True,
+    )
+    plan = AxleRuntimeBundlePlanner().plan(
+        (vehicle,),
+        targets=(TARGET_STORY_LEGACY,),
+        story_profiles={TARGET_STORY_LEGACY: profile},
+    )
+    assert plan.targets[0].status == STATUS_READY
+    payload = plan.targets[0].configurations[0].runtime_payload
+    assert payload["minimumRuntimeVersion"] == SIGNED_STEERING_RUNTIME_VERSION
+    assert payload["steeringCalculation"]["runtimeRecompute"] is False
 
 
 def test_fivem_dependency_cannot_claim_story_runtime_capabilities() -> None:
@@ -1160,6 +1257,28 @@ def test_full_four_target_build_is_staged_and_has_no_cross_contamination(
         assert manifest["runtime"]["package_eligible"] is True
         assert manifest["runtime"]["binary_evidence"]["architecture"] == "x64"
         assert (root / STORY_RUNTIME_NAME / "validation-receipt.json").is_file()
+        settings = json.loads(
+            (root / STORY_RUNTIME_NAME / "runtime.json").read_text("utf-8")
+        )
+        assert settings["schemaVersion"] == 1
+        assert settings["enabled"] is True
+        assert "runtime_version" not in settings
+        metadata = json.loads(
+            (root / STORY_RUNTIME_NAME / "runtime-metadata.json").read_text(
+                "utf-8"
+            )
+        )
+        assert metadata["runtime_name"] == STORY_RUNTIME_NAME
+        assert metadata["runtime_version"] == "1.0.0"
+        assert metadata["target"] == target
+        assert metadata["supported_game_builds"] == ["build-123"]
+        assert metadata["binary_sha256"] == profiles[target].expected_sha256
+        assert metadata["validation_receipt_sha256"] == (
+            profiles[target].expected_receipt_sha256
+        )
+        assert metadata["architecture"] == "x64"
+        assert metadata["scripthook_bundled"] is False
+        assert metadata["online_loading_supported"] is False
 
 
 def test_fivem_enhanced_assets_require_approved_converter(tmp_path: Path) -> None:
@@ -1265,3 +1384,21 @@ def test_direct_install_and_existing_destination_are_refused(tmp_path: Path) -> 
     destination.mkdir()
     with pytest.raises(FileExistsError, match="already exists"):
         AxleRuntimeBundleBuilder().build(plan, destination)
+
+    game = tmp_path / "Grand Theft Auto V"
+    game.mkdir()
+    (game / "GTA5.exe").write_bytes(b"MZ")
+    live_destination = game / "staged-axle-bundle"
+    with pytest.raises(ValueError, match="staged-only"):
+        AxleRuntimeBundleBuilder().build(plan, live_destination)
+    assert not live_destination.exists()
+
+    declared_game = tmp_path / "declared-game-root"
+    declared_game.mkdir()
+    declared_destination = declared_game / "staged-axle-bundle"
+    with pytest.raises(ValueError, match="staged-only"):
+        AxleRuntimeBundleBuilder().build(
+            plan, declared_destination,
+            protected_gta_roots=(declared_game,),
+        )
+    assert not declared_destination.exists()
