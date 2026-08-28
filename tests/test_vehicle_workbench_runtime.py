@@ -10,7 +10,12 @@ import pytest
 
 import allin1_sdk.addon_sdk_ui as sdk_ui
 from allin1_sdk.app import _configure_style
-from allin1_sdk.axle_configurator import detect_axle_configuration
+from allin1_sdk.axle_configurator import (
+    EXPORT_FIVEM_RUNTIME,
+    PRESET_STEER_DRIVE_REAR,
+    detect_axle_configuration,
+)
+from allin1_sdk.vehicle_axles_ui import StoryControllerBuildOptions
 from allin1_sdk.vehicle_authoring import VehicleAuthoringWorkspace
 from allin1_sdk.axle_oiv_export import (
     MODE_RUNTIME_ONLY,
@@ -18,7 +23,10 @@ from allin1_sdk.axle_oiv_export import (
     MODE_VEHICLE_ONLY,
 )
 from allin1_sdk.vehicle_oiv_ui import VehicleOivForm
-from allin1_sdk.vehicle_workbench import VehicleWorkbenchFrame
+from allin1_sdk.vehicle_workbench import (
+    VehicleWorkbenchFrame,
+    _story_axle_build_request,
+)
 
 
 VEHICLES = """<CVehicleModelInfo__InitDataList><InitDatas><Item>
@@ -52,6 +60,46 @@ CARCOLS = """<CVehicleModelInfoVarGlobal><Kits><Item>
 CONTENT = """<CDataFileMgr__ContentsOfDataFileXml><dataFiles><Item>
 <filename>dlc_runtimecar:/common/data/vehicles.meta</filename>
 </Item></dataFiles></CDataFileMgr__ContentsOfDataFileXml>"""
+
+
+def test_story_controller_request_supports_direct_rpf_sidecar_config(
+    tmp_path: Path,
+) -> None:
+    bones = (
+        SimpleNamespace(name="wheel_lf", position=(-1.0, 4.0, 0.0)),
+        SimpleNamespace(name="wheel_rf", position=(1.0, 4.0, 0.0)),
+        SimpleNamespace(name="wheel_lm1", position=(-1.0, 0.0, 0.0)),
+        SimpleNamespace(name="wheel_rm1", position=(1.0, 0.0, 0.0)),
+        SimpleNamespace(name="wheel_lr", position=(-1.0, -2.0, 0.0)),
+        SimpleNamespace(name="wheel_rr", position=(1.0, -2.0, 0.0)),
+    )
+    configuration = detect_axle_configuration(
+        "direct_rpf_bus", bones,
+        preset=PRESET_STEER_DRIVE_REAR,
+        export_mode=EXPORT_FIVEM_RUNTIME,
+        target="story-legacy",
+    )
+    output = tmp_path / "story-controller"
+    request = _story_axle_build_request(
+        configuration,
+        bones,
+        StoryControllerBuildOptions(
+            targets=("story-legacy", "story-enhanced"),
+            configuration_directory="scripts/Fleet/VehicleSettings",
+            log_file="scripts/Fleet/Axles.log",
+            output_directory=output,
+        ),
+    )
+
+    assert request.output_directory == output.resolve()
+    assert request.targets == ("story-legacy", "story-enhanced")
+    assert request.settings.configuration_directory == (
+        "scripts/Fleet/VehicleSettings"
+    )
+    assert request.settings.log_file == "scripts/Fleet/Axles.log"
+    assert len(request.configurations) == 1
+    assert request.configurations[0].configuration == configuration
+    assert request.configurations[0].steering_evidence_bones == bones
 
 
 def _source(root: Path) -> Path:

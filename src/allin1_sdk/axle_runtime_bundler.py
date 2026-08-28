@@ -102,12 +102,13 @@ _AXLE_SUPPORT_ACCEPTANCE_TESTS = frozenset({
 def default_story_runtime_settings() -> dict[str, Any]:
     """Return a fresh native RuntimeSettings document for staged Story builds."""
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "enabled": True,
         "discoveryIntervalMs": 250,
         "recoveryIntervalMs": 2000,
         "restoreOnUnload": True,
-        "logFile": "logs/VehicleWorkbenchAxles.log",
+        "configurationDirectory": "VehicleWorkbenchAxles/configs",
+        "logFile": "VehicleWorkbenchAxles/logs/VehicleWorkbenchAxles.log",
     }
 
 

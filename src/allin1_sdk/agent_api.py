@@ -47,6 +47,7 @@ AUTHORING_COMMANDS = frozenset({
     "build-vehicle-package",
     "build-axle-oiv",
     "build-axle-runtime-bundle",
+    "build-story-axle-runtime",
     "create-weapon-authoring",
     "create-vehicle-authoring",
     "create-ped-authoring",
@@ -177,6 +178,7 @@ READ_ONLY_COMMANDS = frozenset({
     "inspect-rpf-program",
     "inspect-source",
     "inspect-story-axle-runtimes",
+    "inspect-story-axle-toolchain",
     "inspect-vehicle-authoring",
     "inspect-vehicle-axles",
     "inspect-vehicle-distribution",
@@ -243,6 +245,7 @@ COMMAND_RISKS = {
 
 _PATH_SENSITIVE_AXLE_OUTPUTS = {
     "build-axle-runtime-bundle": ("--output-dir", "-o"),
+    "build-story-axle-runtime": ("--output-dir", "-o"),
     "export-story-axle-runtime-config": ("--output", "-o"),
 }
 

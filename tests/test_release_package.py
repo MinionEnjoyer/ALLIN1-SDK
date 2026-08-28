@@ -83,6 +83,7 @@ def test_release_package_contains_launcher_contract_and_checksums(tmp_path):
             "runtime/VehicleWorkbenchAxles/schemas/axle-config.schema.json",
             "runtime/VehicleWorkbenchAxles/src/runtime.cpp",
             "runtime/VehicleWorkbenchAxles/tests/core_tests.cpp",
+            "runtime/VehicleWorkbenchAxles/tools/config_validator.cpp",
         } <= names
         assert "runtime/VehicleWorkbenchAxles/out/VehicleWorkbenchAxles.asi" not in names
         assert "runtime/VehicleWorkbenchAxles/src/generated.dll" not in names
@@ -115,6 +116,19 @@ def test_release_workflow_binds_package_identity_to_github_commit():
     ).read_text(encoding="utf-8")
 
     assert workflow.count('--build-id "$env:GITHUB_SHA"') == 2
+
+
+def test_release_workflow_rewrites_signed_native_receipt_truthfully():
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci-release.yml"
+    ).read_text(encoding="utf-8")
+
+    signature_gate = workflow.index("Get-AuthenticodeSignature")
+    certificate_update = workflow.index(
+        "$receipt.authenticode_certificate_present = $true"
+    )
+    unsigned_update = workflow.index("$receipt.unsigned = $false")
+    assert signature_gate < certificate_update < unsigned_update
 
 
 def test_release_rejects_bundled_example_with_missing_source(tmp_path):

@@ -42,6 +42,16 @@ class ICompiledWheelProfile {
 public:
     virtual ~ICompiledWheelProfile() = default;
     virtual GameIdentity Identity() const = 0;
+    // Exact identities remain the default contract for externally supplied
+    // profiles. A compiled signature-gated profile may override this only when
+    // every private layout value is derived and canary-checked at runtime.
+    virtual bool MatchesIdentity(const GameIdentity& game) const {
+        const auto identity = Identity();
+        return identity.edition == game.edition && identity.build != 0 &&
+               identity.build == game.build &&
+               !identity.executable_fingerprint.empty() &&
+               identity.executable_fingerprint == game.executable_fingerprint;
+    }
     virtual std::uint32_t MaximumPhysicalAxles() const noexcept = 0;
     virtual std::vector<SignatureRequirement>
     SignatureRequirements() const = 0;
@@ -56,6 +66,19 @@ public:
                                  std::uint16_t) = 0;
     virtual bool SetWheelPowered(const VehicleSnapshot&, std::uint32_t,
                                  bool) = 0;
+    // Canonical CWheel bone IDs (11..20) let the runtime prove that an
+    // explicitly overridden collection slot still refers to the intended
+    // physical wheel before it performs any writes.
+    virtual bool SupportsWheelBoneId() const noexcept { return false; }
+    virtual bool ReadWheelBoneId(const VehicleSnapshot&, std::uint32_t,
+                                 std::int32_t&) { return false; }
+    // A live generation token fingerprints the current CVehicle wheel-array
+    // storage without exposing or retaining its pointers.  It lets the core
+    // distinguish a rebuilt wheel collection from a recycled handle/model
+    // pair before restoring an older baseline.
+    virtual bool SupportsWheelGenerationToken() const noexcept { return false; }
+    virtual bool ReadWheelGenerationToken(const VehicleSnapshot&,
+                                          std::uint64_t&) { return false; }
     // Signed per-wheel steering gain is an optional, build-profile capability.
     // Existing reviewed profiles remain source/binary compatible at the
     // contract level and explicitly report no support until all three methods
@@ -105,6 +128,14 @@ public:
     virtual bool SetWheelPowered(const VehicleSnapshot& vehicle,
                                  std::uint32_t index,
                                  bool powered) = 0;
+    virtual bool SupportsWheelBoneId() const noexcept { return false; }
+    virtual bool ReadWheelBoneId(const VehicleSnapshot&, std::uint32_t,
+                                 std::int32_t&) { return false; }
+    virtual bool SupportsWheelGenerationToken() const noexcept {
+        return false;
+    }
+    virtual bool ReadWheelGenerationToken(const VehicleSnapshot&,
+                                          std::uint64_t&) { return false; }
     virtual bool SupportsSteeringGain() const noexcept = 0;
     virtual bool ReadWheelSteeringGain(const VehicleSnapshot& vehicle,
                                        std::uint32_t index,
@@ -147,6 +178,12 @@ public:
     bool WriteWheelFlags(const VehicleSnapshot&, std::uint32_t,
                          std::uint16_t) override;
     bool SetWheelPowered(const VehicleSnapshot&, std::uint32_t, bool) override;
+    bool SupportsWheelBoneId() const noexcept override;
+    bool ReadWheelBoneId(const VehicleSnapshot&, std::uint32_t,
+                         std::int32_t&) override;
+    bool SupportsWheelGenerationToken() const noexcept override;
+    bool ReadWheelGenerationToken(const VehicleSnapshot&,
+                                  std::uint64_t&) override;
     bool SupportsSteeringGain() const noexcept override;
     bool ReadWheelSteeringGain(const VehicleSnapshot&, std::uint32_t,
                                double&) override;
@@ -188,6 +225,12 @@ public:
     bool WriteWheelFlags(const VehicleSnapshot&, std::uint32_t,
                          std::uint16_t) override;
     bool SetWheelPowered(const VehicleSnapshot&, std::uint32_t, bool) override;
+    bool SupportsWheelBoneId() const noexcept override;
+    bool ReadWheelBoneId(const VehicleSnapshot&, std::uint32_t,
+                         std::int32_t&) override;
+    bool SupportsWheelGenerationToken() const noexcept override;
+    bool ReadWheelGenerationToken(const VehicleSnapshot&,
+                                  std::uint64_t&) override;
     bool SupportsSteeringGain() const noexcept override;
     bool ReadWheelSteeringGain(const VehicleSnapshot&, std::uint32_t,
                                double&) override;

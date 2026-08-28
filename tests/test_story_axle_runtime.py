@@ -18,16 +18,40 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "runtime" / "VehicleWorkbenchAxles"
 
 
-def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
+def test_native_build_stages_self_contained_runtime_contract() -> None:
+    package = json.loads(
+        (RUNTIME / "profiles" / "runtime-package.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    build_script = (ROOT / "scripts" / "build_native_asi.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    for key in ("profileSchema", "receiptSchema"):
+        relative_path = package["receiptContract"][key]
+        source_path = (RUNTIME / "profiles" / relative_path).resolve()
+        assert source_path.is_file()
+        assert source_path.name in build_script
+
+    assert "axle-config.schema.json" in build_script
+
+
+def test_story_runtime_profiles_are_compiled_but_distribution_stays_fail_closed(
+) -> None:
     profile = json.loads(
         (RUNTIME / "profiles" / "compatibility.json").read_text(encoding="utf-8")
     )
-    assert profile["runtimeVersion"] == "4.1.0"
+    assert profile["runtimeVersion"] == "4.4.0"
     assert profile["policy"] == {
         "permanentOffsetsAllowed": False,
-        "exactBuildMatchRequired": True,
+        "runtimeProfileIdentityPolicy": (
+            "edition-plus-unique-signature-and-layout-canaries"
+        ),
+        "distributionExactBuildMatchRequired": True,
         "signatureAndExecutablePageValidationRequired": True,
         "packageEligibleReceiptRequired": True,
+        "compiledProfilePresenceIsDistributionApproval": False,
         "x64PeExportInspectionRequired": True,
         "signedSteeringGainRequiresValidatedAccessor": True,
         "runtimeGeometryRequiresValidatedWheelLocalPositionAccessor": True,
@@ -37,16 +61,38 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
     for target in ("story-legacy", "story-enhanced"):
         assert profile["profiles"][target]["supportedGameBuilds"] == []
         assert profile["profiles"][target]["status"] == (
-            "implemented-awaiting-validation"
+            "compiled-awaiting-in-game-acceptance"
+        )
+        assert profile["profiles"][target]["wheelProfileStatus"] == (
+            "compiled-signature-gated"
         )
         assert profile["profiles"][target]["capabilities"] == {
             "steeringFlags": True,
             "driveFlags": True,
-            "signedSteeringGain": False,
+            "wheelBoneIdVerification": True,
+            "wheelGenerationToken": True,
+            "signedSteeringGain": True,
             "wheelLocalPosition": False,
-            "staticForce": False,
-            "physicsActivation": False,
+            "staticForce": True,
+            "physicsActivation": True,
         }
+    assert profile["profiles"]["story-legacy"][
+        "observedUnacceptedExecutables"
+    ] == []
+    observed = profile["profiles"]["story-enhanced"][
+        "observedUnacceptedExecutables"
+    ]
+    assert observed == [
+        {
+            "fileName": "GTA5_Enhanced.exe",
+            "fileVersion": "1.0.1158.13",
+            "build": 1158,
+            "sha256": (
+                "0C52864D4521D9C9D441348AA1156958792DDE8825D0297C851753F167336401"
+            ),
+            "acceptanceStatus": "observed-not-accepted",
+        }
+    ]
 
     package = json.loads(
         (RUNTIME / "profiles" / "runtime-package.json").read_text(
@@ -54,13 +100,20 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
         )
     )
     assert package["runtime"]["version"] == profile["runtimeVersion"]
+    assert package["runtime"]["settingsSchemaVersion"] == 2
     assert package["binaryContract"]["packagingRequiresValidatedProfile"] is True
     assert package["binaryContract"]["validatedProfileExport"] == (
         "VehicleWorkbenchAxles_HasValidatedProfile"
     )
+    assert package["binaryContract"]["hostBridge"][
+        "wheelMemoryAccessIncluded"
+    ] is True
+    assert package["binaryContract"][
+        "compiledProfilePresenceIsDistributionApproval"
+    ] is False
     assert package["binaryContract"]["capabilities"][
         "signedSteeringGain"
-    ] is False
+    ] is True
     assert package["binaryContract"]["capabilities"][
         "wheelLocalPosition"
     ] is False
@@ -68,21 +121,40 @@ def test_story_runtime_profiles_are_explicitly_fail_closed() -> None:
         "receiptContract"
     ]["executableExportsRequired"]
     assert package["runtime"]["maximumAxleSchemaVersion"] == 4
-    assert package["binaryContract"]["capabilities"]["staticForce"] is False
-    assert package["binaryContract"]["capabilities"]["physicsActivation"] is False
+    assert package["binaryContract"]["capabilities"][
+        "wheelBoneIdVerification"
+    ] is True
+    assert package["binaryContract"]["capabilities"][
+        "wheelGenerationToken"
+    ] is True
+    assert package["binaryContract"]["capabilities"]["staticForce"] is True
+    assert package["binaryContract"]["capabilities"]["physicsActivation"] is True
     assert all(
-        not target["packageEligible"] and target["supportedGameBuilds"] == []
+        not target["packageEligible"]
+        and target["supportedGameBuilds"] == []
+        and target["validationReceipt"] is None
         for target in package["targets"].values()
     )
 
     adapter = (RUNTIME / "src" / "wheel_access_adapters.cpp").read_text(
         encoding="utf-8"
     )
-    assert "No validated Legacy wheel-access profile" in adapter
-    assert "No validated Enhanced wheel-access profile" in adapter
-    assert "return false;" in adapter
-    # The isolated adapter is not allowed to grow an address table unnoticed.
+    assert "class SignatureWheelProfile" in adapter
+    assert "DefaultProfiles(Edition::Legacy)" in adapter
+    assert "DefaultProfiles(Edition::Enhanced)" in adapter
+    assert "unique executable signatures" in (
+        RUNTIME / "README.md"
+    ).read_text(encoding="utf-8")
+    # Derived private layout values are allowed; permanent address tables are not.
     assert not re.search(r"\b(?:offset|address)\s*=\s*0x[0-9a-f]{5,}", adapter, re.I)
+
+    entry = (RUNTIME / "src" / "asi_entry.cpp").read_text(encoding="utf-8")
+    assert "script-hook-host-ready-signature-gated-wheel-profile" in entry
+    assert re.search(
+        r"VehicleWorkbenchAxles_HasValidatedProfile\(\).*?return true;",
+        entry,
+        re.S,
+    )
 
 
 def test_story_runtime_schema_and_fixture_are_variable_length() -> None:

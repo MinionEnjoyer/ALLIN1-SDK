@@ -2,11 +2,16 @@
 
 ## Current source release
 
-Do not install the generated native `.asi` host artifacts into GTA V.  Both
-descriptors say that no validated wheel-access profile exists, and the Workbench
-bundler must reject them.  They exist so the ScriptHook host boundary, shared
-binary shape, edition isolation, and build pipeline can be tested without
-inventing game-memory support.
+Do not install the generated native `.asi` host artifacts into GTA V. Both
+artifacts now contain compiled, signature-gated wheel adapters, but neither
+edition has a package-eligible in-game acceptance receipt. The Workbench bundler
+must therefore continue to reject them. The profile-presence export reports the
+binary's compiled accessor capability; it does not mean that any game build is
+supported or approved for distribution.
+
+One local Enhanced `1.0.1158.13` executable identity has been recorded for
+future validation. It remains unaccepted. No Legacy executable has been
+validated.
 
 ## Future validated release
 
@@ -16,12 +21,18 @@ game directory.  A validated Story package contains only:
 - one generic `VehicleWorkbenchAxles.asi` matching the exact target edition;
 - `VehicleWorkbenchAxles/runtime.json`;
 - `VehicleWorkbenchAxles/runtime-metadata.json` for release identity and validation metadata;
-- one JSON file per model below `VehicleWorkbenchAxles/configs/`;
+- one JSON file per model below the guarded `configurationDirectory` selected
+  by `runtime.json` (default `VehicleWorkbenchAxles/configs/`);
 - a compatibility manifest, checksum, README, and uninstall receipt.
 
 It never contains ScriptHookV, `dinput8.dll`, another ASI loader, a FiveM
 resource, Cfx tools, or third-party files without confirmed redistribution
 rights.  Dependency instructions must link to the official source.
+
+The native ASI itself belongs in the GTA root. `configurationDirectory` and
+`logFile` may point to a package-owned relative location such as
+`scripts/ExamplePack/VehicleSettings` and `scripts/ExamplePack/Axles.log`.
+They never authorize an absolute path or `..` traversal outside the game root.
 
 If direct installation is enabled later, it must:
 

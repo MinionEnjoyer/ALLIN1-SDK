@@ -1,8 +1,9 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "enabled": true,
   "discoveryIntervalMs": 250,
   "recoveryIntervalMs": 2000,
   "restoreOnUnload": true,
-  "logFile": "logs/VehicleWorkbenchAxles.log"
+  "configurationDirectory": "VehicleWorkbenchAxles/configs",
+  "logFile": "VehicleWorkbenchAxles/logs/VehicleWorkbenchAxles.log"
 }

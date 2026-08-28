@@ -12,7 +12,7 @@ make weapons, vehicles, archives, and other add-ons work coherently.
 ALLIN1 SDK supports GTA V Legacy and GTA V Enhanced. Its inspection and planning
 workflows are designed for Story Mode mod development.
 
-> **Current public release:** **0.6.1**. Install it from ALLIN1 Launcher or
+> **Current public release:** **0.6.2**. Install it from ALLIN1 Launcher or
 > download the self-contained Windows package from
 > [GitHub Releases](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases).
 
@@ -20,6 +20,21 @@ workflows are designed for Story Mode mod development.
 
 If ALLIN1 Launcher and SDK are useful to you, project support is available through
 [Buy Me a Coffee](https://buymeacoffee.com/minionenjoyer).
+
+## What's new in 0.6.2
+
+- The Vehicle Workbench can now build the shared native axle controller for
+  GTA V Legacy, GTA V Enhanced, or both, then package each edition with its
+  runtime settings and selected per-vehicle axle configurations.
+- Controller paths are author-configurable, including the folder scanned for
+  vehicle JSON sidecars and the destination used for axle diagnostics.
+- The desktop Workbench, CLI, and Agent API share one guarded build contract,
+  with toolchain checks, native tests, configuration parsing, PE/export checks,
+  checksums, receipts, and protected live-game destinations.
+- VehicleWorkbenchAxles **4.4.0** adds edition-specific ScriptHookV hosts,
+  signature-gated wheel access, physical-order and polarity support, detailed
+  axle logging, and fail-closed build compatibility. Generated candidates still
+  require explicit in-game acceptance before they are marked supported.
 
 ## What's new in 0.6.1
 

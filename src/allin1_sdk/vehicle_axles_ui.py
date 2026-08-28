@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 import tkinter as tk
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Callable, Iterable
@@ -70,6 +70,22 @@ EXPORT_LABELS = {
     "Stock metadata": EXPORT_STOCK_METADATA,
     "Selective runtime": EXPORT_FIVEM_RUNTIME,
 }
+
+CONTROLLER_EDITION_TARGETS = {
+    "Legacy + Enhanced": ("story-legacy", "story-enhanced"),
+    "Legacy": ("story-legacy",),
+    "Enhanced": ("story-enhanced",),
+}
+
+
+@dataclass(frozen=True)
+class StoryControllerBuildOptions:
+    """User-selected staging options for one validated controller build."""
+
+    targets: tuple[str, ...]
+    configuration_directory: str
+    log_file: str
+    output_directory: Path
 
 
 def _native_story_export_ready(config: AxleConfiguration | None) -> bool:
@@ -344,12 +360,21 @@ class VehicleAxlesPanel(ttk.Frame):
         on_undo: Callable[[], None],
         on_redo: Callable[[], None],
         on_export: Callable[[AxleConfiguration], None],
+        on_build_controller: Callable[
+            [
+                AxleConfiguration,
+                tuple[NativeModelBone, ...],
+                StoryControllerBuildOptions,
+            ],
+            None,
+        ] | None = None,
     ) -> None:
         super().__init__(parent)
         self._on_apply = on_apply
         self._on_undo = on_undo
         self._on_redo = on_redo
         self._on_export = on_export
+        self._on_build_controller = on_build_controller
         self._model = ""
         self._bones: tuple[NativeModelBone, ...] = ()
         self._asset_names: tuple[str, ...] = ()
@@ -367,6 +392,8 @@ class VehicleAxlesPanel(ttk.Frame):
         self._finding_messages: dict[str, str] = {}
         self._wrap_labels: list[ttk.Label] = []
         self._action_layout: str | None = None
+        self._controller_build_running = False
+        self._validation_error_count = 0
         self._filter_values = {
             "axle_count": tk.StringVar(value="Any"),
             "layout": tk.StringVar(value="Any"),
@@ -473,6 +500,11 @@ class VehicleAxlesPanel(ttk.Frame):
         self.config_menu.add_command(
             label="Export native Story config…",
             command=self._save_runtime_configuration,
+        )
+        self.config_menu.add_separator()
+        self.config_menu.add_command(
+            label="Build Story controller package…",
+            command=self._toggle_controller_builder,
         )
         self.config_button = ttk.Menubutton(
             preset_actions, text="Config ▾", menu=self.config_menu,
@@ -714,6 +746,88 @@ class VehicleAxlesPanel(ttk.Frame):
         self.finding_tree.bind(
             "<<TreeviewSelect>>", self._show_selected_finding,
         )
+
+        self.controller_builder = ttk.LabelFrame(
+            body, text="5 · Story controller package", padding=7,
+        )
+        self.controller_builder.columnconfigure(1, weight=1)
+        controller_intro = ttk.Label(
+            self.controller_builder,
+            text=(
+                "Compile the global axle controller and include this vehicle's "
+                "reviewed config. Build output is staged outside GTA V."
+            ),
+            foreground="#52635c", wraplength=400, justify="left",
+        )
+        controller_intro.grid(
+            row=0, column=0, columnspan=3, sticky="ew", pady=(0, 5),
+        )
+        self._wrap_labels.append(controller_intro)
+        self.controller_edition = tk.StringVar(value="Legacy + Enhanced")
+        self.controller_configuration_directory = tk.StringVar(
+            value="VehicleWorkbenchAxles/configs",
+        )
+        self.controller_log_file = tk.StringVar(
+            value="VehicleWorkbenchAxles/logs/VehicleWorkbenchAxles.log",
+        )
+        self.controller_output_directory = tk.StringVar()
+        for row, (label, variable) in enumerate((
+            ("Edition", self.controller_edition),
+            ("Config folder", self.controller_configuration_directory),
+            ("Log file", self.controller_log_file),
+            ("Output folder", self.controller_output_directory),
+        ), start=1):
+            ttk.Label(self.controller_builder, text=label).grid(
+                row=row, column=0, sticky="w", pady=2,
+            )
+            if label == "Edition":
+                control: tk.Widget = ttk.Combobox(
+                    self.controller_builder, textvariable=variable,
+                    values=tuple(CONTROLLER_EDITION_TARGETS),
+                    state="readonly", width=18,
+                )
+            else:
+                control = ttk.Entry(
+                    self.controller_builder, textvariable=variable, width=24,
+                )
+            control.grid(row=row, column=1, sticky="ew", padx=(6, 0), pady=2)
+            if label == "Output folder":
+                self.controller_output_entry = control
+        self.controller_output_button = ttk.Button(
+            self.controller_builder, text="Browse…",
+            command=self._browse_controller_output,
+        )
+        self.controller_output_button.grid(
+            row=4, column=2, sticky="e", padx=(5, 0), pady=2,
+        )
+        controller_actions = ttk.Frame(self.controller_builder)
+        controller_actions.grid(
+            row=5, column=0, columnspan=3, sticky="ew", pady=(6, 0),
+        )
+        self.controller_build_button = ttk.Button(
+            controller_actions, text="Build validated package",
+            command=self._build_story_controller,
+            style="Axle.Accent.TButton",
+        )
+        self.controller_build_button.pack(side="left")
+        ttk.Button(
+            controller_actions, text="Hide",
+            command=self._toggle_controller_builder,
+        ).pack(side="right")
+        self.controller_build_status = tk.StringVar(
+            value=(
+                "Select Selective runtime behavior, resolve validation findings, "
+                "then build. In-game acceptance remains a separate test."
+            ),
+        )
+        controller_status = ttk.Label(
+            self.controller_builder, textvariable=self.controller_build_status,
+            foreground="#52635c", wraplength=400, justify="left",
+        )
+        controller_status.grid(
+            row=6, column=0, columnspan=3, sticky="ew", pady=(5, 0),
+        )
+        self._wrap_labels.append(controller_status)
 
         ttk.Separator(self).grid(row=1, column=0, sticky="ew", pady=(3, 0))
         self.footer = ttk.Frame(self)
@@ -1299,6 +1413,99 @@ class VehicleAxlesPanel(ttk.Frame):
             self._finding_messages.get(selected[0], "Validation detail unavailable."),
         )
 
+    @staticmethod
+    def _available_controller_output(model: str) -> Path:
+        desktop = Path.home() / "Desktop"
+        parent = desktop if desktop.is_dir() else Path.home()
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "-", model.strip()).strip("-._")
+        stem = f"ALLIN1-Axle-Controller-{slug or 'Vehicle'}"
+        candidate = parent / stem
+        suffix = 2
+        while candidate.exists() or candidate.is_symlink():
+            candidate = parent / f"{stem}-{suffix}"
+            suffix += 1
+        return candidate
+
+    def _toggle_controller_builder(self) -> None:
+        if self.controller_builder.winfo_manager():
+            self.controller_builder.pack_forget()
+            return
+        if not self.controller_output_directory.get().strip():
+            self.controller_output_directory.set(
+                str(self._available_controller_output(self._model)),
+            )
+        self.controller_builder.pack(
+            fill="x", pady=(7, 0), after=self.findings_section,
+        )
+        self.after_idle(self._editor_content_configured)
+
+    def _browse_controller_output(self) -> None:
+        selected = filedialog.askdirectory(
+            parent=self,
+            title="Choose a parent folder for the Story controller build",
+            mustexist=True,
+        )
+        if not selected:
+            return
+        suggested = self._available_controller_output(self._model).name
+        self.controller_output_directory.set(str(Path(selected) / suggested))
+
+    def _refresh_controller_build_state(self) -> None:
+        ready = (
+            self._on_build_controller is not None
+            and self._draft is not None
+            and _native_story_export_ready(self._draft)
+            and self._validation_error_count == 0
+            and not self._preview_blocked
+            and not self._controller_build_running
+        )
+        self.controller_build_button.configure(
+            state="normal" if ready else "disabled",
+        )
+
+    def _build_story_controller(self) -> None:
+        configuration = self._draft
+        callback = self._on_build_controller
+        if configuration is None or callback is None:
+            self.controller_build_status.set(
+                "The Story controller builder is unavailable in this host.",
+            )
+            return
+        target_label = self.controller_edition.get()
+        targets = CONTROLLER_EDITION_TARGETS.get(target_label)
+        output = self.controller_output_directory.get().strip()
+        if targets is None or not output:
+            self.controller_build_status.set(
+                "Choose an edition and a new output folder before building.",
+            )
+            return
+        options = StoryControllerBuildOptions(
+            targets=targets,
+            configuration_directory=(
+                self.controller_configuration_directory.get().strip()
+            ),
+            log_file=self.controller_log_file.get().strip(),
+            output_directory=Path(output).expanduser().resolve(strict=False),
+        )
+        self._controller_build_running = True
+        self.controller_build_status.set("Preparing validated native build…")
+        self._refresh_controller_build_state()
+        try:
+            callback(configuration, self._bones, options)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            self.controller_build_finished(False, f"Build rejected: {exc}")
+
+    def controller_build_progress(self, message: str) -> None:
+        if self._controller_build_running:
+            self.controller_build_status.set(str(message))
+
+    def controller_build_finished(self, succeeded: bool, message: str) -> None:
+        self._controller_build_running = False
+        self.controller_build_status.set(str(message))
+        self._refresh_controller_build_state()
+        if succeeded:
+            self.status.set("Story controller package built and validated.")
+
     def _set_enabled(self, available: bool, *, editable: bool = False) -> None:
         state = "normal" if available and editable else "disabled"
         readonly = "readonly" if available and editable else "disabled"
@@ -1363,6 +1570,15 @@ class VehicleAxlesPanel(ttk.Frame):
                 else "disabled"
             ),
         )
+        self.config_menu.entryconfigure(
+            "Build Story controller package…",
+            state=(
+                "normal"
+                if available and self._on_build_controller is not None
+                else "disabled"
+            ),
+        )
+        self._refresh_controller_build_state()
         self._update_guided_setup()
         if available and self._draft is not None:
             self._validate()
@@ -1852,6 +2068,7 @@ class VehicleAxlesPanel(ttk.Frame):
             )
         errors = sum(item.severity == "error" for item in findings)
         warnings = sum(item.severity == "warning" for item in findings)
+        self._validation_error_count = errors
         runtime = "authoring only; target runtime unavailable" if deployment_blocked else "runtime required" if any(
             item.code.endswith("runtime_required") for item in findings
         ) else "stock-compatible pattern"
@@ -1911,6 +2128,7 @@ class VehicleAxlesPanel(ttk.Frame):
                 f"Handling flags: 0x{self._handling_flags:X} → "
                 f"0x{result.updated_flags:X}{bias_note}"
             )
+        self._refresh_controller_build_state()
 
     def _apply(self) -> None:
         if self._draft is not None:

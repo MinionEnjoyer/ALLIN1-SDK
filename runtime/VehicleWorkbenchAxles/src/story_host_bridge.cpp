@@ -25,6 +25,7 @@ constexpr std::uint64_t kNetworkIsSessionActive = 0xD83C2B94E7508980ULL;
 constexpr std::uint64_t kNetworkIsInTransition = 0x68049AEFF83D8F0AULL;
 constexpr std::uint64_t kDoesEntityExist = 0x7239B21A38F536BAULL;
 constexpr std::uint64_t kGetEntityModel = 0x9F47B058362C84B5ULL;
+constexpr std::uint64_t kActivatePhysics = 0x710311ADF0E20730ULL;
 
 template <typename Function>
 Function ResolveExport(HMODULE module, const char* decorated_name) noexcept {
@@ -36,6 +37,24 @@ bool HasParentTraversal(const std::filesystem::path& path) {
     return std::any_of(path.begin(), path.end(), [](const auto& component) {
         return component == L"..";
     });
+}
+
+bool HasExistingReparseComponent(const std::filesystem::path& base,
+                                 const std::filesystem::path& relative) {
+    auto current = base;
+    for (const auto& component : relative) {
+        current /= component;
+        const auto attributes = GetFileAttributesW(current.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            const auto error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+                return false;
+            }
+            return true;
+        }
+        if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) return true;
+    }
+    return false;
 }
 
 std::string ReadBoundedTextFile(const std::filesystem::path& path,
@@ -321,6 +340,14 @@ ScriptHookApi::InvokeEntityBool(std::uint64_t hash,
     return (*result & 0xFFU) != 0;
 }
 
+bool ScriptHookApi::InvokeEntityVoid(std::uint64_t hash,
+                                     std::int32_t entity) const noexcept {
+    if (!CanInvokeNatives()) return false;
+    native_init_(hash);
+    native_push64_(static_cast<std::uint32_t>(entity));
+    return native_call_() != nullptr;
+}
+
 std::vector<std::int32_t> ScriptHookApi::EnumerateVehicleHandles() const {
     std::vector<std::int32_t> result;
     if (!world_get_all_vehicles_) return result;
@@ -393,18 +420,22 @@ std::filesystem::path ResolveLogPath(const RuntimePaths& paths,
                                      bool& used_fallback) noexcept {
     used_fallback = false;
     try {
-        const std::filesystem::path requested(settings.log_file);
+        const auto requested = std::filesystem::u8path(settings.log_file);
         if (requested.empty() || requested.is_absolute() ||
             requested.has_root_name() || requested.has_root_directory() ||
             HasParentTraversal(requested)) {
             used_fallback = true;
             return paths.log_file;
         }
-        const auto normalized = (paths.data_directory / requested).lexically_normal();
+        const auto& base = settings.schema_version == 1
+                               ? paths.data_directory
+                               : paths.module_directory;
+        const auto normalized = (base / requested).lexically_normal();
         const auto relative = normalized.lexically_relative(
-            paths.data_directory.lexically_normal());
+            base.lexically_normal());
         if (relative.empty() || relative.is_absolute() ||
-            HasParentTraversal(relative)) {
+            HasParentTraversal(relative) ||
+            HasExistingReparseComponent(base, relative)) {
             used_fallback = true;
             return paths.log_file;
         }
@@ -412,6 +443,38 @@ std::filesystem::path ResolveLogPath(const RuntimePaths& paths,
     } catch (...) {
         used_fallback = true;
         return paths.log_file;
+    }
+}
+
+std::filesystem::path ResolveConfigurationPath(
+    const RuntimePaths& paths, const RuntimeSettings& settings,
+    bool& used_fallback) noexcept {
+    used_fallback = false;
+    try {
+        const auto requested =
+            std::filesystem::u8path(settings.configuration_directory);
+        if (requested.empty() || requested.is_absolute() ||
+            requested.has_root_name() || requested.has_root_directory() ||
+            HasParentTraversal(requested)) {
+            used_fallback = true;
+            return paths.configuration_directory;
+        }
+        const auto& base = settings.schema_version == 1
+                               ? paths.data_directory
+                               : paths.module_directory;
+        const auto normalized = (base / requested).lexically_normal();
+        const auto relative = normalized.lexically_relative(
+            base.lexically_normal());
+        if (relative.empty() || relative.is_absolute() ||
+            HasParentTraversal(relative) ||
+            HasExistingReparseComponent(base, relative)) {
+            used_fallback = true;
+            return paths.configuration_directory;
+        }
+        return normalized;
+    } catch (...) {
+        used_fallback = true;
+        return paths.configuration_directory;
     }
 }
 
@@ -478,6 +541,7 @@ ExecutableSignatureResolver::Resolve(const std::string& pattern,
     if (!DecodePattern(pattern, mask, bytes, normalized_mask)) {
         return std::nullopt;
     }
+    std::optional<std::uintptr_t> unique_match;
     for (const auto& range : executable_ranges_) {
         if (range.end <= range.begin ||
             bytes.size() > static_cast<std::size_t>(range.end - range.begin)) {
@@ -494,10 +558,13 @@ ExecutableSignatureResolver::Resolve(const std::string& pattern,
                     break;
                 }
             }
-            if (matched) return address;
+            if (matched) {
+                if (unique_match.has_value()) return std::nullopt;
+                unique_match = address;
+            }
         }
     }
-    return std::nullopt;
+    return unique_match;
 }
 
 bool ExecutableSignatureResolver::IsExecutable(
@@ -593,6 +660,22 @@ StoryVehicleHost::LookupVehicle(std::uint64_t entity_id) {
         return std::nullopt;
     }
     return Snapshot(static_cast<std::int32_t>(entity_id));
+}
+
+bool StoryVehicleHost::SupportsPhysicsActivation() const noexcept {
+    return api_.CanInvokeNatives();
+}
+
+bool StoryVehicleHost::ActivatePhysics(const VehicleSnapshot& vehicle) {
+    if (vehicle.entity_id == 0 ||
+        vehicle.entity_id > static_cast<std::uint64_t>(
+                                std::numeric_limits<std::int32_t>::max())) {
+        return false;
+    }
+    const auto handle = static_cast<std::int32_t>(vehicle.entity_id);
+    const auto exists = api_.InvokeEntityBool(kDoesEntityExist, handle);
+    return exists.has_value() && *exists &&
+           api_.InvokeEntityVoid(kActivatePhysics, handle);
 }
 
 std::optional<VehicleSnapshot>

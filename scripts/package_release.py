@@ -49,6 +49,7 @@ _REQUIRED_AUTHORING_RESOURCES = (
     Path("runtime") / "VehicleWorkbenchAxles" / "schemas" / "axle-config.schema.json",
     Path("runtime") / "VehicleWorkbenchAxles" / "src" / "runtime.cpp",
     Path("runtime") / "VehicleWorkbenchAxles" / "tests" / "core_tests.cpp",
+    Path("runtime") / "VehicleWorkbenchAxles" / "tools" / "config_validator.cpp",
 )
 
 

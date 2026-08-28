@@ -17,7 +17,7 @@ inline constexpr std::uint32_t kLegacyAxleSchemaVersion = 1;
 inline constexpr std::uint32_t kSignedSteeringAxleSchemaVersion = 2;
 inline constexpr std::uint32_t kAxleSupportAxleSchemaVersion = 3;
 inline constexpr std::uint32_t kAxleSchemaVersion = 4;
-inline constexpr std::uint32_t kRuntimeSettingsSchemaVersion = 1;
+inline constexpr std::uint32_t kRuntimeSettingsSchemaVersion = 2;
 inline constexpr std::uint8_t kSteeredBit = 0x08;
 inline constexpr std::uint8_t kDrivenBit = 0x10;
 // Signed steering gain is normalized to the authored front-axle steering
@@ -115,7 +115,12 @@ struct RuntimeSettings {
     std::uint32_t discovery_interval_ms{250};
     std::uint32_t recovery_interval_ms{2000};
     bool restore_on_unload{true};
-    std::string log_file{"logs/VehicleWorkbenchAxles.log"};
+    // Both paths are relative to the GTA installation directory (the folder
+    // containing this root-level ASI). This permits a vehicle pack to keep its
+    // sidecars and log alongside its existing scripts without moving the ASI.
+    std::string configuration_directory{"VehicleWorkbenchAxles/configs"};
+    std::string log_file{
+        "VehicleWorkbenchAxles/logs/VehicleWorkbenchAxles.log"};
 };
 
 struct ConfigurationCatalog {

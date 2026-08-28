@@ -118,6 +118,13 @@ from allin1_sdk.axle_runtime_bundler import (
     story_runtime_profile_report,
     target_capabilities,
 )
+from allin1_sdk.story_axle_runtime_builder import (
+    STORY_TARGETS,
+    StoryAxleRuntimeBuildRequest,
+    StoryAxleRuntimeSettings,
+    build_story_axle_runtime_candidate,
+    inspect_native_axle_toolchain,
+)
 from allin1_sdk.axle_oiv_export import (
     EnhancedOivTargetProfile,
     JsonOivIdentityStore,
@@ -2929,6 +2936,130 @@ def inspect_story_axle_runtimes(
     except (OSError, TypeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(report, indent=2))
+
+
+@main.command("inspect-story-axle-toolchain")
+@click.option(
+    "--source-root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help=(
+        "Optional native VehicleWorkbenchAxles source tree. The bundled SDK "
+        "runtime source is inspected when omitted."
+    ),
+)
+def inspect_story_axle_toolchain(source_root: Path | None) -> None:
+    """Inspect the local native Story controller build prerequisites."""
+    try:
+        report = inspect_native_axle_toolchain(source_root=source_root)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({
+        "schema_version": 1,
+        "operation": "inspect_story_axle_toolchain",
+        **report.to_dict(),
+    }, indent=2))
+
+
+@main.command("build-story-axle-runtime")
+@click.argument(
+    "config_json", nargs=-1,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--target", "targets", multiple=True, type=click.Choice(STORY_TARGETS),
+    help="Build Story Legacy, Story Enhanced, or both when omitted.",
+)
+@click.option(
+    "--skeleton-xml", "skeleton_xml_files", multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help=(
+        "Canonical CodeWalker YFT XML evidence; repeat once per optional "
+        "configuration in the same order."
+    ),
+)
+@click.option(
+    "--output-dir", "-o", required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="New staging directory outside every GTA installation.",
+)
+@click.option(
+    "--gta-path", "protected_gta_roots", multiple=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help=(
+        "Explicit GTA installation root to protect from staged output; repeat "
+        "for multiple installations."
+    ),
+)
+@click.option(
+    "--configuration-directory",
+    default="VehicleWorkbenchAxles/configs", show_default=True,
+    help="Runtime config directory relative to the GTA root.",
+)
+@click.option(
+    "--log-file", default="VehicleWorkbenchAxles/logs/VehicleWorkbenchAxles.log",
+    show_default=True, help="Runtime log file relative to the GTA root.",
+)
+@click.option(
+    "--discovery-interval-ms", default=250, show_default=True,
+    type=click.IntRange(100, 10000),
+)
+@click.option(
+    "--recovery-interval-ms", default=2000, show_default=True,
+    type=click.IntRange(100, 60000),
+)
+@click.option("--runtime-enabled/--runtime-disabled", default=True, show_default=True)
+@click.option(
+    "--restore-on-unload/--no-restore-on-unload", default=True,
+    show_default=True,
+)
+@click.option("--archives/--no-archives", default=True, show_default=True)
+@click.option("--build-id", default="allin1-sdk-local", show_default=True)
+@click.option("--acknowledge-edit", is_flag=True, required=True)
+def build_story_axle_runtime(
+    config_json: tuple[Path, ...], targets: tuple[str, ...],
+    skeleton_xml_files: tuple[Path, ...],
+    output_dir: Path, protected_gta_roots: tuple[Path, ...],
+    configuration_directory: str, log_file: str,
+    discovery_interval_ms: int, recovery_interval_ms: int,
+    runtime_enabled: bool, restore_on_unload: bool, archives: bool,
+    build_id: str, acknowledge_edit: bool,
+) -> None:
+    """Compile and validate generic Legacy/Enhanced Story controller candidates."""
+    del acknowledge_edit
+    try:
+        if config_json:
+            configurations = _axle_build_inputs(
+                config_json, skeleton_xml_files,
+            )
+        elif skeleton_xml_files:
+            raise ValueError(
+                "--skeleton-xml requires a matching axle configuration JSON"
+            )
+        else:
+            configurations = ()
+        request = StoryAxleRuntimeBuildRequest(
+            output_directory=output_dir,
+            targets=targets or STORY_TARGETS,
+            configurations=configurations,
+            settings=StoryAxleRuntimeSettings(
+                enabled=runtime_enabled,
+                discovery_interval_ms=discovery_interval_ms,
+                recovery_interval_ms=recovery_interval_ms,
+                restore_on_unload=restore_on_unload,
+                configuration_directory=configuration_directory,
+                log_file=log_file,
+            ),
+            build_id=build_id,
+            create_archives=archives,
+            protected_gta_roots=protected_gta_roots,
+        )
+        # Package authors always compile the audited SDK-owned controller
+        # source. Arbitrary native source trees are intentionally not accepted
+        # by this Agent-API-exposed command.
+        result = build_story_axle_runtime_candidate(request)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result.to_dict(), indent=2))
 
 
 @main.command("plan-axle-oiv")

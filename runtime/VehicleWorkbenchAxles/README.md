@@ -8,21 +8,25 @@ is only an example.
 ## Safety and current support status
 
 The platform-neutral core, JSON validator, lifecycle, transactional wheel-bit
-updates, online guard, and mock tests are implemented.  The two Windows targets
-compile from shared source.
+updates, online guard, and mock tests are implemented. The two Windows targets
+compile from shared source and now contain separate Legacy and Enhanced
+signature-gated wheel adapters. Those adapters derive private layout values at
+runtime, require unique executable signatures, validate live wheel counts and
+canonical bone IDs, and reacquire the vehicle and wheel collection for every
+operation. They do not contain permanent CVehicle or CWheel offsets.
 
-**Neither Story Mode edition is deployable or marked supported yet.**  The
-Legacy and Enhanced wheel-access adapters intentionally contain no game
-signatures, fixed offsets, layouts, or callable wheel accessors.  `Resolve()`
-always fails before game memory access, and the compatibility manifest lists
-zero supported builds.  The compiled native host artifacts export
-`VehicleWorkbenchAxles_HasValidatedProfile() == false` so the bundler can refuse
-them.
+**Neither Story Mode edition is deployable or marked supported yet.** The
+compiled artifacts now export
+`VehicleWorkbenchAxles_HasValidatedProfile() == true` to report that their
+signature-gated accessor profile is present. That export does not grant
+distribution approval. Both compatibility entries still have empty supported
+build arrays, `packageEligible: false`, and no in-game acceptance receipt, so
+the Workbench bundler continues to refuse them.
 
-This is intentional.  CitizenFX behavior does not establish a safe Story Mode
-memory ABI.  The ScriptHookV host bridge is implemented, but each edition still
-needs a separately reviewed wheel-access signature profile and in-game
-acceptance run before packaging.
+One Enhanced executable identity (`1.0.1158.13`, build `1158`) has been observed
+locally, but it has not passed the required in-game matrix. No Legacy executable
+has been validated. Compilation, signature resolution, or observing an
+executable hash is not an acceptance result.
 
 ## Canonical physical axles
 
@@ -66,7 +70,7 @@ runtime map.  Vehicles beyond the game's recognized slots require cosmetic
 wheels or a future custom-physics extension.  GTA's stock front/shared-rear
 visual instancing limit is unchanged.
 
-## Expected installed layout (after validation, not today)
+## Expected installed layout (after acceptance, not today)
 
 ```text
 VehicleWorkbenchAxles.asi
@@ -80,13 +84,23 @@ VehicleWorkbenchAxles/
     VehicleWorkbenchAxles.log
 ```
 
-`runtime.json` uses the strict native settings contract shown in
+`runtime.json` uses the strict schema-2 native settings contract shown in
 [`examples/runtime.json`](examples/runtime.json). The generic controller is
 enabled by default; set `"enabled": false` to leave it installed while
 preventing configuration discovery, profile resolution, vehicle enumeration,
 and wheel access on the next game launch. Invalid settings also stop the host
 before those operations; a missing settings file alone uses the documented
 enabled defaults.
+
+`configurationDirectory` and `logFile` are guarded paths relative to the GTA
+installation directory. This lets an existing pack keep its portable axle
+sidecars and log beneath its own `scripts` subdirectory while the native ASI
+stays in the GTA root. Absolute paths and parent traversal are rejected. The
+startup log records the configured relative directory inspected; if ScriptHookV
+binding fails before that log can open, the ASI rejects its own module load so
+the failure appears in the ASI loader log instead of remaining silent.
+Schema-1 settings remain readable with their original paths relative to
+`VehicleWorkbenchAxles/`; root-relative custom paths require schema 2.
 
 The bundled `example_bus` configuration is intentionally non-deployable. Its
 companion bone fixture documents the illustrative vehicle-local positions used
@@ -109,18 +123,27 @@ ctest --test-dir out/core --output-on-failure
 ```
 
 On Windows, `VWA_BUILD_ASI_SKELETONS=ON` also creates separate Legacy and
-Enhanced native `.asi` host artifacts.  The historical option name is retained
-for build compatibility.  These are development artifacts only and must not be
-staged into a game or release bundle while the descriptor reports no validated
-profile.
+Enhanced native `.asi` host artifacts. The historical option name is retained
+for build compatibility. These remain unaccepted development artifacts. A true
+compiled-profile export is necessary but not sufficient for staging; the exact
+target build must also have a pinned, passing in-game receipt.
+
+The installed SDK exposes this as **Config > Build Story controller package**
+in the Axle Configurator and as `build-story-axle-runtime` in the console and
+typed Agent API. Those paths can build either edition or both, place any number
+of reviewed vehicle sidecars beneath a configurable GTA-root-relative folder,
+and route logging to a configurable relative file. They run CTest, the native
+configuration parser, PE/export checks, edition-marker checks, and deterministic
+archive hashing before publishing a new output directory. Local results remain
+explicitly marked `supported: false` and `game_acceptance: not-tested`.
 
 ## Workbench integration contract
 
 The Workbench bundler integration supplies:
 
 1. a schema-1 legacy, schema-2 signed-steering, schema-3 support-bias, or
-   schema-4 steering-polarity JSON config in
-   `VehicleWorkbenchAxles/configs/`;
+   schema-4 steering-polarity JSON config in the directory selected by
+   `runtime.json` (default `VehicleWorkbenchAxles/configs/`);
 2. an explicit `wheelIndexMap` emitted from canonical bones and target vehicle
    information;
 3. a runtime dependency record with target edition, minimum runtime version,
@@ -168,7 +191,8 @@ and
 Profile paths are resolved relative to the profile JSON; logs and reports expose
 only basenames and hashes.
 
-Inspect the empty fail-closed catalog or explicitly supplied profiles with:
+Inspect the fail-closed distribution catalog or explicitly supplied accepted
+profiles with:
 
 ```powershell
 allin1-sdk inspect-story-axle-runtimes
@@ -183,23 +207,26 @@ the structured local Agent API.  Without an explicit verified profile, Story
 targets remain omitted.
 
 The native ScriptHook host bridge implements `IVehicleHost` and
-`ISignatureResolver`.  A separately validated edition/build adapter implements
-`IWheelAccess`.  The shared core never takes a ScriptHook dependency and never
+`ISignatureResolver`. Separate Legacy and Enhanced adapters implement
+`IWheelAccess`. They are compiled into edition-specific binaries and derive
+their private wheel layout only after unique target signatures and live layout
+canaries pass. The shared core never takes a ScriptHook dependency and never
 retains a raw vehicle/wheel pointer.
 
-Signed gain is a separate adapter capability. The current profiles expose only
-steering/drive flag access, so a config requesting counter-steer or scaled
-steering is disabled before vehicle writes. A future exact-build profile must
-provide validated gain read/write access; the core then captures, transactionally
-applies, rolls back, recovers, and restores that state alongside managed flags.
-Runtime geometry recomputation additionally requires validated vehicle-local
-wheel-position reads; requesting it without that capability disables the
-configuration before any vehicle write.
+The compiled adapters expose steering/drive flags, canonical live wheel-bone
+verification, signed steering gain, reversible `StaticForce`, and physics
+activation. This is compiled capability, not game-build acceptance or
+distribution approval. Authoritative vehicle-local wheel-position reads are
+not implemented yet, so a configuration requesting runtime geometry
+recomputation is disabled before any vehicle write. Precomputed signed gains
+remain representable in ordinary axle configurations.
 
 ## Lifecycle
 
-- Startup: online guard, exact edition/build detection, fail-closed adapter
-  resolution, bounded config loading, duplicate-model isolation, concise report.
+- Startup: online guard, exact edition/build detection, unique signature and
+  layout-canary resolution, bounded config loading, duplicate-model isolation,
+  concise report. Distribution remains separately pinned to an accepted exact
+  executable build and receipt.
 - Gameplay: event application for create/ownership/repair/wheel recreation plus
   a configurable recovery verification. Because GTA rebuilds its steering-limit
   field during simulation, only already-tracked, explicitly steered wheel gains

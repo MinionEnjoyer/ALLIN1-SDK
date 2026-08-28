@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(VehicleWorkbenchAxles VERSION 4.1.0 LANGUAGES CXX)
+project(VehicleWorkbenchAxles VERSION 4.4.0 LANGUAGES CXX)
+
+# Story hosts are distributed as self-contained native plug-ins.  Keep the
+# runtime library choice explicit so a developer machine's CMake defaults do
+# not silently introduce a VC redistributable dependency.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 if(DEFINED VWA_BUILD_ASI_SKELETONS AND NOT DEFINED VWA_BUILD_STORY_HOSTS)
     set(VWA_BUILD_STORY_HOSTS "${VWA_BUILD_ASI_SKELETONS}" CACHE BOOL
@@ -13,6 +20,8 @@ endif()
 set(VWA_BUILD_ASI_SKELETONS "${VWA_BUILD_STORY_HOSTS}" CACHE BOOL
     "Deprecated alias for VWA_BUILD_STORY_HOSTS" FORCE)
 option(VWA_BUILD_TESTS "Build platform-neutral runtime tests" ON)
+option(VWA_BUILD_CONFIG_VALIDATOR
+    "Build the native axle configuration validation helper" ON)
 
 add_library(VehicleWorkbenchAxlesCore STATIC
     src/json.cpp
@@ -60,6 +69,11 @@ if(WIN32 AND VWA_BUILD_STORY_HOSTS)
             PREFIX ""
             OUTPUT_NAME "VehicleWorkbenchAxles"
             SUFFIX ".asi"
+            # Both edition targets intentionally share the deployed filename,
+            # but MSVC also emits an import library with that basename. Keep
+            # every link artifact edition-local so parallel builds cannot race
+            # over a shared Release/VehicleWorkbenchAxles.{lib,exp} pair.
+            ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/story-${edition}"
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/story-${edition}"
             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/story-${edition}"
         )
@@ -78,4 +92,23 @@ if(VWA_BUILD_TESTS)
     target_link_libraries(VehicleWorkbenchAxlesCoreTests PRIVATE VehicleWorkbenchAxlesCore)
     target_compile_features(VehicleWorkbenchAxlesCoreTests PRIVATE cxx_std_17)
     add_test(NAME VehicleWorkbenchAxlesCoreTests COMMAND VehicleWorkbenchAxlesCoreTests)
+endif()
+
+if(VWA_BUILD_CONFIG_VALIDATOR)
+    add_executable(VehicleWorkbenchAxlesConfigValidator
+        tools/config_validator.cpp
+    )
+    target_link_libraries(VehicleWorkbenchAxlesConfigValidator
+        PRIVATE VehicleWorkbenchAxlesCore
+    )
+    target_compile_features(VehicleWorkbenchAxlesConfigValidator PRIVATE cxx_std_17)
+    if(MSVC)
+        target_compile_options(VehicleWorkbenchAxlesConfigValidator
+            PRIVATE /W4 /permissive-
+        )
+    else()
+        target_compile_options(VehicleWorkbenchAxlesConfigValidator
+            PRIVATE -Wall -Wextra -Wpedantic
+        )
+    endif()
 endif()

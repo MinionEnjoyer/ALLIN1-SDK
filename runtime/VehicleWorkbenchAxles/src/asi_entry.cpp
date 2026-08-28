@@ -21,8 +21,12 @@ namespace {
 
 #if defined(VWA_ASI_EDITION_Legacy)
 constexpr const char* kTarget = "story-legacy";
+constexpr const char* kBuildTargetMarker =
+    "VehicleWorkbenchAxles.BuildTarget=story-legacy";
 #elif defined(VWA_ASI_EDITION_Enhanced)
 constexpr const char* kTarget = "story-enhanced";
+constexpr const char* kBuildTargetMarker =
+    "VehicleWorkbenchAxles.BuildTarget=story-enhanced";
 #else
 #error An explicit Story Mode edition is required
 #endif
@@ -40,12 +44,13 @@ const RuntimeDescriptor kDescriptor{
     vwa::kAxleSchemaVersion,
     VWA_RUNTIME_VERSION,
     kTarget,
-    "script-hook-host-ready-wheel-profile-missing",
+    "script-hook-host-ready-signature-gated-wheel-profile",
 };
 
 HMODULE g_module = nullptr;
 vwa::story::ScriptHookApi g_script_hook;
 std::atomic_bool g_stop_requested{false};
+std::atomic_bool g_registered{false};
 
 constexpr vwa::Edition CompiledEdition() noexcept {
 #if defined(VWA_ASI_EDITION_Legacy)
@@ -82,6 +87,16 @@ void ScriptMainBody() {
         log.Write(vwa::LogLevel::Warning, "unsafe-log-path-rejected",
                   "The configured log path was not a safe relative path; "
                   "the default runtime log is in use");
+    }
+    bool used_fallback_configuration = false;
+    const auto configuration_path = vwa::story::ResolveConfigurationPath(
+        *paths, settings, used_fallback_configuration);
+    if (used_fallback_configuration) {
+        log.Write(vwa::LogLevel::Warning,
+                  "unsafe-configuration-directory-rejected",
+                  "The configured configuration directory was not a safe "
+                  "relative path; the default configuration directory is in "
+                  "use");
     }
     for (const auto& issue : settings_issues) {
         log.Write(issue.fatal ? vwa::LogLevel::Warning : vwa::LogLevel::Info,
@@ -126,9 +141,11 @@ void ScriptMainBody() {
 #endif
     vwa::story::ExecutableSignatureResolver resolver;
     auto catalog = vwa::LoadConfigurationDirectory(
-        paths->configuration_directory, VWA_RUNTIME_VERSION);
+        configuration_path, VWA_RUNTIME_VERSION);
     log.Write(vwa::LogLevel::Info, "configuration-discovery",
-              "Inspected " + std::to_string(catalog.files_seen) +
+              "Inspected configured relative directory '" +
+                  settings.configuration_directory + "': " +
+                  std::to_string(catalog.files_seen) +
                   " configuration file(s); " +
                   std::to_string(catalog.active.size()) +
                   " non-conflicting model configuration(s) parsed");
@@ -138,8 +155,14 @@ void ScriptMainBody() {
     if (!started) {
         log.Write(vwa::LogLevel::Warning, "runtime-inactive",
                   "The native host is healthy, but axle control remains "
-                  "inactive. A matching validated wheel-access profile is "
-                  "required before any game-memory access");
+                  "inactive. Review the preceding fail-closed profile or "
+                  "configuration diagnostic");
+    } else {
+        log.Write(vwa::LogLevel::Info, "wheel-profile-active",
+                  std::string("Activated the ") + kTarget +
+                      " signature-gated wheel profile with canonical bone-ID "
+                      "verification, selective steering/drive flags, signed "
+                      "steering gain, StaticForce, and physics activation");
     }
 
     while (!g_stop_requested.load(std::memory_order_acquire)) {
@@ -179,11 +202,12 @@ VehicleWorkbenchAxles_GetDescriptor() noexcept {
     return &kDescriptor;
 }
 
-// A deployment packager must refuse this artifact until a separately reviewed
-// profile and ScriptHook host bridge replace this fail-closed gate.
+// This reports that the binary contains the compiled, signature-gated wheel
+// profile. Distribution eligibility remains a separate receipt/build gate in
+// the SDK and is deliberately not implied by this export.
 extern "C" __declspec(dllexport) bool
 VehicleWorkbenchAxles_HasValidatedProfile() noexcept {
-    return false;
+    return true;
 }
 
 // Distinguishes a complete ScriptHook lifecycle bridge from the former DLL
@@ -192,6 +216,14 @@ VehicleWorkbenchAxles_HasValidatedProfile() noexcept {
 extern "C" __declspec(dllexport) bool
 VehicleWorkbenchAxles_HasScriptHookHost() noexcept {
     return true;
+}
+
+// A unique, non-executing marker lets the SDK verify that a staged binary was
+// compiled for the requested edition. Both edition names also occur in shared
+// enum/string tables, so searching for the bare target name is ambiguous.
+extern "C" __declspec(dllexport) const char*
+VehicleWorkbenchAxles_GetBuildTargetMarker() noexcept {
+    return kBuildTargetMarker;
 }
 
 BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID reserved) {
@@ -204,10 +236,17 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID reserved) {
             !g_script_hook.Register(module, &ScriptMain)) {
             OutputDebugStringA(
                 "VehicleWorkbenchAxles: ScriptHookV host registration failed\n");
+            // Returning FALSE makes the ASI loader record a deterministic
+            // module-load failure instead of accepting a dead controller that
+            // can never create its normal file log.
+            return FALSE;
         }
+        g_registered.store(true, std::memory_order_release);
     } else if (reason == DLL_PROCESS_DETACH) {
         g_stop_requested.store(true, std::memory_order_release);
-        g_script_hook.Unregister(module);
+        if (g_registered.exchange(false, std::memory_order_acq_rel)) {
+            g_script_hook.Unregister(module);
+        }
     }
     // DllMain performs only ScriptHook registration/unregistration. File I/O,
     // native calls, configuration parsing, and profile resolution occur on

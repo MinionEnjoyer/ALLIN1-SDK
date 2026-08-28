@@ -1,43 +1,59 @@
 {
   "manifestVersion": 1,
-  "runtimeVersion": "4.1.0",
+  "runtimeVersion": "4.4.0",
   "profiles": {
     "story-legacy": {
-      "status": "implemented-awaiting-validation",
+      "status": "compiled-awaiting-in-game-acceptance",
       "hostBridgeStatus": "implemented",
-      "wheelProfileStatus": "missing",
+      "wheelProfileStatus": "compiled-signature-gated",
       "supportedGameBuilds": [],
+      "observedUnacceptedExecutables": [],
       "capabilities": {
         "steeringFlags": true,
         "driveFlags": true,
-        "signedSteeringGain": false,
+        "wheelBoneIdVerification": true,
+        "wheelGenerationToken": true,
+        "signedSteeringGain": true,
         "wheelLocalPosition": false,
-        "staticForce": false,
-        "physicsActivation": false
+        "staticForce": true,
+        "physicsActivation": true
       },
-      "reason": "The native ScriptHookV host is implemented, but no validated Legacy wheel-access signature profile is shipped. The adapter disables before memory access."
+      "reason": "A Legacy signature-gated adapter is compiled, but no Legacy executable has been observed or passed the in-game acceptance matrix. No Legacy build is supported or package eligible."
     },
     "story-enhanced": {
-      "status": "implemented-awaiting-validation",
+      "status": "compiled-awaiting-in-game-acceptance",
       "hostBridgeStatus": "implemented",
-      "wheelProfileStatus": "missing",
+      "wheelProfileStatus": "compiled-signature-gated",
       "supportedGameBuilds": [],
+      "observedUnacceptedExecutables": [
+        {
+          "fileName": "GTA5_Enhanced.exe",
+          "fileVersion": "1.0.1158.13",
+          "build": 1158,
+          "sha256": "0C52864D4521D9C9D441348AA1156958792DDE8825D0297C851753F167336401",
+          "acceptanceStatus": "observed-not-accepted"
+        }
+      ],
       "capabilities": {
         "steeringFlags": true,
         "driveFlags": true,
-        "signedSteeringGain": false,
+        "wheelBoneIdVerification": true,
+        "wheelGenerationToken": true,
+        "signedSteeringGain": true,
         "wheelLocalPosition": false,
-        "staticForce": false,
-        "physicsActivation": false
+        "staticForce": true,
+        "physicsActivation": true
       },
-      "reason": "The native ScriptHookV host is implemented, but no validated Enhanced wheel-access signature profile is shipped. The adapter disables before memory access."
+      "reason": "An Enhanced signature-gated adapter is compiled and one local executable identity has been recorded, but that identity has not passed the in-game acceptance matrix. No Enhanced build is supported or package eligible."
     }
   },
   "policy": {
     "permanentOffsetsAllowed": false,
-    "exactBuildMatchRequired": true,
+    "runtimeProfileIdentityPolicy": "edition-plus-unique-signature-and-layout-canaries",
+    "distributionExactBuildMatchRequired": true,
     "signatureAndExecutablePageValidationRequired": true,
     "packageEligibleReceiptRequired": true,
+    "compiledProfilePresenceIsDistributionApproval": false,
     "x64PeExportInspectionRequired": true,
     "signedSteeringGainRequiresValidatedAccessor": true,
     "runtimeGeometryRequiresValidatedWheelLocalPositionAccessor": true,

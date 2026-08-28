@@ -26,6 +26,7 @@ from allin1_sdk.axle_configurator import (
 )
 from allin1_sdk.axle_runtime_bundler import story_native_runtime_configuration
 from allin1_sdk.vehicle_axles_ui import (
+    StoryControllerBuildOptions,
     VehicleAxlesPanel,
     _edit_axle_controls,
     _format_steering_gain,
@@ -207,7 +208,7 @@ def _remapped_bus_bones() -> tuple[Bone, ...]:
 
 def test_guided_setup_preserves_detected_bus_order_and_builds_rear_steer() -> None:
     wheel_bones = _remapped_bus_bones()
-    detected = detect_axle_configuration("metrobusxl2", wheel_bones)
+    detected = detect_axle_configuration("example_transit_bus", wheel_bones)
 
     assert _has_unreviewed_physical_layout(detected)
     configured, solution = _guided_physical_layout_configuration(
@@ -237,7 +238,7 @@ def test_guided_setup_preserves_detected_bus_order_and_builds_rear_steer() -> No
 def test_guided_bus_exports_controller_ready_native_story_contract() -> None:
     wheel_bones = _remapped_bus_bones()
     detected = detect_axle_configuration(
-        "metrobusxl2", wheel_bones, target="story-legacy",
+        "example_transit_bus", wheel_bones, target="story-legacy",
     )
     configured, _solution = _guided_physical_layout_configuration(
         detected, wheel_bones,
@@ -250,7 +251,7 @@ def test_guided_bus_exports_controller_ready_native_story_contract() -> None:
     payload = story_native_runtime_configuration(configured, bones=wheel_bones)
 
     assert payload["schemaVersion"] == 4
-    assert payload["modelName"] == "metrobusxl2"
+    assert payload["modelName"] == "example_transit_bus"
     assert payload["expectedWheelCount"] == 6
     assert payload["compatibility"] == {"story-legacy": True}
     assert [row["wheelIndices"] for row in payload["axles"]] == [
@@ -354,5 +355,77 @@ def test_panel_load_apply_export_and_clear_lifecycle(tk_root) -> None:
         assert not panel.tree.get_children()
         assert panel.detect_button.instate(["disabled"])
         assert panel.status.get() == "Select a vehicle to inspect its wheel skeleton."
+    finally:
+        panel.destroy()
+
+
+def test_panel_builds_story_controller_from_compact_inline_form(
+    tmp_path, tk_root,
+) -> None:
+    captured = []
+    panel = VehicleAxlesPanel(
+        tk_root,
+        on_apply=lambda _configuration: None,
+        on_undo=lambda: None,
+        on_redo=lambda: None,
+        on_export=lambda _configuration: None,
+        on_build_controller=lambda configuration, bones, options: captured.append(
+            (configuration, bones, options)
+        ),
+    )
+    try:
+        bones = _three_axle_bones()
+        configuration = detect_axle_configuration(
+            "fixture_bus", bones,
+            preset=PRESET_STEER_DRIVE_REAR,
+            export_mode=EXPORT_FIVEM_RUNTIME,
+            target="story-legacy",
+        )
+        panel.load(
+            "fixture_bus", configuration, bones=bones, editable=True,
+        )
+
+        assert not panel.controller_builder.winfo_manager()
+        panel._toggle_controller_builder()
+        tk_root.update_idletasks()
+        assert panel.controller_builder.winfo_manager() == "pack"
+        assert panel.controller_build_button.instate(["!disabled"])
+
+        output = tmp_path / "controller-candidate"
+        panel.controller_edition.set("Enhanced")
+        panel.controller_configuration_directory.set(
+            "scripts/ExampleTransitPack/VehicleSettings",
+        )
+        panel.controller_log_file.set(
+            "scripts/ExampleTransitPack/Axles.log",
+        )
+        panel.controller_output_directory.set(str(output))
+        panel._build_story_controller()
+
+        assert len(captured) == 1
+        sent_configuration, sent_bones, options = captured[0]
+        assert sent_configuration == configuration
+        assert sent_bones == bones
+        assert options == StoryControllerBuildOptions(
+            targets=("story-enhanced",),
+            configuration_directory=(
+                "scripts/ExampleTransitPack/VehicleSettings"
+            ),
+            log_file="scripts/ExampleTransitPack/Axles.log",
+            output_directory=output.resolve(),
+        )
+        assert panel.controller_build_button.instate(["disabled"])
+        assert "Preparing" in panel.controller_build_status.get()
+
+        panel.controller_build_progress("Running native tests…")
+        assert panel.controller_build_status.get() == "Running native tests…"
+        panel.controller_build_finished(
+            True, "Validated runtime 4.4.0; in-game acceptance is required.",
+        )
+        assert panel.controller_build_button.instate(["!disabled"])
+        assert "Validated runtime 4.4.0" in panel.controller_build_status.get()
+
+        panel._toggle_controller_builder()
+        assert not panel.controller_builder.winfo_manager()
     finally:
         panel.destroy()

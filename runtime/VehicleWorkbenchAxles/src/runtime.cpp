@@ -13,7 +13,7 @@
 #include <utility>
 
 #ifndef VWA_RUNTIME_VERSION
-#define VWA_RUNTIME_VERSION "4.1.0"
+#define VWA_RUNTIME_VERSION "4.4.0"
 #endif
 
 namespace vwa {
@@ -88,6 +88,21 @@ bool HasAnyStaticForceSetting(
         [](const AxleDefinition& axle) {
             return axle.suspension.has_value();
         });
+}
+
+std::optional<std::int32_t>
+CanonicalWheelBoneId(const std::string& bone) noexcept {
+    if (bone == "wheel_lf") return 11;
+    if (bone == "wheel_rf") return 12;
+    if (bone == "wheel_lr") return 13;
+    if (bone == "wheel_rr") return 14;
+    if (bone == "wheel_lm1") return 15;
+    if (bone == "wheel_rm1") return 16;
+    if (bone == "wheel_lm2") return 17;
+    if (bone == "wheel_rm2") return 18;
+    if (bone == "wheel_lm3") return 19;
+    if (bone == "wheel_rm3") return 20;
+    return std::nullopt;
 }
 
 std::string HashText(std::uint32_t value) {
@@ -169,6 +184,23 @@ struct AxleRuntime::Implementation {
         if (emitted_once.insert(code + "\n" + message).second) {
             log.Write(level, code, message);
         }
+    }
+
+    std::optional<std::uint64_t>
+    ResolveWheelGeneration(const VehicleSnapshot& vehicle) {
+        if (!access.SupportsWheelGenerationToken()) {
+            return vehicle.wheel_generation;
+        }
+        std::uint64_t generation = 0;
+        if (!access.ReadWheelGenerationToken(vehicle, generation) ||
+            generation == 0) {
+            LogOnce(LogLevel::Warning, "wheel-generation-unavailable",
+                    "Live wheel storage could not be fingerprinted for model " +
+                        HashText(vehicle.model_hash) +
+                        "; lifecycle-sensitive reads and writes were skipped");
+            return std::nullopt;
+        }
+        return generation;
     }
 
     bool EditionAllowed(const AxleConfiguration& configuration,
@@ -373,6 +405,23 @@ struct AxleRuntime::Implementation {
                         std::to_string(game_wheel_count) +
                         "; configuration skipped");
             return std::nullopt;
+        }
+        if (access.SupportsWheelBoneId()) {
+            for (const auto& [bone, index] : configuration.wheel_index_map) {
+                const auto expected = CanonicalWheelBoneId(bone);
+                std::int32_t actual = -1;
+                if (!expected.has_value() || index >= game_wheel_count ||
+                    !access.ReadWheelBoneId(vehicle, index, actual) ||
+                    actual != *expected) {
+                    LogOnce(LogLevel::Error, "runtime-wheel-bone-mismatch",
+                            "Model " + HashText(configuration.model_hash) +
+                                " maps " + bone + " to collection slot " +
+                                std::to_string(index) +
+                                ", but the live CWheel bone ID does not match; "
+                                "no changes were applied");
+                    return std::nullopt;
+                }
+            }
         }
 
         std::vector<WheelPlan> plan;
@@ -624,8 +673,21 @@ struct AxleRuntime::Implementation {
             return false;
         }
 
+        const auto generation_before = ResolveWheelGeneration(vehicle);
+        if (!generation_before.has_value()) return false;
+
         auto plan = BuildPlan(vehicle, configuration, game_wheel_count);
         if (!plan.has_value()) return false;
+
+        const auto generation_after = ResolveWheelGeneration(vehicle);
+        if (!generation_after.has_value()) return false;
+        if (*generation_after != *generation_before) {
+            LogOnce(LogLevel::Warning, "wheel-generation-changed-during-plan",
+                    "Wheel storage changed while planning model " +
+                        HashText(configuration.model_hash) +
+                        "; the stale plan was discarded with no writes");
+            return false;
+        }
 
         // Reads and plan construction can take an arbitrary amount of time.
         // Re-check the session at the write boundary, then again before each
@@ -635,7 +697,7 @@ struct AxleRuntime::Implementation {
         auto tracked_it = tracked.find(vehicle.entity_id);
         const bool new_generation =
             tracked_it == tracked.end() ||
-            tracked_it->second.wheel_generation != vehicle.wheel_generation ||
+            tracked_it->second.wheel_generation != *generation_after ||
             tracked_it->second.model_hash != vehicle.model_hash;
         if (!new_generation && !plan->empty() &&
             plan->front().manages_static_force) {
@@ -679,7 +741,7 @@ struct AxleRuntime::Implementation {
         TrackedVehicle replacement;
         if (new_generation) {
             replacement.model_hash = vehicle.model_hash;
-            replacement.wheel_generation = vehicle.wheel_generation;
+            replacement.wheel_generation = *generation_after;
             replacement.last_verified = now;
             for (const auto& wheel : *plan) {
                 replacement.originals.emplace(
@@ -811,9 +873,12 @@ struct AxleRuntime::Implementation {
         if (!access.SupportsSteeringGain()) return;
         for (const auto& [entity_id, saved] : tracked) {
             const auto current = host.LookupVehicle(entity_id);
-            if (!current.has_value() ||
-                current->model_hash != saved.model_hash ||
-                current->wheel_generation != saved.wheel_generation) {
+            if (!current.has_value() || current->model_hash != saved.model_hash) {
+                continue;
+            }
+            const auto current_generation = ResolveWheelGeneration(*current);
+            if (!current_generation.has_value() ||
+                *current_generation != saved.wheel_generation) {
                 continue;
             }
             for (const auto& [index, original] : saved.originals) {
@@ -910,8 +975,7 @@ struct AxleRuntime::Implementation {
                 iterator = tracked.erase(iterator);
                 continue;
             }
-            if (current->model_hash != saved.model_hash ||
-                current->wheel_generation != saved.wheel_generation) {
+            if (current->model_hash != saved.model_hash) {
                 // Entity ids may be reused and wheel storage may be recreated.
                 // Never apply an old baseline to the replacement identity.
                 LogOnce(
@@ -919,6 +983,23 @@ struct AxleRuntime::Implementation {
                     "Model " + HashText(saved.model_hash) +
                         " was replaced before restoration; its obsolete "
                         "baseline was released without touching the new entity");
+                iterator = tracked.erase(iterator);
+                continue;
+            }
+            const auto current_generation = ResolveWheelGeneration(*current);
+            if (!current_generation.has_value()) {
+                ++iterator;
+                continue;
+            }
+            if (*current_generation != saved.wheel_generation) {
+                // The entity/model pair survived, but its CWheel storage did
+                // not. Never restore the old allocation's baseline into it.
+                LogOnce(
+                    LogLevel::Info, "restore-identity-replaced",
+                    "Model " + HashText(saved.model_hash) +
+                        " rebuilt its wheel storage before restoration; its "
+                        "obsolete baseline was released without touching the "
+                        "new wheel collection");
                 iterator = tracked.erase(iterator);
                 continue;
             }
@@ -1200,11 +1281,14 @@ void AxleRuntime::Service(std::chrono::steady_clock::time_point now) {
         const auto configured = runtime.configurations.find(vehicle.model_hash);
         if (configured == runtime.configurations.end()) continue;
         seen.insert(vehicle.entity_id);
+        const auto live_generation =
+            runtime.ResolveWheelGeneration(vehicle);
+        if (!live_generation.has_value()) continue;
         const auto tracked = runtime.tracked.find(vehicle.entity_id);
         const bool new_or_recreated =
             tracked == runtime.tracked.end() ||
             tracked->second.model_hash != vehicle.model_hash ||
-            tracked->second.wheel_generation != vehicle.wheel_generation;
+            tracked->second.wheel_generation != *live_generation;
         const bool recovery_due =
             tracked != runtime.tracked.end() &&
             now - tracked->second.last_verified >= recovery_interval;

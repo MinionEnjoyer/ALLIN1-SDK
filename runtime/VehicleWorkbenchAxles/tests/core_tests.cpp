@@ -94,9 +94,19 @@ public:
                            : static_cast<std::uint16_t>(flags[index] & ~kDrivenBit);
         return true;
     }
+    bool SupportsWheelGenerationToken() const noexcept override {
+        return true;
+    }
+    bool ReadWheelGenerationToken(const VehicleSnapshot& vehicle,
+                                  std::uint64_t& generation) override {
+        if (!bound) return false;
+        generation = generation_token ^ vehicle.entity_id;
+        return generation != 0;
+    }
 
     bool bound{false};
     std::vector<std::uint16_t> flags{0, 0, 0, 0};
+    std::uint64_t generation_token{0xA11E0000ULL};
 };
 
 class Host final : public IVehicleHost {
@@ -199,6 +209,42 @@ public:
         ++powered_writes;
         return true;
     }
+    bool SupportsWheelBoneId() const noexcept override {
+        return supports_wheel_bone_id;
+    }
+    bool ReadWheelBoneId(const VehicleSnapshot&, std::uint32_t index,
+                         std::int32_t& bone_id) override {
+        if (!resolved || !supports_wheel_bone_id || index >= bone_ids.size()) {
+            return false;
+        }
+        if (fail_next_bone_read_at.has_value() &&
+            *fail_next_bone_read_at == index) {
+            fail_next_bone_read_at.reset();
+            return false;
+        }
+        bone_id = bone_ids[index];
+        ++bone_id_reads;
+        return true;
+    }
+    bool SupportsWheelGenerationToken() const noexcept override {
+        return supports_wheel_generation_token;
+    }
+    bool ReadWheelGenerationToken(const VehicleSnapshot&, std::uint64_t& token)
+        override {
+        if (!resolved || !supports_wheel_generation_token) return false;
+        if (fail_next_generation_read) {
+            fail_next_generation_read = false;
+            return false;
+        }
+        if (change_generation_read_number.has_value() &&
+            *change_generation_read_number == generation_reads) {
+            ++generation_token;
+            change_generation_read_number.reset();
+        }
+        token = generation_token;
+        ++generation_reads;
+        return token != 0;
+    }
     bool SupportsSteeringGain() const noexcept override {
         return supports_steering_gain;
     }
@@ -288,29 +334,38 @@ public:
     std::uint32_t maximum_axles{5};
     std::string failure;
     std::vector<std::uint16_t> flags;
+    std::vector<std::int32_t> bone_ids;
     std::vector<double> steering_gains;
     std::vector<WheelLocalPosition> wheel_local_positions;
     std::vector<double> static_forces;
     bool supports_steering_gain{false};
+    bool supports_wheel_bone_id{false};
+    bool supports_wheel_generation_token{false};
     bool supports_wheel_local_position{false};
     bool supports_static_force{false};
     std::optional<std::uint32_t> fail_next_read_at;
     std::optional<std::uint32_t> fail_next_write_at;
     std::optional<std::uint32_t> fail_next_power_write_at;
     std::optional<std::uint32_t> fail_next_gain_write_at;
+    std::optional<std::uint32_t> fail_next_bone_read_at;
     std::optional<std::uint32_t> fail_next_position_read_at;
     std::optional<std::uint32_t> fail_next_static_write_at;
     std::optional<std::uint32_t> corrupt_next_static_read_at;
     std::optional<std::size_t> corrupt_static_read_number;
+    std::optional<std::size_t> change_generation_read_number;
+    bool fail_next_generation_read{false};
     std::size_t reads{0};
     std::size_t writes{0};
     std::size_t powered_writes{0};
+    std::size_t bone_id_reads{0};
+    std::size_t generation_reads{0};
     std::size_t gain_reads{0};
     std::size_t gain_writes{0};
     std::size_t position_reads{0};
     std::size_t static_force_reads{0};
     std::size_t static_force_writes{0};
     std::size_t resolve_calls{0};
+    std::uint64_t generation_token{1};
 };
 
 const std::vector<std::pair<std::string, std::string>> kAllPairs{
@@ -319,6 +374,13 @@ const std::vector<std::pair<std::string, std::string>> kAllPairs{
     {"wheel_lm2", "wheel_rm2"},
     {"wheel_lm3", "wheel_rm3"},
     {"wheel_lr", "wheel_rr"},
+};
+
+const std::map<std::string, std::int32_t> kCanonicalWheelBoneIds{
+    {"wheel_lf", 11},  {"wheel_rf", 12},  {"wheel_lr", 13},
+    {"wheel_rr", 14},  {"wheel_lm1", 15}, {"wheel_rm1", 16},
+    {"wheel_lm2", 17}, {"wheel_rm2", 18}, {"wheel_lm3", 19},
+    {"wheel_rm3", 20},
 };
 
 AxleConfiguration MakeConfiguration(std::size_t axle_count,
@@ -456,6 +518,15 @@ void TestVariableLengthRuntime() {
     }
 }
 
+void ConfigureLiveBoneIds(const AxleConfiguration& configuration,
+                          WheelAccess& access) {
+    access.supports_wheel_bone_id = true;
+    access.bone_ids.assign(configuration.expected_wheel_count, -1);
+    for (const auto& [bone, index] : configuration.wheel_index_map) {
+        access.bone_ids.at(index) = kCanonicalWheelBoneIds.at(bone);
+    }
+}
+
 void PromoteToSupportBias(AxleConfiguration& configuration,
                           const std::vector<double>& weights = {}) {
     configuration.schema_version = kAxleSupportAxleSchemaVersion;
@@ -466,6 +537,230 @@ void PromoteToSupportBias(AxleConfiguration& configuration,
         axle.steering_gain = axle.steered ? 1.0 : 0.0;
         axle.suspension = AxleSuspension{
             weights.empty() ? 1.0 : weights.at(index)};
+    }
+}
+
+void TestLiveBoneFingerprintBlocksWrongOverride() {
+    auto configuration = MakeConfiguration(3);
+
+    Host host;
+    WheelAccess access;
+    LogSink log;
+    Resolver resolver;
+    access.flags = InitialFlags(configuration.expected_wheel_count);
+    ConfigureLiveBoneIds(configuration, access);
+    // Simulate a stale or incorrectly authored physical-order override.
+    std::swap(access.bone_ids[0], access.bone_ids[1]);
+    host.vehicles = {{77, configuration.model_hash, 1}};
+    ConfigurationCatalog catalog;
+    catalog.active.emplace(configuration.model_hash, configuration);
+
+    AxleRuntime runtime(host, access, log);
+    Check(runtime.Start(std::move(catalog), resolver),
+          "bone-fingerprint fixture failed to start");
+    runtime.Service(std::chrono::steady_clock::now());
+    Check(access.writes == 0 && access.powered_writes == 0,
+          "mismatched live wheel bones allowed axle writes");
+    Check(std::any_of(log.entries.begin(), log.entries.end(),
+                      [](const auto& entry) {
+                          return entry.first == "runtime-wheel-bone-mismatch";
+                      }),
+          "mismatched live wheel bones did not emit a diagnostic");
+    runtime.Shutdown();
+}
+
+void TestLiveBoneFingerprintAcceptsCanonicalMapAndFailsClosedOnReadError() {
+    Resolver resolver;
+    auto configuration = MakeConfiguration(3, 0xB0A1D001U);
+
+    Host valid_host;
+    WheelAccess valid_access;
+    LogSink valid_log;
+    const auto valid_before = InitialFlags(configuration.expected_wheel_count);
+    valid_access.flags = valid_before;
+    ConfigureLiveBoneIds(configuration, valid_access);
+    valid_host.vehicles = {{78, configuration.model_hash, 1}};
+    ConfigurationCatalog valid_catalog;
+    valid_catalog.active.emplace(configuration.model_hash, configuration);
+    AxleRuntime valid_runtime(valid_host, valid_access, valid_log);
+    Check(valid_runtime.Start(std::move(valid_catalog), resolver),
+          "canonical live-bone fixture failed to start");
+    valid_runtime.Service(std::chrono::steady_clock::now());
+    VerifyDesiredFlags(configuration, valid_before, valid_access.flags);
+    Check(valid_access.bone_id_reads == configuration.expected_wheel_count,
+          "canonical live wheel mapping was not verified exactly once");
+    Check(valid_runtime.TrackedVehicleCount() == 1,
+          "canonical live wheel mapping was not tracked");
+    valid_runtime.Shutdown();
+
+    Host failed_host;
+    WheelAccess failed_access;
+    LogSink failed_log;
+    const auto failed_before = InitialFlags(configuration.expected_wheel_count);
+    failed_access.flags = failed_before;
+    ConfigureLiveBoneIds(configuration, failed_access);
+    const auto failed_slot =
+        configuration.wheel_index_map.at(configuration.axles.front().left_bone);
+    failed_access.fail_next_bone_read_at = failed_slot;
+    failed_host.vehicles = {{79, configuration.model_hash, 1}};
+    ConfigurationCatalog failed_catalog;
+    failed_catalog.active.emplace(configuration.model_hash, configuration);
+    AxleRuntime failed_runtime(failed_host, failed_access, failed_log);
+    Check(failed_runtime.Start(std::move(failed_catalog), resolver),
+          "live-bone read-failure fixture failed to start");
+    failed_runtime.Service(std::chrono::steady_clock::now());
+    Check(failed_access.flags == failed_before && failed_access.writes == 0 &&
+              failed_access.powered_writes == 0,
+          "failed live wheel-bone read allowed axle writes");
+    Check(std::any_of(
+              failed_log.entries.begin(), failed_log.entries.end(),
+              [](const auto& entry) {
+                  return entry.first == "runtime-wheel-bone-mismatch";
+              }),
+          "failed live wheel-bone read did not produce a fail-closed diagnostic");
+    failed_runtime.Shutdown();
+}
+
+void TestLiveWheelGenerationRebuildsBaseline() {
+    Host host;
+    WheelAccess access;
+    LogSink log;
+    Resolver resolver;
+    auto configuration = MakeConfiguration(3, 0x6E4E0001U);
+    const auto first_baseline = InitialFlags(configuration.expected_wheel_count);
+    access.flags = first_baseline;
+    access.supports_wheel_generation_token = true;
+    access.generation_token = 101;
+    // The host identity deliberately never changes. Only the validated wheel
+    // adapter can observe that GTA replaced the underlying CWheel storage.
+    host.vehicles = {{301, configuration.model_hash, 44}};
+    ConfigurationCatalog catalog;
+    catalog.active.emplace(configuration.model_hash, configuration);
+    AxleRuntime runtime(host, access, log);
+    Check(runtime.Start(std::move(catalog), resolver),
+          "live-generation fixture failed to start");
+    const auto first = std::chrono::steady_clock::now();
+    runtime.Service(first);
+    Check(runtime.TrackedVehicleCount() == 1,
+          "first wheel generation was not tracked");
+
+    auto replacement_baseline = InitialFlags(configuration.expected_wheel_count);
+    for (std::size_t index = 0; index < replacement_baseline.size(); ++index) {
+        replacement_baseline[index] = static_cast<std::uint16_t>(
+            (0xB200U + static_cast<std::uint16_t>(index << 5U)) |
+            (index % 3U == 0U ? kSteeredBit : kDrivenBit));
+    }
+    access.flags = replacement_baseline;
+    ++access.generation_token;
+    runtime.Service(first + std::chrono::seconds(1));
+    VerifyDesiredFlags(configuration, replacement_baseline, access.flags);
+    Check(runtime.TrackedVehicleCount() == 1,
+          "replacement wheel generation was not tracked");
+
+    runtime.Shutdown();
+    Check(runtime.State() == RuntimeState::Stopped &&
+              access.flags == replacement_baseline,
+          "shutdown restored the stale wheel generation instead of the replacement baseline");
+}
+
+void TestLiveWheelGenerationGuardsPlanningAndRestoration() {
+    Resolver resolver;
+
+    {
+        Host host;
+        WheelAccess access;
+        LogSink log;
+        auto configuration = MakeConfiguration(3, 0x6E4E0002U);
+        const auto before = InitialFlags(configuration.expected_wheel_count);
+        access.flags = before;
+        access.supports_wheel_generation_token = true;
+        access.change_generation_read_number = 1;
+        host.vehicles = {{302, configuration.model_hash, 55}};
+        ConfigurationCatalog catalog;
+        catalog.active.emplace(configuration.model_hash, configuration);
+        AxleRuntime runtime(host, access, log);
+        Check(runtime.Start(std::move(catalog), resolver),
+              "stale-plan generation fixture failed to start");
+        runtime.OnVehicleEvent(host.vehicles.front(), VehicleEvent::Repaired);
+        Check(access.flags == before && access.writes == 0 &&
+                  access.powered_writes == 0 &&
+                  runtime.TrackedVehicleCount() == 0,
+              "wheel generation change during planning allowed stale writes");
+        Check(std::any_of(
+                  log.entries.begin(), log.entries.end(),
+                  [](const auto& entry) {
+                      return entry.first ==
+                             "wheel-generation-changed-during-plan";
+                  }),
+              "stale wheel plan rejection was not diagnosed");
+        runtime.Shutdown();
+    }
+
+    {
+        Host host;
+        WheelAccess access;
+        LogSink log;
+        auto configuration = MakeConfiguration(3, 0x6E4E0003U);
+        access.flags = InitialFlags(configuration.expected_wheel_count);
+        access.supports_wheel_generation_token = true;
+        host.vehicles = {{303, configuration.model_hash, 66}};
+        ConfigurationCatalog catalog;
+        catalog.active.emplace(configuration.model_hash, configuration);
+        AxleRuntime runtime(host, access, log);
+        Check(runtime.Start(std::move(catalog), resolver),
+              "replacement-before-restore fixture failed to start");
+        runtime.Service(std::chrono::steady_clock::now());
+
+        auto replacement = InitialFlags(configuration.expected_wheel_count);
+        for (std::size_t index = 0; index < replacement.size(); ++index) {
+            replacement[index] = static_cast<std::uint16_t>(
+                0xC000U | (index % 2U == 0U ? kSteeredBit : kDrivenBit));
+        }
+        access.flags = replacement;
+        ++access.generation_token;
+        const auto writes_before = access.writes;
+        const auto powered_writes_before = access.powered_writes;
+        runtime.Shutdown();
+        Check(runtime.State() == RuntimeState::Stopped &&
+                  runtime.TrackedVehicleCount() == 0 &&
+                  access.flags == replacement,
+              "shutdown touched replacement CWheel storage");
+        Check(access.writes == writes_before &&
+                  access.powered_writes == powered_writes_before,
+              "replacement CWheel storage received stale restoration writes");
+        Check(std::any_of(
+                  log.entries.begin(), log.entries.end(),
+                  [](const auto& entry) {
+                      return entry.first == "restore-identity-replaced";
+                  }),
+              "replacement wheel generation was not diagnosed during restore");
+    }
+
+    {
+        Host host;
+        WheelAccess access;
+        LogSink log;
+        auto configuration = MakeConfiguration(3, 0x6E4E0004U);
+        const auto original = InitialFlags(configuration.expected_wheel_count);
+        access.flags = original;
+        access.supports_wheel_generation_token = true;
+        host.vehicles = {{304, configuration.model_hash, 77}};
+        ConfigurationCatalog catalog;
+        catalog.active.emplace(configuration.model_hash, configuration);
+        AxleRuntime runtime(host, access, log);
+        Check(runtime.Start(std::move(catalog), resolver),
+              "generation-read retry fixture failed to start");
+        runtime.Service(std::chrono::steady_clock::now());
+        access.fail_next_generation_read = true;
+        runtime.Shutdown();
+        Check(runtime.State() == RuntimeState::Faulted &&
+                  runtime.TrackedVehicleCount() == 1 && access.IsResolved(),
+              "transient generation read failure discarded a retryable baseline");
+        runtime.Shutdown();
+        Check(runtime.State() == RuntimeState::Stopped &&
+                  runtime.TrackedVehicleCount() == 0 &&
+                  access.flags == original && !access.IsResolved(),
+              "generation-token retry did not restore the original baseline");
     }
 }
 
@@ -778,6 +1073,12 @@ void TestOnlineAndUnsupportedGuards() {
               profiled_adapter.ReadWheelFlags({1, 1, 1}, 0, flags) &&
               flags == 0xA408U,
           "bound build profile did not service wheel access");
+    std::uint64_t generation = 0;
+    Check(profiled_adapter.SupportsWheelGenerationToken() &&
+              profiled_adapter.ReadWheelGenerationToken(
+                  {1, 1, 1}, generation) &&
+              generation == (profile->generation_token ^ 1U),
+          "bound build profile did not forward its wheel generation token");
     double static_force = 0.0;
     Check(!profiled_adapter.SupportsStaticForce() &&
               !profiled_adapter.ReadWheelStaticForce(
@@ -1357,12 +1658,13 @@ void TestAxleSupportBiasParsingAndValidation() {
 
 void TestRuntimeSettingsContract() {
     const std::string packaged_settings = R"json({
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "enabled": true,
       "discoveryIntervalMs": 250,
       "recoveryIntervalMs": 2000,
       "restoreOnUnload": true,
-      "logFile": "logs/VehicleWorkbenchAxles.log"
+      "configurationDirectory": "scripts/ExampleTransitPack/VehicleSettings",
+      "logFile": "scripts/ExampleTransitPack/Axles.log"
     })json";
     std::vector<ValidationIssue> issues;
     const auto parsed = ParseRuntimeSettingsJson(
@@ -1372,8 +1674,20 @@ void TestRuntimeSettingsContract() {
     Check(parsed->enabled && parsed->discovery_interval_ms == 250U &&
               parsed->recovery_interval_ms == 2000U &&
               parsed->restore_on_unload &&
-              parsed->log_file == "logs/VehicleWorkbenchAxles.log",
+              parsed->configuration_directory ==
+                  "scripts/ExampleTransitPack/VehicleSettings" &&
+              parsed->log_file == "scripts/ExampleTransitPack/Axles.log",
           "packaged native runtime settings changed values while parsing");
+
+    std::vector<ValidationIssue> legacy_path_issues;
+    const auto legacy_paths = ParseRuntimeSettingsJson(
+        R"json({"schemaVersion":1,"logFile":"logs/VehicleWorkbenchAxles.log"})json",
+        legacy_path_issues, "legacy-runtime.json");
+    Check(legacy_paths.has_value() && legacy_path_issues.empty() &&
+              legacy_paths->schema_version == 1U &&
+              legacy_paths->configuration_directory == "configs" &&
+              legacy_paths->log_file == "logs/VehicleWorkbenchAxles.log",
+          "schema-1 runtime path behavior was not preserved");
 
     std::vector<ValidationIssue> disabled_issues;
     const auto disabled = ParseRuntimeSettingsJson(
@@ -1410,6 +1724,46 @@ void TestRuntimeSettingsContract() {
                   return issue.code == "unknown-runtime-setting" && issue.fatal;
               }),
           "unknown runtime settings were not reported fail-closed");
+
+    std::vector<ValidationIssue> unsafe_configuration_issues;
+    Check(!ParseRuntimeSettingsJson(
+               R"json({"schemaVersion":1,"configurationDirectory":"../outside"})json",
+               unsafe_configuration_issues, "runtime.json")
+               .has_value(),
+          "runtime settings accepted a parent-traversing configuration path");
+    Check(std::any_of(
+              unsafe_configuration_issues.begin(),
+              unsafe_configuration_issues.end(),
+              [](const ValidationIssue& issue) {
+                  return issue.code == "unsafe-configuration-directory" &&
+                         issue.fatal;
+              }),
+          "unsafe configuration directory was not reported fail-closed");
+
+    std::vector<ValidationIssue> unsafe_log_issues;
+    Check(!ParseRuntimeSettingsJson(
+               R"json({"schemaVersion":1,"logFile":"C:/outside.log"})json",
+               unsafe_log_issues, "runtime.json")
+               .has_value(),
+          "runtime settings accepted an absolute log path");
+    Check(std::any_of(
+              unsafe_log_issues.begin(), unsafe_log_issues.end(),
+              [](const ValidationIssue& issue) {
+                  return issue.code == "unsafe-log-path" && issue.fatal;
+              }),
+          "unsafe log path was not reported fail-closed");
+
+    for (const auto* unsafe_path : {"NUL", "scripts/Axles.log:stream",
+                                    "scripts/trailing. /Axles.log"}) {
+        std::vector<ValidationIssue> windows_path_issues;
+        const std::string settings =
+            std::string("{\"schemaVersion\":2,\"logFile\":\"") +
+            unsafe_path + "\"}";
+        Check(!ParseRuntimeSettingsJson(settings, windows_path_issues,
+                                        "runtime.json")
+                   .has_value(),
+              "runtime settings accepted an unsafe Windows path");
+    }
 }
 
 void TestValidationAndParsing() {
@@ -1731,6 +2085,10 @@ void TestValidationAndParsing() {
 int main() {
     try {
         TestVariableLengthRuntime();
+        TestLiveBoneFingerprintBlocksWrongOverride();
+        TestLiveBoneFingerprintAcceptsCanonicalMapAndFailsClosedOnReadError();
+        TestLiveWheelGenerationRebuildsBaseline();
+        TestLiveWheelGenerationGuardsPlanningAndRestoration();
         TestIntentionalPhysicalOrderOverride();
         TestInvalidWheelCountAndRollback();
         TestRecoveryRetainsOriginalBaseline();

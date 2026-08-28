@@ -36,6 +36,8 @@ public:
     InvokeEntityHash(std::uint64_t hash, std::int32_t entity) const noexcept;
     std::optional<bool>
     InvokeEntityBool(std::uint64_t hash, std::int32_t entity) const noexcept;
+    bool InvokeEntityVoid(std::uint64_t hash,
+                          std::int32_t entity) const noexcept;
     std::vector<std::int32_t> EnumerateVehicleHandles() const;
     const char* LastFailure() const noexcept;
 
@@ -75,6 +77,9 @@ RuntimeSettings LoadRuntimeSettings(const RuntimePaths& paths,
 std::filesystem::path ResolveLogPath(const RuntimePaths& paths,
                                      const RuntimeSettings& settings,
                                      bool& used_fallback) noexcept;
+std::filesystem::path ResolveConfigurationPath(
+    const RuntimePaths& paths, const RuntimeSettings& settings,
+    bool& used_fallback) noexcept;
 
 class FileLogSink final : public ILogSink {
 public:
@@ -121,6 +126,8 @@ public:
     std::vector<VehicleSnapshot> EnumerateVehicles() override;
     std::optional<VehicleSnapshot>
     LookupVehicle(std::uint64_t entity_id) override;
+    bool SupportsPhysicsActivation() const noexcept override;
+    bool ActivatePhysics(const VehicleSnapshot& vehicle) override;
 
 private:
     std::optional<VehicleSnapshot>

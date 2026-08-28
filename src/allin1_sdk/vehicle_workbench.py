@@ -38,6 +38,7 @@ from allin1_sdk.compiled_render import (
 )
 from allin1_sdk.native_assets import (
     NativeAssetInspector,
+    NativeModelBone,
     NativeModelScene,
     native_preview_limit,
 )
@@ -49,11 +50,21 @@ from allin1_sdk.vehicle_project import (
 from allin1_sdk.vehicle_package import VehicleAddonPackageBuilder
 from allin1_sdk.axle_configurator import (
     AxleConfiguration,
+    joaat_hex,
     parse_handling_flags,
     write_fivem_resource,
 )
 from allin1_sdk.axle_prefabs import load_prefab_axle_configuration
-from allin1_sdk.vehicle_axles_ui import VehicleAxlesPanel
+from allin1_sdk.vehicle_axles_ui import (
+    StoryControllerBuildOptions,
+    VehicleAxlesPanel,
+)
+from allin1_sdk.story_axle_runtime_builder import (
+    StoryAxleRuntimeBuildRequest,
+    StoryAxleRuntimeBuildResult,
+    StoryAxleRuntimeSettings,
+    build_story_axle_runtime_candidate,
+)
 from allin1_sdk.vehicle_oiv_ui import VehicleOivExportDialog, VehicleOivForm
 from allin1_sdk.axle_oiv_export import (
     MODE_RUNTIME_ONLY,
@@ -269,6 +280,42 @@ def _viewport_render_weight(value: object) -> int:
     return encoded_image_weight(value)
 
 
+def _story_axle_build_request(
+    configuration: AxleConfiguration,
+    bones: tuple[NativeModelBone, ...],
+    options: StoryControllerBuildOptions,
+    *,
+    protected_gta_roots: tuple[Path, ...] = (),
+) -> StoryAxleRuntimeBuildRequest:
+    """Translate the inline Workbench form into the shared native build contract."""
+
+    vehicle = VehicleAxleBuildInput(
+        configuration=configuration,
+        configuration_id=(
+            configuration.configuration_id
+            or f"{configuration.vehicle_model}-axles"
+        ),
+        model_hash=(
+            configuration.model_hash or joaat_hex(configuration.vehicle_model)
+        ),
+        minimum_runtime_version=configuration.minimum_runtime_version,
+        steering_evidence_bones=bones,
+    )
+    request = StoryAxleRuntimeBuildRequest(
+        output_directory=options.output_directory,
+        targets=options.targets,
+        configurations=(vehicle,),
+        settings=StoryAxleRuntimeSettings(
+            configuration_directory=options.configuration_directory,
+            log_file=options.log_file,
+        ),
+        build_id=f"allin1-sdk-{__version__}",
+        create_archives=True,
+        protected_gta_roots=protected_gta_roots,
+    )
+    return request.validate()
+
+
 class _PageStack(ttk.Frame):
     """Tabless page host used where nested notebook headers consume the editor."""
 
@@ -401,6 +448,11 @@ class VehicleWorkbenchFrame(ttk.Frame):
             queue.SimpleQueue()
         )
         self._compiled_render_poll_job: str | None = None
+        self._story_axle_build_thread: threading.Thread | None = None
+        self._story_axle_build_events: queue.SimpleQueue[tuple[str, object]] = (
+            queue.SimpleQueue()
+        )
+        self._story_axle_build_poll_job: str | None = None
         self._viewport_scene_worker = LatestOnlyRenderWorker(
             thread_name="allin1-viewport-scene-loader",
         )
@@ -835,6 +887,7 @@ class VehicleWorkbenchFrame(ttk.Frame):
             on_undo=self._undo_authoring_edit,
             on_redo=self._redo_authoring_edit,
             on_export=self._export_axle_configuration,
+            on_build_controller=self._build_story_axle_controller_package,
         )
         self.axles_panel.pack(fill="both", expand=True)
 
@@ -3119,6 +3172,105 @@ class VehicleWorkbenchFrame(ttk.Frame):
             on_preview=lambda form: self._prepare_story_export(configuration, form),
         )
 
+    def _build_story_axle_controller_package(
+        self,
+        configuration: AxleConfiguration,
+        bones: tuple[NativeModelBone, ...],
+        options: StoryControllerBuildOptions,
+    ) -> None:
+        running = self._story_axle_build_thread
+        if running is not None and running.is_alive():
+            self.axles_panel.controller_build_finished(
+                False, "A Story controller build is already running.",
+            )
+            return
+        try:
+            request = _story_axle_build_request(
+                configuration,
+                bones,
+                options,
+                protected_gta_roots=self.installation_roots,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            self.axles_panel.controller_build_finished(
+                False, f"Build rejected: {exc}",
+            )
+            return
+
+        self._story_axle_build_events = queue.SimpleQueue()
+
+        def progress(message: str) -> None:
+            self._story_axle_build_events.put(("progress", message))
+
+        def worker() -> None:
+            try:
+                result = build_story_axle_runtime_candidate(
+                    request, progress=progress,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                self._story_axle_build_events.put(("error", exc))
+            else:
+                self._story_axle_build_events.put(("complete", result))
+
+        self.axles_panel.controller_build_progress(
+            "Checking CMake, CTest, and Visual Studio Build Tools…",
+        )
+        self._story_axle_build_thread = threading.Thread(
+            target=worker, name="allin1-story-axle-builder", daemon=True,
+        )
+        self._story_axle_build_thread.start()
+        self._ensure_story_axle_build_poll()
+
+    def _ensure_story_axle_build_poll(self) -> None:
+        if self._story_axle_build_poll_job is None:
+            self._story_axle_build_poll_job = self.after(
+                50, self._poll_story_axle_build,
+            )
+
+    def _poll_story_axle_build(self) -> None:
+        self._story_axle_build_poll_job = None
+        terminal = False
+        while True:
+            try:
+                kind, value = self._story_axle_build_events.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "progress":
+                self.axles_panel.controller_build_progress(str(value))
+            elif kind == "complete" and isinstance(
+                value, StoryAxleRuntimeBuildResult,
+            ):
+                targets = " + ".join(
+                    target.removeprefix("story-").title()
+                    for target in value.built_targets
+                )
+                archives = ", ".join(path.name for path in value.archives)
+                self.axles_panel.controller_build_finished(
+                    True,
+                    (
+                        f"Validated runtime {value.runtime_version} for {targets}. "
+                        f"Archives: {archives or 'not requested'}.\n"
+                        f"Output: {value.root}\n"
+                        "CMake, native tests, config parsing, and PE checks passed; "
+                        "in-game acceptance is still required."
+                    ),
+                )
+                self.status.set(
+                    f"Built Story axle controller candidate: {value.root}",
+                )
+                terminal = True
+            elif kind == "error":
+                self.axles_panel.controller_build_finished(
+                    False, f"Build failed: {value}",
+                )
+                self.status.set(f"Story axle controller build failed: {value}")
+                terminal = True
+        thread = self._story_axle_build_thread
+        if terminal or thread is None or not thread.is_alive():
+            self._story_axle_build_thread = None
+        else:
+            self._ensure_story_axle_build_poll()
+
     def _prepare_story_export(
         self,
         configuration: AxleConfiguration,
@@ -3895,6 +4047,9 @@ class VehicleWorkbenchFrame(ttk.Frame):
         if self._compiled_render_poll_job is not None:
             self.after_cancel(self._compiled_render_poll_job)
             self._compiled_render_poll_job = None
+        if self._story_axle_build_poll_job is not None:
+            self.after_cancel(self._story_axle_build_poll_job)
+            self._story_axle_build_poll_job = None
         if self._compiled_render_cancel_event is not None:
             self._compiled_render_cancel_event.set()
         self._viewport_scene_worker.close(wait=False)

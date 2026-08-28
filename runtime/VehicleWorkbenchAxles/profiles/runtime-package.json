@@ -2,9 +2,9 @@
   "manifestVersion": 1,
   "runtime": {
     "name": "VehicleWorkbenchAxles",
-    "version": "4.1.0",
+    "version": "4.4.0",
     "maximumAxleSchemaVersion": 4,
-    "settingsSchemaVersion": 1,
+    "settingsSchemaVersion": 2,
     "binaryFileName": "VehicleWorkbenchAxles.asi",
     "settingsDestination": "VehicleWorkbenchAxles/runtime.json",
     "metadataDestination": "VehicleWorkbenchAxles/runtime-metadata.json",
@@ -21,17 +21,21 @@
       "scriptHookVIsExternalPrerequisite": true,
       "perFrameService": true,
       "onlineSessionGuard": "native-fail-closed",
-      "wheelMemoryAccessIncluded": false
+      "wheelMemoryAccessIncluded": true,
+      "profileGate": "edition-plus-unique-signature-and-layout-canaries"
     },
     "capabilities": {
       "steeringFlags": true,
       "driveFlags": true,
-      "signedSteeringGain": false,
+      "wheelBoneIdVerification": true,
+      "wheelGenerationToken": true,
+      "signedSteeringGain": true,
       "wheelLocalPosition": false,
-      "staticForce": false,
-      "physicsActivation": false
+      "staticForce": true,
+      "physicsActivation": true
     },
-    "packagingRequiresValidatedProfile": true
+    "packagingRequiresValidatedProfile": true,
+    "compiledProfilePresenceIsDistributionApproval": false
   },
   "receiptContract": {
     "schemaVersion": 1,
@@ -54,9 +58,10 @@
       "supportedGameBuilds": [],
       "packageEligible": false,
       "validationReceipt": null,
-      "status": "implemented-awaiting-validation",
+      "status": "compiled-awaiting-in-game-acceptance",
       "hostBridgeStatus": "implemented",
-      "wheelProfileStatus": "missing"
+      "wheelProfileStatus": "compiled-signature-gated",
+      "observedUnacceptedExecutables": []
     },
     "story-enhanced": {
       "cmakeTarget": "VehicleWorkbenchAxlesEnhanced",
@@ -64,9 +69,18 @@
       "supportedGameBuilds": [],
       "packageEligible": false,
       "validationReceipt": null,
-      "status": "implemented-awaiting-validation",
+      "status": "compiled-awaiting-in-game-acceptance",
       "hostBridgeStatus": "implemented",
-      "wheelProfileStatus": "missing"
+      "wheelProfileStatus": "compiled-signature-gated",
+      "observedUnacceptedExecutables": [
+        {
+          "fileName": "GTA5_Enhanced.exe",
+          "fileVersion": "1.0.1158.13",
+          "build": 1158,
+          "sha256": "0C52864D4521D9C9D441348AA1156958792DDE8825D0297C851753F167336401",
+          "acceptanceStatus": "observed-not-accepted"
+        }
+      ]
     }
   },
   "forbiddenBundledDependencies": [

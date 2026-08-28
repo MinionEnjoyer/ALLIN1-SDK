@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cwctype>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
@@ -133,13 +134,31 @@ bool IsLegacySteeringGain(const AxleDefinition& axle) noexcept {
 
 bool IsRelativeSafePath(const std::string& value) {
     if (value.empty()) return false;
-    const std::filesystem::path path(value);
+    const auto path = std::filesystem::u8path(value);
     if (path.is_absolute() || path.has_root_name() || path.has_root_directory()) {
         return false;
     }
-    return std::none_of(path.begin(), path.end(), [](const auto& part) {
-        return part == "..";
-    });
+    static const std::set<std::wstring> kReservedNames{
+        L"CON", L"PRN", L"AUX", L"NUL", L"COM1", L"COM2", L"COM3",
+        L"COM4", L"COM5", L"COM6", L"COM7", L"COM8", L"COM9",
+        L"LPT1", L"LPT2", L"LPT3", L"LPT4", L"LPT5", L"LPT6",
+        L"LPT7", L"LPT8", L"LPT9",
+    };
+    for (const auto& part : path) {
+        const auto component = part.wstring();
+        if (component.empty() || component == L"." || component == L".." ||
+            component.back() == L'.' || component.back() == L' ' ||
+            component.find_first_of(L"<>:\"|?*") != std::wstring::npos) {
+            return false;
+        }
+        auto stem = component.substr(0, component.find(L'.'));
+        std::transform(stem.begin(), stem.end(), stem.begin(),
+                       [](wchar_t ch) {
+                           return static_cast<wchar_t>(std::towupper(ch));
+                       });
+        if (kReservedNames.find(stem) != kReservedNames.end()) return false;
+    }
+    return true;
 }
 
 bool HasFatal(const std::vector<ValidationIssue>& issues,
@@ -699,8 +718,10 @@ ParseConfigurationJson(const std::string& json_text,
                 result.wheel_index_map.emplace(
                     bone, NumberToUInt32(index, "wheelIndexMap." + bone));
             }
-        } else if (const auto* mapping_value = root.Find("wheelIndexMapping")) {
-            const auto& mapping = Required(*mapping_value, "by_bone").AsObject();
+        } else if (const auto* mapping_contract =
+                       root.Find("wheelIndexMapping")) {
+            const auto& mapping =
+                Required(*mapping_contract, "by_bone").AsObject();
             for (const auto& [bone, index] : mapping) {
                 result.wheel_index_map.emplace(
                     bone, NumberToUInt32(index,
@@ -971,7 +992,8 @@ ParseRuntimeSettingsJson(const std::string& json_text,
         const auto& object = root.AsObject();
         static const std::set<std::string> kAllowedRuntimeSettings{
             "schemaVersion", "enabled", "discoveryIntervalMs",
-            "recoveryIntervalMs", "restoreOnUnload", "logFile",
+            "recoveryIntervalMs", "restoreOnUnload",
+            "configurationDirectory", "logFile",
         };
         for (const auto& [key, _value] : object) {
             if (kAllowedRuntimeSettings.find(key) ==
@@ -984,10 +1006,18 @@ ParseRuntimeSettingsJson(const std::string& json_text,
         }
         RuntimeSettings result;
         result.schema_version = RequiredUInt32(root, "schemaVersion");
-        if (result.schema_version != kRuntimeSettingsSchemaVersion) {
+        if (result.schema_version < 1 ||
+            result.schema_version > kRuntimeSettingsSchemaVersion) {
             AddIssue(issues, "unsupported-runtime-settings-schema",
-                     "runtime.json requires schema version 1", source_name);
+                     "runtime.json requires schema version 1 or 2",
+                     source_name);
             return std::nullopt;
+        }
+        // Schema 1 paths were relative to VehicleWorkbenchAxles/. Preserve
+        // that behavior exactly. Schema 2 paths are relative to the GTA root.
+        if (result.schema_version == 1) {
+            result.configuration_directory = "configs";
+            result.log_file = "logs/VehicleWorkbenchAxles.log";
         }
         if (const auto* value = root.Find("enabled")) {
             result.enabled = value->AsBool();
@@ -1002,6 +1032,15 @@ ParseRuntimeSettingsJson(const std::string& json_text,
         }
         if (const auto* value = root.Find("restoreOnUnload")) {
             result.restore_on_unload = value->AsBool();
+        }
+        if (const auto* value = root.Find("configurationDirectory")) {
+            if (result.schema_version < 2) {
+                AddIssue(issues, "configuration-directory-requires-schema-2",
+                         "configurationDirectory requires runtime settings "
+                         "schema version 2",
+                         source_name);
+            }
+            result.configuration_directory = value->AsString();
         }
         if (const auto* value = root.Find("logFile")) {
             result.log_file = value->AsString();
@@ -1019,9 +1058,16 @@ ParseRuntimeSettingsJson(const std::string& json_text,
                      "and no more than 60000",
                      source_name);
         }
+        if (!IsRelativeSafePath(result.configuration_directory)) {
+            AddIssue(issues, "unsafe-configuration-directory",
+                     "configurationDirectory must be a non-empty relative "
+                     "path below the GTA installation directory",
+                     source_name);
+        }
         if (!IsRelativeSafePath(result.log_file)) {
             AddIssue(issues, "unsafe-log-path",
-                     "logFile must be a relative path below the runtime directory",
+                     "logFile must be a non-empty relative path below the GTA "
+                     "installation directory",
                      source_name);
         }
         if (std::any_of(

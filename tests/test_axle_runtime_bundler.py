@@ -1260,7 +1260,7 @@ def test_full_four_target_build_is_staged_and_has_no_cross_contamination(
         settings = json.loads(
             (root / STORY_RUNTIME_NAME / "runtime.json").read_text("utf-8")
         )
-        assert settings["schemaVersion"] == 1
+        assert settings["schemaVersion"] == 2
         assert settings["enabled"] is True
         assert "runtime_version" not in settings
         metadata = json.loads(
