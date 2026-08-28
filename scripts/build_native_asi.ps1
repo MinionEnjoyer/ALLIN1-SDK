@@ -17,7 +17,22 @@ $build = Join-Path $output 'build'
 $stage = Join-Path $output 'stage'
 Remove-Item -LiteralPath $build,$stage -Recurse -Force -ErrorAction SilentlyContinue
 
-cmake -S $source -B $build -G 'Visual Studio 17 2022' -A x64 `
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+$install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if (-not $install -or -not (Test-Path -LiteralPath $install)) {
+    throw 'A supported Visual Studio C++ x64 toolchain was not found.'
+}
+if ($install -notmatch '[\\/](2019|2022|2026)[\\/]') {
+    throw "Could not identify the Visual Studio product year from $install."
+}
+$generator = switch ($Matches[1]) {
+    '2019' { 'Visual Studio 16 2019' }
+    '2022' { 'Visual Studio 17 2022' }
+    '2026' { 'Visual Studio 18 2026' }
+}
+
+cmake -S $source -B $build -G $generator -A x64 `
     -DVWA_BUILD_STORY_HOSTS=ON -DVWA_BUILD_TESTS=ON
 if ($LASTEXITCODE -ne 0) { throw 'Native ASI configure failed.' }
 cmake --build $build --config Release --parallel
@@ -25,9 +40,6 @@ if ($LASTEXITCODE -ne 0) { throw 'Native ASI build failed.' }
 ctest --test-dir $build -C Release --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Native ASI CTest suite failed.' }
 
-$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
-$install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 $devShell = Join-Path $install 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
 Import-Module $devShell
 Enter-VsDevShell -VsInstallPath $install -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'

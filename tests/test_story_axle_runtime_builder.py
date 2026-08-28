@@ -72,8 +72,28 @@ def _toolchain() -> builder.NativeAxleToolchainReport:
         cmake_version="3.30.0",
         ctest_path=Path("ctest.exe"),
         visual_studio_path=Path("C:/BuildTools"),
+        cmake_generator="Visual Studio 17 2022",
         problems=(),
     )
+
+
+def test_visual_studio_product_year_selects_matching_cmake_generator() -> None:
+    for year, expected in (
+        ("2019", "Visual Studio 16 2019"),
+        ("2022", "Visual Studio 17 2022"),
+        ("2026", "Visual Studio 18 2026"),
+    ):
+        generator, problem = builder._visual_studio_cmake_generator(
+            Path(f"C:/Program Files/Microsoft Visual Studio/{year}/BuildTools"),
+        )
+        assert generator == expected
+        assert problem is None
+
+    generator, problem = builder._visual_studio_cmake_generator(
+        Path("C:/BuildTools"),
+    )
+    assert generator is None
+    assert problem is not None
 
 
 def test_runtime_source_root_falls_back_to_wheel_data_files(

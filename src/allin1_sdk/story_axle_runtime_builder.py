@@ -154,6 +154,7 @@ class NativeAxleToolchainReport:
     cmake_version: str | None
     ctest_path: Path | None
     visual_studio_path: Path | None
+    cmake_generator: str | None
     problems: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -210,6 +211,20 @@ def _visual_studio_installation() -> tuple[Path | None, str | None]:
     return path.resolve(), None
 
 
+def _visual_studio_cmake_generator(installation: Path) -> tuple[str | None, str | None]:
+    """Map supported Visual Studio product years to CMake generators."""
+
+    match = re.search(r"[\\/](2019|2022|2026)[\\/]", str(installation))
+    if match is None:
+        return None, "Visual Studio product year could not be identified"
+    generators = {
+        "2019": "Visual Studio 16 2019",
+        "2022": "Visual Studio 17 2022",
+        "2026": "Visual Studio 18 2026",
+    }
+    return generators[match.group(1)], None
+
+
 def inspect_native_axle_toolchain(
     *, source_root: Path | None = None,
 ) -> NativeAxleToolchainReport:
@@ -254,8 +269,15 @@ def inspect_native_axle_toolchain(
     if ctest is None:
         problems.append("CTest is not available beside CMake or on PATH")
     visual_studio, visual_studio_problem = _visual_studio_installation()
+    cmake_generator: str | None = None
     if visual_studio_problem:
         problems.append(visual_studio_problem)
+    elif visual_studio is not None:
+        cmake_generator, generator_problem = _visual_studio_cmake_generator(
+            visual_studio,
+        )
+        if generator_problem:
+            problems.append(generator_problem)
     return NativeAxleToolchainReport(
         ready=not problems,
         platform=os.name,
@@ -264,6 +286,7 @@ def inspect_native_axle_toolchain(
         cmake_version=cmake_version,
         ctest_path=ctest,
         visual_studio_path=visual_studio,
+        cmake_generator=cmake_generator,
         problems=tuple(problems),
     )
 
@@ -550,7 +573,12 @@ def build_story_axle_runtime_candidate(
     planned = request.validate()
     source = (source_root or _runtime_source_root()).expanduser().resolve(strict=False)
     toolchain = inspect_native_axle_toolchain(source_root=source)
-    if not toolchain.ready or toolchain.cmake_path is None or toolchain.ctest_path is None:
+    if (
+        not toolchain.ready
+        or toolchain.cmake_path is None
+        or toolchain.ctest_path is None
+        or toolchain.cmake_generator is None
+    ):
         raise StoryAxleRuntimeBuildError("; ".join(toolchain.problems))
     runtime_version = _runtime_version(source)
     output = planned.output_directory
@@ -568,7 +596,7 @@ def build_story_axle_runtime_candidate(
             "CMake configure",
             [
                 toolchain.cmake_path, "-S", source, "-B", build_directory,
-                "-G", "Visual Studio 17 2022", "-A", "x64",
+                "-G", toolchain.cmake_generator, "-A", "x64",
                 "-DVWA_BUILD_STORY_HOSTS=ON", "-DVWA_BUILD_TESTS=ON",
                 "-DVWA_BUILD_CONFIG_VALIDATOR=ON",
             ],
