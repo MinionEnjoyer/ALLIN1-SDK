@@ -234,6 +234,10 @@ def test_viewport_key_normalizes_angles_filters_and_quality():
         "scene", yaw=0, pitch=0, quality="full",
     )
     assert full.quality == "full"
+    uv = ViewportRenderKey.create(
+        "scene", yaw=0, pitch=0, render_mode="uvs",
+    )
+    assert uv.render_mode == "uvs"
     with pytest.raises(ValueError, match="mode"):
         ViewportRenderKey.create("scene", yaw=0, pitch=0, render_mode="xray")
     with pytest.raises(ValueError, match="quality"):

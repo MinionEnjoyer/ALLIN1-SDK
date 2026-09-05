@@ -6,7 +6,7 @@ from copy import deepcopy
 
 import pytest
 
-from allin1_sdk.map_contract import MapProject, STORY_SAVE_POLICY
+from allin1_sdk.map_contract import MapProject, MapStreaming, STORY_SAVE_POLICY
 
 
 def map_payload() -> dict:
@@ -66,6 +66,18 @@ def map_payload() -> dict:
     }
 
 
+def no_ipl_map_payload() -> dict:
+    payload = map_payload()
+    payload["streaming"].update({
+        "mode": "none",
+        "content_group": None,
+        "ipls": [],
+    })
+    for level in payload["levels"]:
+        level["ipls"] = []
+    return payload
+
+
 def test_map_contract_normalizes_and_round_trips_every_runtime_surface():
     project = MapProject.from_dict(map_payload())
 
@@ -74,8 +86,67 @@ def test_map_contract_normalizes_and_round_trips_every_runtime_surface():
     assert project.levels[0].center.heading == 270.0
     assert project.portals[0].source.position.heading == 90.0
     assert project.portals[0].mode == "both"
+    assert project.streaming.mode == "ipl"
+    assert project.to_dict()["streaming"]["mode"] == "ipl"
     assert project.garages[0].slots[0].vehicle_types == ("land",)
     assert MapProject.from_dict(project.to_dict()) == project
+
+
+def test_map_streaming_model_keeps_existing_positional_arguments_compatible():
+    streaming = MapStreaming(
+        "examplemap", "EXAMPLE_MAP_GROUP", ("example_map_placement",),
+        250.0, 450.0, True,
+    )
+
+    assert streaming.activation_radius == 250.0
+    assert streaming.release_radius == 450.0
+    assert streaming.keep_resident is True
+    assert streaming.mode == "ipl"
+
+
+def test_map_contract_accepts_explicit_no_ipl_streaming_mode():
+    project = MapProject.from_dict(no_ipl_map_payload())
+
+    assert project.streaming.mode == "none"
+    assert project.streaming.content_group is None
+    assert project.streaming.ipls == ()
+    assert project.levels[0].ipls == ()
+    assert MapProject.from_dict(project.to_dict()) == project
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda value: value["streaming"].update(
+                {"content_group": "BASE_GAME_GROUP"},
+            ),
+            "content_group.*mode is 'none'",
+        ),
+        (
+            lambda value: value["streaming"].update({"ipls": ["invented_ipl"]}),
+            "ipls must be empty",
+        ),
+        (
+            lambda value: value["levels"][0].update({"ipls": ["invented_ipl"]}),
+            "levels may not declare IPLs",
+        ),
+    ],
+)
+def test_no_ipl_streaming_mode_rejects_loading_declarations(mutation, message):
+    payload = no_ipl_map_payload()
+    mutation(payload)
+
+    with pytest.raises(ValueError, match=message):
+        MapProject.from_dict(payload)
+
+
+def test_map_contract_rejects_unknown_streaming_mode():
+    payload = map_payload()
+    payload["streaming"]["mode"] = "automatic"
+
+    with pytest.raises(ValueError, match="mode must be 'ipl' or 'none'"):
+        MapProject.from_dict(payload)
 
 
 @pytest.mark.parametrize(

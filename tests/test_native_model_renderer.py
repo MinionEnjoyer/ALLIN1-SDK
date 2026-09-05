@@ -21,6 +21,8 @@ def _scene(*, repeated_triangles: int = 1) -> native_assets.NativeModelScene:
         material_index=0,
         material_name="vehicle_paint",
         texture_names=("body_diff",),
+        texcoords=((0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9)),
+        texture_parameters=(("DiffuseSampler", "body_diff"),),
     )
     right = native_assets._ModelGeometry(
         vertices=(
@@ -33,6 +35,8 @@ def _scene(*, repeated_triangles: int = 1) -> native_assets.NativeModelScene:
         material_index=1,
         material_name="vehicle_glass",
         texture_names=("glass_diff",),
+        texcoords=((0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9)),
+        texture_parameters=(("DiffuseSampler", "glass_diff"),),
     )
     return native_assets.NativeModelScene(
         "renderer-fixture.ydr", (left, right),
@@ -88,6 +92,36 @@ def test_native_model_render_modes_are_deterministic_and_distinct():
     assert wireframe_pixels.get(paint, 0) == 0
 
 
+def test_native_model_collision_overlay_shares_camera_and_reports_sampling():
+    scene = _scene()
+    exact = native_assets._ModelGeometry(
+        vertices=((-1.2, -0.8, 0.4), (1.2, -0.8, 0.4), (0.0, 0.9, 0.7)),
+        triangles=((0, 1, 2),), lod="GeometryBVH", component="Triangle mesh",
+    )
+    box = native_assets._ModelGeometry(
+        vertices=((-0.8, -0.6, 0.1), (0.8, -0.6, 0.1), (0.0, 0.6, 0.2)),
+        triangles=((0, 1, 2),), lod="GeometryBVH",
+        component="Box diagnostic hull",
+    )
+    collision = native_assets.NativeCollisionScene(
+        "renderer-fixture.ybn", (exact, box),
+        primitive_counts=(("Box", 1), ("Triangle", 1)),
+        material_count=2, owner_count=1,
+    )
+
+    plain, plain_metadata = scene.render()
+    overlaid, metadata = scene.render(
+        collision_scene=collision, collision_visible=True,
+    )
+
+    assert plain_metadata["collision_overlay_visible"] is False
+    assert metadata["collision_overlay_visible"] is True
+    assert metadata["collision_overlay_triangle_count"] == 2
+    assert metadata["collision_overlay_rendered_triangle_count"] == 2
+    assert metadata["collision_overlay_sampled"] is False
+    assert ImageChops.difference(_image(plain), _image(overlaid)).getbbox() is not None
+
+
 def test_native_model_render_uses_semantic_material_colours():
     scene = _scene()
     rendered, metadata = scene.render(render_mode="materials")
@@ -104,6 +138,123 @@ def test_native_model_render_uses_semantic_material_colours():
     assert native_assets._material_mode_color(
         (78, 114, 134), "1|vehicle_glass|glass_diff",
     ) in visible
+
+
+def test_native_model_render_can_isolate_one_material_surface():
+    scene = _scene()
+    rendered, metadata = scene.render(
+        material="vehicle_glass", render_mode="materials",
+    )
+
+    assert rendered.startswith(b"\x89PNG")
+    assert metadata["model_camera_material"] == "vehicle_glass"
+    assert metadata["model_rendered_triangle_count"] == 2
+    with pytest.raises(ValueError, match="material was not found"):
+        scene.render(material="missing_shader")
+
+
+def test_native_model_textured_mode_samples_bounded_uv0_pixels():
+    scene = _scene()
+    body = Image.new("RGB", (4, 4), (220, 72, 54))
+    glass = Image.new("RGB", (4, 4), (38, 144, 214))
+
+    rendered, metadata = scene.render(
+        render_mode="textured", textures={"BODY_DIFF": body, "glass_diff": glass},
+    )
+    fallback, fallback_metadata = scene.render(render_mode="textured")
+
+    assert rendered.startswith(b"\x89PNG")
+    assert rendered != fallback
+    assert metadata["model_render_texture_source_count"] == 2
+    assert metadata["model_render_textured_geometry_count"] == 2
+    assert metadata["model_render_textured_triangle_count"] == 4
+    assert metadata["model_render_unresolved_textures"] == ""
+    assert metadata["model_render_texture_sampling"].startswith("UV0")
+    assert "bounded linked texture previews" in metadata["model_render_fidelity"]
+    assert fallback_metadata["model_render_textured_triangle_count"] == 0
+    assert fallback_metadata["model_render_unresolved_textures"] == (
+        "body_diff, glass_diff"
+    )
+
+
+def test_native_model_uv_mode_classifies_rendered_coverage_evidence():
+    geometry = native_assets._ModelGeometry(
+        vertices=(
+            (-1.0, -1.0, 0.0), (1.0, -1.0, 0.0), (0.0, 1.0, 0.0),
+            (0.4, 0.1, 0.2), (0.8, 0.4, 0.3),
+        ),
+        triangles=((0, 1, 2), (0, 1, 3), (0, 3, 4)),
+        lod="High",
+        material_name="vehicle_paint",
+        texture_names=("body_diff",),
+        texcoords=((0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.4, 0.1)),
+        texture_parameters=(("DiffuseSampler", "body_diff"),),
+    )
+    scene = native_assets.NativeModelScene("uv-evidence.ydr", (geometry,))
+
+    rendered, metadata = scene.render(
+        render_mode="uvs", textures={"body_diff": Image.new("RGB", (2, 2))},
+    )
+
+    assert rendered.startswith(b"\x89PNG")
+    assert metadata["model_render_uv_valid_triangle_count"] == 1
+    assert metadata["model_render_uv_resolved_triangle_count"] == 1
+    assert metadata["model_render_uv_unresolved_triangle_count"] == 0
+    assert metadata["model_render_uv_degenerate_triangle_count"] == 1
+    assert metadata["model_render_uv_missing_triangle_count"] == 1
+    assert metadata["model_render_uv_coverage_percent"] == pytest.approx(33.33)
+    assert metadata["model_render_uv_analysis_scope"] == "3 rendered triangles"
+    assert metadata["model_render_lighting"] == "flat UV0 coverage classes"
+
+
+def test_native_model_uv_atlas_groups_textures_and_connects_shared_edges():
+    scene = _scene()
+
+    rendered, metadata = scene.render_uv_atlas(
+        textures={"body_diff": Image.new("RGB", (8, 8), (180, 48, 36))},
+    )
+
+    assert rendered.startswith(b"\x89PNG")
+    assert metadata["source_triangle_count"] == 4
+    assert metadata["rendered_triangle_count"] == 4
+    assert metadata["island_count"] == 2
+    assert metadata["texture_group_count"] == 2
+    assert metadata["returned_texture_group_count"] == 2
+    assert metadata["sampled"] is False
+    assert metadata["selection"] == {
+        "lod": "All", "component": "All", "material": "All",
+    }
+    groups = {item["name"]: item for item in metadata["texture_groups"]}
+    assert groups["body_diff"]["resolved"] is True
+    assert groups["body_diff"]["island_count"] == 1
+    assert groups["glass_diff"]["resolved"] is False
+    assert groups["glass_diff"]["island_count"] == 1
+    assert _image(rendered).size == (metadata["width"], metadata["height"])
+
+
+def test_native_model_uv_atlas_reports_seams_degenerate_and_missing_uv0():
+    geometry = native_assets._ModelGeometry(
+        vertices=tuple((float(index), 0.0, 0.0) for index in range(12)),
+        triangles=((0, 1, 2), (3, 4, 5), (6, 7, 8), (9, 10, 11)),
+        lod="High", component="Body", material_name="vehicle_paint",
+        texture_names=("body_diff",),
+        texcoords=(
+            (0.1, 0.1), (0.8, 0.1), (0.1, 0.8),
+            (0.9, 0.1), (1.1, 0.1), (0.9, 0.8),
+            (0.4, 0.4), (0.4, 0.4), (0.4, 0.4),
+        ),
+        texture_parameters=(("DiffuseSampler", "body_diff"),),
+    )
+    scene = native_assets.NativeModelScene("uv-status.yft", (geometry,))
+
+    _rendered, metadata = scene.render_uv_atlas()
+
+    assert metadata["valid_triangle_count"] == 2
+    assert metadata["rendered_triangle_count"] == 1
+    assert metadata["seam_triangle_count"] == 1
+    assert metadata["degenerate_triangle_count"] == 1
+    assert metadata["missing_triangle_count"] == 1
+    assert metadata["island_count"] == 1
 
 
 def test_native_model_shaded_fallbacks_stay_in_a_cohesive_neutral_range():
@@ -292,6 +443,68 @@ def test_native_model_decoder_preserves_uvs_and_sampler_roles():
     )
 
 
+def test_native_model_decoder_preserves_exact_vector_and_array_parameters():
+    shader = etree.fromstring(b"""
+    <Item><Name>vehicle_paint</Name><Parameters>
+      <Item name="DiffuseSampler" type="Texture"><Name>body_d</Name></Item>
+      <Item name="specularIntensityMult" type="Vector"
+            x="0.5" y="0" z="-0.25" w="1" />
+      <Item name="detailSettings" type="Array">
+        <Value x="1" y="2" z="3" w="4" />
+        <Value x="5.25" y="6" z="7" w="8" />
+      </Item>
+    </Parameters></Item>
+    """)
+
+    material = native_assets._model_material_record(shader, 0)
+
+    assert material.parameters == (
+        native_assets.NativeModelParameter(
+            name="specularIntensityMult", source_type="Vector",
+            values=((0.5, 0.0, -0.25, 1.0),),
+        ),
+        native_assets.NativeModelParameter(
+            name="detailSettings", source_type="Array",
+            values=((1.0, 2.0, 3.0, 4.0), (5.25, 6.0, 7.0, 8.0)),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("parameter", "message"),
+    [
+        ('<Item name="bad" type="Vector" x="1" y="2" z="3" />', "missing"),
+        (
+            '<Item name="bad" type="Vector" x="NaN" y="0" z="0" w="0" />',
+            "non-finite",
+        ),
+    ],
+)
+def test_native_model_decoder_rejects_untrustworthy_numeric_parameters(
+    parameter, message,
+):
+    shader = etree.fromstring(
+        f"<Item><Parameters>{parameter}</Parameters></Item>".encode()
+    )
+
+    with pytest.raises(ValueError, match=message):
+        native_assets._model_material_record(shader, 0)
+
+
+def test_native_model_decoder_bounds_parameter_rows():
+    rows = "".join(
+        f'<Value x="{index}" y="0" z="0" w="0" />'
+        for index in range(native_assets.MAX_MODEL_PARAMETER_ARRAY_ROWS + 1)
+    )
+    shader = etree.fromstring(
+        f'<Item><Parameters><Item name="oversized" type="Array">{rows}'
+        "</Item></Parameters></Item>".encode()
+    )
+
+    with pytest.raises(ValueError, match="array limit"):
+        native_assets._model_material_record(shader, 0)
+
+
 def test_fragment_wheel_children_use_bones_and_fill_empty_right_side(tmp_path):
     xml = tmp_path / "vehicle.yft.xml"
     xml.write_text("""<?xml version="1.0"?>
@@ -376,7 +589,7 @@ def test_fragment_wheel_children_use_bones_and_fill_empty_right_side(tmp_path):
     )
 
 
-@pytest.mark.parametrize("mode", ["", "textured", "SHADOWS"])
+@pytest.mark.parametrize("mode", ["", "raytraced", "SHADOWS"])
 def test_native_model_render_rejects_unknown_modes(mode):
     with pytest.raises(ValueError, match="render mode must be one of"):
         _scene().render(render_mode=mode)

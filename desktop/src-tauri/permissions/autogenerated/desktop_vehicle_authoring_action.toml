@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-vehicle-authoring-action"
+description = "Enables the desktop_vehicle_authoring_action command without any pre-configured scope."
+commands.allow = ["desktop_vehicle_authoring_action"]
+
+[[permission]]
+identifier = "deny-desktop-vehicle-authoring-action"
+description = "Denies the desktop_vehicle_authoring_action command without any pre-configured scope."
+commands.deny = ["desktop_vehicle_authoring_action"]

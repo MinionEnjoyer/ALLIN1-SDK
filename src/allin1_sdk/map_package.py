@@ -116,8 +116,13 @@ class MapAddonPackageBuilder:
             scan = AddonPackageInspector(
                 self.project_root, self.gta_path,
             ).inspect(source_path)
-            inspection = MapProjectResolver.inspect_scan(scan)
-            if not any(item.role == "placement" for item in inspection.assets):
+            requires_ymap = descriptor.streaming.mode == "ipl"
+            inspection = MapProjectResolver.inspect_scan(
+                scan, require_ymap=requires_ymap,
+            )
+            if requires_ymap and not any(
+                item.role == "placement" for item in inspection.assets
+            ):
                 raise ValueError(
                     "Map source does not expose a YMAP placement asset for validation"
                 )
@@ -231,7 +236,8 @@ class MapAddonPackageBuilder:
                 raise ValueError("Direct RPF sources may not be symbolic links")
             if source.stat().st_size > MAX_IMPORTED_MAP_RPF_BYTES:
                 raise ValueError("Map RPF exceeds the guarded 1 GiB package import limit")
-            self._require_indexed_placement(scan)
+            if descriptor.streaming.mode == "ipl":
+                self._require_indexed_placement(scan)
             self._require_declared_ipls(
                 descriptor,
                 self._indexed_ymap_names(scan),
@@ -253,7 +259,8 @@ class MapAddonPackageBuilder:
             )
         if members:
             member = members[0]
-            self._require_indexed_placement(scan, archive_path=member.path)
+            if descriptor.streaming.mode == "ipl":
+                self._require_indexed_placement(scan, archive_path=member.path)
             self._require_declared_ipls(
                 descriptor,
                 self._indexed_ymap_names(scan, archive_path=member.path),

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-select-texture-build-destination"
+description = "Enables the select_texture_build_destination command without any pre-configured scope."
+commands.allow = ["select_texture_build_destination"]
+
+[[permission]]
+identifier = "deny-select-texture-build-destination"
+description = "Denies the select_texture_build_destination command without any pre-configured scope."
+commands.deny = ["select_texture_build_destination"]

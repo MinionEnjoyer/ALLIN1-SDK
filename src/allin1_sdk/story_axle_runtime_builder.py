@@ -273,6 +273,40 @@ class NativeToolchainCheck:
 
 
 @dataclass(frozen=True)
+class NativeAxleToolchainSettings:
+    """Per-user native tool discovery preferences.
+
+    These values are workstation settings, not vehicle-package data.  A
+    non-empty override is authoritative: a stale or invalid override blocks
+    preflight instead of silently selecting a different compiler installation.
+    """
+
+    mode: str = "auto"
+    cmake_path: Path | None = None
+    ctest_path: Path | None = None
+    visual_studio_path: Path | None = None
+
+    def validate(self) -> "NativeAxleToolchainSettings":
+        mode = str(self.mode).strip().casefold()
+        if mode not in {"auto", "manual"}:
+            raise ValueError("Toolchain mode must be Auto or Manual")
+
+        def normalize(value: Path | str | None) -> Path | None:
+            if value is None or not str(value).strip():
+                return None
+            return Path(value).expanduser().resolve(strict=False)
+
+        result = replace(
+            self,
+            mode=mode,
+            cmake_path=normalize(self.cmake_path),
+            ctest_path=normalize(self.ctest_path),
+            visual_studio_path=normalize(self.visual_studio_path),
+        )
+        return result
+
+
+@dataclass(frozen=True)
 class NativeAxleToolchainReport:
     ready: bool
     platform: str
@@ -297,12 +331,22 @@ class NativeAxleToolchainReport:
     probe_detail: str = "Not run"
     checks: tuple[NativeToolchainCheck, ...] = ()
     guidance: tuple[str, ...] = ()
+    settings_mode: str = "auto"
+    cmake_discovery_source: str | None = None
+    ctest_discovery_source: str | None = None
+    visual_studio_discovery_source: str | None = None
+    cmake_generator_architecture: str = "x64"
+    cmake_toolset: str | None = None
+    windows_sdk_path: Path | None = None
+    visual_studio_instance_id: str | None = None
+    component_identities: tuple[tuple[str, str], ...] = ()
+    selection_fingerprint: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         for key in (
             "source_root", "cmake_path", "ctest_path", "visual_studio_path",
-            "cl_path",
+            "cl_path", "windows_sdk_path",
         ):
             value = payload[key]
             payload[key] = str(value) if value is not None else None
@@ -325,7 +369,41 @@ def _runtime_source_root() -> Path:
     return checkout_or_app
 
 
+def _target_supports_wheel_local_position(
+    source_root: Path,
+    target_id: str,
+) -> bool:
+    """Read the exact target capability used to specialize runtime JSON.
+
+    Automatic steering remains an authoring calculation when a compiled
+    profile cannot safely read live wheel positions. Only an explicit true
+    capability may enable runtime recomputation; malformed profile metadata
+    blocks the build instead of silently changing the controller contract.
+    """
+
+    path = source_root / "profiles" / "compatibility.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        profiles = payload["profiles"]
+        target = profiles[target_id]
+        capabilities = target["capabilities"]
+        value = capabilities["wheelLocalPosition"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise StoryAxleRuntimeBuildError(
+            f"Runtime compatibility metadata is invalid for {target_id}: {path}"
+        ) from exc
+    if not isinstance(value, bool):
+        raise StoryAxleRuntimeBuildError(
+            "Runtime wheelLocalPosition capability must be boolean for "
+            f"{target_id}"
+        )
+    return value
+
+
 _VC_WORKLOAD = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+_NATIVE_DESKTOP_WORKLOAD = "Microsoft.VisualStudio.Workload.NativeDesktop"
+_BUILD_TOOLS_CPP_WORKLOAD = "Microsoft.VisualStudio.Workload.VCTools"
+_VC_CMAKE_COMPONENT = "Microsoft.VisualStudio.Component.VC.CMake.Project"
 _MINIMUM_CMAKE = (3, 20, 0)
 _MINIMUM_MSVC_TOOLSET = (14, 20, 0)
 _MAXIMUM_MSVC_TOOLSET = (15, 0, 0)
@@ -362,6 +440,180 @@ def _executable_version(
     return match.group(1), None
 
 
+def _fresh_windows_path() -> str:
+    """Return process + current user/machine PATH without restart assumptions."""
+
+    values: list[str] = []
+    if os.name == "nt":
+        try:
+            import winreg  # type: ignore[import-not-found]
+
+            registry_values = (
+                (
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+                ),
+                (
+                    winreg.HKEY_CURRENT_USER,
+                    r"Environment",
+                ),
+            )
+            for hive, key_name in registry_values:
+                try:
+                    with winreg.OpenKey(hive, key_name) as key:
+                        value, _kind = winreg.QueryValueEx(key, "Path")
+                except OSError:
+                    continue
+                if isinstance(value, str):
+                    values.append(os.path.expandvars(value))
+        except (ImportError, OSError):
+            pass
+    # Preserve process-only additions as a final fallback, while preferring
+    # registry values that may have changed since this SDK process started.
+    values.append(os.environ.get("PATH", ""))
+    entries: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for entry in value.split(os.pathsep):
+            cleaned = os.path.expandvars(entry.strip().strip('"'))
+            key = os.path.normcase(cleaned)
+            if cleaned and key not in seen:
+                seen.add(key)
+                entries.append(cleaned)
+    return os.pathsep.join(entries)
+
+
+def _which_fresh(name: str) -> Path | None:
+    """Resolve an executable against a freshly assembled Windows PATH."""
+
+    search_path = _fresh_windows_path()
+    try:
+        value = shutil.which(name, path=search_path)
+    except TypeError:
+        # A few embedders/tests expose the one-argument shutil.which contract.
+        value = shutil.which(name)
+    return Path(value).resolve() if value else None
+
+
+def _valid_executable_override(
+    path: Path | None,
+    expected_name: str,
+) -> tuple[Path | None, str | None]:
+    if path is None:
+        return None, None
+    candidate = Path(path).expanduser().resolve(strict=False)
+    if not candidate.is_file() or candidate.is_symlink():
+        return None, f"Configured path does not exist: {candidate}"
+    if candidate.name.casefold() != expected_name.casefold():
+        return None, f"Configured path must select {expected_name}: {candidate}"
+    return candidate, None
+
+
+def _standard_cmake_candidates() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    for key in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        root = os.environ.get(key, "").strip()
+        if root:
+            candidates.append(Path(root) / "CMake" / "bin" / "cmake.exe")
+    # dict.fromkeys preserves the documented search order.
+    return tuple(dict.fromkeys(path.resolve(strict=False) for path in candidates))
+
+
+def _visual_studio_bundled_cmake(installation: Path | None) -> Path | None:
+    if installation is None:
+        return None
+    candidate = (
+        installation / "Common7" / "IDE" / "CommonExtensions" /
+        "Microsoft" / "CMake" / "CMake" / "bin" / "cmake.exe"
+    )
+    if candidate.is_file() and not candidate.is_symlink():
+        return candidate.resolve()
+    return None
+
+
+def _same_tool_installation(left: Path | None, right: Path | None) -> bool:
+    if left is None or right is None:
+        return False
+    return os.path.normcase(str(left.parent.resolve(strict=False))) == os.path.normcase(
+        str(right.parent.resolve(strict=False))
+    )
+
+
+def _file_identity(path: Path) -> str:
+    """Stable executable identity used to detect selection drift before build."""
+
+    return _sha256(path)
+
+
+def _combined_file_identity(
+    paths: Iterable[Path], *, require_all: bool = False,
+) -> str | None:
+    candidates = tuple(paths)
+    rows: list[tuple[str, str]] = []
+    for path in candidates:
+        if path.is_file() and not path.is_symlink():
+            try:
+                digest = _file_identity(path)
+            except OSError:
+                return None
+            rows.append((path.name.casefold(), digest))
+        elif require_all:
+            return None
+    if not rows:
+        return None
+    return hashlib.sha256(
+        json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _selection_fingerprint(
+    *,
+    cmake: Path | None,
+    ctest: Path | None,
+    visual_studio: Path | None,
+    cl_path: Path | None,
+    windows_sdk_root: Path | None,
+    versions: Mapping[str, str | None],
+    generator: str | None,
+) -> tuple[tuple[tuple[str, str], ...], str | None]:
+    components: list[tuple[str, str]] = []
+    for key, path in (("cmake", cmake), ("ctest", ctest), ("cl", cl_path)):
+        if path is None or not path.is_file() or path.is_symlink():
+            continue
+        try:
+            components.append((key, _file_identity(path)))
+        except OSError:
+            continue
+    if visual_studio is not None:
+        vs_identity = _combined_file_identity((
+            visual_studio / "MSBuild" / "Current" / "Bin" / "MSBuild.exe",
+            visual_studio / "Common7" / "IDE" / "devenv.exe",
+        ))
+        if vs_identity:
+            components.append(("visual_studio", vs_identity))
+    sdk_version = versions.get("windows_sdk")
+    if windows_sdk_root is not None and sdk_version:
+        sdk_identity = _combined_file_identity((
+            windows_sdk_root / "Include" / sdk_version / "um" / "Windows.h",
+            windows_sdk_root / "Include" / sdk_version / "ucrt" / "stdlib.h",
+            windows_sdk_root / "Lib" / sdk_version / "um" / "x64" / "kernel32.lib",
+            windows_sdk_root / "Lib" / sdk_version / "ucrt" / "x64" / "ucrt.lib",
+        ), require_all=True)
+        if sdk_identity:
+            components.append(("windows_sdk", sdk_identity))
+    if not components:
+        return (), None
+    payload = {
+        "components": components,
+        "versions": dict(versions),
+        "generator": generator,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return tuple(components), fingerprint
+
+
 def _vswhere_executable() -> tuple[Path | None, str | None]:
     if os.name != "nt":
         return None, "Native Story ASI builds require Windows"
@@ -387,7 +639,16 @@ def _vswhere_property(
         executable, "-latest", "-products", "*", "-property", property_name,
     ]
     if require_vc:
-        command[4:4] = ["-requires", _VC_WORKLOAD]
+        command[4:4] = [
+            # The full IDE exposes Desktop development with C++ as
+            # Workload.NativeDesktop, while the Build Tools product exposes the
+            # equivalent workload as Workload.VCTools.  Requiring either
+            # product-specific workload here would reject the other product.
+            # The shared x86/x64 compiler component is the stable discovery
+            # contract; the concrete Hostx64/x64 compiler and isolated build
+            # probe below prove that the workload is actually usable.
+            "-requires", _VC_WORKLOAD,
+        ]
     try:
         completed = run_hidden(
             command, capture_output=True, text=True, encoding="utf-8",
@@ -432,6 +693,61 @@ def _visual_studio_details(
         vswhere, "displayName", require_vc=has_workload,
     )
     return path.resolve(), version, name, has_workload, None
+
+
+def _configured_visual_studio_details(
+    configured: Path,
+) -> tuple[Path | None, str | None, str | None, bool, str | None]:
+    """Validate an explicit VS installation or x64 cl.exe selection."""
+
+    selected = Path(configured).expanduser().resolve(strict=False)
+    installation: Path | None = None
+    if selected.is_file() and selected.name.casefold() == "cl.exe":
+        for parent in selected.parents:
+            if (parent / "VC" / "Tools" / "MSVC").is_dir():
+                installation = parent
+                break
+    elif selected.is_dir():
+        installation = selected
+    if installation is None or not installation.is_dir() or installation.is_symlink():
+        return (
+            None, None, None, False,
+            f"Configured Visual Studio/compiler path is invalid: {selected}",
+        )
+
+    version: str | None = None
+    name: str | None = None
+    vswhere, _problem = _vswhere_executable()
+    if vswhere is not None:
+        try:
+            completed = run_hidden(
+                [vswhere, "-all", "-products", "*", "-format", "json"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=15, check=False,
+            )
+            records = json.loads(completed.stdout or "[]") if completed.returncode == 0 else []
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            records = []
+        selected_key = os.path.normcase(str(installation.resolve(strict=False)))
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, Mapping):
+                continue
+            raw_path = str(record.get("installationPath", ""))
+            if os.path.normcase(str(Path(raw_path).resolve(strict=False))) != selected_key:
+                continue
+            version = str(record.get("installationVersion") or "") or None
+            name = str(record.get("displayName") or "") or None
+            break
+
+    if version is None:
+        match = re.search(r"[\\/](16|17|18|2019|2022|2026)[\\/]", str(installation))
+        major = {
+            "2019": "16", "2022": "17", "2026": "18",
+        }.get(match.group(1), match.group(1)) if match else None
+        version = f"{major}.0.0" if major else None
+    name = name or "Configured Visual Studio"
+    workload = (installation / "VC" / "Tools" / "MSVC").is_dir()
+    return installation.resolve(), version, name, workload, None
 
 
 def _visual_studio_installation() -> tuple[Path | None, str | None]:
@@ -495,6 +811,39 @@ def _msvc_toolset(
     return None, None, None, "Host x64 / Target x64 cl.exe was not found"
 
 
+def _configured_msvc_toolset(
+    cl_path: Path,
+    installation: Path,
+) -> tuple[Path | None, str | None, Path | None, str | None]:
+    """Preserve an explicitly selected Hostx64/x64 compiler exactly."""
+
+    selected = Path(cl_path).expanduser().resolve(strict=False)
+    if not selected.is_file() or selected.is_symlink() or selected.name.casefold() != "cl.exe":
+        return None, None, None, f"Configured compiler is not a usable cl.exe: {selected}"
+    toolsets = installation / "VC" / "Tools" / "MSVC"
+    try:
+        relative = selected.relative_to(toolsets.resolve(strict=False))
+    except ValueError:
+        return None, None, None, (
+            "Configured cl.exe is not part of the selected Visual Studio installation"
+        )
+    parts = relative.parts
+    if not (
+        len(parts) == 5
+        and parts[1].casefold() == "bin"
+        and parts[2].casefold() == "hostx64"
+        and parts[3].casefold() == "x64"
+        and parts[4].casefold() == "cl.exe"
+    ):
+        return None, None, None, (
+            "Configured cl.exe must be the Host x64 / Target x64 compiler"
+        )
+    version = parts[0]
+    if not _version_tuple(version):
+        return None, None, None, "Configured cl.exe has an unrecognized toolset version"
+    return toolsets / version, version, selected, None
+
+
 def _compiler_banner(cl_path: Path) -> tuple[str | None, str | None, str | None]:
     try:
         completed = run_hidden(
@@ -532,20 +881,75 @@ def _windows_sdk() -> tuple[str | None, Path | None, str | None]:
                 and _version_tuple(child.name, width=4)
                 and (child / "um" / "Windows.h").is_file()
                 and (child / "ucrt" / "stdlib.h").is_file()
+                and (root / "Lib" / child.name / "um" / "x64" / "kernel32.lib").is_file()
+                and (root / "Lib" / child.name / "ucrt" / "x64" / "ucrt.lib").is_file()
             ),
             key=lambda value: _version_tuple(value, width=4), reverse=True,
         )
         if versions:
             return versions[0], root, None
-    return None, None, "A complete Windows 10/11 SDK with UM and UCRT headers was not found"
+    return (
+        None, None,
+        "A complete Windows 10/11 SDK with x64 UM/UCRT headers and libraries was not found",
+    )
+
+
+def _cmake_selection_arguments(
+    *,
+    generator: str,
+    visual_studio: Path | None,
+    cl_path: Path | None,
+    toolset_version: str | None,
+    windows_sdk_version: str | None,
+    windows_sdk_path: Path | None,
+) -> list[str | Path]:
+    """Pin CMake to the exact preflight-selected x64 VS toolchain."""
+
+    arguments: list[str | Path] = ["-G", generator, "-A", "x64"]
+    if visual_studio is not None:
+        arguments.append(
+            f"-DCMAKE_GENERATOR_INSTANCE:PATH={visual_studio}"
+        )
+    if toolset_version:
+        arguments.extend(["-T", f"version={toolset_version},host=x64"])
+    if cl_path is not None:
+        arguments.append(f"-DCMAKE_CXX_COMPILER:FILEPATH={cl_path}")
+    if windows_sdk_version:
+        arguments.append(f"-DCMAKE_SYSTEM_VERSION={windows_sdk_version}")
+    if windows_sdk_path is not None:
+        arguments.append(
+            f"-DCMAKE_WINDOWS_KITS_10_DIR:PATH={windows_sdk_path}"
+        )
+    arguments.append("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded")
+    return arguments
+
+
+def _selected_toolchain_environment(
+    *, windows_sdk_path: Path | None, windows_sdk_version: str | None,
+) -> dict[str, str]:
+    environment = dict(os.environ)
+    if windows_sdk_path is not None:
+        root = str(windows_sdk_path.resolve(strict=False)).rstrip("\\/") + "\\"
+        environment["WindowsSdkDir"] = root
+        environment["UniversalCRTSdkDir"] = root
+    if windows_sdk_version:
+        environment["WindowsSDKVersion"] = windows_sdk_version.rstrip("\\/") + "\\"
+        environment["UCRTVersion"] = windows_sdk_version.rstrip("\\/")
+    return environment
 
 
 def _run_cpp17_static_probe(
     *,
     cmake: Path,
+    ctest: Path | None = None,
     generator: str,
+    visual_studio: Path | None = None,
+    cl_path: Path | None = None,
+    toolset_version: str | None = None,
+    windows_sdk_version: str | None = None,
+    windows_sdk_path: Path | None = None,
 ) -> tuple[bool, str]:
-    """Compile and inspect a disposable x64 C++17 /MT executable."""
+    """Configure, build, link, execute, and CTest a disposable C++17 /MT app."""
 
     try:
         with tempfile.TemporaryDirectory(prefix="allin1-axle-preflight-") as raw:
@@ -564,6 +968,8 @@ def _run_cpp17_static_probe(
                     "target_compile_features(allin1_axle_probe PRIVATE cxx_std_17)",
                     "set_property(TARGET allin1_axle_probe PROPERTY ",
                     '  MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")',
+                    "enable_testing()",
+                    "add_test(NAME allin1_axle_probe_test COMMAND allin1_axle_probe)",
                     "",
                 )),
                 encoding="utf-8",
@@ -579,21 +985,31 @@ def _run_cpp17_static_probe(
                 "int main() { return std::is_same_v<int, int> ? 0 : 1; }\n",
                 encoding="utf-8",
             )
+            configure = [cmake, "-S", source, "-B", build]
+            configure.extend(_cmake_selection_arguments(
+                generator=generator,
+                visual_studio=visual_studio,
+                cl_path=cl_path,
+                toolset_version=toolset_version,
+                windows_sdk_version=windows_sdk_version,
+                windows_sdk_path=windows_sdk_path,
+            ))
             commands = (
-                [
-                    cmake, "-S", source, "-B", build, "-G", generator,
-                    "-A", "x64", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
-                ],
+                configure,
                 [
                     cmake, "--build", build, "--config", "Release", "--target",
                     "allin1_axle_probe",
                 ],
             )
+            selected_environment = _selected_toolchain_environment(
+                windows_sdk_path=windows_sdk_path,
+                windows_sdk_version=windows_sdk_version,
+            )
             for index, command in enumerate(commands):
                 completed = run_hidden(
                     command, cwd=source, capture_output=True, text=True,
                     encoding="utf-8", errors="replace", timeout=120,
-                    check=False,
+                    check=False, env=selected_environment,
                 )
                 if completed.returncode != 0:
                     phase = "configure" if index == 0 else "compile/link"
@@ -609,15 +1025,43 @@ def _run_cpp17_static_probe(
                     "Static-runtime probe imported dynamic CRT files: "
                     + ", ".join(forbidden)
                 )
-            return True, "C++17 x64 compile/link passed with the static MSVC runtime"
+            if ctest is None:
+                return False, "C++17 probe could not run because CTest was not selected"
+            completed = run_hidden(
+                [
+                    ctest, "--test-dir", build, "-C", "Release",
+                    "--output-on-failure",
+                ],
+                cwd=source, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=120, check=False,
+                env=selected_environment,
+            )
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout or "").strip()
+                return False, f"C++17 probe CTest failed: {detail[-800:]}"
+            return (
+                True,
+                "C++17 x64 configure/build/link and CTest passed with the static MSVC runtime",
+            )
     except (OSError, subprocess.TimeoutExpired, StoryAxleRuntimeBuildError) as exc:
         return False, f"C++17/static-runtime probe failed: {exc}"
 
 
 def inspect_native_axle_toolchain(
-    *, source_root: Path | None = None,
+    *,
+    source_root: Path | None = None,
+    settings: NativeAxleToolchainSettings | None = None,
 ) -> NativeAxleToolchainReport:
+    """Resolve and prove one coherent native x64 toolchain selection."""
+
     source = (source_root or _runtime_source_root()).expanduser().resolve(strict=False)
+    configured = (settings or NativeAxleToolchainSettings()).validate()
+    explicitly_selected_cl = (
+        configured.visual_studio_path
+        if configured.visual_studio_path is not None
+        and configured.visual_studio_path.name.casefold() == "cl.exe"
+        else None
+    )
     checks: list[NativeToolchainCheck] = []
 
     def record(
@@ -647,74 +1091,164 @@ def inspect_native_axle_toolchain(
     )
     missing = [path.name for path in required if not path.is_file() or path.is_symlink()]
     record(
-        "runtime_source",
-        "Controller source",
-        not missing,
+        "runtime_source", "Controller source", not missing,
         str(source) if not missing else "Missing: " + ", ".join(missing),
         "Complete packaged VehicleWorkbenchAxles source tree",
         "Repair or reinstall the ALLIN1 SDK so its native runtime sources are restored.",
     )
 
-    cmake_text = shutil.which("cmake")
-    cmake = Path(cmake_text).resolve() if cmake_text else None
-    ctest_text = shutil.which("ctest")
-    if ctest_text is None and cmake is not None:
-        adjacent = cmake.with_name("ctest.exe")
-        ctest_text = str(adjacent) if adjacent.is_file() else None
-    ctest = Path(ctest_text).resolve() if ctest_text else None
-    cmake_version: str | None = None
+    # Resolve Visual Studio first because its bundled CMake is the first
+    # automatic candidate after a user override.
+    visual_studio_source: str | None = None
+    if configured.visual_studio_path is not None:
+        (
+            visual_studio, visual_studio_version, visual_studio_name,
+            vc_workload_ready, visual_studio_problem,
+        ) = _configured_visual_studio_details(configured.visual_studio_path)
+        visual_studio_source = "user-configured"
+    elif configured.mode == "manual":
+        visual_studio = None
+        visual_studio_version = None
+        visual_studio_name = None
+        vc_workload_ready = False
+        visual_studio_problem = "Manual Visual Studio/compiler path is not selected"
+        visual_studio_source = "manual"
+    else:
+        (
+            visual_studio, visual_studio_version, visual_studio_name,
+            vc_workload_ready, visual_studio_problem,
+        ) = _visual_studio_details()
+        visual_studio_source = "Visual Studio Installer"
+
+    cmake: Path | None = None
     cmake_problem: str | None = None
+    cmake_source: str | None = None
+    if configured.cmake_path is not None:
+        cmake, cmake_problem = _valid_executable_override(
+            configured.cmake_path, "cmake.exe",
+        )
+        cmake_source = "user-configured"
+    elif configured.mode == "manual":
+        cmake_problem = "Manual cmake.exe path is not selected"
+        cmake_source = "manual"
+    else:
+        bundled = _visual_studio_bundled_cmake(visual_studio)
+        if bundled is not None:
+            cmake = bundled
+            cmake_source = "Visual Studio bundled"
+        else:
+            cmake = _which_fresh("cmake")
+            if cmake is not None:
+                cmake_source = "current machine/user PATH"
+            else:
+                for candidate in _standard_cmake_candidates():
+                    if candidate.is_file() and not candidate.is_symlink():
+                        cmake = candidate.resolve()
+                        cmake_source = "Program Files"
+                        break
+
+    ctest: Path | None = None
+    ctest_problem: str | None = None
+    ctest_source: str | None = None
+    if configured.ctest_path is not None:
+        ctest, ctest_problem = _valid_executable_override(
+            configured.ctest_path, "ctest.exe",
+        )
+        ctest_source = "user-configured"
+    elif configured.mode == "manual":
+        ctest_problem = "Manual ctest.exe path is not selected"
+        ctest_source = "manual"
+    elif cmake is not None:
+        adjacent = cmake.with_name("ctest.exe")
+        if adjacent.is_file() and not adjacent.is_symlink():
+            ctest = adjacent.resolve()
+            ctest_source = "beside selected CMake"
+        else:
+            ctest = _which_fresh("ctest")
+            if ctest is not None:
+                ctest_source = "current machine/user PATH fallback"
+    elif configured.mode == "auto":
+        ctest = _which_fresh("ctest")
+        if ctest is not None:
+            ctest_source = "current machine/user PATH fallback"
+
+    cmake_version: str | None = None
     if cmake is not None:
-        cmake_version, cmake_problem = _executable_version(cmake, "cmake")
-    cmake_ready = (
-        cmake is not None
-        and cmake_problem is None
+        cmake_version, version_problem = _executable_version(cmake, "cmake")
+        cmake_problem = cmake_problem or version_problem
+    cmake_ready = bool(
+        cmake is not None and cmake_problem is None
         and _version_tuple(cmake_version) >= _MINIMUM_CMAKE
     )
+    if cmake_version and _version_tuple(cmake_version) < _MINIMUM_CMAKE:
+        cmake_problem = f"CMake {cmake_version} is older than required 3.20"
+    bundled_cmake_missing = bool(
+        visual_studio is not None
+        and _visual_studio_bundled_cmake(visual_studio) is None
+    )
+    vs_install_argument = (
+        str(visual_studio) if visual_studio is not None
+        else r"<VISUAL_STUDIO_INSTALLATION>"
+    )
+    vs_cmake_repair = (
+        f"Visual Studio component: {_VC_CMAKE_COMPONENT} "
+        "(C++ CMake tools for Windows). PowerShell: "
+        "$setup = \"${env:ProgramFiles(x86)}\\Microsoft Visual Studio\\Installer\\setup.exe\"; "
+        f"& $setup modify --installPath \"{vs_install_argument}\" --add "
+        f"{_VC_CMAKE_COMPONENT} --passive --norestart. Alternative: "
+        "winget install --id Kitware.CMake --exact --source winget"
+    )
+    cmake_detected = (
+        f"{cmake_version} — {cmake} [{cmake_source}]"
+        if cmake is not None and cmake_version else cmake_problem or
+        "Not found in Visual Studio, current PATH, or Program Files"
+    )
+    if bundled_cmake_missing and cmake is not None:
+        cmake_detected += (
+            f" · optional VS component missing: {_VC_CMAKE_COMPONENT}"
+        )
     record(
-        "cmake",
-        "CMake",
-        cmake_ready,
-        (
-            f"{cmake_version} — {cmake}" if cmake is not None and cmake_version
-            else cmake_problem or "Not found on PATH"
-        ),
+        "cmake", "CMake", cmake_ready,
+        cmake_detected,
         "CMake 3.20 or newer",
-        "Install current CMake for Windows and enable its Add to PATH option.",
+        vs_cmake_repair,
+        cmake_problem or "",
     )
 
     ctest_version: str | None = None
-    ctest_problem: str | None = None
     if ctest is not None:
-        ctest_version, ctest_problem = _executable_version(ctest, "ctest")
-    ctest_ready = (
-        ctest is not None
-        and ctest_problem is None
-        and ctest_version is not None
-        and cmake_version is not None
+        ctest_version, version_problem = _executable_version(ctest, "ctest")
+        ctest_problem = ctest_problem or version_problem
+    same_installation = _same_tool_installation(cmake, ctest)
+    same_version = bool(
+        ctest_version and cmake_version
         and _version_tuple(ctest_version) == _version_tuple(cmake_version)
     )
-    ctest_detected = ctest_problem or "Not found beside CMake or on PATH"
-    if ctest is not None and ctest_version:
-        ctest_detected = f"{ctest_version} — {ctest}"
-        if cmake_version and not ctest_ready:
-            ctest_detected += f" (does not match CMake {cmake_version})"
+    if ctest is not None and cmake is not None and not same_installation:
+        ctest_problem = (
+            "CTest is from a different installation than the selected CMake"
+        )
+    elif ctest_version and cmake_version and not same_version:
+        ctest_problem = f"CTest {ctest_version} does not match CMake {cmake_version}"
+    ctest_ready = bool(
+        ctest is not None and ctest_problem is None
+        and same_installation and same_version
+    )
     record(
-        "ctest",
-        "CTest",
-        ctest_ready,
-        ctest_detected,
-        "CTest from the same versioned CMake toolchain",
-        "Repair CMake or put its bin directory first on PATH so cmake and ctest match.",
+        "ctest", "CTest", ctest_ready,
+        (
+            f"{ctest_version} — {ctest} [{ctest_source}]"
+            if ctest is not None and ctest_version else ctest_problem or
+            "Not found beside the selected CMake or on the current PATH"
+        ),
+        "CTest beside and version-matched to the selected CMake",
+        (
+            "Select the ctest.exe installed beside cmake.exe, or repair the same "
+            "CMake installation. Do not mix CMake tool directories."
+        ),
+        ctest_problem or "",
     )
 
-    (
-        visual_studio,
-        visual_studio_version,
-        visual_studio_name,
-        vc_workload_ready,
-        visual_studio_problem,
-    ) = _visual_studio_details()
     cmake_generator: str | None = None
     generator_problem: str | None = None
     if visual_studio is not None:
@@ -722,48 +1256,44 @@ def inspect_native_axle_toolchain(
             visual_studio,
         )
         if cmake_generator is None and visual_studio_version:
-            major = _version_tuple(visual_studio_version)[0]
+            version_parts = _version_tuple(visual_studio_version)
+            major = version_parts[0] if version_parts else None
             cmake_generator = {
                 16: "Visual Studio 16 2019",
                 17: "Visual Studio 17 2022",
                 18: "Visual Studio 18 2026",
             }.get(major)
-            generator_problem = (
-                None if cmake_generator else
+            generator_problem = None if cmake_generator else (
                 f"Visual Studio {visual_studio_version} is not supported"
             )
-    vs_major = (
-        _version_tuple(visual_studio_version)[0]
-        if _version_tuple(visual_studio_version) else None
-    )
-    visual_studio_ready = (
-        visual_studio is not None
-        and visual_studio_problem is None
-        and cmake_generator is not None
-        and vs_major in {16, 17, 18}
+    vs_parts = _version_tuple(visual_studio_version)
+    vs_major = vs_parts[0] if vs_parts else None
+    visual_studio_ready = bool(
+        visual_studio is not None and visual_studio_problem is None
+        and cmake_generator is not None and vs_major in {16, 17, 18}
     )
     record(
-        "visual_studio",
-        "Visual Studio",
-        visual_studio_ready,
+        "visual_studio", "Visual Studio", visual_studio_ready,
         (
             f"{visual_studio_name or 'Visual Studio'} {visual_studio_version or ''} — "
-            f"{visual_studio}" if visual_studio is not None
-            else visual_studio_problem or "Not found"
+            f"{visual_studio} [{visual_studio_source}]"
+            if visual_studio is not None else visual_studio_problem or "Not found"
         ),
-        "Supported Visual Studio 2019 or newer installation",
-        "Install Visual Studio Build Tools 2022 or newer through the Visual Studio Installer.",
-        generator_problem or "",
+        "Visual Studio 2019 or newer with a compatible CMake generator",
+        "Install Visual Studio Build Tools 2022 or newer, then press Recheck.",
+        generator_problem or visual_studio_problem or "",
     )
     record(
-        "vc_workload",
-        "VC x86/x64 workload",
+        "vc_workload", "Desktop C++ / VC x86-x64 workload",
         visual_studio_ready and vc_workload_ready,
         "Installed" if vc_workload_ready else "Not detected",
-        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
         (
-            "Open Visual Studio Installer, choose Modify, select Desktop development "
-            "with C++, and include MSVC x86/x64 build tools."
+            f"{_NATIVE_DESKTOP_WORKLOAD} or {_BUILD_TOOLS_CPP_WORKLOAD}, "
+            f"with {_VC_WORKLOAD}"
+        ),
+        (
+            "Open Visual Studio Installer, choose Modify, select Desktop "
+            "development with C++, and include MSVC x86/x64 build tools."
         ),
     )
 
@@ -772,54 +1302,59 @@ def inspect_native_axle_toolchain(
     cl_path: Path | None = None
     toolset_problem: str | None = None
     if visual_studio is not None and vc_workload_ready:
-        (
-            toolset_root, msvc_toolset_version, cl_path, toolset_problem,
-        ) = _msvc_toolset(visual_studio)
+        if explicitly_selected_cl is not None:
+            toolset_root, msvc_toolset_version, cl_path, toolset_problem = (
+                _configured_msvc_toolset(
+                    explicitly_selected_cl, visual_studio,
+                )
+            )
+        else:
+            toolset_root, msvc_toolset_version, cl_path, toolset_problem = (
+                _msvc_toolset(visual_studio)
+            )
     cl_version: str | None = None
     cl_target: str | None = None
     cl_problem: str | None = None
     if cl_path is not None:
         cl_version, cl_target, cl_problem = _compiler_banner(cl_path)
-    cl_ready = cl_path is not None and cl_version is not None and cl_problem is None
+    cl_ready = bool(cl_path is not None and cl_version and not cl_problem)
     record(
-        "compiler",
-        "MSVC compiler",
-        cl_ready,
+        "compiler", "MSVC compiler", cl_ready,
         (
             f"cl.exe {cl_version} for {cl_target} — {cl_path}"
             if cl_ready else cl_problem or toolset_problem or "Not found"
         ),
-        "An actual cl.exe /Bv result from the selected Visual Studio installation",
+        "Actual Host x64 / Target x64 cl.exe verified using cl.exe /Bv",
         "Repair the Visual C++ workload and its latest x64 compiler tools.",
+        cl_problem or toolset_problem or "",
     )
 
     toolset_tuple = _version_tuple(msvc_toolset_version)
     toolset_ready = bool(
-        toolset_root is not None
-        and toolset_tuple >= _MINIMUM_MSVC_TOOLSET
+        toolset_root is not None and toolset_tuple >= _MINIMUM_MSVC_TOOLSET
         and toolset_tuple < _MAXIMUM_MSVC_TOOLSET
     )
     record(
-        "msvc_toolset",
-        "MSVC toolset",
-        toolset_ready,
+        "msvc_toolset", "MSVC toolset", toolset_ready,
         msvc_toolset_version or toolset_problem or "Not detected",
         "Supported MSVC v142/v143-compatible toolset (14.20 through 14.x)",
         "Install or update the MSVC x64/x86 build tools in Visual Studio Installer.",
     )
 
     windows_sdk_version, windows_sdk_root, windows_sdk_problem = _windows_sdk()
-    windows_sdk_ready = windows_sdk_version is not None and windows_sdk_root is not None
+    windows_sdk_ready = bool(windows_sdk_version and windows_sdk_root)
     record(
-        "windows_sdk",
-        "Windows SDK",
-        windows_sdk_ready,
+        "windows_sdk", "Windows SDK", windows_sdk_ready,
         (
             f"{windows_sdk_version} — {windows_sdk_root}"
             if windows_sdk_ready else windows_sdk_problem or "Not found"
         ),
-        "Complete Windows 10/11 SDK with UM and UCRT headers",
-        "Add the Windows 10 or Windows 11 SDK from Visual Studio Installer Individual components.",
+        "Complete Windows 10/11 SDK with x64 UM and UCRT headers/libraries",
+        (
+            "Add the Windows 10 or Windows 11 SDK from Visual Studio Installer "
+            "Individual components, then press Recheck."
+        ),
+        windows_sdk_problem or "",
     )
 
     host_architecture = (
@@ -829,32 +1364,73 @@ def inspect_native_axle_toolchain(
     target_architecture = "x64" if cl_target == "x64" else cl_target
     architecture_ready = host_architecture == "x64" and target_architecture == "x64"
     record(
-        "architecture",
-        "Compiler architecture",
-        architecture_ready,
+        "architecture", "Compiler architecture", architecture_ready,
         f"Host {host_architecture or 'unknown'} / Target {target_architecture or 'unknown'}",
         "Host x64 and Target x64",
         "Install the x64 MSVC tools; 32-bit host or target compilers are not supported.",
     )
 
+    selected_versions = {
+        "cmake": cmake_version,
+        "ctest": ctest_version,
+        "visual_studio": visual_studio_version,
+        "cl": cl_version,
+        "msvc_toolset": msvc_toolset_version,
+        "windows_sdk": windows_sdk_version,
+    }
+    component_identities, selection_id = _selection_fingerprint(
+        cmake=cmake,
+        ctest=ctest,
+        visual_studio=visual_studio,
+        cl_path=cl_path,
+        windows_sdk_root=windows_sdk_root,
+        versions=selected_versions,
+        generator=cmake_generator,
+    )
+    identity_names = {name for name, _digest in component_identities}
+    required_identities = {"cmake", "ctest", "visual_studio", "cl", "windows_sdk"}
+    missing_identities = sorted(required_identities - identity_names)
+    identities_ready = not missing_identities and selection_id is not None
+    record(
+        "selection_identity", "Toolchain identity", identities_ready,
+        (
+            "Verified SHA-256 identities for CMake, CTest, Visual Studio/MSBuild, "
+            "cl.exe, and the Windows SDK"
+            if identities_ready else
+            "Could not fingerprint: " + ", ".join(missing_identities)
+        ),
+        "Readable immutable identities for every selected build component",
+        (
+            "Repair file permissions or the named installation, then press "
+            "Recheck. Builds cannot use a partially fingerprinted toolchain."
+        ),
+    )
+
     prerequisites_ready = all(check.ready for check in checks)
     probe_succeeded = False
     probe_detail = "Not run because prerequisite checks failed"
-    if prerequisites_ready and cmake is not None and cmake_generator is not None:
+    if (
+        prerequisites_ready and cmake is not None and ctest is not None
+        and cmake_generator is not None
+    ):
         probe_succeeded, probe_detail = _run_cpp17_static_probe(
             cmake=cmake,
+            ctest=ctest,
             generator=cmake_generator,
+            visual_studio=visual_studio,
+            cl_path=cl_path,
+            toolset_version=msvc_toolset_version,
+            windows_sdk_version=windows_sdk_version,
+            windows_sdk_path=windows_sdk_root,
         )
     record(
-        "compile_probe",
-        "Isolated compile probe",
-        probe_succeeded,
+        "compile_probe", "Isolated compile + CTest probe", probe_succeeded,
         probe_detail,
-        "Successful isolated C++17 x64 compile/link using the static MSVC runtime",
         (
-            "Review the probe detail, repair the reported compiler/SDK component, "
-            "then press Recheck."
+            "Successful isolated C++17 Release x64 configure/build/link/CTest "
+            "using the selected VS instance and static MSVC runtime"
         ),
+        "Review the probe detail, repair the named component, then press Recheck.",
     )
 
     problems = tuple(
@@ -888,6 +1464,22 @@ def inspect_native_axle_toolchain(
         probe_detail=probe_detail,
         checks=tuple(checks),
         guidance=guidance,
+        settings_mode=configured.mode,
+        cmake_discovery_source=cmake_source,
+        ctest_discovery_source=ctest_source,
+        visual_studio_discovery_source=visual_studio_source,
+        cmake_generator_architecture="x64",
+        cmake_toolset=(
+            f"version={msvc_toolset_version},host=x64"
+            if msvc_toolset_version else None
+        ),
+        windows_sdk_path=windows_sdk_root,
+        visual_studio_instance_id=(
+            f"{visual_studio_name or 'Visual Studio'} {visual_studio_version or ''}".strip()
+            if visual_studio is not None else None
+        ),
+        component_identities=component_identities,
+        selection_fingerprint=selection_id,
     )
 
 
@@ -900,6 +1492,7 @@ class StoryAxleRuntimeBuildRequest:
     build_id: str = "allin1-sdk-local"
     create_archives: bool = True
     protected_gta_roots: tuple[Path, ...] = ()
+    toolchain_report: NativeAxleToolchainReport | None = None
 
     def validate(self) -> "StoryAxleRuntimeBuildRequest":
         targets = tuple(dict.fromkeys(str(value).strip().casefold() for value in self.targets))
@@ -917,6 +1510,12 @@ class StoryAxleRuntimeBuildRequest:
             raise ValueError(f"Native axle builds must be staged outside GTA V: {game_root}")
         if not isinstance(self.settings, StoryAxleRuntimeSettings):
             raise ValueError("Runtime settings must use StoryAxleRuntimeSettings")
+        if self.toolchain_report is not None and not isinstance(
+            self.toolchain_report, NativeAxleToolchainReport,
+        ):
+            raise ValueError(
+                "Native build toolchain must use NativeAxleToolchainReport"
+            )
         settings = self.settings.normalize_selected_paths(
             self.protected_gta_roots,
         )
@@ -1072,6 +1671,7 @@ def _portable_command_records(
     for tool_path in (
         toolchain.cmake_path, toolchain.ctest_path,
         toolchain.visual_studio_path, toolchain.cl_path,
+        toolchain.windows_sdk_path,
     ):
         if tool_path is not None:
             replacements.append((Path(tool_path), "<toolchain>"))
@@ -1149,6 +1749,7 @@ def _run_command(
     *,
     cwd: Path,
     timeout: int,
+    env: Mapping[str, str] | None = None,
 ) -> NativeBuildCommandRecord:
     started = time.monotonic()
     try:
@@ -1161,6 +1762,7 @@ def _run_command(
             errors="replace",
             timeout=timeout,
             check=False,
+            env=dict(env) if env is not None else None,
         )
     except subprocess.TimeoutExpired as exc:
         raise StoryAxleRuntimeBuildError(f"{name} exceeded its {timeout}-second timeout") from exc
@@ -1306,6 +1908,107 @@ def _write_checksum(path: Path, digest: str) -> None:
     )
 
 
+def _verify_preflight_selection(
+    report: NativeAxleToolchainReport,
+    *,
+    source_root: Path,
+) -> NativeAxleToolchainReport:
+    """Fail if an immutable preflight selection drifted before the real build."""
+
+    if not report.ready:
+        raise StoryAxleRuntimeBuildError(
+            "; ".join(report.problems) or "Native toolchain preflight is not READY"
+        )
+    if report.selection_fingerprint is None and not report.component_identities:
+        raise StoryAxleRuntimeBuildError(
+            "Native toolchain report has no verified component identities; press Recheck"
+        )
+    if not report.probe_succeeded:
+        raise StoryAxleRuntimeBuildError(
+            "Native toolchain preflight probe was not successful"
+        )
+    required = {
+        "cmake.exe": report.cmake_path,
+        "ctest.exe": report.ctest_path,
+        "Visual Studio": report.visual_studio_path,
+        "x64 cl.exe": report.cl_path,
+        "Windows SDK": report.windows_sdk_path,
+    }
+    missing = [
+        label for label, path in required.items()
+        if path is None or not Path(path).exists()
+    ]
+    if missing:
+        raise StoryAxleRuntimeBuildError(
+            "Preflight selection changed or disappeared: " + ", ".join(missing)
+        )
+    if report.source_root.resolve(strict=False) != source_root.resolve(strict=False):
+        raise StoryAxleRuntimeBuildError(
+            "Controller source changed after preflight; press Recheck"
+        )
+    assert report.cmake_path is not None
+    assert report.ctest_path is not None
+    assert report.visual_studio_path is not None
+    assert report.cl_path is not None
+    assert report.windows_sdk_path is not None
+    if not _same_tool_installation(report.cmake_path, report.ctest_path):
+        raise StoryAxleRuntimeBuildError(
+            "Selected CMake and CTest no longer belong to the same installation"
+        )
+    cmake_version, cmake_problem = _executable_version(report.cmake_path, "cmake")
+    ctest_version, ctest_problem = _executable_version(report.ctest_path, "ctest")
+    cl_version, cl_target, cl_problem = _compiler_banner(report.cl_path)
+    if cmake_problem or cmake_version != report.cmake_version:
+        raise StoryAxleRuntimeBuildError(
+            "Selected CMake changed after preflight; press Recheck"
+        )
+    if ctest_problem or ctest_version != report.ctest_version:
+        raise StoryAxleRuntimeBuildError(
+            "Selected CTest changed after preflight; press Recheck"
+        )
+    if (
+        cl_problem or cl_version != report.cl_version
+        or cl_target != report.target_architecture
+    ):
+        raise StoryAxleRuntimeBuildError(
+            "Selected x64 compiler changed after preflight; press Recheck"
+        )
+    sdk_version = report.windows_sdk_version
+    if not sdk_version or not (
+        report.windows_sdk_path / "Include" / sdk_version / "um" / "Windows.h"
+    ).is_file() or not (
+        report.windows_sdk_path / "Lib" / sdk_version / "um" / "x64" /
+        "kernel32.lib"
+    ).is_file():
+        raise StoryAxleRuntimeBuildError(
+            "Selected Windows SDK changed after preflight; press Recheck"
+        )
+    current_components, fingerprint = _selection_fingerprint(
+        cmake=report.cmake_path,
+        ctest=report.ctest_path,
+        visual_studio=report.visual_studio_path,
+        cl_path=report.cl_path,
+        windows_sdk_root=report.windows_sdk_path,
+        versions={
+            "cmake": cmake_version,
+            "ctest": ctest_version,
+            "visual_studio": report.visual_studio_version,
+            "cl": cl_version,
+            "msvc_toolset": report.msvc_toolset_version,
+            "windows_sdk": report.windows_sdk_version,
+        },
+        generator=report.cmake_generator,
+    )
+    if (
+        tuple(current_components) != tuple(report.component_identities)
+        or fingerprint != report.selection_fingerprint
+    ):
+        raise StoryAxleRuntimeBuildError(
+            "A selected tool executable changed after preflight; press Recheck"
+        )
+    return report
+
+
 def build_story_axle_runtime_candidate(
     request: StoryAxleRuntimeBuildRequest,
     *,
@@ -1316,7 +2019,12 @@ def build_story_axle_runtime_candidate(
 
     planned = request.validate()
     source = (source_root or _runtime_source_root()).expanduser().resolve(strict=False)
-    toolchain = inspect_native_axle_toolchain(source_root=source)
+    # The desktop workbench passes the exact report it displayed. CLI callers
+    # without one perform one preflight here, then use that same selection for
+    # every command below; no command performs an independent PATH lookup.
+    toolchain = planned.toolchain_report or inspect_native_axle_toolchain(
+        source_root=source,
+    )
     if (
         not toolchain.ready
         or toolchain.cmake_path is None
@@ -1324,6 +2032,7 @@ def build_story_axle_runtime_candidate(
         or toolchain.cmake_generator is None
     ):
         raise StoryAxleRuntimeBuildError("; ".join(toolchain.problems))
+    toolchain = _verify_preflight_selection(toolchain, source_root=source)
     runtime_version = _runtime_version(source)
     output = planned.output_directory
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1334,18 +2043,33 @@ def build_story_axle_runtime_candidate(
     publish = temporary_root / "publish"
     commands: list[NativeBuildCommandRecord] = []
     callback = progress or (lambda _message: None)
+    selected_environment = _selected_toolchain_environment(
+        windows_sdk_path=toolchain.windows_sdk_path,
+        windows_sdk_version=toolchain.windows_sdk_version,
+    )
     try:
         callback("Configuring native axle runtime")
+        configure_command: list[str | Path] = [
+            toolchain.cmake_path, "-S", source, "-B", build_directory,
+        ]
+        configure_command.extend(_cmake_selection_arguments(
+            generator=toolchain.cmake_generator,
+            visual_studio=toolchain.visual_studio_path,
+            cl_path=toolchain.cl_path,
+            toolset_version=toolchain.msvc_toolset_version,
+            windows_sdk_version=toolchain.windows_sdk_version,
+            windows_sdk_path=toolchain.windows_sdk_path,
+        ))
+        configure_command.extend([
+            "-DVWA_BUILD_STORY_HOSTS=ON", "-DVWA_BUILD_TESTS=ON",
+            "-DVWA_BUILD_CONFIG_VALIDATOR=ON",
+            "-DVWA_BUILD_SETTINGS_EDITOR=ON",
+        ])
         commands.append(_run_command(
             "CMake configure",
-            [
-                toolchain.cmake_path, "-S", source, "-B", build_directory,
-                "-G", toolchain.cmake_generator, "-A", "x64",
-                "-DVWA_BUILD_STORY_HOSTS=ON", "-DVWA_BUILD_TESTS=ON",
-                "-DVWA_BUILD_CONFIG_VALIDATOR=ON",
-                "-DVWA_BUILD_SETTINGS_EDITOR=ON",
-            ],
+            configure_command,
             cwd=source, timeout=_COMMAND_TIMEOUT_SECONDS,
+            env=selected_environment,
         ))
         callback("Compiling Legacy and Enhanced controllers")
         commands.append(_run_command(
@@ -1355,6 +2079,7 @@ def build_story_axle_runtime_candidate(
                 "--config", "Release", "--parallel",
             ],
             cwd=source, timeout=_COMMAND_TIMEOUT_SECONDS,
+            env=selected_environment,
         ))
         callback("Running native controller tests")
         commands.append(_run_command(
@@ -1364,6 +2089,7 @@ def build_story_axle_runtime_candidate(
                 "-C", "Release", "--output-on-failure",
             ],
             cwd=source, timeout=_COMMAND_TIMEOUT_SECONDS,
+            env=selected_environment,
         ))
 
         validator = build_directory / "Release" / "VehicleWorkbenchAxlesConfigValidator.exe"
@@ -1392,6 +2118,9 @@ def build_story_axle_runtime_candidate(
         binary_hashes: dict[str, str] = {}
         for target in planned.targets:
             edition = _TARGET_LABELS[target]
+            runtime_geometry_recompute = (
+                _target_supports_wheel_local_position(source, target)
+            )
             callback(f"Staging {edition} controller")
             binary = (
                 build_directory / f"story-{edition}" / "Release" /
@@ -1455,7 +2184,9 @@ def build_story_axle_runtime_candidate(
             for item in planned.configurations:
                 targeted = retarget_axle_configuration(item.configuration, target)
                 payload = story_native_runtime_configuration(
-                    targeted, bones=item.steering_evidence_bones,
+                    targeted,
+                    bones=item.steering_evidence_bones,
+                    runtime_geometry_recompute=runtime_geometry_recompute,
                 )
                 name = _safe_config_name(targeted.vehicle_model)
                 destination = config_root / name
@@ -1535,7 +2266,7 @@ def build_story_axle_runtime_candidate(
             commands.append(_run_command(
                 "Native configuration validation",
                 [validator, *all_configs],
-                cwd=source, timeout=120,
+                cwd=source, timeout=120, env=selected_environment,
             ))
 
         archives: list[Path] = []
@@ -1583,6 +2314,7 @@ def build_story_axle_runtime_candidate(
             toolchain=toolchain,
         )
         command_payload = [record.to_dict() for record in portable_commands]
+        portable_identities = dict(toolchain.component_identities)
         manifest = publish / "build-manifest.json"
         _write_json(manifest, {
             "schema_version": 1,
@@ -1603,6 +2335,37 @@ def build_story_axle_runtime_candidate(
             "binary_sha256": binary_hashes,
             "settings_editor_sha256": settings_editor_sha256,
             "archives": archive_hashes,
+            "toolchain": {
+                "selection_fingerprint": toolchain.selection_fingerprint,
+                "cmake": {
+                    "version": toolchain.cmake_version,
+                    "discovery_source": toolchain.cmake_discovery_source,
+                    "executable_sha256": portable_identities.get("cmake"),
+                },
+                "ctest": {
+                    "version": toolchain.ctest_version,
+                    "discovery_source": toolchain.ctest_discovery_source,
+                    "executable_sha256": portable_identities.get("ctest"),
+                },
+                "visual_studio": {
+                    "identity": toolchain.visual_studio_instance_id,
+                    "version": toolchain.visual_studio_version,
+                    "discovery_source": (
+                        toolchain.visual_studio_discovery_source
+                    ),
+                    "generator": toolchain.cmake_generator,
+                    "architecture": toolchain.cmake_generator_architecture,
+                },
+                "compiler": {
+                    "version": toolchain.cl_version,
+                    "toolset_version": toolchain.msvc_toolset_version,
+                    "host": toolchain.host_architecture,
+                    "target": toolchain.target_architecture,
+                    "executable_sha256": portable_identities.get("cl"),
+                },
+                "windows_sdk_version": toolchain.windows_sdk_version,
+                "preflight_probe": "passed",
+            },
             "validation": {
                 "cmake_build": "passed",
                 "ctest": "passed",
@@ -1617,10 +2380,16 @@ def build_story_axle_runtime_candidate(
             },
             "commands": command_payload,
         })
-        _assert_no_local_path_leaks(
-            publish,
-            (temporary_root, source, Path.home()),
-        )
+        forbidden_roots: list[Path] = [temporary_root, source, Path.home()]
+        for selected_path in (
+            toolchain.cmake_path, toolchain.ctest_path,
+            toolchain.visual_studio_path, toolchain.cl_path,
+            toolchain.windows_sdk_path,
+        ):
+            if selected_path is not None:
+                selected = Path(selected_path).resolve(strict=False)
+                forbidden_roots.append(selected if selected.is_dir() else selected.parent)
+        _assert_no_local_path_leaks(publish, tuple(forbidden_roots))
         if output.exists() or output.is_symlink():
             raise FileExistsError(f"Output appeared while the build was running: {output}")
         # Windows rename is a no-clobber operation. The preflight above also
@@ -1648,7 +2417,8 @@ def build_story_axle_runtime_candidate(
 
 
 __all__ = [
-    "NativeAxleToolchainReport", "NativeToolchainCheck",
+    "NativeAxleToolchainReport", "NativeAxleToolchainSettings",
+    "NativeToolchainCheck",
     "StoryAxleRuntimeBuildError",
     "StoryAxleRuntimeBuildRequest", "StoryAxleRuntimeBuildResult",
     "StoryAxleRuntimeSettings", "build_story_axle_runtime_candidate",

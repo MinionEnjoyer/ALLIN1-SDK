@@ -75,6 +75,13 @@ class VehicleProjectModel:
         )
 
     @property
+    def collision_asset(self) -> str | None:
+        return next(
+            (item.path for item in self.assets if item.role == "collision_dictionary"),
+            None,
+        )
+
+    @property
     def ready_for_preview(self) -> bool:
         return self.primary_model is not None or self.high_detail_model is not None
 
@@ -88,6 +95,7 @@ class VehicleProjectModel:
             "primary_model": self.primary_model,
             "high_detail_model": self.high_detail_model,
             "texture_asset": self.texture_asset,
+            "collision_asset": self.collision_asset,
             "ready_for_preview": self.ready_for_preview,
             "complete": self.complete,
         })
@@ -271,7 +279,9 @@ class VehicleProjectResolver:
                 path=entry.path,
                 size=entry.size,
                 required=required,
-                previewable=entry.suffix in {".yft", ".ytd", ".ydr", ".ydd"},
+                previewable=entry.suffix in {
+                    ".ybn", ".yft", ".ytd", ".ydr", ".ydd",
+                },
             ))
 
         model_key = vehicle.model.casefold()
@@ -286,6 +296,12 @@ class VehicleProjectResolver:
             else:
                 role = "model_dependency"
             bind(role, path, required=role == "primary_model")
+        primary_binding = next(
+            (item for item in bindings if item.role == "primary_model"), None,
+        )
+        if primary_binding is not None:
+            collision_path = PurePosixPath(primary_binding.path).with_suffix(".ybn")
+            bind("collision_dictionary", collision_path.as_posix(), required=False)
         for path in vehicle.texture_assets:
             bind("texture_dictionary", path)
         for path in vehicle.metadata_sources:

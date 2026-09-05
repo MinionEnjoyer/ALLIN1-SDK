@@ -542,13 +542,35 @@ ExecutableSignatureResolver::Resolve(const std::string& pattern,
         return std::nullopt;
     }
     std::optional<std::uintptr_t> unique_match;
+    const auto anchor_iterator = std::find_if(
+        normalized_mask.begin(), normalized_mask.end(),
+        [](char value) { return value != '?'; });
+    const auto anchor = anchor_iterator == normalized_mask.end()
+                            ? bytes.size()
+                            : static_cast<std::size_t>(
+                                  anchor_iterator - normalized_mask.begin());
     for (const auto& range : executable_ranges_) {
         if (range.end <= range.begin ||
             bytes.size() > static_cast<std::size_t>(range.end - range.begin)) {
             continue;
         }
         const auto last = range.end - bytes.size();
-        for (auto address = range.begin; address <= last; ++address) {
+        auto address = range.begin;
+        while (address <= last) {
+            // Jump between occurrences of one required byte instead of
+            // testing the full pattern at every executable byte. Wildcard
+            // semantics and unique-match rejection remain unchanged.
+            if (anchor < bytes.size()) {
+                const auto search_begin = address + anchor;
+                const auto search_last = last + anchor;
+                const auto remaining = static_cast<std::size_t>(
+                    search_last - search_begin + 1U);
+                const auto* found = static_cast<const std::uint8_t*>(
+                    std::memchr(reinterpret_cast<const void*>(search_begin),
+                                bytes[anchor], remaining));
+                if (!found) break;
+                address = reinterpret_cast<std::uintptr_t>(found) - anchor;
+            }
             const auto* candidate = reinterpret_cast<const std::uint8_t*>(address);
             bool matched = true;
             for (std::size_t index = 0; index < bytes.size(); ++index) {
@@ -562,6 +584,7 @@ ExecutableSignatureResolver::Resolve(const std::string& pattern,
                 if (unique_match.has_value()) return std::nullopt;
                 unique_match = address;
             }
+            ++address;
         }
     }
     return unique_match;
@@ -620,11 +643,21 @@ StoryVehicleHost::StoryVehicleHost(const ScriptHookApi& api,
         (compiled_edition_ == Edition::Enhanced &&
          EqualsIgnoreCase(filename, L"GTA5_Enhanced.exe"));
     if (!expected) identity_.edition = Edition::Unknown;
+    image_path_ = *image;
     identity_.build = ExecutableBuild(*image);
-    identity_.executable_fingerprint = Sha256File(*image);
 }
 
 GameIdentity StoryVehicleHost::DetectGame() const {
+    // Hashing the GTA executable can touch hundreds of megabytes. Defer it
+    // until a validated configuration actually requires build-profile
+    // resolution instead of charging every inactive/no-config installation at
+    // ScriptHook startup.
+    if (!fingerprint_resolved_) {
+        fingerprint_resolved_ = true;
+        if (identity_.edition != Edition::Unknown && !image_path_.empty()) {
+            identity_.executable_fingerprint = Sha256File(image_path_);
+        }
+    }
     return identity_;
 }
 
@@ -645,8 +678,13 @@ bool StoryVehicleHost::IsOnlineSession() const {
 
 std::vector<VehicleSnapshot> StoryVehicleHost::EnumerateVehicles() {
     std::vector<VehicleSnapshot> result;
-    for (const auto handle : api_.EnumerateVehicleHandles()) {
-        const auto snapshot = Snapshot(handle);
+    const auto handles = api_.EnumerateVehicleHandles();
+    result.reserve(handles.size());
+    for (const auto handle : handles) {
+        // worldGetAllVehicles already produced a live world handle. A second
+        // DOES_ENTITY_EXIST native for every vehicle was redundant;
+        // GET_ENTITY_MODEL below remains the authoritative snapshot filter.
+        const auto snapshot = Snapshot(handle, false);
         if (snapshot.has_value()) result.push_back(*snapshot);
     }
     return result;
@@ -659,7 +697,10 @@ StoryVehicleHost::LookupVehicle(std::uint64_t entity_id) {
                         std::numeric_limits<std::int32_t>::max())) {
         return std::nullopt;
     }
-    return Snapshot(static_cast<std::int32_t>(entity_id));
+    // GET_ENTITY_MODEL returns zero for a released handle and supplies the
+    // identity check required by the runtime. Avoid a redundant existence
+    // native on every 100 ms maintenance lookup.
+    return Snapshot(static_cast<std::int32_t>(entity_id), false);
 }
 
 bool StoryVehicleHost::SupportsPhysicsActivation() const noexcept {
@@ -679,10 +720,13 @@ bool StoryVehicleHost::ActivatePhysics(const VehicleSnapshot& vehicle) {
 }
 
 std::optional<VehicleSnapshot>
-StoryVehicleHost::Snapshot(std::int32_t handle) const {
+StoryVehicleHost::Snapshot(std::int32_t handle,
+                           bool verify_existence) const {
     if (handle <= 0) return std::nullopt;
-    const auto exists = api_.InvokeEntityBool(kDoesEntityExist, handle);
-    if (!exists.has_value() || !*exists) return std::nullopt;
+    if (verify_existence) {
+        const auto exists = api_.InvokeEntityBool(kDoesEntityExist, handle);
+        if (!exists.has_value() || !*exists) return std::nullopt;
+    }
     const auto model = api_.InvokeEntityHash(kGetEntityModel, handle);
     if (!model.has_value() || *model == 0) return std::nullopt;
     VehicleSnapshot snapshot;

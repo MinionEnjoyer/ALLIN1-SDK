@@ -1,0 +1,16 @@
+.code-editor-shell { border: 1px solid var(--border); min-width: 0; }
+.code-editor-toolbar, .code-document-strip { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 12px; background: var(--surface-muted); color: var(--muted); font-size: 13px; }
+.code-document-strip { margin-top: 16px; border: 1px solid var(--border); border-bottom: 0; }
+.code-document-strip > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code-editor-toolbar { border-bottom: 1px solid var(--border); }
+.code-editor-surface { height: clamp(300px, 48vh, 640px); min-width: 0; }
+.code-save-copy { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; padding: 14px 0; }
+.code-save-copy label { display: grid; gap: 6px; }
+.code-save-copy p { color: var(--muted); margin: 0; }
+.code-diagnostics { border-top: 1px solid var(--border); padding: 14px 0; }
+.code-diagnostics p { margin: 6px 0; color: var(--muted); }
+.code-diff pre { max-height: 300px; overflow: auto; padding: 12px; color: var(--text); background: var(--surface-muted); border: 1px solid var(--border); white-space: pre; }
+.code-editor-surface .cm-search input { color: var(--text); background: var(--surface); border: 1px solid var(--border); }
+@media (max-width: 850px) { .code-editor-toolbar > span { display: none; } .code-document-strip { flex-direction: column; align-items: start; } }
+.code-editor-shell { --code-keyword: #683e91; --code-string: #176344; --code-value: #215e87; }
+:root[data-theme="dark"] .code-editor-shell { --code-keyword: #d7b3f7; --code-string: #93d5a6; --code-value: #99ccef; }

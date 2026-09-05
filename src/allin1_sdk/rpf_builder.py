@@ -153,10 +153,13 @@ class RpfArchiveBuilder:
         return _SourceSnapshot(tuple(rows), file_count, byte_count, archive_count)
 
     def _run_builder(self, loose: Path, output: Path) -> None:
+        # All inputs here are owned loose files or recursively built OPEN RPFs.
+        # Loading game keys is unnecessary for creation and prevents isolated
+        # authoring with an edition-only decoder context. Readback still uses
+        # the selected edition through self.service.
         completed = run_hidden(
             [
                 self.service.patcher, "build-dlc", loose, output,
-                "--gta-path", self.service.gta_path,
             ],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
         )

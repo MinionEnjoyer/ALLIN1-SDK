@@ -94,6 +94,7 @@ def _payload(source: Path, archive_path: str, entry_path: str) -> bytes:
 
 def _builder_runner(args, **_kwargs):
     assert args[1] == "build-dlc"
+    assert "--gta-path" not in args  # New OPEN archives must not require game keys.
     Path(args[3]).write_bytes(_pack_folder(Path(args[2])))
     return SimpleNamespace(returncode=0, stdout="built", stderr="")
 

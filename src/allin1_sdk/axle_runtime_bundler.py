@@ -14,7 +14,7 @@ import shutil
 import struct
 import tempfile
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
@@ -37,6 +37,7 @@ from allin1_sdk.axle_configurator import (
     validate_axle_configuration,
 )
 from allin1_sdk.paths import gta_root_containing
+from allin1_sdk.release_paths import strict_json
 
 
 BUNDLE_SCHEMA_VERSION = 1
@@ -251,7 +252,7 @@ def _safe_regular_file(
 def _bounded_json_object(path: Path, label: str, maximum_bytes: int) -> dict[str, Any]:
     source = _safe_regular_file(path, label, maximum_bytes=maximum_bytes)
     try:
-        payload = json.loads(source.read_text("utf-8"))
+        payload = strict_json(source.read_text("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{label} is not valid UTF-8 JSON") from exc
     if not isinstance(payload, dict):
@@ -667,6 +668,10 @@ class StoryRuntimeValidationReceipt:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "StoryRuntimeValidationReceipt":
+        string_fields = {"receipt_id", "profile_id", "runtime_name", "target_id", "runtime_version",
+                         "binary_sha256", "binary_architecture", "validation_authority", "accepted_at", "license"}
+        if any(not isinstance(payload.get(key), str) for key in string_fields):
+            raise ValueError("Story runtime receipt is missing required string fields")
         tests = payload.get("acceptance_tests")
         builds = payload.get("supported_game_builds")
         exports = payload.get("required_exports")
@@ -846,6 +851,9 @@ class StoryRuntimeValidationReceipt:
             raise ValueError("Story runtime receipt accepted_at is not ISO-8601") from exc
         if accepted.tzinfo is None:
             raise ValueError("Story runtime receipt accepted_at must include a timezone")
+        now = datetime.now(timezone.utc)
+        if accepted > now or now - accepted > timedelta(days=7):
+            raise ValueError("Story runtime receipt is stale or future-dated; obtain fresh acceptance evidence")
         if not self.package_eligible:
             raise ValueError("Story runtime receipt is not package eligible")
         if not self.redistribution_allowed or not redistribution_allowed:
@@ -1625,6 +1633,8 @@ def _runtime_payload(
     target_id: str,
     runtime_config: AxleConfiguration,
     wheel_map: ResolvedWheelMap,
+    *,
+    runtime_geometry_recompute: bool | None = None,
 ) -> dict[str, Any]:
     """Serialize the native variable-length axle-controller contract.
 
@@ -1687,14 +1697,21 @@ def _runtime_payload(
         if calculation is None:
             raise ValueError("Signed runtime payload requires steering evidence")
         automatic = calculation.mode == STEERING_CALCULATION_AUTOMATIC
+        recompute = automatic and (
+            True
+            if runtime_geometry_recompute is None
+            else runtime_geometry_recompute
+        )
         steering_calculation: dict[str, Any] = {
             "mode": "automaticGeometry" if automatic else calculation.mode,
             "algorithmVersion": calculation.algorithm_version,
             "bonePositionSha256": calculation.bone_position_sha256,
             # Automatic authoring gains are a preview/fallback only.  The
-            # native controller must solve again from the loaded vehicle's
-            # local canonical wheel-bone positions.  Manual gains remain exact.
-            "runtimeRecompute": automatic,
+            # native controller solves again only when the selected exact-build
+            # profile exposes a validated local-wheel-position reader.  Other
+            # profiles retain the reviewed authoring result as a locked,
+            # fail-closed fallback.  Manual gains always remain exact.
+            "runtimeRecompute": recompute,
         }
         if calculation.physical_bone_pairs:
             steering_calculation["physicalBonePairs"] = [
@@ -1703,7 +1720,6 @@ def _runtime_payload(
             ]
         if automatic:
             steering_calculation.update({
-                "referenceSelection": "farthest_steered_axle",
                 "pivotLongitudinalPosition": (
                     calculation.pivot_longitudinal_position
                 ),
@@ -1718,6 +1734,10 @@ def _runtime_payload(
                 "pairPositionTolerance": calculation.pair_position_tolerance,
                 "positionEpsilon": calculation.position_epsilon,
             })
+            if recompute:
+                steering_calculation["referenceSelection"] = (
+                    "farthest_steered_axle"
+                )
         payload["steeringCalculation"] = steering_calculation
     if runtime_config.intentional_layout_override is not None:
         layout = runtime_config.intentional_layout_override
@@ -1783,13 +1803,16 @@ def story_native_runtime_configuration(
     config: AxleConfiguration,
     *,
     bones: Iterable[BoneLike] = (),
+    runtime_geometry_recompute: bool | None = None,
 ) -> dict[str, Any]:
     """Build one controller-ready native Story configuration.
 
     This writes no game files and does not bypass package/profile eligibility;
     it only produces the same target-specific JSON consumed by the native
-    ``VehicleWorkbenchAxles`` ASI.  Automatic geometry is refreshed and marked
-    for authoritative runtime-local recalculation.  Manual gains are preserved.
+    ``VehicleWorkbenchAxles`` ASI. Automatic geometry is refreshed. It is
+    marked for authoritative runtime-local recalculation unless the caller
+    explicitly disables that behavior for a target without a validated
+    local-wheel-position accessor. Manual gains are preserved.
     """
 
     if config.export_mode != EXPORT_FIVEM_RUNTIME:
@@ -1825,7 +1848,13 @@ def story_native_runtime_configuration(
     )
     _validated_configuration_findings(vehicle)
     runtime_config, wheel_map = _runtime_configuration(vehicle, targets[0])
-    return _runtime_payload(vehicle, targets[0], runtime_config, wheel_map)
+    return _runtime_payload(
+        vehicle,
+        targets[0],
+        runtime_config,
+        wheel_map,
+        runtime_geometry_recompute=runtime_geometry_recompute,
+    )
 
 
 def compatibility_configuration(

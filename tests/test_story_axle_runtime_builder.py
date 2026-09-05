@@ -119,6 +119,41 @@ def test_runtime_source_root_falls_back_to_wheel_data_files(
     assert builder._runtime_source_root() == wheel_runtime.resolve()
 
 
+def test_target_wheel_position_capability_is_read_from_exact_profile() -> None:
+    assert builder._target_supports_wheel_local_position(
+        RUNTIME, TARGET_STORY_LEGACY,
+    ) is False
+    assert builder._target_supports_wheel_local_position(
+        RUNTIME, TARGET_STORY_ENHANCED,
+    ) is False
+
+
+def test_malformed_target_capability_blocks_native_build_metadata(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "runtime"
+    profiles = source / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "compatibility.json").write_text(
+        json.dumps({
+            "profiles": {
+                TARGET_STORY_ENHANCED: {
+                    "capabilities": {"wheelLocalPosition": "yes"},
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        builder.StoryAxleRuntimeBuildError,
+        match="wheelLocalPosition capability must be boolean",
+    ):
+        builder._target_supports_wheel_local_position(
+            source, TARGET_STORY_ENHANCED,
+        )
+
+
 def test_runtime_paths_match_the_native_schema_two_contract() -> None:
     assert builder.validate_runtime_relative_path(
         r"scripts\ExampleTransitPack\VehicleSettings",
@@ -328,6 +363,18 @@ def _nominal_preflight(
     toolset = visual_studio / "VC" / "Tools" / "MSVC" / "14.44.35207"
     cl = toolset / "bin" / "Hostx64" / "x64" / "cl.exe"
     sdk = tmp_path / "Windows Kits" / "10"
+    for fixture in (
+        cmake,
+        ctest,
+        cl,
+        visual_studio / "MSBuild" / "Current" / "Bin" / "MSBuild.exe",
+        sdk / "Include" / "10.0.26100.0" / "um" / "Windows.h",
+        sdk / "Include" / "10.0.26100.0" / "ucrt" / "stdlib.h",
+        sdk / "Lib" / "10.0.26100.0" / "um" / "x64" / "kernel32.lib",
+        sdk / "Lib" / "10.0.26100.0" / "ucrt" / "x64" / "ucrt.lib",
+    ):
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        fixture.write_bytes(b"fixture")
     monkeypatch.setattr(
         builder.shutil,
         "which",
@@ -400,7 +447,7 @@ def test_complete_toolchain_preflight_reports_every_required_version(
     assert {check.key for check in report.checks} == {
         "runtime_source", "cmake", "ctest", "visual_studio", "vc_workload",
         "compiler", "msvc_toolset", "windows_sdk", "architecture",
-        "compile_probe",
+        "selection_identity", "compile_probe",
     }
     assert all(check.ready for check in report.checks)
 
@@ -423,6 +470,10 @@ def test_toolchain_preflight_fails_closed_for_clean_machine_dependencies(
 ) -> None:
     paths = _nominal_preflight(monkeypatch, tmp_path)
     if missing in {"cmake", "ctest"}:
+        if missing == "ctest":
+            paths["ctest"].unlink()
+        for variable in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+            monkeypatch.setenv(variable, str(tmp_path / f"empty-{variable}"))
         monkeypatch.setattr(
             builder.shutil,
             "which",
@@ -544,6 +595,10 @@ def test_failed_build_never_deletes_an_output_created_after_preflight(
         targets=(TARGET_STORY_LEGACY,),
     )
     monkeypatch.setattr(builder, "inspect_native_axle_toolchain", lambda **_: _toolchain())
+    monkeypatch.setattr(
+        builder, "_verify_preflight_selection",
+        lambda report, **_kwargs: report,
+    )
     monkeypatch.setattr(builder, "_runtime_version", lambda _source: "4.4.0")
 
     def fail_after_external_creation(*_args, **_kwargs):
@@ -574,9 +629,13 @@ def test_candidate_happy_path_stages_both_editions_and_custom_paths(
         build_id="focused-test",
     )
     monkeypatch.setattr(builder, "inspect_native_axle_toolchain", lambda **_: _toolchain())
+    monkeypatch.setattr(
+        builder, "_verify_preflight_selection",
+        lambda report, **_kwargs: report,
+    )
 
-    def fake_run(name, command, *, cwd, timeout):
-        del cwd, timeout
+    def fake_run(name, command, *, cwd, timeout, env=None):
+        del cwd, timeout, env
         command = tuple(str(value) for value in command)
         if name == "Native build":
             build_root = Path(command[2])
@@ -635,6 +694,20 @@ def test_candidate_happy_path_stages_both_editions_and_custom_paths(
     monkeypatch.setattr(
         builder, "_pe_imports_and_signature", lambda _path: (("kernel32.dll",), False),
     )
+    runtime_recompute_choices: list[bool | None] = []
+    real_story_configuration = builder.story_native_runtime_configuration
+
+    def capture_story_configuration(*args, **kwargs):
+        runtime_recompute_choices.append(
+            kwargs.get("runtime_geometry_recompute")
+        )
+        return real_story_configuration(*args, **kwargs)
+
+    monkeypatch.setattr(
+        builder,
+        "story_native_runtime_configuration",
+        capture_story_configuration,
+    )
 
     result = builder.build_story_axle_runtime_candidate(request, source_root=RUNTIME)
 
@@ -658,7 +731,8 @@ def test_candidate_happy_path_stages_both_editions_and_custom_paths(
             root / "scripts" / "ExampleTransitPack" / "VehicleSettings" /
             "builder_bus.axles.json"
         )
-        assert json.loads(config.read_text("utf-8"))["expectedWheelCount"] == 6
+        config_payload = json.loads(config.read_text("utf-8"))
+        assert config_payload["expectedWheelCount"] == 6
         receipt = json.loads(
             (root / "build-validation-receipt.json").read_text("utf-8")
         )
@@ -673,12 +747,17 @@ def test_candidate_happy_path_stages_both_editions_and_custom_paths(
     assert manifest["validation"]["native_config_parser"] == "passed"
     assert manifest["validation"]["supported"] is False
     assert manifest["validation"]["settings_editor_pe_x64"] == "passed"
+    assert manifest["toolchain"]["cmake"]["version"] == "3.30.0"
+    assert manifest["toolchain"]["visual_studio"]["generator"] == (
+        "Visual Studio 17 2022"
+    )
     assert len(manifest["settings_editor_sha256"]) == 64
     assert result.checksums.keys() == {
         "VehicleWorkbenchAxles-Legacy-4.5.0.zip",
         "VehicleWorkbenchAxles-Enhanced-4.5.0.zip",
         "VehicleWorkbenchAxles-4.5.0-Legacy-and-Enhanced.zip",
     }
+    assert runtime_recompute_choices == [False, False]
     manifest_text = result.manifest.read_text("utf-8")
     assert r"C:\Users\jessie" not in manifest_text
     assert "C:/Users/jessie" not in manifest_text
@@ -686,6 +765,8 @@ def test_candidate_happy_path_stages_both_editions_and_custom_paths(
     assert RUNTIME.as_posix() not in manifest_text
     assert str(tmp_path) not in manifest_text
     assert tmp_path.as_posix() not in manifest_text
+    assert r"C:\BuildTools" not in manifest_text
+    assert "C:/BuildTools" not in manifest_text
     assert all(
         r"C:\Users\jessie" not in record.stdout_tail
         for record in result.commands

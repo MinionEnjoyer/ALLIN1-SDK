@@ -55,6 +55,27 @@
       "default": []
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "streaming": {
+            "required": ["mode"],
+            "properties": {"mode": {"const": "none"}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "levels": {
+            "items": {
+              "properties": {"ipls": {"maxItems": 0}}
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "identifier": {
       "type": "string",
@@ -100,6 +121,11 @@
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
         },
+        "mode": {
+          "enum": ["ipl", "none"],
+          "default": "ipl",
+          "description": "Use IPL loading, or none when the project references only already-loaded base-game content."
+        },
         "content_group": {
           "oneOf": [
             {"$ref": "#/$defs/nativeName"},
@@ -124,17 +150,33 @@
         },
         "keep_resident": {"type": "boolean", "default": false}
       },
-      "anyOf": [
+      "allOf": [
         {
-          "required": ["content_group"],
-          "properties": {"content_group": {"$ref": "#/$defs/nativeName"}}
-        },
-        {
-          "required": ["ipls"],
-          "properties": {"ipls": {"minItems": 1}}
+          "if": {
+            "required": ["mode"],
+            "properties": {"mode": {"const": "none"}}
+          },
+          "then": {
+            "properties": {
+              "content_group": {"type": "null"},
+              "ipls": {"maxItems": 0}
+            }
+          },
+          "else": {
+            "anyOf": [
+              {
+                "required": ["content_group"],
+                "properties": {"content_group": {"$ref": "#/$defs/nativeName"}}
+              },
+              {
+                "required": ["ipls"],
+                "properties": {"ipls": {"minItems": 1}}
+              }
+            ]
+          }
         }
       ],
-      "$comment": "MapProject.load additionally requires release_radius >= activation_radius, rejects IPL duplicates case-insensitively, and requires at least one project-level or level-level IPL because the Story runtime never executes arbitrary content groups."
+      "$comment": "Mode defaults to ipl for backward compatibility. MapProject.load additionally requires release_radius >= activation_radius, rejects IPL duplicates case-insensitively, requires at least one project-level or level-level IPL in ipl mode, and rejects non-null content groups or non-empty IPL lists in none mode."
     },
     "level": {
       "type": "object",

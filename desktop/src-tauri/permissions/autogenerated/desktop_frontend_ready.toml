@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-frontend-ready"
+description = "Enables the desktop_frontend_ready command without any pre-configured scope."
+commands.allow = ["desktop_frontend_ready"]
+
+[[permission]]
+identifier = "deny-desktop-frontend-ready"
+description = "Denies the desktop_frontend_ready command without any pre-configured scope."
+commands.deny = ["desktop_frontend_ready"]

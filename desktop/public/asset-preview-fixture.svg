@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" role="img" aria-labelledby="title description">
+  <title id="title">Comet S2 package preview fixture</title>
+  <desc id="description">A restrained technical vehicle preview used by the local desktop demonstration.</desc>
+  <defs>
+    <linearGradient id="surface" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#17201c" />
+      <stop offset="1" stop-color="#0f1512" />
+    </linearGradient>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M36 0H0V36" fill="none" stroke="#8ea39a" stroke-opacity=".11" />
+    </pattern>
+  </defs>
+  <rect width="960" height="540" fill="url(#surface)" />
+  <rect width="960" height="540" fill="url(#grid)" />
+  <path d="M0 432H960" stroke="#5f746a" stroke-opacity=".42" />
+  <g fill="none" stroke="#77c99a" stroke-width="3">
+    <path d="M183 363 236 272 362 221h211l122 57 73 85-25 38H209Z" />
+    <path d="m287 272 92-34h180l83 40-355-6Z" stroke-opacity=".72" />
+    <path d="M399 238 374 345M557 238l33 107" stroke-opacity=".45" />
+    <circle cx="328" cy="386" r="52" fill="#111815" />
+    <circle cx="328" cy="386" r="27" stroke-opacity=".55" />
+    <circle cx="652" cy="386" r="52" fill="#111815" />
+    <circle cx="652" cy="386" r="27" stroke-opacity=".55" />
+  </g>
+  <g fill="#d9e7df" font-family="Segoe UI, sans-serif">
+    <text x="48" y="61" font-size="18" font-weight="600" letter-spacing="2">ASSET PREVIEW</text>
+    <text x="48" y="91" fill="#8fa49a" font-size="14">preview/comet6.png · read-only fixture</text>
+  </g>
+  <g fill="#8fa49a" font-family="Cascadia Mono, monospace" font-size="13">
+    <text x="48" y="482">1920 × 1080</text>
+    <text x="788" y="482">RGBA</text>
+  </g>
+</svg>

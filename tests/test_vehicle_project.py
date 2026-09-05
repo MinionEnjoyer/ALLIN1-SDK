@@ -47,6 +47,7 @@ def _package(root: Path, *, complete: bool = True) -> Path:
         (stream / "projectcar.yft").write_bytes(b"primary-fragment")
         (stream / "projectcar_hi.yft").write_bytes(b"high-detail-fragment")
         (stream / "projectcar.ytd").write_bytes(b"texture-dictionary")
+        (stream / "projectcar.ybn").write_bytes(b"collision-dictionary")
         (package / "american_rel.rpf.gxt2").write_bytes(b"labels")
     return package
 
@@ -60,10 +61,12 @@ def test_vehicle_project_resolves_native_and_metadata_roles(tmp_path):
     assert model.primary_model == "stream/projectcar.yft"
     assert model.high_detail_model == "stream/projectcar_hi.yft"
     assert model.texture_asset == "stream/projectcar.ytd"
+    assert model.collision_asset == "stream/projectcar.ybn"
     assert model.ready_for_preview and model.complete
     roles = {item.role for item in model.assets}
     assert {
         "primary_model", "high_detail_model", "texture_dictionary",
+        "collision_dictionary",
         "vehicle_metadata", "handling_metadata", "variation_metadata",
         "tuning_metadata", "registration", "text_labels",
     } <= roles

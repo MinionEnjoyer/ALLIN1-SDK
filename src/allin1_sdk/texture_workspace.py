@@ -96,6 +96,23 @@ class TextureRestoreResult:
     catalog: TextureCatalog
 
 
+@dataclass(frozen=True)
+class TextureSourceInspection:
+    source: Path
+    size: int
+    sha256: str
+    width: int
+    height: int
+    mip_levels: int
+    format: str
+    converted_to_dds: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result["source"] = str(self.source)
+        return result
+
+
 def inspect_dds(path: str | Path) -> DdsMetadata:
     """Read and validate the DDS header fields used by GTA texture dictionaries."""
     source = Path(path)
@@ -167,6 +184,46 @@ def inspect_dds(path: str | Path) -> DdsMetadata:
             f"{fourcc!r}"
         )
     return DdsMetadata(width, height, mip_levels, format_name)
+
+
+def inspect_texture_source(path: str | Path) -> TextureSourceInspection:
+    """Validate one prospective DDS/raster import without writing a workspace."""
+    authored = Path(path).expanduser()
+    if authored.is_symlink():
+        raise ValueError("Texture source cannot be a symbolic link")
+    source = authored.resolve(strict=True)
+    size = source.stat().st_size
+    if not source.is_file() or not 0 < size <= MAX_TEXTURE_SOURCE_BYTES:
+        raise ValueError("Texture source is missing, empty, or exceeds the guarded limit")
+    suffix = source.suffix.casefold()
+    if suffix == ".dds":
+        metadata = inspect_dds(source)
+        converted = False
+    elif suffix in RASTER_TEXTURE_SUFFIXES:
+        try:
+            with Image.open(source) as opened:
+                if (
+                    opened.width <= 0 or opened.height <= 0
+                    or opened.width > MAX_TEXTURE_DIMENSION
+                    or opened.height > MAX_TEXTURE_DIMENSION
+                    or opened.width * opened.height > MAX_TEXTURE_PIXELS
+                ):
+                    raise ValueError("Raster texture dimensions exceed the guarded limit")
+                opened.load()
+                metadata = DdsMetadata(
+                    opened.width, opened.height, 1, "D3DFMT_A8B8G8R8",
+                )
+        except (Image.DecompressionBombError, UnidentifiedImageError, OSError) as exc:
+            raise ValueError(f"Could not decode texture image: {exc}") from exc
+        converted = True
+    else:
+        raise ValueError("Texture source must be DDS, PNG, JPEG, BMP, TGA, or WebP")
+    return TextureSourceInspection(
+        source=source, size=size, sha256=_sha256_file(source),
+        width=metadata.width, height=metadata.height,
+        mip_levels=metadata.mip_levels, format=metadata.format,
+        converted_to_dds=converted,
+    )
 
 
 class TextureDictionaryWorkspace:
@@ -264,6 +321,62 @@ class TextureDictionaryWorkspace:
         return TextureCatalog(
             self.root, self.xml, self.assets, tuple(records), tuple(catalog_warnings),
         )
+
+    @property
+    def revision(self) -> int:
+        history = self.root / "history"
+        if not history.exists():
+            return 0
+        if not history.is_dir() or history.is_symlink():
+            raise ValueError("YTD workspace history folder is unsafe")
+        return sum(
+            1 for item in history.iterdir()
+            if item.is_dir() and not item.is_symlink()
+            and (item / "edit.json").is_file()
+        )
+
+    @property
+    def can_undo(self) -> bool:
+        history = self.root / "history"
+        if not history.is_dir() or history.is_symlink():
+            return False
+        return any(
+            item.is_dir() and not item.is_symlink()
+            and (item / "edit.json").is_file()
+            and "-restore-backup-" not in item.name
+            and not item.name.endswith(".restored")
+            for item in history.iterdir()
+        )
+
+    def state_sha256(self) -> str:
+        catalog = self.catalog()
+        source = self.manifest.get("source", {})
+        evidence = {
+            "source_name": source.get("name") if isinstance(source, dict) else None,
+            "source_sha256": source.get("sha256") if isinstance(source, dict) else None,
+            "xml_sha256": _sha256_file(self.xml),
+            "textures": [
+                {
+                    "name": item.name, "file_name": item.file_name,
+                    "width": item.width, "height": item.height,
+                    "mip_levels": item.mip_levels, "format": item.format,
+                    "usage": item.usage, "size": item.size, "sha256": item.sha256,
+                }
+                for item in catalog.textures
+            ],
+        }
+        return hashlib.sha256(json.dumps(
+            evidence, ensure_ascii=True, separators=(",", ":"), sort_keys=True,
+        ).encode("utf-8")).hexdigest()
+
+    def texture_path(self, texture_name: str) -> Path:
+        _tree, items = self._tree()
+        item = self._find(items, texture_name)
+        return self._asset_member(self._text(item, "FileName"))
+
+    @classmethod
+    def validate_texture_name(cls, value: str) -> str:
+        return cls._safe_texture_name(value)
 
     def replace(self, texture_name: str, source_image: str | Path) -> TextureEditResult:
         tree, items = self._tree()
@@ -445,12 +558,8 @@ class TextureDictionaryWorkspace:
         return target
 
     def _prepare_dds(self, source_image: str | Path, destination: Path) -> DdsMetadata:
-        authored = Path(source_image).expanduser()
-        if authored.is_symlink():
-            raise ValueError("Texture source cannot be a symbolic link")
-        source = authored.resolve()
-        if not source.is_file() or not 0 < source.stat().st_size <= MAX_TEXTURE_SOURCE_BYTES:
-            raise ValueError("Texture source is missing, empty, or exceeds the guarded limit")
+        inspection = inspect_texture_source(source_image)
+        source = inspection.source
         suffix = source.suffix.casefold()
         if suffix == ".dds":
             metadata = inspect_dds(source)

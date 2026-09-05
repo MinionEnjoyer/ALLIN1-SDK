@@ -11,7 +11,7 @@ from allin1_sdk.map_contract import MapProject
 from allin1_sdk.map_package import MapAddonPackageBuilder
 from allin1_sdk.mods import ModManifest
 
-from test_map_contract import map_payload
+from test_map_contract import map_payload, no_ipl_map_payload
 
 
 def _prebuilt_map(root: Path, *, second: bool = False) -> Path:
@@ -205,6 +205,53 @@ def test_map_package_builder_accepts_a_direct_inspected_rpf(tmp_path, monkeypatc
     report = json.loads(result.report.read_text(encoding="utf-8"))
     assert report["source_evidence"]["source"] == source.name
     assert str(source.resolve()) not in result.report.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "expected_source_mode"),
+    [("rpf", "direct_rpf"), ("folder", "prebuilt_dlc_rpf")],
+)
+def test_map_package_builder_accepts_none_mode_without_indexed_ymap(
+    tmp_path, monkeypatch, source_kind, expected_source_mode,
+):
+    payload_bytes = b"RPF7-base-game-garage"
+    if source_kind == "rpf":
+        source = tmp_path / "base-game-garage.rpf"
+        source.write_bytes(payload_bytes)
+        entries = ()
+    else:
+        source = tmp_path / "base-game-garage"
+        payload = source / "examplemap" / "dlc.rpf"
+        payload.parent.mkdir(parents=True)
+        payload.write_bytes(payload_bytes)
+        entries = (PackageEntry("examplemap/dlc.rpf", len(payload_bytes)),)
+    scan = PackageScan(
+        source=source,
+        source_kind=source_kind,
+        entries=entries,
+        findings=(),
+        weapons=(),
+        ammo=(),
+        animation_weapons=(),
+        shop_weapons=(),
+        rpf_indexed_entries=(),
+    )
+    monkeypatch.setattr(
+        "allin1_sdk.map_package.AddonPackageInspector.inspect",
+        lambda _inspector, _source: scan,
+    )
+
+    result = MapAddonPackageBuilder(tmp_path).build(
+        source, no_ipl_map_payload(), tmp_path / "none-output", edition="enhanced",
+    )
+
+    assert result.source_mode == expected_source_mode
+    assert result.payload.read_bytes() == payload_bytes
+    report = json.loads(result.report.read_text(encoding="utf-8"))
+    assert report["descriptor"]["project"]["streaming"]["mode"] == "none"
+    assert report["map_project"]["summary"]["assets"] == 0
+    assert report["map_project"]["summary"]["valid"] is True
+    assert report["map_project"]["findings"] == []
 
 
 def test_map_package_builder_rejects_declared_ipls_missing_from_selected_rpf(

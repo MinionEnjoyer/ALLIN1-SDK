@@ -21,6 +21,11 @@ MODEL_XML = """<?xml version="1.0" encoding="utf-8"?>
   <Item><Name>vehicle_paint</Name><Parameters>
    <Item name="DiffuseSampler" type="Texture"><Name>fixture_d</Name></Item>
    <Item name="BumpSampler" type="Texture"><Name>fixture_n</Name></Item>
+   <Item name="specularIntensityMult" type="Vector" x="0.5" y="0" z="0" w="0"/>
+   <Item name="detailSettings" type="Array">
+    <Value x="1" y="0.72" z="0.18" w="0"/>
+    <Value x="4" y="2" z="1" w="0"/>
+   </Item>
   </Parameters></Item>
   <Item><Name>vehicle_glass</Name><Parameters>
    <Item name="DiffuseSampler" type="Texture"><Name>fixture_glass</Name></Item>
@@ -95,8 +100,13 @@ def test_model_material_project_preserves_shader_usage_and_texture_roles(tmp_pat
     assert [item.material_document_index for item in project.geometries] == [0, 1]
     assert project.materials[0].textures[0].role == "color"
     assert project.materials[0].textures[1].role == "normal"
+    assert [item.name for item in project.materials[0].parameters] == [
+        "specularIntensityMult", "detailSettings",
+    ]
+    assert project.materials[0].parameters[1].values[1] == (4.0, 2.0, 1.0, 0.0)
     assert project.scene is not None
     assert project.to_dict()["summary"]["texture_bindings"] == 3
+    assert project.to_dict()["summary"]["numeric_parameters"] == 2
 
 
 def test_material_workspace_edits_existing_bindings_with_revision_and_undo(tmp_path):
@@ -135,6 +145,58 @@ def test_material_workspace_reassigns_geometry_only_inside_local_catalog(tmp_pat
     assert result.project.geometries[0].material_name == "vehicle_glass"
     with pytest.raises(ValueError, match="local shader group"):
         workspace.set_geometry_material(1, 8, expected_revision=1)
+
+
+def test_material_workspace_edits_existing_numeric_parameter_shape_and_undo(tmp_path):
+    workspace = MaterialAuthoringWorkspace.initialize(_workspace(tmp_path))
+    original = workspace.xml_path.read_bytes()
+
+    edited = workspace.set_parameter(
+        0, "detailSettings",
+        [["1", "0.8", "0.18", "0"], ["4", "2", "1.25", "0"]],
+        expected_revision=0,
+    )
+
+    assert edited.revision == 1
+    assert edited.changes == (
+        {
+            "field": "parameter.detailSettings[0].y",
+            "before": "0.72", "after": "0.8",
+        },
+        {
+            "field": "parameter.detailSettings[1].z",
+            "before": "1", "after": "1.25",
+        },
+    )
+    assert edited.project.materials[0].parameters[1].values == (
+        (1.0, 0.8, 0.18, 0.0), (4.0, 2.0, 1.25, 0.0),
+    )
+
+    undone = workspace.undo(expected_revision=1)
+    assert undone.revision == 2
+    assert workspace.xml_path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        ([["1", "2", "3"]], "exactly four"),
+        ([["NaN", "0", "0", "0"]], "finite float32"),
+        ([["1", "0", "0", "0"], ["2", "0", "0", "0"]], "exactly 1"),
+    ],
+)
+def test_material_workspace_rejects_malformed_numeric_parameters(
+    tmp_path, values, message,
+):
+    workspace = MaterialAuthoringWorkspace.initialize(_workspace(tmp_path))
+    before = workspace.xml_path.read_bytes()
+
+    with pytest.raises(ValueError, match=message):
+        workspace.set_parameter(
+            0, "specularIntensityMult", values, expected_revision=0,
+        )
+
+    assert workspace.xml_path.read_bytes() == before
 
 
 def test_material_workspace_rejects_missing_slots_and_external_xml_drift(tmp_path):

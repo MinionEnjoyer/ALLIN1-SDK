@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping
 
 from lxml import etree
 from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
@@ -60,15 +60,22 @@ AUDIO_PREVIEW_SUFFIXES = frozenset({".awc"})
 MAX_MODEL_XML_BYTES = 192 * 1024 * 1024
 MAX_MODEL_VERTICES = 1_000_000
 MAX_MODEL_TRIANGLES = 1_000_000
+MAX_MODEL_MATERIAL_PARAMETERS = 512
+MAX_MODEL_PARAMETER_ARRAY_ROWS = 255
 MAX_RENDERED_TRIANGLES = 45_000
+MAX_UV_ATLAS_TRIANGLES = 45_000
+MAX_UV_ATLAS_TEXTURE_GROUPS = 8
 INTERACTIVE_RENDERED_TRIANGLES = 6_000
 INTERACTIVE_SILHOUETTE_POINTS = 2_048
-MODEL_RENDER_MODES = frozenset({"materials", "shaded", "wireframe"})
+MODEL_RENDER_MODES = frozenset({
+    "materials", "shaded", "textured", "uvs", "wireframe",
+})
 MODEL_RENDER_QUALITIES = {
     "interactive": INTERACTIVE_RENDERED_TRIANGLES,
     "final": MAX_RENDERED_TRIANGLES,
     "full": MAX_MODEL_TRIANGLES,
 }
+MAX_TEXTURE_PREVIEW_ITEMS = 24
 
 # CodeWalker can emit unresolved shader identities as their lower-case Jenkins
 # hash.  Keep this small catalog deterministic and source-controlled so reports
@@ -103,6 +110,23 @@ MAX_RENDERED_ARCHETYPES = 18
 
 
 @dataclass(frozen=True)
+class NativeTexturePreview:
+    """One bounded raster exported while inspecting a texture dictionary."""
+
+    name: str
+    file_name: str
+    width: int
+    height: int
+    mip_levels: int
+    format: str
+    usage: str
+    size: int
+    sha256: str
+    thumbnail_png: bytes | None = field(default=None, repr=False, compare=False)
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class _ConvertedAsset:
     structured_text: str
     image_png: bytes | None
@@ -110,6 +134,8 @@ class _ConvertedAsset:
     metadata: dict[str, Any] = field(default_factory=dict)
     conversion_error: str | None = None
     model_scene: NativeModelScene | None = None
+    collision_scene: NativeCollisionScene | None = None
+    texture_previews: tuple[NativeTexturePreview, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -123,6 +149,16 @@ class _ModelGeometry:
     texture_names: tuple[str, ...] = ()
     texcoords: tuple[tuple[float, float], ...] = ()
     texture_parameters: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class _UvAtlasTriangle:
+    """One bounded, same-tile UV0 triangle retained for atlas drawing."""
+
+    geometry_index: int
+    indices: tuple[int, int, int]
+    tile: tuple[int, int]
+    points: tuple[tuple[float, float], ...]
 
 
 _ModelRenderBounds = tuple[
@@ -156,6 +192,55 @@ def _model_geometry_bounds(
 
 
 @dataclass(frozen=True)
+class NativeCollisionScene:
+    """Package-owned YBN geometry retained for aligned model diagnostics."""
+
+    name: str
+    geometries: tuple[_ModelGeometry, ...]
+    primitive_counts: tuple[tuple[str, int], ...]
+    material_count: int
+    owner_count: int
+    skipped_polygon_count: int = 0
+
+    @property
+    def vertex_count(self) -> int:
+        return sum(len(item.vertices) for item in self.geometries)
+
+    @property
+    def render_triangle_count(self) -> int:
+        return sum(len(item.triangles) for item in self.geometries)
+
+    @property
+    def polygon_count(self) -> int:
+        return sum(count for _kind, count in self.primitive_counts)
+
+    @property
+    def bounds(self) -> dict[str, list[float]]:
+        minima, maxima, _count = _model_geometry_bounds(self.geometries)
+        return {
+            "min": [round(value, 6) for value in minima],
+            "max": [round(value, 6) for value in maxima],
+            "size": [
+                round(maxima[axis] - minima[axis], 6) for axis in range(3)
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class NativeModelParameter:
+    """One exact numeric shader parameter decoded from CodeWalker XML.
+
+    CodeWalker serializes legacy scalar and short-vector constants as Vector4
+    values, so this evidence intentionally retains that source shape rather
+    than guessing how many components a particular game shader consumes.
+    """
+
+    name: str
+    source_type: str
+    values: tuple[tuple[float, float, float, float], ...]
+
+
+@dataclass(frozen=True)
 class NativeModelMaterial:
     """One shader/material record referenced by decoded model geometry."""
 
@@ -163,6 +248,7 @@ class NativeModelMaterial:
     name: str
     texture_names: tuple[str, ...]
     texture_parameters: tuple[tuple[str, str], ...] = ()
+    parameters: tuple[NativeModelParameter, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -266,14 +352,21 @@ class NativeModelScene:
     def render(
         self, *, yaw: float = 34.0, pitch: float = 24.0,
         lod: str | None = None, component: str | None = None,
+        material: str | None = None,
         render_mode: str = "shaded", quality: str = "final",
         triangle_budget: int | None = None,
+        textures: Mapping[str, Image.Image] | None = None,
+        collision_scene: NativeCollisionScene | None = None,
+        collision_visible: bool = False,
     ) -> tuple[bytes, dict[str, Any]]:
         """Render a PNG while preserving the established public contract."""
         image, metadata = self.render_image(
             yaw=yaw, pitch=pitch, lod=lod, component=component,
+            material=material,
             render_mode=render_mode, quality=quality,
-            triangle_budget=triangle_budget,
+            triangle_budget=triangle_budget, textures=textures,
+            collision_scene=collision_scene,
+            collision_visible=collision_visible,
         )
         return _encode_model_render(
             image, str(metadata["model_render_quality"]),
@@ -282,8 +375,12 @@ class NativeModelScene:
     def render_image(
         self, *, yaw: float = 34.0, pitch: float = 24.0,
         lod: str | None = None, component: str | None = None,
+        material: str | None = None,
         render_mode: str = "shaded", quality: str = "final",
         triangle_budget: int | None = None,
+        textures: Mapping[str, Image.Image] | None = None,
+        collision_scene: NativeCollisionScene | None = None,
+        collision_visible: bool = False,
     ) -> tuple[Image.Image, dict[str, Any]]:
         """Render a fresh RGB image for in-process interactive viewports."""
         if not math.isfinite(yaw) or not math.isfinite(pitch):
@@ -335,11 +432,26 @@ class NativeModelScene:
             if not selected_pairs:
                 raise ValueError(f"Model component was not found in the selected LOD: {component}")
             selected_component = selected_pairs[0][1].component
+        selected_material = "All"
+        if material and material.casefold() != "all":
+            selected_pairs = tuple(
+                (index, item) for index, item in selected_pairs
+                if item.material_name.casefold() == material.casefold()
+            )
+            if not selected_pairs:
+                raise ValueError(
+                    "Model material was not found in the selected LOD/component: "
+                    f"{material}"
+                )
+            selected_material = selected_pairs[0][1].material_name
         selected = tuple(item for _index, item in selected_pairs)
         selected_materials = tuple(
             self._render_material_cache[index] for index, _item in selected_pairs
         )
-        bounds_key = (selected_lod.casefold(), selected_component.casefold())
+        bounds_key = (
+            selected_lod.casefold(),
+            f"{selected_component.casefold()}::{selected_material.casefold()}",
+        )
         render_bounds = self._render_bounds_cache.get(bounds_key)
         if render_bounds is None:
             render_bounds = _model_geometry_bounds(selected)
@@ -356,6 +468,11 @@ class NativeModelScene:
                 bounds_key[0], bounds_key[1],
                 triangle_budget or MODEL_RENDER_QUALITIES[normalized_quality],
             ),
+            texture_images=textures,
+            collision_geometries=(
+                collision_scene.geometries
+                if collision_visible and collision_scene is not None else ()
+            ),
         )
         metadata = dict(self.metadata)
         metadata.update(rendered)
@@ -364,8 +481,76 @@ class NativeModelScene:
             "model_camera_pitch": round(normalized_pitch, 2),
             "model_camera_lod": selected_lod,
             "model_camera_component": selected_component,
+            "model_camera_material": selected_material,
         })
         return image, metadata
+
+    def render_uv_atlas(
+        self, *, lod: str | None = None, component: str | None = None,
+        material: str | None = None,
+        textures: Mapping[str, Image.Image] | None = None,
+        triangle_budget: int = MAX_UV_ATLAS_TRIANGLES,
+    ) -> tuple[bytes, dict[str, Any]]:
+        """Render a bounded, texture-grouped UV0 island atlas.
+
+        Islands are connected components of sampled mesh triangles sharing an
+        edge in the same integer UV tile. Cross-tile triangles are reported as
+        seam evidence instead of being folded into misleading long polygons.
+        """
+        if (
+            isinstance(triangle_budget, bool)
+            or not isinstance(triangle_budget, int)
+            or not 1 <= triangle_budget <= MAX_UV_ATLAS_TRIANGLES
+        ):
+            raise ValueError(
+                "UV atlas triangle budget must be an integer between 1 and "
+                f"{MAX_UV_ATLAS_TRIANGLES:,}"
+            )
+        selected = tuple(self.geometries)
+        selected_lod = "All"
+        if lod and lod.casefold() != "all":
+            selected = tuple(
+                item for item in selected if item.lod.casefold() == lod.casefold()
+            )
+            if not selected:
+                raise ValueError(f"Model LOD was not found: {lod}")
+            selected_lod = selected[0].lod
+        selected_component = "All"
+        if component and component.casefold() != "all":
+            selected = tuple(
+                item for item in selected
+                if item.component.casefold() == component.casefold()
+            )
+            if not selected:
+                raise ValueError(
+                    f"Model component was not found in the selected LOD: {component}"
+                )
+            selected_component = selected[0].component
+        selected_material = "All"
+        if material and material.casefold() != "all":
+            selected = tuple(
+                item for item in selected
+                if item.material_name.casefold() == material.casefold()
+            )
+            if not selected:
+                raise ValueError(
+                    "Model material was not found in the selected LOD/component: "
+                    f"{material}"
+                )
+            selected_material = selected[0].material_name
+        image, metadata = _render_uv_atlas_image(
+            selected, self.name, textures=textures,
+            triangle_budget=triangle_budget,
+        )
+        metadata.update({
+            "selection": {
+                "lod": selected_lod,
+                "component": selected_component,
+                "material": selected_material,
+            },
+            "read_only": True,
+        })
+        return _encode_model_render(image, "final"), metadata
 
 
 @dataclass(frozen=True)
@@ -464,6 +649,8 @@ class NativeAssetReport:
     image_png: bytes | None = None
     warnings: tuple[str, ...] = ()
     model_scene: NativeModelScene | None = None
+    collision_scene: NativeCollisionScene | None = None
+    texture_previews: tuple[NativeTexturePreview, ...] = ()
 
     def summary(self) -> str:
         lines = [
@@ -550,24 +737,102 @@ def _format_identity(name: str, data: bytes) -> tuple[str, dict[str, Any]]:
     return names.get(suffix, "Binary asset"), metadata
 
 
-def _texture_contact_sheet(folder: Path) -> tuple[bytes | None, int]:
+def _texture_xml_value(item: etree._Element, name: str) -> str:
+    child = next((
+        child for child in item
+        if isinstance(child.tag, str) and etree.QName(child).localname == name
+    ), None)
+    if child is None:
+        return ""
+    return (
+        child.get("ref", "").strip()
+        or child.get("value", "").strip()
+        or (child.text or "").strip()
+    )
+
+
+def _texture_contact_sheet(
+    xml: Path, folder: Path,
+) -> tuple[bytes | None, int, tuple[NativeTexturePreview, ...]]:
     candidates = sorted(
         (path for path in folder.rglob("*") if path.suffix.casefold() in {
             ".dds", ".png", ".jpg", ".jpeg", ".bmp",
         }),
         key=lambda path: path.name.casefold(),
     )
+    xml_records: dict[str, tuple[str, str]] = {}
+    try:
+        root = _safe_codewalker_xml(xml).getroot()
+        if _local_name(root) == "TextureDictionary":
+            for item in (
+                child for child in root
+                if isinstance(child.tag, str) and _local_name(child) == "Item"
+            ):
+                file_name = _texture_xml_value(item, "FileName")
+                if file_name:
+                    xml_records[Path(file_name).name.casefold()] = (
+                        _texture_xml_value(item, "Name") or Path(file_name).stem,
+                        _texture_xml_value(item, "Usage"),
+                    )
+    except (OSError, ValueError, etree.XMLSyntaxError):
+        # Exported dependencies remain useful preview evidence when an unusual
+        # CodeWalker XML dialect does not expose the expected dictionary nodes.
+        xml_records = {}
+
+    previews: list[NativeTexturePreview] = []
     thumbnails: list[tuple[Image.Image, str]] = []
-    for path in candidates[:24]:
+    for path in candidates[:MAX_TEXTURE_PREVIEW_ITEMS]:
+        width = 0
+        height = 0
+        mip_levels = 1
+        format_name = path.suffix.removeprefix(".").upper() or "raster"
+        warnings: list[str] = []
+        thumbnail_png: bytes | None = None
+        record_name, usage = xml_records.get(
+            path.name.casefold(), (path.stem, ""),
+        )
         try:
             with Image.open(path) as opened:
+                width, height = opened.size
+                if width * height > 40_000_000:
+                    raise ValueError("Texture exceeds the guarded preview pixel limit")
                 image = ImageOps.exif_transpose(opened).convert("RGBA")
                 image.thumbnail((190, 150), Image.Resampling.LANCZOS)
-                thumbnails.append((image.copy(), path.stem))
-        except (OSError, UnidentifiedImageError, Image.DecompressionBombError):
-            continue
+                thumbnail = io.BytesIO()
+                image.save(thumbnail, format="PNG", optimize=True)
+                thumbnail_png = thumbnail.getvalue()
+                thumbnails.append((image.copy(), record_name))
+        except (
+            OSError, ValueError, UnidentifiedImageError,
+            Image.DecompressionBombError,
+        ) as exc:
+            warnings.append(f"Texture thumbnail unavailable: {exc}")
+        if path.suffix.casefold() == ".dds":
+            try:
+                with path.open("rb") as stream:
+                    dds = _dds_metadata(stream.read(148))
+                if dds:
+                    width = int(str(dds.get("dimensions", "0 × 0")).split("×")[0])
+                    height = int(str(dds.get("dimensions", "0 × 0")).split("×")[1])
+                    mip_levels = int(dds.get("mip_levels", 1))
+                    format_name = str(dds.get("pixel_format", "DDS"))
+            except (OSError, ValueError, IndexError) as exc:
+                warnings.append(f"DDS metadata unavailable: {exc}")
+        previews.append(NativeTexturePreview(
+            name=record_name,
+            file_name=path.relative_to(folder).as_posix(),
+            width=width,
+            height=height,
+            mip_levels=mip_levels,
+            format=format_name,
+            usage=usage,
+            size=path.stat().st_size,
+            sha256=_sha256_file(path),
+            thumbnail_png=thumbnail_png,
+            warnings=tuple(warnings),
+        ))
     if not thumbnails:
-        return None, len(candidates)
+        return None, len(candidates), tuple(previews)
     columns = 4
     cell_width, cell_height = 210, 185
     rows = (len(thumbnails) + columns - 1) // columns
@@ -582,7 +847,7 @@ def _texture_contact_sheet(folder: Path) -> tuple[bytes | None, int]:
         draw.text((left + 8, top + 160), label[:30], fill="#E8F2EC")
     output = io.BytesIO()
     sheet.convert("RGB").save(output, format="PNG")
-    return output.getvalue(), len(candidates)
+    return output.getvalue(), len(candidates), tuple(previews)
 
 
 def _local_name(element: etree._Element) -> str:
@@ -1020,15 +1285,58 @@ def _model_materials(root: etree._Element) -> tuple[NativeModelMaterial, ...]:
 def _model_material_record(
     shader: etree._Element, index: int,
 ) -> NativeModelMaterial:
+    parameter_elements = shader.xpath(
+        "./*[local-name()='Parameters']/*[local-name()='Item']"
+    )
+    if len(parameter_elements) > MAX_MODEL_MATERIAL_PARAMETERS:
+        raise ValueError(
+            "A model material exceeds the guarded shader parameter limit"
+        )
     parameters = tuple(
         (parameter.get("name", "").strip(), texture_name)
-        for parameter in shader.xpath(
-            "./*[local-name()='Parameters']/*[local-name()='Item']"
-        )
+        for parameter in parameter_elements
         if parameter.get("type", "").casefold() == "texture"
         for texture_name in (_direct_model_text(parameter, "Name"),)
         if texture_name
     )
+    numeric_parameters: list[NativeModelParameter] = []
+    for parameter in parameter_elements:
+        source_type = parameter.get("type", "").strip().casefold()
+        if source_type not in {"vector", "array"}:
+            continue
+        rows = (
+            (parameter,)
+            if source_type == "vector"
+            else tuple(parameter.xpath("./*[local-name()='Value']"))
+        )
+        if len(rows) > MAX_MODEL_PARAMETER_ARRAY_ROWS:
+            raise ValueError(
+                "A model material exceeds the guarded shader parameter array limit"
+            )
+        values: list[tuple[float, float, float, float]] = []
+        for row in rows:
+            if any(row.get(axis) is None for axis in ("x", "y", "z", "w")):
+                raise ValueError(
+                    "A model shader parameter is missing a Vector4 component"
+                )
+            try:
+                vector = tuple(
+                    float(row.get(axis, "")) for axis in ("x", "y", "z", "w")
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "A model shader parameter contains a non-numeric component"
+                ) from exc
+            if not all(math.isfinite(value) for value in vector):
+                raise ValueError(
+                    "A model shader parameter contains a non-finite component"
+                )
+            values.append((vector[0], vector[1], vector[2], vector[3]))
+        numeric_parameters.append(NativeModelParameter(
+            name=parameter.get("name", "").strip(),
+            source_type="Vector" if source_type == "vector" else "Array",
+            values=tuple(values),
+        ))
     textures = tuple(dict.fromkeys(value for _slot, value in parameters))
     return NativeModelMaterial(
         index=index,
@@ -1037,6 +1345,7 @@ def _model_material_record(
         ),
         texture_names=textures,
         texture_parameters=parameters,
+        parameters=tuple(numeric_parameters),
     )
 
 
@@ -1382,6 +1691,330 @@ def _shade_color(
     )
 
 
+def _model_diffuse_texture_name(geometry: _ModelGeometry) -> str | None:
+    """Select the most likely base-colour sampler without guessing shader code."""
+    diffuse_tokens = (
+        "diffuse", "albedo", "basecolor", "base_color", "colour", "color",
+    )
+    secondary_tokens = (
+        "normal", "bump", "spec", "rough", "detail", "emissive",
+    )
+    for slot, name in geometry.texture_parameters:
+        if name and any(token in slot.casefold() for token in diffuse_tokens):
+            return name
+    for slot, name in geometry.texture_parameters:
+        if name and not any(token in slot.casefold() for token in secondary_tokens):
+            return name
+    return next((name for name in geometry.texture_names if name), None)
+
+
+def _sample_uv_triangle(
+    texture: Image.Image,
+    texcoords: tuple[tuple[float, float], ...],
+    triangle: tuple[int, int, int],
+) -> tuple[int, int, int] | None:
+    """Return a cheap, repeatable three-vertex UV sample for one triangle."""
+    if max(triangle) >= len(texcoords) or texture.width < 1 or texture.height < 1:
+        return None
+    red = green = blue = 0
+    for index in triangle:
+        u, v = texcoords[index]
+        if not math.isfinite(u) or not math.isfinite(v):
+            return None
+        wrapped_u = u - math.floor(u)
+        wrapped_v = v - math.floor(v)
+        x = min(texture.width - 1, round(wrapped_u * (texture.width - 1)))
+        y = min(texture.height - 1, round((1.0 - wrapped_v) * (texture.height - 1)))
+        sample = texture.getpixel((x, y))
+        red += int(sample[0])
+        green += int(sample[1])
+        blue += int(sample[2])
+    return (round(red / 3), round(green / 3), round(blue / 3))
+
+
+def _uv_triangle_status(
+    texcoords: tuple[tuple[float, float], ...],
+    triangle: tuple[int, int, int],
+) -> str:
+    """Classify bounded UV0 evidence as valid, degenerate, or missing."""
+    if max(triangle) >= len(texcoords):
+        return "missing"
+    first, second, third = (texcoords[index] for index in triangle)
+    if not all(math.isfinite(value) for point in (first, second, third) for value in point):
+        return "missing"
+    twice_area = abs(
+        ((second[0] - first[0]) * (third[1] - first[1]))
+        - ((second[1] - first[1]) * (third[0] - first[0]))
+    )
+    return "degenerate" if twice_area <= 1e-10 else "valid"
+
+
+def _uv_tile_index(value: float) -> int:
+    """Assign exact positive tile borders to the preceding UV tile."""
+    nearest = round(value)
+    if value > 0.0 and abs(value - nearest) <= 1e-9:
+        return int(nearest) - 1
+    return math.floor(value)
+
+
+def _uv_island_color(group_name: str, island: int) -> tuple[int, int, int]:
+    """Return a stable, legible colour for one UV connected component."""
+    digest = hashlib.sha256(
+        f"{group_name.casefold()}::{island}".encode("utf-8")
+    ).digest()
+    hue = int.from_bytes(digest[:4], "big") / 0xFFFFFFFF
+    red, green, blue = colorsys.hsv_to_rgb(hue, 0.54, 0.93)
+    return round(red * 255), round(green * 255), round(blue * 255)
+
+
+def _render_uv_atlas_image(
+    geometries: tuple[_ModelGeometry, ...], name: str, *,
+    textures: Mapping[str, Image.Image] | None,
+    triangle_budget: int,
+) -> tuple[Image.Image, dict[str, Any]]:
+    """Build a bounded contact sheet of UV0 topology grouped by diffuse map."""
+    normalized_textures = {
+        key.casefold(): value.convert("RGB")
+        for key, value in (textures or {}).items()
+        if key and value.width > 0 and value.height > 0
+    }
+    total_triangles = sum(len(geometry.triangles) for geometry in geometries)
+    selected_indices = _uniform_triangle_indices(total_triangles, triangle_budget)
+    sampled_indices = (
+        selected_indices if selected_indices is not None else range(total_triangles)
+    )
+    groups: dict[str, dict[str, Any]] = {}
+    geometry_offset = 0
+    geometry_index = 0
+
+    def group_for(geometry: _ModelGeometry) -> dict[str, Any]:
+        texture_name = _model_diffuse_texture_name(geometry) or "Unbound UV0"
+        key = texture_name.casefold()
+        group = groups.get(key)
+        if group is None:
+            group = {
+                "name": texture_name,
+                "resolved": key in normalized_textures,
+                "materials": set(),
+                "geometries": set(),
+                "sampled_triangle_count": 0,
+                "valid_triangle_count": 0,
+                "rendered_triangle_count": 0,
+                "degenerate_triangle_count": 0,
+                "missing_triangle_count": 0,
+                "seam_triangle_count": 0,
+                "triangles": [],
+            }
+            groups[key] = group
+        if geometry.material_name:
+            group["materials"].add(geometry.material_name)
+        group["geometries"].add(geometry_index)
+        return group
+
+    for global_index in sampled_indices:
+        while (
+            geometry_index < len(geometries)
+            and global_index >= geometry_offset + len(geometries[geometry_index].triangles)
+        ):
+            geometry_offset += len(geometries[geometry_index].triangles)
+            geometry_index += 1
+        if geometry_index >= len(geometries):
+            break
+        geometry = geometries[geometry_index]
+        triangle = geometry.triangles[global_index - geometry_offset]
+        group = group_for(geometry)
+        group["sampled_triangle_count"] += 1
+        status = _uv_triangle_status(geometry.texcoords, triangle)
+        if status != "valid":
+            group[f"{status}_triangle_count"] += 1
+            continue
+        group["valid_triangle_count"] += 1
+        coordinates = tuple(geometry.texcoords[index] for index in triangle)
+        tiles = tuple(
+            (_uv_tile_index(point[0]), _uv_tile_index(point[1]))
+            for point in coordinates
+        )
+        if tiles[1:] != tiles[:-1]:
+            group["seam_triangle_count"] += 1
+            continue
+        tile = tiles[0]
+        points = tuple(
+            (point[0] - tile[0], point[1] - tile[1])
+            for point in coordinates
+        )
+        group["triangles"].append(_UvAtlasTriangle(
+            geometry_index=geometry_index,
+            indices=triangle,
+            tile=tile,
+            points=points,
+        ))
+        group["rendered_triangle_count"] += 1
+
+    ordered_groups = sorted(
+        groups.values(),
+        key=lambda item: (-int(item["sampled_triangle_count"]), str(item["name"]).casefold()),
+    )
+    displayed_groups = ordered_groups[:MAX_UV_ATLAS_TEXTURE_GROUPS]
+    total_islands = 0
+    for group in ordered_groups:
+        triangles: list[_UvAtlasTriangle] = group["triangles"]
+        parents = list(range(len(triangles)))
+
+        def find(index: int) -> int:
+            while parents[index] != index:
+                parents[index] = parents[parents[index]]
+                index = parents[index]
+            return index
+
+        def union(first: int, second: int) -> None:
+            first_root, second_root = find(first), find(second)
+            if first_root != second_root:
+                parents[second_root] = first_root
+
+        edge_owner: dict[tuple[int, int, int, int, int], int] = {}
+        for triangle_index, triangle in enumerate(triangles):
+            first, second, third = triangle.indices
+            for edge in ((first, second), (second, third), (third, first)):
+                key = (
+                    triangle.geometry_index, triangle.tile[0], triangle.tile[1],
+                    min(edge), max(edge),
+                )
+                owner = edge_owner.setdefault(key, triangle_index)
+                union(triangle_index, owner)
+        roots: dict[int, int] = {}
+        island_indices = []
+        for triangle_index in range(len(triangles)):
+            root = find(triangle_index)
+            island_indices.append(roots.setdefault(root, len(roots)))
+        group["island_indices"] = island_indices
+        group["island_count"] = len(roots)
+        total_islands += len(roots)
+
+    columns = 1 if len(displayed_groups) <= 1 else 2
+    rows = max(1, math.ceil(len(displayed_groups) / columns))
+    width = 960
+    margin = 28
+    gap = 18
+    label_height = 43
+    tile_size = (width - (margin * 2) - (gap * (columns - 1))) // columns
+    row_height = label_height + tile_size + 23
+    height = 70 + (rows * row_height) + 18
+    image = Image.new("RGB", (width, height), "#0d1310")
+    draw = ImageDraw.Draw(image)
+    draw.text((margin, 22), f"UV0 ISLAND ATLAS  |  {name[:64]}", fill="#E8F2EC")
+    scope = (
+        f"{sum(int(group['rendered_triangle_count']) for group in ordered_groups):,} "
+        f"triangles · {total_islands:,} islands · "
+        f"{len(displayed_groups)}/{len(ordered_groups)} texture groups"
+    )
+    draw.text((margin, 43), scope, fill="#91AA9D")
+
+    for group_index, group in enumerate(displayed_groups):
+        column = group_index % columns
+        row = group_index // columns
+        left = margin + (column * (tile_size + gap))
+        label_top = 70 + (row * row_height)
+        top = label_top + label_height
+        texture = normalized_textures.get(str(group["name"]).casefold())
+        if texture is not None:
+            texture_panel = ImageOps.fit(texture, (tile_size, tile_size))
+            dark_panel = Image.new("RGB", texture_panel.size, "#07100c")
+            texture_panel = Image.blend(texture_panel, dark_panel, 0.53)
+            image.paste(texture_panel, (left, top))
+        else:
+            draw.rectangle(
+                (left, top, left + tile_size, top + tile_size), fill="#111a16",
+            )
+        for division in range(1, 4):
+            coordinate = round((tile_size * division) / 4)
+            draw.line(
+                (left + coordinate, top, left + coordinate, top + tile_size),
+                fill="#314039", width=1,
+            )
+            draw.line(
+                (left, top + coordinate, left + tile_size, top + coordinate),
+                fill="#314039", width=1,
+            )
+        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        edge = (77, 220, 174, 228) if group["resolved"] else (231, 170, 68, 228)
+        for triangle, island in zip(group["triangles"], group["island_indices"]):
+            polygon = tuple(
+                (
+                    left + (point[0] * tile_size),
+                    top + ((1.0 - point[1]) * tile_size),
+                )
+                for point in triangle.points
+            )
+            color = _uv_island_color(str(group["name"]), island)
+            overlay_draw.polygon(polygon, fill=(*color, 40))
+            overlay_draw.line((*polygon, polygon[0]), fill=edge, width=1)
+        image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle(
+            (left, top, left + tile_size, top + tile_size),
+            outline="#527065" if group["resolved"] else "#8d6934", width=2,
+        )
+        draw.text((left, label_top + 5), str(group["name"])[:42], fill="#E8F2EC")
+        detail = (
+            f"{group['island_count']:,} islands · "
+            f"{group['rendered_triangle_count']:,} drawn · "
+            f"{group['seam_triangle_count']:,} seams"
+        )
+        draw.text((left, label_top + 22), detail, fill="#91AA9D")
+
+    public_groups = [
+        {
+            "name": str(group["name"]),
+            "resolved": bool(group["resolved"]),
+            "material_names": sorted(group["materials"], key=str.casefold),
+            "geometry_count": len(group["geometries"]),
+            "sampled_triangle_count": int(group["sampled_triangle_count"]),
+            "valid_triangle_count": int(group["valid_triangle_count"]),
+            "rendered_triangle_count": int(group["rendered_triangle_count"]),
+            "island_count": int(group["island_count"]),
+            "seam_triangle_count": int(group["seam_triangle_count"]),
+            "degenerate_triangle_count": int(group["degenerate_triangle_count"]),
+            "missing_triangle_count": int(group["missing_triangle_count"]),
+        }
+        for group in ordered_groups
+    ]
+    return image, {
+        "width": width,
+        "height": height,
+        "triangle_budget": triangle_budget,
+        "source_triangle_count": total_triangles,
+        "sampled_triangle_count": sum(
+            int(group["sampled_triangle_count"]) for group in ordered_groups
+        ),
+        "rendered_triangle_count": sum(
+            int(group["rendered_triangle_count"]) for group in ordered_groups
+        ),
+        "valid_triangle_count": sum(
+            int(group["valid_triangle_count"]) for group in ordered_groups
+        ),
+        "degenerate_triangle_count": sum(
+            int(group["degenerate_triangle_count"]) for group in ordered_groups
+        ),
+        "missing_triangle_count": sum(
+            int(group["missing_triangle_count"]) for group in ordered_groups
+        ),
+        "seam_triangle_count": sum(
+            int(group["seam_triangle_count"]) for group in ordered_groups
+        ),
+        "island_count": total_islands,
+        "texture_group_count": len(ordered_groups),
+        "returned_texture_group_count": len(displayed_groups),
+        "sampled": selected_indices is not None,
+        "texture_groups": public_groups,
+        "fidelity": (
+            "UV0 coordinates decoded from native geometry; islands connect sampled "
+            "same-tile triangles by shared mesh edges; linked YTD backgrounds are "
+            "bounded previews; cross-tile seams are count-only"
+        ),
+    }
+
+
 def _uniform_sample_indices(total: int, budget: int) -> tuple[int, ...] | None:
     """Select an ordered, deterministic, globally distributed bounded sample."""
     if total <= budget:
@@ -1463,6 +2096,8 @@ def _render_model_image(
         tuple[str, str, int], tuple[_PreparedInteractiveTriangle, ...]
     ] | None = None,
     interactive_cache_key: tuple[str, str, int] | None = None,
+    texture_images: Mapping[str, Image.Image] | None = None,
+    collision_geometries: tuple[_ModelGeometry, ...] = (),
 ) -> tuple[Image.Image, dict[str, Any]]:
     normalized_mode = render_mode.strip().casefold()
     if normalized_mode not in MODEL_RENDER_MODES:
@@ -1560,6 +2195,15 @@ def _render_model_image(
     geometry_render_materials: list[
         tuple[str, str, tuple[int, int, int]]
     ] = []
+    normalized_textures = {
+        str(texture_name).casefold(): (
+            texture if texture.mode == "RGB" else texture.convert("RGB")
+        )
+        for texture_name, texture in (texture_images or {}).items()
+        if str(texture_name).strip() and isinstance(texture, Image.Image)
+    }
+    geometry_texture_sources: list[tuple[str | None, Image.Image | None]] = []
+    unresolved_textures: set[str] = set()
     prepared_materials = (
         model_materials
         if model_materials is not None and len(model_materials) == len(geometries)
@@ -1576,6 +2220,14 @@ def _render_model_image(
             ))
             base_color = _material_mode_color(base_color, material_key)
         geometry_render_materials.append((identity, semantic, base_color))
+        texture_name = _model_diffuse_texture_name(geometry)
+        texture = (
+            normalized_textures.get(texture_name.casefold())
+            if texture_name is not None else None
+        )
+        geometry_texture_sources.append((texture_name, texture))
+        if normalized_mode in {"textured", "uvs"} and texture_name and texture is None:
+            unresolved_textures.add(texture_name)
 
     cached_triangles = None
     use_interactive_cache = (
@@ -1768,6 +2420,12 @@ def _render_model_image(
             underlay = _shade_color(average, 0.48)
             draw.polygon(hull, fill=underlay)
             draw.line((*hull, hull[0]), fill=_shade_color(average, 0.62), width=1)
+    textured_triangle_count = 0
+    uv_valid_triangle_count = 0
+    uv_resolved_triangle_count = 0
+    uv_unresolved_triangle_count = 0
+    uv_degenerate_triangle_count = 0
+    uv_missing_triangle_count = 0
     for (
         _depth, _ordinal, geometry_index, triangle, polygon, light,
     ) in rendered:
@@ -1776,14 +2434,46 @@ def _render_model_image(
             edge_color = _shade_color(base_color, 0.72 + (0.28 * light))
             draw.line((*polygon, polygon[0]), fill=edge_color, width=1)
             continue
+        texture_fill = None
+        if normalized_mode == "textured":
+            _texture_name, texture = geometry_texture_sources[geometry_index]
+            if texture is not None:
+                texture_fill = _sample_uv_triangle(
+                    texture, geometries[geometry_index].texcoords, triangle,
+                )
+                if texture_fill is not None:
+                    textured_triangle_count += 1
+        uv_fill = None
+        if normalized_mode == "uvs":
+            uv_status = _uv_triangle_status(
+                geometries[geometry_index].texcoords, triangle,
+            )
+            if uv_status == "valid":
+                uv_valid_triangle_count += 1
+                _texture_name, texture = geometry_texture_sources[geometry_index]
+                if texture is not None:
+                    uv_resolved_triangle_count += 1
+                    uv_fill = (47, 169, 105)
+                else:
+                    uv_unresolved_triangle_count += 1
+                    uv_fill = (211, 155, 61)
+            elif uv_status == "degenerate":
+                uv_degenerate_triangle_count += 1
+                uv_fill = (184, 83, 150)
+            else:
+                uv_missing_triangle_count += 1
+                uv_fill = (202, 76, 67)
         fill = (
-            base_color
-            if normalized_mode == "materials"
-            else _shade_color(base_color, light)
+            uv_fill or base_color if normalized_mode in {"materials", "uvs"}
+            else _shade_color(texture_fill or base_color, light)
         )
         # Shaded intentionally has no per-triangle outline. Only true open edges
         # and geometry/material boundaries receive a restrained silhouette.
         draw.polygon(polygon, fill=fill)
+        if normalized_mode == "uvs":
+            draw.line(
+                (*polygon, polygon[0]), fill=_shade_color(fill, 0.52), width=1,
+            )
         if trace_boundaries:
             for first, second, start, end in (
                 (triangle[0], triangle[1], polygon[0], polygon[1]),
@@ -1802,6 +2492,47 @@ def _render_model_image(
             for point in points[::max(1, len(points) // 12_000)]:
                 x, y, _depth = point
                 draw.ellipse((x - 1, y - 1, x + 1, y + 1), fill=point_color)
+    collision_triangle_count = sum(
+        len(geometry.triangles) for geometry in collision_geometries
+    )
+    collision_rendered_count = 0
+    if collision_triangle_count:
+        collision_budget = min(configured_budget, MAX_RENDERED_TRIANGLES)
+        collision_indices = _uniform_triangle_indices(
+            collision_triangle_count, collision_budget,
+        )
+        selected_collision = (
+            set(collision_indices) if collision_indices is not None else None
+        )
+        collision_polygons: list[
+            tuple[float, int, str, tuple[tuple[float, float], ...]]
+        ] = []
+        ordinal = 0
+        for geometry in collision_geometries:
+            for triangle in geometry.triangles:
+                if selected_collision is None or ordinal in selected_collision:
+                    transformed = tuple(
+                        screen(geometry.vertices[index]) for index in triangle
+                    )
+                    collision_polygons.append((
+                        sum(point[2] for point in transformed) / 3.0,
+                        ordinal,
+                        geometry.component,
+                        tuple((point[0], point[1]) for point in transformed),
+                    ))
+                ordinal += 1
+        collision_polygons.sort(key=lambda item: (item[0], item[1]))
+        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        for _depth, _ordinal, component_name, polygon in collision_polygons:
+            diagnostic_box = component_name.casefold().startswith("box diagnostic")
+            fill = (241, 167, 55, 30) if diagnostic_box else (49, 204, 168, 28)
+            edge = (245, 178, 70, 224) if diagnostic_box else (69, 224, 187, 224)
+            overlay_draw.polygon(polygon, fill=fill)
+            overlay_draw.line((*polygon, polygon[0]), fill=edge, width=2)
+        image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+        draw = ImageDraw.Draw(image)
+        collision_rendered_count = len(collision_polygons)
     draw.text(
         (38, 24), f"{title} · {normalized_mode.upper()}  |  {name[:64]}",
         fill="#E8F2EC",
@@ -1834,17 +2565,49 @@ def _render_model_image(
         "model_render_triangle_budget": configured_budget,
         "model_rendered_triangle_count": len(rendered),
         "model_render_skipped_triangle_count": total_triangles - len(rendered),
+        "collision_overlay_visible": bool(collision_triangle_count),
+        "collision_overlay_triangle_count": collision_triangle_count,
+        "collision_overlay_rendered_triangle_count": collision_rendered_count,
+        "collision_overlay_sampled": collision_rendered_count < collision_triangle_count,
         "model_render_sampled": selected_indices is not None,
         "model_render_sample_underlay": sample_underlay,
         "model_render_material_count": len({item[0] for item in material_records}),
         "model_render_semantic_materials": ", ".join(sorted({
             item[1] for item in material_records
         })) or "none",
+        "model_render_texture_source_count": len(normalized_textures),
+        "model_render_textured_geometry_count": sum(
+            1 for geometry, (_name, texture) in zip(
+                geometries, geometry_texture_sources, strict=True,
+            ) if texture is not None and geometry.texcoords
+        ) if normalized_mode == "textured" else 0,
+        "model_render_textured_triangle_count": textured_triangle_count,
+        "model_render_unresolved_textures": ", ".join(
+            sorted(unresolved_textures, key=str.casefold)
+        ),
+        "model_render_texture_sampling": (
+            "UV0 three-vertex average from bounded linked texture previews"
+            if normalized_mode == "textured" else "disabled"
+        ),
+        "model_render_uv_valid_triangle_count": uv_valid_triangle_count,
+        "model_render_uv_resolved_triangle_count": uv_resolved_triangle_count,
+        "model_render_uv_unresolved_triangle_count": uv_unresolved_triangle_count,
+        "model_render_uv_degenerate_triangle_count": uv_degenerate_triangle_count,
+        "model_render_uv_missing_triangle_count": uv_missing_triangle_count,
+        "model_render_uv_coverage_percent": round(
+            (uv_valid_triangle_count / len(rendered) * 100.0) if rendered else 0.0,
+            2,
+        ) if normalized_mode == "uvs" else 0.0,
+        "model_render_uv_analysis_scope": (
+            f"{len(rendered):,} rendered triangles"
+            if normalized_mode == "uvs" else "disabled"
+        ),
         "model_render_depth_ordering": "far-to-near triangle painter",
         "model_render_lighting": (
             "two-sided Lambert; ambient 0.36, directional 0.64"
-            if normalized_mode == "shaded"
+            if normalized_mode in {"shaded", "textured"}
             else "flat material IDs" if normalized_mode == "materials"
+            else "flat UV0 coverage classes" if normalized_mode == "uvs"
             else "edge-only material wireframe"
         ),
         "model_render_output_size": f"{width} x {height}",
@@ -1853,7 +2616,13 @@ def _render_model_image(
             "cached selection bounds" if supplied_bounds else "computed geometry bounds"
         ),
         "model_render_fidelity": (
-            "decoded geometry and material references only; game shaders, "
+            "decoded geometry, UV0, and bounded linked texture previews; game "
+            "shader layers, reflections, and skinning are not reproduced"
+            if normalized_mode == "textured"
+            else "decoded geometry and bounded UV0 coverage classes; texture "
+            "resolution reflects only the linked preview dictionary"
+            if normalized_mode == "uvs"
+            else "decoded geometry and material references only; game shaders, "
             "textures, reflections, and skinning are not reproduced"
         ),
     }
@@ -2173,10 +2942,10 @@ def _collision_index(
     return index
 
 
-def _collision_preview_from_xml(
+def _collision_scene_from_xml(
     xml: Path, name: str,
-) -> tuple[bytes | None, dict[str, Any], str | None]:
-    """Render bounded YBN triangle and primitive diagnostics."""
+) -> tuple[NativeCollisionScene | None, dict[str, Any], str | None]:
+    """Decode bounded YBN triangle and primitive diagnostics."""
     try:
         root = _safe_codewalker_xml(xml).getroot()
         geometries: list[_ModelGeometry] = []
@@ -2184,6 +2953,7 @@ def _collision_preview_from_xml(
         skipped_polygons = 0
         total_vertices = 0
         total_render_triangles = 0
+        owner_count = 0
         for vertices_element in root.xpath(".//*[local-name()='Vertices']"):
             owner = vertices_element.getparent()
             if owner is None:
@@ -2195,7 +2965,9 @@ def _collision_preview_from_xml(
             vertices = _collision_vertices(vertices_element, center)
             if not vertices:
                 continue
+            owner_count += 1
             triangles: list[tuple[int, int, int]] = []
+            box_triangles: list[tuple[int, int, int]] = []
             for polygon in polygons:
                 if not isinstance(polygon.tag, str):
                     continue
@@ -2214,47 +2986,85 @@ def _collision_preview_from_xml(
                     # Four YBN box control vertices describe one oriented primitive.
                     # A tetrahedral diagnostic hull exposes its placement without
                     # claiming to be the exact physics-engine surface tessellation.
-                    triangles.extend((
+                    box_triangles.extend((
                         (box[0], box[1], box[2]), (box[0], box[1], box[3]),
                         (box[0], box[2], box[3]), (box[1], box[2], box[3]),
                     ))
                 elif kind not in {"Sphere", "Capsule", "Cylinder"}:
                     skipped_polygons += 1
             total_vertices += len(vertices)
-            total_render_triangles += len(triangles)
+            total_render_triangles += len(triangles) + len(box_triangles)
             if total_vertices > MAX_MODEL_VERTICES:
                 raise ValueError("Collision preview exceeds the guarded vertex limit")
             if total_render_triangles > MAX_MODEL_TRIANGLES:
                 raise ValueError("Collision preview exceeds the guarded triangle limit")
-            geometries.append(_ModelGeometry(vertices, tuple(triangles), _local_name(owner)))
+            owner_name = _local_name(owner)
+            if triangles:
+                geometries.append(_ModelGeometry(
+                    vertices, tuple(triangles), owner_name,
+                    component="Triangle mesh",
+                ))
+            if box_triangles:
+                geometries.append(_ModelGeometry(
+                    vertices, tuple(box_triangles), owner_name,
+                    component="Box diagnostic hull",
+                ))
+            if not triangles and not box_triangles:
+                geometries.append(_ModelGeometry(
+                    vertices, (), owner_name,
+                    component="Unrendered primitive anchors",
+                ))
         material_count = len(root.xpath(
             ".//*[local-name()='Materials']/*[local-name()='Item']"
         ))
         metadata: dict[str, Any] = {
-            "collision_geometry_count": len(geometries),
+            "collision_geometry_count": owner_count,
             "collision_vertex_count": total_vertices,
             "collision_polygon_count": sum(polygon_counts.values()),
             "collision_material_count": material_count,
             "collision_primitives": ", ".join(
                 f"{kind}: {count}" for kind, count in sorted(polygon_counts.items())
             ) or "none",
+            "collision_primitive_counts": dict(sorted(polygon_counts.items())),
         }
         if skipped_polygons:
             metadata["collision_skipped_polygons"] = skipped_polygons
         if not geometries:
             metadata["collision_preview"] = "No supported collision geometry was found"
             return None, metadata, None
+        scene = NativeCollisionScene(
+            name=name,
+            geometries=tuple(geometries),
+            primitive_counts=tuple(sorted(polygon_counts.items())),
+            material_count=material_count,
+            owner_count=owner_count,
+            skipped_polygon_count=skipped_polygons,
+        )
+        return scene, metadata, None
+    except (OSError, ValueError, etree.XMLSyntaxError, OverflowError) as exc:
+        return None, {}, f"Collision preview unavailable: {exc}"
+
+
+def _collision_preview_from_xml(
+    xml: Path, name: str,
+) -> tuple[bytes | None, dict[str, Any], str | None, NativeCollisionScene | None]:
+    """Render a standalone preview while retaining the reusable YBN scene."""
+    scene, metadata, warning = _collision_scene_from_xml(xml, name)
+    if scene is None:
+        return None, metadata, warning, None
+    try:
         image, rendered = _render_model_wireframe(
-            geometries, name, title="COLLISION PREVIEW", geometry_label="collision groups",
+            list(scene.geometries), name, title="COLLISION PREVIEW",
+            geometry_label="collision groups",
         )
         metadata.update({
             "collision_bounds": rendered["model_bounds"],
             "collision_render_triangles": rendered["model_triangle_count"],
             "collision_preview": "isometric geometry diagnostic",
         })
-        return image, metadata, None
-    except (OSError, ValueError, etree.XMLSyntaxError, OverflowError) as exc:
-        return None, {}, f"Collision preview unavailable: {exc}"
+        return image, metadata, warning, scene
+    except (OSError, ValueError, OverflowError) as exc:
+        return None, metadata, f"Collision preview unavailable: {exc}", scene
 
 
 def _direct_child(
@@ -3221,6 +4031,8 @@ class NativeAssetInspector:
         structured: str | None = None
         image_png: bytes | None = None
         model_scene: NativeModelScene | None = None
+        collision_scene: NativeCollisionScene | None = None
+        texture_previews: tuple[NativeTexturePreview, ...] = ()
         if truncated:
             warnings.append("Deep preview skipped because the asset exceeded the safety limit.")
         if suffix == ".gxt2" and not truncated:
@@ -3246,6 +4058,8 @@ class NativeAssetInspector:
                 structured = converted.structured_text
                 image_png = converted.image_png
                 model_scene = converted.model_scene
+                collision_scene = converted.collision_scene
+                texture_previews = converted.texture_previews
                 metadata.update(converted.metadata)
                 if converted.texture_count:
                     metadata["exported_textures"] = converted.texture_count
@@ -3260,6 +4074,8 @@ class NativeAssetInspector:
             sha256=hashlib.sha256(data).hexdigest(), metadata=metadata,
             structured_text=structured, image_png=image_png,
             warnings=tuple(warnings), model_scene=model_scene,
+            collision_scene=collision_scene,
+            texture_previews=texture_previews,
         )
 
     def _convert(
@@ -3286,6 +4102,7 @@ class NativeAssetInspector:
             preview_metadata: dict[str, Any] = {}
             geometry_image: bytes | None = None
             model_scene: NativeModelScene | None = None
+            collision_scene: NativeCollisionScene | None = None
             suffix = Path(name).suffix.casefold()
             if suffix in MODEL_PREVIEW_SUFFIXES:
                 model_scene, preview_metadata, preview_warning = _model_scene_from_xml(
@@ -3296,7 +4113,10 @@ class NativeAssetInspector:
                 if preview_warning:
                     preview_metadata["model_preview"] = preview_warning
             elif suffix in COLLISION_PREVIEW_SUFFIXES:
-                geometry_image, preview_metadata, preview_warning = _collision_preview_from_xml(
+                (
+                    geometry_image, preview_metadata, preview_warning,
+                    collision_scene,
+                ) = _collision_preview_from_xml(
                     xml, Path(name).name,
                 )
                 if preview_warning:
@@ -3336,10 +4156,12 @@ class NativeAssetInspector:
                     f"\n\n<!-- Preview truncated at 2,000,000 characters; "
                     f"full CodeWalker XML was {xml_size:,} bytes. -->\n"
                 )
-            texture_image, count = _texture_contact_sheet(assets)
+            texture_image, count, texture_previews = _texture_contact_sheet(xml, assets)
             return _ConvertedAsset(
                 text, geometry_image or texture_image, count,
                 metadata=preview_metadata, model_scene=model_scene,
+                collision_scene=collision_scene,
+                texture_previews=texture_previews,
             )
 
     def export_workspace(

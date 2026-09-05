@@ -371,6 +371,30 @@ class PedAuthoringWorkspace:
     def inspect(self) -> PedAuthoringProject:
         return self._scan_project()[1]
 
+    def state_sha256(self) -> str:
+        """Bind reviews to actual copied bytes, not just file sizes or revision."""
+        from allin1_sdk.managed_package_conversion import _safe_publication_path
+
+        _safe_publication_path(self.root)
+        _safe_publication_path(self._core.manifest_path)
+        scan = AddonPackageInspector().inspect(self.source)
+        files = []
+        for entry in sorted(scan.entries, key=lambda item: item.path):
+            authored = self.source / entry.path
+            _safe_publication_path(authored)
+            files.append((entry.path, _file_sha256(self._core.member(entry.path))))
+        return hashlib.sha256(json.dumps(
+            {"manifest": self.manifest, "files": files},
+            sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+
+    def _check_state(self, expected: str | None) -> None:
+        if expected is not None and (
+            not isinstance(expected, str) or not _SHA256.fullmatch(expected)
+            or self.state_sha256() != expected
+        ):
+            raise ValueError("Ped workspace changed after review; inspect and review again")
+
     def publish_source(self) -> Path:
         if self.source.name.casefold() == "dlc.rpf.source":
             return self.source
@@ -525,10 +549,12 @@ class PedAuthoringWorkspace:
         *,
         expected_revision: int,
         expected_plan_sha256: str,
+        expected_state_sha256: str | None = None,
     ) -> PedAuthoringResult:
         with self._core.operation_lock():
             self._core.refresh_manifest()
             self._check_revision(expected_revision)
+            self._check_state(expected_state_sha256)
             normalized_sha = str(expected_plan_sha256).strip().casefold()
             if not _SHA256.fullmatch(normalized_sha):
                 raise ValueError(
@@ -598,10 +624,12 @@ class PedAuthoringWorkspace:
         new_name: str,
         new_props: str | None = None,
         expected_revision: int | None = None,
+        expected_state_sha256: str | None = None,
     ) -> PedAuthoringResult:
         with self._core.operation_lock():
             self._core.refresh_manifest()
             self._check_revision(expected_revision)
+            self._check_state(expected_state_sha256)
             scan, before_project = self._scan_project()
             current = self._unique_ped(scan, ped_name)
             target = self._validate_identity(new_name, "ped name")
@@ -664,10 +692,12 @@ class PedAuthoringWorkspace:
         updates: dict[str, str],
         *,
         expected_revision: int | None = None,
+        expected_state_sha256: str | None = None,
     ) -> PedAuthoringResult:
         with self._core.operation_lock():
             self._core.refresh_manifest()
             self._check_revision(expected_revision)
+            self._check_state(expected_state_sha256)
             return self._update_locked(ped_name, updates)
 
     def _update_locked(
@@ -712,10 +742,12 @@ class PedAuthoringWorkspace:
 
     def undo(
         self, *, expected_revision: int | None = None,
+        expected_state_sha256: str | None = None,
     ) -> PedAuthoringResult:
         with self._core.operation_lock():
             self._core.refresh_manifest()
             self._check_revision(expected_revision)
+            self._check_state(expected_state_sha256)
             history = self._core.latest_history()
             self._core.verify_post_edit_state(history)
             record = self._core.history_record(history)

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-apply-rpf-utility"
+description = "Enables the desktop_apply_rpf_utility command without any pre-configured scope."
+commands.allow = ["desktop_apply_rpf_utility"]
+
+[[permission]]
+identifier = "deny-desktop-apply-rpf-utility"
+description = "Denies the desktop_apply_rpf_utility command without any pre-configured scope."
+commands.deny = ["desktop_apply_rpf_utility"]

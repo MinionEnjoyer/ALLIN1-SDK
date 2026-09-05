@@ -2039,6 +2039,10 @@ def test_native_asset_helper_xml_and_texture_contact_sheet(tmp_path, monkeypatch
     assert report.structured_text.startswith("<TextureDictionary>")
     assert report.metadata["exported_textures"] == 1
     assert report.image_png.startswith(b"\x89PNG")
+    assert len(report.texture_previews) == 1
+    assert report.texture_previews[0].name == "diffuse"
+    assert (report.texture_previews[0].width, report.texture_previews[0].height) == (32, 16)
+    assert report.texture_previews[0].thumbnail_png.startswith(b"\x89PNG")
 
 
 def test_native_asset_helper_uses_game_keys_and_summarizes_awc(tmp_path, monkeypatch):
@@ -2205,6 +2209,10 @@ def test_native_asset_helper_renders_collision_geometry(tmp_path, monkeypatch):
     assert report.metadata["collision_primitives"] == "Box: 1, Triangle: 1"
     assert report.metadata["collision_render_triangles"] == 5
     assert report.metadata["collision_preview"] == "isometric geometry diagnostic"
+    assert report.collision_scene is not None
+    assert report.collision_scene.primitive_counts == (("Box", 1), ("Triangle", 1))
+    assert report.collision_scene.render_triangle_count == 5
+    assert report.collision_scene.bounds["size"] == [1.0, 1.0, 1.0]
 
 
 def test_native_asset_helper_renders_ymap_placement_overview(tmp_path, monkeypatch):

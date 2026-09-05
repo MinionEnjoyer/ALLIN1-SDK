@@ -14,6 +14,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -120,10 +121,12 @@ public:
                 online_checks >= *online_on_check);
     }
     std::vector<VehicleSnapshot> EnumerateVehicles() override {
+        ++enumerate_calls;
         return vehicles;
     }
     std::optional<VehicleSnapshot>
     LookupVehicle(std::uint64_t entity_id) override {
+        ++lookup_calls;
         for (const auto& vehicle : vehicles) {
             if (vehicle.entity_id == entity_id) return vehicle;
         }
@@ -141,6 +144,8 @@ public:
     bool online{false};
     std::optional<std::size_t> online_on_check;
     mutable std::size_t online_checks{0};
+    std::size_t enumerate_calls{0};
+    std::size_t lookup_calls{0};
     bool supports_physics_activation{false};
     bool physics_activation_succeeds{true};
     std::size_t physics_activation_calls{0};
@@ -270,7 +275,9 @@ public:
             fail_next_gain_write_at.reset();
             return false;
         }
-        steering_gains[index] = gain;
+        if (discard_gain_writes_at.count(index) == 0U) {
+            steering_gains[index] = gain;
+        }
         ++gain_writes;
         return true;
     }
@@ -348,6 +355,7 @@ public:
     std::optional<std::uint32_t> fail_next_write_at;
     std::optional<std::uint32_t> fail_next_power_write_at;
     std::optional<std::uint32_t> fail_next_gain_write_at;
+    std::set<std::uint32_t> discard_gain_writes_at;
     std::optional<std::uint32_t> fail_next_bone_read_at;
     std::optional<std::uint32_t> fail_next_position_read_at;
     std::optional<std::uint32_t> fail_next_static_write_at;
@@ -1280,6 +1288,8 @@ void TestVolatileSteeringMaintenanceIgnoresFixedWheels() {
           "volatile steering maintenance fixture did not start");
     const auto first = std::chrono::steady_clock::now();
     runtime.Service(first);
+    Check(host.lookup_calls == 0,
+          "initial discovery unexpectedly used tracked-vehicle lookup");
 
     const auto managed =
         configuration.wheel_index_map.at(configuration.axles[0].left_bone);
@@ -1289,24 +1299,168 @@ void TestVolatileSteeringMaintenanceIgnoresFixedWheels() {
     access.steering_gains[fixed] = 7.25;
     const auto writes_before = access.gain_writes;
 
-    // Less than the discovery interval: only the bounded per-frame volatile
-    // maintenance path can repair this engine-owned field.
+    // Maintenance is intentionally bounded even when Service runs every host
+    // frame. The managed wheel remains untouched until its 100 ms deadline.
     runtime.Service(first + std::chrono::milliseconds(1));
+    runtime.Service(first + std::chrono::milliseconds(99));
+    Check(access.steering_gains[managed] == 13.7362,
+          "volatile maintenance ran before its bounded cadence elapsed");
+    Check(access.gain_writes == writes_before,
+          "bounded maintenance wrote on an intervening host frame");
+    Check(host.lookup_calls == 0,
+          "maintenance performed native-style lookup before its deadline");
+    runtime.Service(first + std::chrono::milliseconds(100));
+    Check(host.lookup_calls == 1,
+          "due maintenance did not perform exactly one vehicle lookup");
     Check(std::abs(access.steering_gains[managed] - 1.0) < 0.000001,
-          "per-frame maintenance did not repair GTA steering gain drift");
+          "bounded maintenance did not repair GTA steering gain drift");
     Check(access.steering_gains[fixed] == 7.25,
           "fixed wheel gain drift was treated as controller-owned state");
     Check(access.gain_writes == writes_before + 1U,
           "volatile maintenance wrote more than the one drifting managed wheel");
 
     access.steering_gains[managed] = 9.0;
-    runtime.Service(first + std::chrono::milliseconds(2));
+    runtime.Service(first + std::chrono::milliseconds(101));
+    Check(access.steering_gains[managed] == 9.0,
+          "maintenance cadence was not preserved after a successful repair");
+    runtime.Service(first + std::chrono::milliseconds(200));
     Check(std::count_if(
               log.entries.begin(), log.entries.end(),
               [](const auto& entry) {
                   return entry.first == "steering-gain-reasserted";
               }) == 1,
           "repeated gain drift produced frame-spam logging");
+    runtime.Shutdown();
+}
+
+void TestIdleServiceAvoidsPerFrameHostPolling() {
+    auto configuration = MakeConfiguration(2, 0x5A17B063U);
+    Host host;
+    WheelAccess access;
+    access.flags = InitialFlags(4);
+    LogSink log;
+    ConfigurationCatalog catalog;
+    catalog.active.emplace(configuration.model_hash, configuration);
+    Resolver resolver;
+    RuntimeSettings settings;
+    settings.discovery_interval_ms = 250;
+    AxleRuntime runtime(host, access, log, settings);
+    Check(runtime.Start(std::move(catalog), resolver),
+          "idle-service performance fixture did not start");
+
+    const auto first = std::chrono::steady_clock::now();
+    runtime.Service(first);
+    for (int offset = 1; offset < 100; ++offset) {
+        runtime.Service(first + std::chrono::milliseconds(offset));
+    }
+    Check(host.online_checks == 2,
+          "idle Service queried online state on intervening host frames");
+    Check(host.enumerate_calls == 1,
+          "idle Service enumerated vehicles before discovery was due");
+    Check(host.lookup_calls == 0,
+          "idle Service performed tracked-vehicle lookups without a target");
+
+    runtime.Service(first + std::chrono::milliseconds(100));
+    Check(host.online_checks == 3 && host.enumerate_calls == 1,
+          "online guard and discovery cadences were not independent");
+    runtime.Service(first + std::chrono::milliseconds(249));
+    Check(host.enumerate_calls == 1,
+          "discovery ran before the configured interval");
+    runtime.Service(first + std::chrono::milliseconds(250));
+    Check(host.enumerate_calls == 2,
+          "discovery did not run at the configured interval");
+    runtime.Shutdown();
+}
+
+void TestVolatileSteeringMaintenanceBacksOffAndRecovers() {
+    auto configuration = MakeConfiguration(3, 0x5A17B062U);
+    PromoteToSignedSchema(configuration);
+    configuration.axles[0].steering_gain = 1.0;
+    configuration.axles[1].steering_gain = 0.0;
+    configuration.axles[2].steering_gain = -0.22;
+
+    Host host;
+    host.vehicles = {{86, configuration.model_hash, 1}};
+    WheelAccess access;
+    access.supports_steering_gain = true;
+    access.flags = InitialFlags(6);
+    access.steering_gains = {0.11, 0.12, 0.13, 0.14, 0.15, 0.16};
+    LogSink log;
+    ConfigurationCatalog catalog;
+    catalog.active.emplace(configuration.model_hash, configuration);
+    Resolver resolver;
+    AxleRuntime runtime(host, access, log);
+    Check(runtime.Start(std::move(catalog), resolver),
+          "steering maintenance backoff fixture did not start");
+    const auto first = std::chrono::steady_clock::now();
+    runtime.Service(first);
+
+    const auto failing =
+        configuration.wheel_index_map.at(configuration.axles[0].left_bone);
+    const auto independent =
+        configuration.wheel_index_map.at(configuration.axles[2].left_bone);
+    access.steering_gains[failing] = 13.0;
+    access.discard_gain_writes_at.insert(failing);
+    const auto writes_before = access.gain_writes;
+
+    runtime.Service(first + std::chrono::milliseconds(100));
+    Check(access.gain_writes == writes_before + 1U,
+          "first rejected steering maintenance write was not attempted");
+    for (int offset = 101; offset < 200; ++offset) {
+        runtime.Service(first + std::chrono::milliseconds(offset));
+    }
+    Check(access.gain_writes == writes_before + 1U,
+          "a rejected wheel was retried on intervening host frames");
+
+    // A different wheel remains independently serviceable while the failing
+    // wheel enters exponential backoff.
+    access.steering_gains[independent] = 8.0;
+    runtime.Service(first + std::chrono::milliseconds(200));
+    Check(access.gain_writes == writes_before + 3U,
+          "per-wheel backoff suppressed maintenance for a healthy wheel");
+    Check(std::abs(access.steering_gains[independent] - (-0.22)) < 0.000001,
+          "healthy wheel was not repaired during another wheel's backoff");
+    for (int offset = 201; offset < 400; ++offset) {
+        runtime.Service(first + std::chrono::milliseconds(offset));
+    }
+    Check(access.gain_writes == writes_before + 3U,
+          "second failure did not extend the retry interval");
+
+    runtime.Service(first + std::chrono::milliseconds(400));
+    Check(access.gain_writes == writes_before + 4U,
+          "third exponential-backoff retry did not occur");
+    for (int offset = 401; offset < 800; ++offset) {
+        runtime.Service(first + std::chrono::milliseconds(offset));
+    }
+    Check(access.gain_writes == writes_before + 4U,
+          "throttled wheel re-entered the per-frame write loop");
+    Check(std::count_if(
+              log.entries.begin(), log.entries.end(),
+              [](const auto& entry) {
+                  return entry.first ==
+                         "steering-gain-maintenance-throttled";
+              }) == 1,
+          "repeated failures did not produce one bounded-backoff diagnostic");
+
+    access.discard_gain_writes_at.erase(failing);
+    runtime.Service(first + std::chrono::milliseconds(800));
+    Check(std::abs(access.steering_gains[failing] - 1.0) < 0.000001,
+          "backed-off wheel did not recover on its scheduled retry");
+    Check(std::count_if(
+              log.entries.begin(), log.entries.end(),
+              [](const auto& entry) {
+                  return entry.first ==
+                         "steering-gain-maintenance-recovered";
+              }) == 1,
+          "successful retry did not report maintenance recovery");
+
+    access.steering_gains[failing] = 6.0;
+    runtime.Service(first + std::chrono::milliseconds(899));
+    Check(access.steering_gains[failing] == 6.0,
+          "recovered wheel lost its normal bounded cadence");
+    runtime.Service(first + std::chrono::milliseconds(900));
+    Check(std::abs(access.steering_gains[failing] - 1.0) < 0.000001,
+          "recovered wheel did not return to its normal retry cadence");
     runtime.Shutdown();
 }
 
@@ -2173,6 +2327,8 @@ int main() {
         TestOnlineAndUnsupportedGuards();
         TestSignedSteeringGainCapabilityAndRestore();
         TestVolatileSteeringMaintenanceIgnoresFixedWheels();
+        TestVolatileSteeringMaintenanceBacksOffAndRecovers();
+        TestIdleServiceAvoidsPerFrameHostPolling();
         TestRuntimeGeometryUsesAuthoritativePhysicalOrder();
         TestAxleSupportBiasApplyRollbackAndRestore();
         TestAxleSupportBiasParsingAndValidation();

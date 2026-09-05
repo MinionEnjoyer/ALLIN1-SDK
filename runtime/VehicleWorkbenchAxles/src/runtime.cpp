@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -25,6 +26,27 @@ constexpr std::uint16_t kManagedWheelBits =
 constexpr double kGainComparisonEpsilon = kSteeringGainEpsilon;
 constexpr double kStaticForceAbsoluteTolerance = 1.0e-4;
 constexpr double kStaticForceRelativeTolerance = 0.005;
+constexpr auto kSteeringMaintenanceInterval =
+    std::chrono::milliseconds(100);
+constexpr auto kSteeringMaintenanceMaximumBackoff =
+    std::chrono::milliseconds(5000);
+constexpr std::uint32_t kSteeringMaintenanceSuppressionThreshold = 3U;
+// The host still performs an unconditional online-session check immediately
+// before every write.  This cadence applies only to idle Service calls, where
+// polling both network natives every rendered frame adds work without making a
+// write any safer.
+constexpr auto kIdleOnlineGuardInterval = std::chrono::milliseconds(100);
+
+std::chrono::milliseconds SteeringMaintenanceBackoff(
+    std::uint32_t consecutive_failures) noexcept {
+    if (consecutive_failures == 0U) return kSteeringMaintenanceInterval;
+    const auto shift = std::min<std::uint32_t>(
+        consecutive_failures - 1U, 6U);
+    const auto multiplier = std::uint64_t{1} << shift;
+    const auto delay = std::chrono::milliseconds(
+        kSteeringMaintenanceInterval.count() * multiplier);
+    return std::min(delay, kSteeringMaintenanceMaximumBackoff);
+}
 
 bool StaticForceEqual(double left, double right) noexcept {
     const double scale = std::max(std::abs(left), std::abs(right));
@@ -137,6 +159,8 @@ struct AxleRuntime::Implementation {
         bool has_steering_gain{false};
         double static_force{0.0};
         bool has_static_force{false};
+        std::uint32_t steering_maintenance_failures{0};
+        std::chrono::steady_clock::time_point next_steering_maintenance{};
     };
 
     struct TrackedVehicle {
@@ -173,6 +197,7 @@ struct AxleRuntime::Implementation {
     std::unordered_map<std::uint64_t, TrackedVehicle> tracked;
     std::unordered_set<std::string> emitted_once;
     std::chrono::steady_clock::time_point last_discovery{};
+    std::chrono::steady_clock::time_point last_idle_online_guard{};
 
     Implementation(IVehicleHost& host_ref, IWheelAccess& access_ref,
                    ILogSink& log_ref, RuntimeSettings runtime_settings)
@@ -753,6 +778,8 @@ struct AxleRuntime::Implementation {
                         wheel.manages_steering_gain,
                         wheel.original_static_force,
                         wheel.manages_static_force,
+                        0U,
+                        now + kSteeringMaintenanceInterval,
                     });
             }
         }
@@ -869,9 +896,26 @@ struct AxleRuntime::Implementation {
         return false;
     }
 
-    void MaintainVolatileSteeringGains() {
+    void MaintainVolatileSteeringGains(
+        std::chrono::steady_clock::time_point now) {
         if (!access.SupportsSteeringGain()) return;
-        for (const auto& [entity_id, saved] : tracked) {
+        for (auto& saved_entry : tracked) {
+            const auto entity_id = saved_entry.first;
+            auto& saved = saved_entry.second;
+            const bool has_due_wheel = std::any_of(
+                saved.originals.begin(), saved.originals.end(),
+                [now](const auto& original_entry) {
+                    const auto& original = original_entry.second;
+                    return original.has_steering_gain &&
+                           (original.next_steering_maintenance
+                                .time_since_epoch()
+                                .count() == 0 ||
+                            now >= original.next_steering_maintenance);
+                });
+            // LookupVehicle performs native existence/model queries.  Avoid
+            // those calls entirely on the host frames between the bounded
+            // maintenance deadlines.
+            if (!has_due_wheel) continue;
             const auto current = host.LookupVehicle(entity_id);
             if (!current.has_value() || current->model_hash != saved.model_hash) {
                 continue;
@@ -881,32 +925,79 @@ struct AxleRuntime::Implementation {
                 *current_generation != saved.wheel_generation) {
                 continue;
             }
-            for (const auto& [index, original] : saved.originals) {
+            for (auto& original_entry : saved.originals) {
+                const auto index = original_entry.first;
+                auto& original = original_entry.second;
                 if (!original.has_steering_gain) continue;
+                if (original.next_steering_maintenance.time_since_epoch().count() !=
+                        0 &&
+                    now < original.next_steering_maintenance) {
+                    continue;
+                }
+
+                const auto recovered = [&]() {
+                    if (original.steering_maintenance_failures > 0U) {
+                        LogOnce(
+                            LogLevel::Info,
+                            "steering-gain-maintenance-recovered",
+                            "Volatile steering gain maintenance recovered for "
+                            "model " +
+                                HashText(saved.model_hash) + " wheel " +
+                                std::to_string(index));
+                    }
+                    original.steering_maintenance_failures = 0U;
+                    original.next_steering_maintenance =
+                        now + kSteeringMaintenanceInterval;
+                };
+                const auto failed = [&](const std::string& code,
+                                        const std::string& message) {
+                    if (original.steering_maintenance_failures <
+                        std::numeric_limits<std::uint32_t>::max()) {
+                        ++original.steering_maintenance_failures;
+                    }
+                    const auto delay = SteeringMaintenanceBackoff(
+                        original.steering_maintenance_failures);
+                    original.next_steering_maintenance = now + delay;
+                    LogOnce(LogLevel::Warning, code, message);
+                    if (original.steering_maintenance_failures ==
+                        kSteeringMaintenanceSuppressionThreshold) {
+                        LogOnce(
+                            LogLevel::Warning,
+                            "steering-gain-maintenance-throttled",
+                            "Repeated volatile steering gain failures for model " +
+                                HashText(saved.model_hash) + " wheel " +
+                                std::to_string(index) +
+                                "; retries are isolated to this wheel and "
+                                "backed off to " +
+                                std::to_string(delay.count()) + " ms");
+                    }
+                };
+
                 double observed = 0.0;
                 if (!access.ReadWheelSteeringGain(
                         *current, index, observed) ||
                     !std::isfinite(observed)) {
-                    LogOnce(LogLevel::Warning,
-                            "steering-gain-maintenance-read-failed",
-                            "Could not read volatile steering gain for model " +
-                                HashText(saved.model_hash) + " wheel " +
-                                std::to_string(index));
+                    failed(
+                        "steering-gain-maintenance-read-failed",
+                        "Could not read volatile steering gain for model " +
+                            HashText(saved.model_hash) + " wheel " +
+                            std::to_string(index));
                     continue;
                 }
                 if (std::abs(observed - original.desired_steering_gain) <=
                     kGainComparisonEpsilon) {
+                    recovered();
                     continue;
                 }
                 if (!ConfirmOfflineBeforeWrite()) return;
                 if (!access.WriteWheelSteeringGain(
                         *current, index,
                         original.desired_steering_gain)) {
-                    LogOnce(LogLevel::Warning,
-                            "steering-gain-maintenance-write-failed",
-                            "Could not reassert volatile steering gain for "
-                            "model " + HashText(saved.model_hash) + " wheel " +
-                                std::to_string(index));
+                    failed(
+                        "steering-gain-maintenance-write-failed",
+                        "Could not reassert volatile steering gain for model " +
+                            HashText(saved.model_hash) + " wheel " +
+                            std::to_string(index));
                     continue;
                 }
                 double verified = 0.0;
@@ -915,14 +1006,15 @@ struct AxleRuntime::Implementation {
                     !std::isfinite(verified) ||
                     std::abs(verified - original.desired_steering_gain) >
                         kGainComparisonEpsilon) {
-                    LogOnce(LogLevel::Warning,
-                            "steering-gain-maintenance-verify-failed",
-                            "Volatile steering gain did not survive immediate "
-                            "readback for model " +
-                                HashText(saved.model_hash) + " wheel " +
-                                std::to_string(index));
+                    failed(
+                        "steering-gain-maintenance-verify-failed",
+                        "Volatile steering gain did not survive immediate "
+                        "readback for model " +
+                            HashText(saved.model_hash) + " wheel " +
+                            std::to_string(index));
                     continue;
                 }
+                recovered();
                 LogOnce(LogLevel::Debug, "steering-gain-reasserted",
                         "Reasserted engine-owned steering gain for model " +
                             HashText(saved.model_hash) + " wheel " +
@@ -1243,6 +1335,7 @@ bool AxleRuntime::Start(ConfigurationCatalog catalog,
 
     runtime.state = RuntimeState::Running;
     runtime.last_discovery = {};
+    runtime.last_idle_online_guard = {};
     runtime.log.Write(LogLevel::Info, "runtime-started",
                       std::string("VehicleWorkbenchAxles ") +
                           VWA_RUNTIME_VERSION + " started for " +
@@ -1256,14 +1349,19 @@ bool AxleRuntime::Start(ConfigurationCatalog catalog,
 void AxleRuntime::Service(std::chrono::steady_clock::time_point now) {
     auto& runtime = *implementation_;
     if (runtime.state != RuntimeState::Running) return;
-    if (runtime.host.IsOnlineSession()) {
-        runtime.DisableForOnline();
-        return;
+    if (runtime.last_idle_online_guard.time_since_epoch().count() == 0 ||
+        now - runtime.last_idle_online_guard >= kIdleOnlineGuardInterval) {
+        runtime.last_idle_online_guard = now;
+        if (runtime.host.IsOnlineSession()) {
+            runtime.DisableForOnline();
+            return;
+        }
     }
     // GTA rebuilds its per-wheel steering-limit field during ordinary vehicle
-    // simulation. Keep only explicitly steered, tracked gains current on every
-    // host service tick; discovery and flag recovery remain rate-limited.
-    runtime.MaintainVolatileSteeringGains();
+    // simulation. Keep explicitly steered, tracked gains current on a bounded
+    // cadence. Wheels that reject readback are backed off independently so a
+    // single unsupported slot cannot create a per-frame write/verify loop.
+    runtime.MaintainVolatileSteeringGains(now);
     if (runtime.state != RuntimeState::Running) return;
     const auto discovery_interval =
         std::chrono::milliseconds(runtime.settings.discovery_interval_ms);

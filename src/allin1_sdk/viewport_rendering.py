@@ -20,7 +20,7 @@ from typing import Callable, Generic, Hashable, Literal, TypeVar
 K = TypeVar("K", bound=Hashable)
 V = TypeVar("V")
 RenderQuality = Literal["interactive", "final", "full"]
-RenderMode = Literal["materials", "shaded", "wireframe"]
+RenderMode = Literal["materials", "shaded", "textured", "uvs", "wireframe"]
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,9 @@ class ViewportRenderKey:
         normalized_mode = (
             render_mode.strip().casefold() if isinstance(render_mode, str) else ""
         )
-        if normalized_mode not in {"materials", "shaded", "wireframe"}:
+        if normalized_mode not in {
+            "materials", "shaded", "textured", "uvs", "wireframe",
+        }:
             raise ValueError(f"Unsupported viewport render mode: {render_mode}")
         if quality not in {"interactive", "final", "full"}:
             raise ValueError(f"Unsupported viewport render quality: {quality}")

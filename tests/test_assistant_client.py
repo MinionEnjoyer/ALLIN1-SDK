@@ -21,7 +21,7 @@ from allin1_sdk.assistant_client import (
     local_runtime_spec,
     prompt_assistant,
 )
-from allin1_sdk.sdk_console import (
+from allin1_sdk.console_commands import (
     command_catalog as console_catalog,
     execute_console_command,
     suggestions_for,
@@ -111,7 +111,7 @@ def local_files(tmp_path: Path) -> tuple[Path, Path]:
 
 def test_shared_root_and_configuration_validation(tmp_path: Path) -> None:
     assert default_assistant_root({"LOCALAPPDATA": str(tmp_path)}) == (
-        tmp_path / "ALLIN1" / "Assistant"
+        tmp_path / "ALLIN1-SDK" / "Assistant"
     ).resolve()
     with pytest.raises(ValueError, match="not configured"):
         load_assistant_settings(tmp_path / "missing")

@@ -46,7 +46,7 @@ using CodeWalker.Utils;
 
 namespace RpfPatcher
 {
-    class Program
+    partial class Program
     {
         private static readonly Dictionary<string, string> OwnedDlcEntries =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -85,6 +85,7 @@ namespace RpfPatcher
                     "  RpfPatcher.exe build-ytd    <dds_folder> <output_ytd> [legacy|gen9]\n" +
                     "  RpfPatcher.exe unpack-ytd   <ytd_path> <output_folder> [legacy|gen9]\n" +
                     "  RpfPatcher.exe extract-entry <gta_path> <rpf_path> <name> <output>\n" +
+                    "  RpfPatcher.exe extract-exact-entry <gta_path> <rpf_path> <entry_path> <output>\n" +
                     "  RpfPatcher.exe replace-entry <gta_path> <rpf_path> <entry_path> <payload>\n" +
                     "  RpfPatcher.exe delete-entry <gta_path> <rpf_path> <entry_path>\n" +
                     "  RpfPatcher.exe apply-entry-changes <gta_path> <rpf_path> <manifest_tsv> <payload_root>\n" +
@@ -156,6 +157,12 @@ namespace RpfPatcher
                 return UnpackYtd(args);
             if (command == "extract-entry")
                 return ExtractEntry(args);
+            if (command == "extract-exact-entry")
+                return ExtractExactEntry(args);
+            if (command == "extract-exact-nested-entry")
+                return ExtractExactNestedEntry(args);
+            if (command == "replace-exact-nested-entry")
+                return ReplaceExactNestedEntry(args);
             if (command == "replace-entry")
                 return ReplaceEntry(args);
             if (command == "delete-entry")
@@ -1415,14 +1422,7 @@ namespace RpfPatcher
                 bool isGen9 = File.Exists(Path.Combine(gtaPath, "GTA5_Enhanced.exe"))
                            || File.Exists(Path.Combine(gtaPath, "eboot.bin"));
                 var warnings = new List<string>();
-                try
-                {
-                    GTA5Keys.LoadFromPath(gtaPath, isGen9, null);
-                }
-                catch (Exception ex)
-                {
-                    warnings.Add("Encryption keys could not be loaded: " + ex.Message);
-                }
+                string keyMode = LoadReadOnlyArchiveKeys(gtaPath, isGen9, rpfPath);
 
                 // A filesystem path contains a drive-colon, which CodeWalker's
                 // nested-RPF safety check correctly rejects as a virtual path.
@@ -1439,6 +1439,7 @@ namespace RpfPatcher
                 var document = new Dictionary<string, object>
                 {
                     { "schema_version", 1 },
+                    { "key_mode", keyMode },
                     { "source", rpfPath },
                     { "edition", isGen9 ? "Enhanced" : "Legacy" },
                     { "archive_size", new FileInfo(rpfPath).Length },
@@ -1577,6 +1578,19 @@ namespace RpfPatcher
             return null;
         }
 
+        static int ExtractExactEntry(string[] args)
+        {
+            if (args.Length != 5)
+            {
+                Console.Error.WriteLine(
+                    "Usage: RpfPatcher.exe extract-exact-entry <gta_path> <rpf_path> <entry_path> <output>");
+                return 1;
+            }
+            return ExtractVirtualEntry(new[] {
+                "extract-virtual-entry", args[1], args[2], string.Empty, args[3], args[4]
+            });
+        }
+
         static int ExtractVirtualEntry(string[] args)
         {
             if (args.Length < 6)
@@ -1599,10 +1613,10 @@ namespace RpfPatcher
             {
                 bool isGen9 = File.Exists(Path.Combine(gtaPath, "GTA5_Enhanced.exe"))
                            || File.Exists(Path.Combine(gtaPath, "eboot.bin"));
-                GTA5Keys.LoadFromPath(gtaPath, isGen9, null);
+                LoadReadOnlyArchiveKeys(gtaPath, isGen9, rpfPath);
                 var root = new RpfFile(rpfPath, Path.GetFileName(rpfPath));
                 root.ScanStructure(null,
-                    warning => Console.Error.WriteLine("RPF scan warning: " + warning));
+                    warning => { throw new InvalidDataException("RPF scan: " + warning); });
                 RpfFile archive = FindVirtualArchive(root, archivePath);
                 if (archive == null)
                 {
@@ -1679,10 +1693,10 @@ namespace RpfPatcher
 
                 bool isGen9 = File.Exists(Path.Combine(gtaPath, "GTA5_Enhanced.exe"))
                            || File.Exists(Path.Combine(gtaPath, "eboot.bin"));
-                GTA5Keys.LoadFromPath(gtaPath, isGen9, null);
+                LoadReadOnlyArchiveKeys(gtaPath, isGen9, rpfPath);
                 var root = new RpfFile(rpfPath, Path.GetFileName(rpfPath));
                 root.ScanStructure(null,
-                    warning => Console.Error.WriteLine("RPF scan warning: " + warning));
+                    warning => { throw new InvalidDataException("RPF scan: " + warning); });
 
                 Directory.CreateDirectory(outputRoot);
                 string outputPrefix = outputRoot.TrimEnd(
@@ -3292,70 +3306,51 @@ namespace RpfPatcher
 
         static RpfFileEntry FindExactFileEntry(RpfFile rpf, string entryPath)
         {
-            string requested = entryPath.Replace('\\', '/').Trim('/');
-            var matches = rpf.AllEntries?
-                .OfType<RpfFileEntry>()
-                .Where(entry =>
-                {
-                    string relative = RelativeRpfEntryPath(rpf, entry);
-                    return string.Equals(relative, requested,
-                            StringComparison.OrdinalIgnoreCase)
-                        || relative.EndsWith("/" + requested,
-                            StringComparison.OrdinalIgnoreCase);
-                })
-                .ToArray() ?? Array.Empty<RpfFileEntry>();
-            if (matches.Length > 1)
-                throw new InvalidOperationException(
-                    "RPF entry path is ambiguous: " + entryPath);
-            return matches.SingleOrDefault();
+            return FindExactEntry(rpf, entryPath) as RpfFileEntry;
         }
 
         static RpfDirectoryEntry FindExactDirectory(RpfFile rpf, string directoryPath)
         {
-            string requested = directoryPath.Replace('\\', '/').Trim('/');
-            if (string.IsNullOrEmpty(requested)) return rpf.Root;
-            var matches = rpf.AllEntries?
-                .OfType<RpfDirectoryEntry>()
-                .Where(entry =>
-                {
-                    string relative = RelativeRpfEntryPath(rpf, entry).TrimEnd('/');
-                    return string.Equals(relative, requested,
-                            StringComparison.OrdinalIgnoreCase)
-                        || relative.EndsWith("/" + requested,
-                            StringComparison.OrdinalIgnoreCase);
-                })
-                .ToArray() ?? Array.Empty<RpfDirectoryEntry>();
-            if (matches.Length > 1)
-                throw new InvalidOperationException(
-                    "RPF directory path is ambiguous: " + directoryPath);
-            return matches.SingleOrDefault();
+            if (directoryPath == string.Empty) return rpf.Root;
+            return FindExactEntry(rpf, directoryPath) as RpfDirectoryEntry;
         }
 
+        // Resolve from the selected archive's root one segment at a time.
+        // Suffix matching can otherwise select x/data/global.gxt2 when the
+        // requested data/global.gxt2 is absent. Entry.Path is display metadata,
+        // not identity; nested archives must be selected explicitly beforehand.
         static RpfEntry FindExactEntry(RpfFile rpf, string entryPath)
         {
-            string requested = entryPath.Replace('\\', '/').Trim('/');
+            string requested = entryPath?.Replace('\\', '/');
             if (string.IsNullOrEmpty(requested)) return null;
-            var matches = rpf.AllEntries?
-                .Where(entry =>
-                {
-                    string relative = RelativeRpfEntryPath(rpf, entry).TrimEnd('/');
-                    return string.Equals(relative, requested,
-                            StringComparison.OrdinalIgnoreCase)
-                        || relative.EndsWith("/" + requested,
-                            StringComparison.OrdinalIgnoreCase);
-                })
-                .ToArray() ?? Array.Empty<RpfEntry>();
-            if (matches.Length > 1)
-                throw new InvalidOperationException(
-                    "RPF entry path is ambiguous: " + entryPath);
-            return matches.SingleOrDefault();
+            if (requested.Length > 2048 || requested.Any(char.IsControl)
+                || requested.Contains(':') || requested.Contains('!')
+                || requested.Split('/').Any(part =>
+                    string.IsNullOrEmpty(part) || part == "." || part == ".."))
+                throw new InvalidDataException("Unsafe exact RPF entry path: " + entryPath);
+            RpfEntry current = rpf.Root;
+            foreach (string segment in requested.Split('/'))
+            {
+                if (!(current is RpfDirectoryEntry directory)) return null;
+                var matches = directory.Directories.Cast<RpfEntry>()
+                    .Concat(directory.Files)
+                    .Where(entry => string.Equals(entry.Name, segment,
+                        StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                if (matches.Length > 1)
+                    throw new InvalidOperationException(
+                        "RPF entry path is ambiguous: " + entryPath);
+                current = matches.SingleOrDefault();
+                if (current == null) return null;
+            }
+            return current;
         }
 
         static RpfFile OpenWritableRpf(string gtaPath, string rpfPath)
         {
             bool isGen9 = File.Exists(Path.Combine(gtaPath, "GTA5_Enhanced.exe"))
                        || File.Exists(Path.Combine(gtaPath, "eboot.bin"));
-            GTA5Keys.LoadFromPath(gtaPath, isGen9, null);
+            LoadReadOnlyArchiveKeys(gtaPath, isGen9, rpfPath);
             // Keep the physical path in FilePath but use a virtual root name for
             // CodeWalker's entry graph. Drive-colons in the virtual path make
             // otherwise valid Enhanced binary entries fail structural scanning.

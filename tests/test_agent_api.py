@@ -66,6 +66,7 @@ def test_catalog_is_structured_and_classifies_risk():
     assert catalog["inspect-workbench"]["risk"] == "read_only"
     assert catalog["validate-map-project"]["risk"] == "read_only"
     assert catalog["inspect-map-project"]["risk"] == "read_only"
+    assert catalog["detect-map-placements"]["risk"] == "read_only"
     assert catalog["build-map-package"]["risk"] == "authoring_write"
     assert catalog["plan-managed-vehicle-package"]["risk"] == "read_only"
     assert catalog["export-managed-vehicle-package"]["risk"] == "authoring_write"

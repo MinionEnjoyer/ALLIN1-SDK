@@ -4,6 +4,7 @@ import hashlib
 import json
 import struct
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -324,7 +325,7 @@ def _story_profile(
         "validated_profile_export_result": True,
         "acceptance_tests": acceptance_tests,
         "validation_authority": "ALLIN1 native acceptance fixture",
-        "accepted_at": "2026-08-25T12:00:00Z",
+        "accepted_at": datetime.now(timezone.utc).isoformat(),
         "package_eligible": True,
         "redistribution_allowed": redistribution_allowed,
         "license": license_name,

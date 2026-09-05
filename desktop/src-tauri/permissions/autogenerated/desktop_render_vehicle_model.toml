@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-render-vehicle-model"
+description = "Enables the desktop_render_vehicle_model command without any pre-configured scope."
+commands.allow = ["desktop_render_vehicle_model"]
+
+[[permission]]
+identifier = "deny-desktop-render-vehicle-model"
+description = "Denies the desktop_render_vehicle_model command without any pre-configured scope."
+commands.deny = ["desktop_render_vehicle_model"]

@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RpfPatcherProject Condition="'$(RpfPatcherProject)' == ''">../RpfPatcher/RpfPatcher.csproj</RpfPatcherProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(RpfPatcherProject)" />
+  </ItemGroup>
+</Project>

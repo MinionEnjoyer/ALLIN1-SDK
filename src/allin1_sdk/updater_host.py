@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import os
 import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
+
+from allin1_sdk.release_paths import no_links, tree_files
+from allin1_sdk.self_update import SDK_CHECKSUMS, SDK_EXECUTABLE, verify_release_tree
 
 
 def _filesystem_path(path: Path) -> Path:
@@ -51,23 +56,32 @@ def _wait_for_process(process_id: int, timeout_seconds: int = 120) -> None:
 
 
 def _validated_paths(install_root: Path, staged_root: Path, entrypoint: str) -> tuple[Path, Path]:
-    root = install_root.resolve(strict=True)
-    pending = staged_root.resolve(strict=True)
+    root = no_links(install_root).resolve(strict=True)
+    pending = no_links(staged_root).resolve(strict=True)
     if pending.parent != root.parent or not pending.name.startswith(root.name + ".updating-"):
         raise ValueError("staged update is outside the SDK installation boundary")
-    if Path(entrypoint).name != entrypoint or not (pending / entrypoint).is_file():
+    if entrypoint != SDK_EXECUTABLE or not (pending / entrypoint).is_file():
         raise ValueError("staged SDK entrypoint is invalid")
+    tree_files(root)
+    verify_release_tree(pending)
     return root, pending
 
 
 def apply_staged_update(
     install_root: Path, staged_root: Path, entrypoint: str,
+    *, expected_manifest_sha256: str | None = None,
 ) -> Path:
     """Swap one already-verified sibling directory, rolling back on failure."""
     root, pending = _validated_paths(install_root, staged_root, entrypoint)
-    backup = root.with_name(root.name + ".previous")
+    if expected_manifest_sha256 is not None and hashlib.sha256(
+        (pending / SDK_CHECKSUMS).read_bytes()
+    ).hexdigest() != expected_manifest_sha256:
+        raise ValueError("Staged SDK manifest changed after scheduling")
+    # A unique retained backup preserves unowned/user data and never destroys an
+    # older backup (or follows an attacker-controlled .previous junction).
+    backup = no_links(root.with_name(root.name + ".previous-" + uuid.uuid4().hex))
     if backup.exists():
-        shutil.rmtree(_filesystem_path(backup))
+        raise FileExistsError("SDK backup destination already exists")
     root.replace(backup)
     try:
         pending.replace(root)
@@ -75,24 +89,20 @@ def apply_staged_update(
         subprocess.Popen([str(executable)], cwd=str(root), close_fds=True)
     except Exception:
         if root.exists():
-            shutil.rmtree(_filesystem_path(root))
+            no_links(root)
+            root.replace(pending)
         if backup.exists():
+            tree_files(backup)
             backup.replace(root)
         raise
-    if backup.exists():
-        shutil.rmtree(_filesystem_path(backup))
     return root / entrypoint
 
 
 def _delete_self_later(path: Path) -> None:
-    if os.name != "nt":
-        return
-    command = f'ping 127.0.0.1 -n 3 > nul & del /f /q "{path}"'
-    subprocess.Popen(
-        ["cmd.exe", "/d", "/s", "/c", command],
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
-        close_fds=True,
-    )
+    # Do not interpolate an externally supplied path into a destructive shell.
+    # The uniquely named temporary helper is intentionally retained for normal
+    # OS temporary-file cleanup; it contains no user data.
+    return
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -101,11 +111,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--install-root", type=Path, required=True)
     parser.add_argument("--staged-root", type=Path, required=True)
     parser.add_argument("--entrypoint", required=True)
+    parser.add_argument("--expected-manifest-sha256", required=True)
     parser.add_argument("--delete-self", type=Path)
     args = parser.parse_args(argv)
     try:
         _wait_for_process(args.wait_pid)
-        apply_staged_update(args.install_root, args.staged_root, args.entrypoint)
+        apply_staged_update(args.install_root, args.staged_root, args.entrypoint,
+                            expected_manifest_sha256=args.expected_manifest_sha256)
     except Exception as exc:
         log_root = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "ALLIN1" / "SDK"
         log_root.mkdir(parents=True, exist_ok=True)

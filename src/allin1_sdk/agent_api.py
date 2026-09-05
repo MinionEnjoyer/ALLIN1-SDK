@@ -166,6 +166,7 @@ AUTHORING_COMMANDS = frozenset({
 READ_ONLY_COMMANDS = frozenset({
     "assistant",
     "compare-telemetry",
+    "detect-map-placements",
     "inspect-binary-workspace",
     "inspect-log",
     "inspect-model-materials",
@@ -356,6 +357,16 @@ def command_risk(command: str) -> str:
         ) from exc
 
 
+def effective_command_risk(command: str, arguments: Iterable[str] = ()) -> str:
+    """Return the reviewed risk after path-sensitive elevation.
+
+    Desktop and other typed transports use this public helper so every caller
+    shares the Agent API's fail-closed classification instead of copying it.
+    """
+    normalized = [str(value) for value in arguments]
+    return _effective_command_risk(command, normalized, command_risk(command))
+
+
 def _parameter_schema(parameter: click.Parameter) -> dict[str, Any]:
     raw_default = parameter.default
     default_provided = not (
@@ -499,9 +510,7 @@ def execute_request(
     if command is None:
         return _response(request_id, ok=False, error=f"unknown command: {command_name}")
     try:
-        risk = _effective_command_risk(
-            command_name, arguments, command_risk(command_name),
-        )
+        risk = effective_command_risk(command_name, arguments)
     except UnclassifiedCommandError as exc:
         response = _response(
             request_id, ok=False, risk="unclassified", error=str(exc),

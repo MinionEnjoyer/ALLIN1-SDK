@@ -8,7 +8,7 @@ from click.testing import CliRunner
 
 from allin1_sdk import assistant_client
 from allin1_sdk.cli import main
-from allin1_sdk.sdk_console import command_catalog
+from allin1_sdk.console_commands import command_catalog
 from allin1_sdk.settings_assistant import (
     PROPOSAL_KIND,
     SETTINGS_PROPOSAL_RESPONSE_FORMAT,

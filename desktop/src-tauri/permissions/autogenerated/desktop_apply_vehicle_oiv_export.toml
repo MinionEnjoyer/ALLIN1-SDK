@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-apply-vehicle-oiv-export"
+description = "Enables the desktop_apply_vehicle_oiv_export command without any pre-configured scope."
+commands.allow = ["desktop_apply_vehicle_oiv_export"]
+
+[[permission]]
+identifier = "deny-desktop-apply-vehicle-oiv-export"
+description = "Denies the desktop_apply_vehicle_oiv_export command without any pre-configured scope."
+commands.deny = ["desktop_apply_vehicle_oiv_export"]

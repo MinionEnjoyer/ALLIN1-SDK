@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://minionenjoyer.github.io/ALLIN1-SDK/desktop-protocol-v1.schema.json",
+  "title": "ALLIN1 SDK desktop protocol envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "request_id",
+    "job_id",
+    "operation",
+    "payload",
+    "sequence",
+    "risk",
+    "terminal"
+  ],
+  "properties": {
+    "protocol_version": {
+      "const": "1.0.0"
+    },
+    "request_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"}
+      ]
+    },
+    "job_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"}
+      ]
+    },
+    "operation": {
+      "enum": [
+        "handshake",
+        "catalog",
+        "execute",
+        "inspect_package",
+        "preview_asset",
+        "render_vehicle_model",
+        "inspect_model_materials",
+        "inspect_model_material_workspace",
+        "review_model_material_workspace",
+        "create_model_material_workspace",
+        "review_model_material_edit",
+        "apply_model_material_edit",
+        "apply_model_material_history",
+        "review_model_material_build",
+        "apply_model_material_build",
+        "inspect_texture_workspace",
+        "inspect_authoring_workspace",
+        "review_workspace_action",
+        "apply_workspace_action",
+        "inspect_gxt2_workspace",
+        "inspect_rpf_change_set",
+        "inspect_rpf_transaction",
+        "list_rpf_transactions",
+        "review_rpf_transaction",
+        "apply_rpf_transaction",
+        "review_rpf_change_set",
+        "apply_rpf_change_set",
+        "review_gxt2_action",
+        "apply_gxt2_action",
+        "review_texture_workspace",
+        "create_texture_workspace",
+        "preview_texture_workspace",
+        "review_texture_edit",
+        "apply_texture_edit",
+        "apply_texture_history",
+        "review_texture_build",
+        "apply_texture_build",
+        "assistant_status",
+        "assistant_prompt",
+        "configure_assistant",
+        "inspect_weapon_workbench",
+        "review_weapon_authoring",
+        "apply_weapon_authoring",
+        "inspect_ped_workbench",
+        "review_ped_authoring",
+        "apply_ped_authoring",
+        "inspect_rpf_archive",
+        "inspect_vehicle_project",
+        "inspect_vehicle_authoring_workspace",
+        "review_vehicle_authoring_workspace",
+        "create_vehicle_authoring_workspace",
+        "review_vehicle_authoring_edit",
+        "apply_vehicle_authoring_edit",
+        "review_vehicle_authoring_appearance",
+        "apply_vehicle_authoring_appearance",
+        "inspect_vehicle_authoring_tuning",
+        "review_vehicle_authoring_tuning",
+        "apply_vehicle_authoring_tuning",
+        "review_vehicle_authoring_light_profile",
+        "apply_vehicle_authoring_light_profile",
+        "review_vehicle_authoring_axles",
+        "apply_vehicle_authoring_axles",
+        "inspect_vehicle_authoring_axle_skeleton",
+        "review_vehicle_authoring_transmission",
+        "apply_vehicle_authoring_transmission",
+        "review_vehicle_authoring_distribution",
+        "apply_vehicle_authoring_distribution",
+        "review_vehicle_package_build",
+        "apply_vehicle_package_build",
+        "apply_vehicle_authoring_history",
+        "inspect_recipe",
+        "inspect_package_receipts",
+        "review_package_lifecycle",
+        "apply_package_lifecycle",
+        "inspect_vehicle_quick_import",
+        "review_vehicle_quick_import",
+        "prepare_vehicle_quick_import",
+        "review_vehicle_oiv_export",
+        "apply_vehicle_oiv_export",
+        "review_vehicle_package_publish",
+        "apply_vehicle_package_publish",
+        "check_update",
+        "start_job",
+        "cancel_job",
+        "job_event",
+        "result",
+        "error",
+        "shutdown"
+      ]
+    },
+    "payload": {
+      "type": "object"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "risk": {
+      "enum": [
+        "none",
+        "read_only",
+        "authoring_write",
+        "game_write",
+        "unclassified"
+      ]
+    },
+    "terminal": {
+      "type": "boolean"
+    }
+  }
+}

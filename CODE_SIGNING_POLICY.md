@@ -2,23 +2,28 @@
 
 ## Status
 
-ALLIN1 SDK has applied for the SignPath Foundation open-source code-signing
-program. Until approval and verified-build integration are complete, public release
-files are unsigned and must be verified against the SHA-256 manifests attached to
-their GitHub release.
+The maintainer has selected **unsigned manual-download distribution for 0.6.4**.
+The release is still unreleased and not release-qualified. A SignPath certificate
+is not part of the near-term release plan; no approval, sponsorship or delivery
+date is claimed. No replacement signing provider is promised either.
 
-After approval, official signed releases will state:
+The older Azure signed-release job is disabled and retained only as a future
+integration reference. Neither an unset certificate nor that disabled job blocks
+preparing an explicitly unsigned manual package. Tests, reviewed source,
+packaged lifecycle, artifact identity and acceptance requirements still apply.
+See [release preparation](RELEASE_SIGNING.md).
 
-> Free code signing provided by SignPath.io, certificate by SignPath Foundation.
-
-No project member receives or stores the SignPath Foundation private key.
+Windows publisher certificates and automatic-update signatures are separate
+trust mechanisms. Unsigned manual downloads do not permit bypassing update
+verification. React update installation stays disabled until its own trusted
+key/metadata workflow is implemented and qualified.
 
 ## Project and release scope
 
 - Source repository: <https://github.com/MinionEnjoyer/ALLIN1-SDK>
 - License: GNU General Public License v3.0 or later
 - Official downloads: <https://github.com/MinionEnjoyer/ALLIN1-SDK/releases>
-- Eligible artifacts: the SDK desktop executable, structured Agent API executable,
+- Future signing scope: the SDK desktop executable, structured Agent API executable,
   archive helper, and their open-source runtime dependencies produced by the tagged
   GitHub Actions release workflow.
 
@@ -37,22 +42,25 @@ multi-factor authentication. The release approver is responsible for confirming 
 the source revision, version, test result, dependency revision, artifact inventory,
 and release notes are correct before approving a signing request.
 
-## Build and signing controls
+## Release integrity controls
 
 1. Official release artifacts originate from a versioned tag in this repository.
 2. The Windows workflow checks out the pinned submodule revision, installs declared
    dependencies, runs the complete automated test suite, and builds the desktop,
    agent, and helper applications on a clean hosted runner.
-3. The signing integration must verify the GitHub build origin and inventory every
-   executable `.exe`, `.dll`, and `.pyd` payload before signing.
-4. Packaging is permitted only after every executable payload has a valid,
-   timestamped Authenticode signature.
-5. The package builder creates internal SHA-256 checksums and a separate release
-   archive checksum after signing. GitHub Releases publishes those manifests beside
-   the archive.
+3. Inventory the exact shell, sidecar, helpers, resources and third-party payloads.
+   Record their actual signature status; do not label them publisher-signed merely
+   because a dependency already has a signature.
+4. The manual release notes and download instructions must disclose that the
+   project release is unsigned. Checksums establish byte consistency, not
+   publisher authentication or safety. Do not advise disabling security protections.
+5. Generate internal and external SHA-256 checksums from the final bytes. Publish
+   those manifests and the build identity alongside the manually approved assets.
 
-Signing must fail closed. Maintainers must not bypass origin verification, executable
-inventory, signature verification, tests, or checksum generation to publish a release.
+Any future signed channel must fail closed on missing or invalid signatures.
+The unsigned policy does not relax origin verification, executable inventory,
+containment, tests, acceptance or checksums, and does not turn candidates into
+approved releases. Never reuse an existing version to conceal changed payloads.
 
 ## Privacy and network behavior
 
@@ -67,10 +75,17 @@ selects that link. Windows then hands the URL to the user's default browser, who
 privacy policy and configuration apply. File-preview actions that use a browser open
 local `file:` resources rather than uploading them.
 
-Release signing sends only the automated release artifact and build-origin evidence
-to the configured signing service. SignPath's policies apply to that service-side
-processing. The SDK does not include an automatic updater; downloading or installing
-an SDK release is a separate, explicit action owned by ALLIN1 Launcher or the user.
+If signing is introduced later, it sends the automated artifact and build-origin
+evidence to the selected signing service; that provider's policies would apply.
+Explicit update checks contact the release service. React signed update
+installation remains disabled pending production identity and metadata; legacy
+updater services and user-managed installation are separate workflows.
+
+Optional assistant requests can send the selected prompt and grounded context to
+the user-configured compatible API, or to a local model runtime. They are explicit
+actions, not background analytics. Saving assistant settings does not start
+inference. API keys are referenced by environment-variable name, never written
+into SDK settings. Review context and provider privacy before sending private data.
 
 ## Reporting concerns
 

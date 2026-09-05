@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-configure-assistant"
+description = "Enables the desktop_configure_assistant command without any pre-configured scope."
+commands.allow = ["desktop_configure_assistant"]
+
+[[permission]]
+identifier = "deny-desktop-configure-assistant"
+description = "Denies the desktop_configure_assistant command without any pre-configured scope."
+commands.deny = ["desktop_configure_assistant"]

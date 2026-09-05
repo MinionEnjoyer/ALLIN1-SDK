@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-apply-vehicle-package-publish"
+description = "Enables the desktop_apply_vehicle_package_publish command without any pre-configured scope."
+commands.allow = ["desktop_apply_vehicle_package_publish"]
+
+[[permission]]
+identifier = "deny-desktop-apply-vehicle-package-publish"
+description = "Denies the desktop_apply_vehicle_package_publish command without any pre-configured scope."
+commands.deny = ["desktop_apply_vehicle_package_publish"]

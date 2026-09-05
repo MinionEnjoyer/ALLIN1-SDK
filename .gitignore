@@ -20,3 +20,22 @@ tools/RpfPatcher/*.json
 tools/RpfPatcher/ShadersGen9Conversion.xml
 tools/RpfPatcher/SharpDX*.dll
 tools/RpfPatcher/strings.txt
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/src-tauri/sidecar/*.exe
+desktop/src-tauri/standalone-resources/
+desktop/src-tauri/.stage-resources-*/
+desktop/*.tsbuildinfo
+
+# Local backups and private, independently owned Vector experiments.
+/.work/
+/tools/audit_kriss_scope.mjs
+/tools/audit_kriss_sight_mesh.py
+/tools/build_kriss_vector_allin1_package.py
+/tools/build_kriss_vector_refinement.py
+/tools/kriss_sight_component.py
+/tools/render_kriss_sight_states.py
+/tests/test_kriss_refinement.py
+/tests/test_kriss_sight_component.py

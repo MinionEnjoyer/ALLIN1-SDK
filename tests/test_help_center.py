@@ -1,4 +1,4 @@
-from allin1_sdk.help_center import HELP_TOPICS, search_help_topics
+from allin1_sdk.help_topics import HELP_TOPICS, search_help_topics
 
 
 def test_help_center_has_unique_keys_and_core_workflows():

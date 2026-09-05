@@ -8,8 +8,12 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import zipfile
 from pathlib import Path
+from allin1_sdk.release_paths import no_links, tree_files
+from allin1_sdk.release_identity import require_reviewed_source
+from allin1_sdk.self_update import inspect_release_archive
 
 
 _AUTHORING_RESOURCE_TREES = (
@@ -34,7 +38,15 @@ _AUTHORING_RESOURCE_IGNORED_SUFFIXES = {
     ".pdb",
     ".pyc",
 }
+_ROOT_DOCUMENTATION = (
+    Path("RELEASE_NOTES.md"), Path("CODE_SIGNING_POLICY.md"),
+    Path("RELEASE_SIGNING.md"), Path("desktop/README.md"),
+)
 _REQUIRED_AUTHORING_RESOURCES = (
+    *_ROOT_DOCUMENTATION,
+    Path("docs/README.md"), Path("docs/catalog.json"),
+    Path("docs/sdk-guide.md"), Path("docs/release-0.6.4.md"),
+    Path("docs/cli-reference.md"), Path("docs/validation.md"),
     Path("assets") / "axle-prefabs.json",
     Path("assets") / "visual-tyre-packages.json",
     Path("docs") / "axle-prefabs.md",
@@ -121,6 +133,12 @@ def _copy_authoring_resources(root: Path, app_dir: Path) -> None:
             + "\n- ".join(missing)
         )
 
+    for relative in _ROOT_DOCUMENTATION:
+        source = no_links(root / relative)
+        destination = no_links(app_dir / relative)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
     for relative_root in _AUTHORING_RESOURCE_TREES:
         source_root = root / relative_root
         if not source_root.is_dir():
@@ -167,7 +185,7 @@ def _copy_runtime(root: Path, app_dir: Path, rpf_dir: Path) -> None:
 
 def _iter_payload(app_dir: Path):
     for path in sorted(app_dir.rglob("*"), key=lambda item: item.as_posix().casefold()):
-        if path.is_file() and path.name != "checksums.json":
+        if path.is_file() and path != app_dir / "checksums.json":
             yield path.relative_to(app_dir).as_posix(), path
 
 
@@ -175,6 +193,35 @@ def package_release(
     root: Path, app_dir: Path, rpf_dir: Path, output: Path, version: str,
     build_id: str,
 ) -> tuple[Path, Path]:
+    version = _version(version)
+    _build_id(build_id)
+    for directory in (root, app_dir, rpf_dir, output):
+        no_links(directory)
+    inputs = tree_files(app_dir)
+    tree_files(rpf_dir)
+    for name in ("sdk", "assets", "docs", "examples", "runtime/VehicleWorkbenchAxles"):
+        tree_files(root / name)
+    if output.resolve().is_relative_to(app_dir.resolve()) or output.resolve().is_relative_to(rpf_dir.resolve()):
+        raise ValueError("Release output must not be inside an input payload")
+    archive_path = output / f"ALLIN1-SDK-{version}-win-x64.zip"
+    if archive_path.exists() or archive_path.with_name(archive_path.name + ".sha256").exists():
+        raise FileExistsError("Release artifact already exists; never overwrite/reuse a release identity")
+    _validate_example_sources(root)
+    # Build in a new owned directory; merging resource trees leaves removed
+    # DLLs/docs in the package and makes the staged and packaged bytes disagree.
+    with tempfile.TemporaryDirectory(prefix="allin1-sdk-package-") as directory:
+        fresh = Path(directory)
+        for name, source in inputs.items():
+            if (name.split("/")[0] in {"sdk", "assets", "docs", "examples", "runtime"}
+                    or name.startswith("tools/RpfPatcher/") or name in {"release.json", "checksums.json", "README.md", "LICENSE"}):
+                continue
+            target = fresh / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        return _package_fresh(root, fresh, rpf_dir, output, version, build_id)
+
+
+def _package_fresh(root, app_dir, rpf_dir, output, version, build_id):
     _validate_example_sources(root)
     _copy_runtime(root, app_dir, rpf_dir)
     metadata = {
@@ -200,7 +247,7 @@ def package_release(
 
     output.mkdir(parents=True, exist_ok=True)
     archive_path = output / f"ALLIN1-SDK-{version}-win-x64.zip"
-    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+    with zipfile.ZipFile(archive_path, "x", zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
         for path in sorted(app_dir.rglob("*"), key=lambda item: item.as_posix().casefold()):
             if not path.is_file():
                 continue
@@ -209,6 +256,7 @@ def package_release(
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
             archive.writestr(info, path.read_bytes())
+    inspect_release_archive(archive_path, version)
     digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
     checksum_path = archive_path.with_name(archive_path.name + ".sha256")
     checksum_path.write_text(f"{digest}  {archive_path.name}\n", encoding="ascii")
@@ -222,6 +270,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--version", type=_version, required=True)
     parser.add_argument("--build-id", type=_build_id)
+    parser.add_argument("--reviewed-commit", required=True, help="Exact independently reviewed clean source commit")
     args = parser.parse_args()
     build_id = args.build_id
     if build_id is None:
@@ -230,6 +279,9 @@ def main() -> None:
         except argparse.ArgumentTypeError as exc:
             parser.error("--build-id is required when GITHUB_SHA is unavailable or invalid")
     root = Path(__file__).resolve().parents[1]
+    require_reviewed_source(root, args.reviewed_commit, args.version)
+    if build_id != args.reviewed_commit:
+        parser.error("Release build ID must equal the reviewed source commit")
     archive, checksum = package_release(
         root, args.app_dir.resolve(), args.rpf_dir.resolve(), args.output.resolve(),
         args.version, build_id,

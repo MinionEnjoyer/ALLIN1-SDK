@@ -138,10 +138,13 @@ def _write_text_atomic(path: Path, text: str) -> None:
     temporary.replace(path)
 
 
-def _read_json_object(path: str | Path, label: str) -> dict[str, Any]:
+def _read_json_object(path: str | Path, label: str, *, expected_sha256: str | None = None) -> dict[str, Any]:
     source = Path(path).expanduser().resolve()
     try:
-        payload = json.loads(source.read_text(encoding="utf-8"))
+        raw = source.read_bytes()
+        if expected_sha256 is not None and hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise ValueError(f"{label} changed after review")
+        payload = json.loads(raw.decode("utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"Invalid {label}: {exc}") from exc
     if not isinstance(payload, dict):
@@ -688,10 +691,10 @@ class RpfExplorerService:
             },
         )
 
-    def export_gxt2_workspace(
-        self, index: RpfIndex, entry: RpfEntryRecord, destination: str | Path,
-    ) -> Path:
-        """Extract one exact GXT2 dictionary into a bound text workspace."""
+    def read_gxt2_entry(
+        self, index: RpfIndex, entry: RpfEntryRecord,
+    ) -> tuple[bytes, dict[str, object]]:
+        """Read a complete bounded dictionary and bind it to an unchanged archive."""
         if entry.kind == "directory" or index.entry(entry.id) != entry:
             raise ValueError("Entry does not belong to this RPF index")
         if entry.suffix != ".gxt2":
@@ -700,18 +703,30 @@ class RpfExplorerService:
             raise ValueError("Selected GXT2 entry is invalid or exceeds the guarded limit")
         archive_hash = _sha256_file(index.source)
         with tempfile.TemporaryDirectory(prefix="allin1-rpf-gxt2-export-") as temporary:
-            source = self.extract(index, entry, Path(temporary) / entry.name)
-            data = source.read_bytes()
+            source = self.extract(index, entry, Path(temporary) / "dictionary.gxt2")
+            if source.stat().st_size > MAX_GXT2_BYTES:
+                raise ValueError("Extracted GXT2 exceeds the guarded limit")
+            with source.open("rb") as stream:
+                data = stream.read(MAX_GXT2_BYTES + 1)
+        if len(data) != entry.size or len(data) > MAX_GXT2_BYTES:
+            raise ValueError("Extracted GXT2 size does not match the indexed dictionary")
         if _sha256_file(index.source) != archive_hash:
-            raise RuntimeError("RPF changed during GXT2 workspace export")
+            raise RuntimeError("RPF changed during GXT2 dictionary read")
+        Gxt2Workspace.parse(data)
+        return data, {
+            "outer_archive": str(index.source),
+            "outer_archive_sha256": archive_hash,
+            "entry_id": entry.id,
+            "edition": index.edition,
+        }
+
+    def export_gxt2_workspace(
+        self, index: RpfIndex, entry: RpfEntryRecord, destination: str | Path,
+    ) -> Path:
+        """Extract one exact GXT2 dictionary into a bound text workspace."""
+        data, binding = self.read_gxt2_entry(index, entry)
         return Gxt2Workspace().export_bytes(
-            entry.name, data, destination,
-            source_binding={
-                "outer_archive": str(index.source),
-                "outer_archive_sha256": archive_hash,
-                "entry_id": entry.id,
-                "edition": index.edition,
-            },
+            entry.name, data, destination, source_binding=binding,
         )
 
     def plan_gxt2_workspace_replacement(
@@ -2683,11 +2698,12 @@ class RpfExplorerService:
     def apply_change_plan(
         self, plan_path: str | Path, *, receipt_root: str | Path | None = None,
         progress: ProgressCallback | None = None,
+        expected_sha256: str | None = None, before_commit: Callable[[], None] | None = None,
     ) -> Path:
         """Apply a guarded plan through backup, staging, verification, and commit."""
         self._require_tool()
         plan_source = Path(plan_path).expanduser().resolve()
-        plan = _read_json_object(plan_source, "RPF entry-change plan")
+        plan = _read_json_object(plan_source, "RPF entry-change plan", expected_sha256=expected_sha256)
         if plan.get("operation") == "rpf_multi_entry_change":
             derived = plan.get("derived_delta")
             if derived is not None:
@@ -2735,10 +2751,12 @@ class RpfExplorerService:
             lock = self._acquire_archive_lock(archive, plan["plan_id"])
             try:
                 return self._apply_multi_plan_locked(
-                    plan, archive, changes, receipt_root, progress,
+                    plan, archive, changes, receipt_root, progress, before_commit,
                 )
             finally:
                 lock.unlink(missing_ok=True)
+        if before_commit is not None:
+            raise ValueError("Reviewed desktop execution requires a multi-entry plan")
         archive, payload, archive_path, entry_path, action = self._validate_plan(plan)
         self._require_game_closed()
         lock = self._acquire_archive_lock(archive, plan["plan_id"])
@@ -2883,6 +2901,7 @@ class RpfExplorerService:
         self, plan: dict[str, Any], archive: Path,
         changes: list[tuple[dict[str, Any], Path | None]],
         receipt_root: str | Path | None, progress: ProgressCallback | None,
+        before_commit: Callable[[], None] | None = None,
     ) -> Path:
         self._emit(progress, "Checking guarded batch inputs", 5)
         if archive.stat().st_size != plan["archive_size"]:
@@ -3007,6 +3026,10 @@ class RpfExplorerService:
 
             self._emit(progress, "Committing one verified outer archive", 80)
             self._require_game_closed()
+            if before_commit is not None:
+                before_commit()
+            if _sha256_file(archive) != plan["archive_sha256"]:
+                raise RuntimeError("RPF changed while the transaction was staging; refusing commit")
             stage.replace(archive)
             committed = True
             if _sha256_file(archive) != staged_hash:
@@ -3117,12 +3140,13 @@ class RpfExplorerService:
 
     def rollback_transaction(
         self, receipt_path: str | Path, *, progress: ProgressCallback | None = None,
+        expected_sha256: str | None = None, before_commit: Callable[[], None] | None = None,
     ) -> Path:
         """Restore an applied transaction if its archive is still receipt-owned."""
         self._require_tool()
         source = Path(receipt_path).expanduser().resolve()
         receipt = self._validate_receipt(
-            _read_json_object(source, "RPF transaction receipt")
+            _read_json_object(source, "RPF transaction receipt", expected_sha256=expected_sha256)
         )
         recoverable_statuses = {"applied", "verified_staging", "rollback_failed"}
         if receipt["status"] not in recoverable_statuses:
@@ -3137,7 +3161,7 @@ class RpfExplorerService:
         lock = self._acquire_archive_lock(archive, receipt["plan_id"])
         try:
             return self._rollback_transaction_locked(
-                source, receipt, archive, progress,
+                source, receipt, archive, progress, before_commit,
             )
         finally:
             lock.unlink(missing_ok=True)
@@ -3145,6 +3169,7 @@ class RpfExplorerService:
     def _rollback_transaction_locked(
         self, source: Path, receipt: dict[str, Any], archive: Path,
         progress: ProgressCallback | None,
+        before_commit: Callable[[], None] | None = None,
     ) -> Path:
         self._emit(progress, "Verifying applied transaction", 10)
         expected_applied = receipt.get("applied_archive_sha256")
@@ -3180,13 +3205,19 @@ class RpfExplorerService:
         rollback_stage = archive.with_name(
             f".{archive.name}.{receipt['transaction_id']}.rollback-stage"
         )
+        committed = False
         try:
             self._emit(progress, "Creating rollback recovery copy", 30)
             self._copy_verified(archive, recovery, expected_applied)
             self._copy_verified(backup, rollback_stage, receipt["backup"]["sha256"])
             self._emit(progress, "Restoring pre-transaction archive", 65)
             self._require_game_closed()
+            if before_commit is not None:
+                before_commit()
+            if _sha256_file(archive) != expected_applied:
+                raise RuntimeError("RPF changed while rollback was staging; refusing restore")
             rollback_stage.replace(archive)
+            committed = True
             if _sha256_file(archive) != receipt["backup"]["sha256"]:
                 raise RuntimeError("Restored archive does not match its rollback snapshot")
             if receipt["operation"] == "rpf_multi_entry_change":
@@ -3202,9 +3233,10 @@ class RpfExplorerService:
                     receipt["original"], receipt["edition"],
                 )
         except Exception as exc:
-            if recovery.is_file():
+            if committed and recovery.is_file():
                 recovery.replace(archive)
-            raise RuntimeError(f"Rollback failed; applied archive was restored: {exc}") from exc
+            outcome = "applied archive was restored" if committed else "archive was not overwritten"
+            raise RuntimeError(f"Rollback failed; {outcome}: {exc}") from exc
         finally:
             rollback_stage.unlink(missing_ok=True)
             recovery.unlink(missing_ok=True)
@@ -4247,11 +4279,14 @@ class RpfExplorerService:
             reverse=True,
         ))
 
-    def recover_transaction(self, receipt_path: str | Path) -> dict[str, Any]:
+    def recover_transaction(
+        self, receipt_path: str | Path, *, expected_sha256: str | None = None,
+        before_commit: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         """Reconcile an interrupted receipt with the archive without committing a write."""
         source = Path(receipt_path).expanduser().resolve()
         receipt = self._validate_receipt(
-            _read_json_object(source, "RPF transaction receipt")
+            _read_json_object(source, "RPF transaction receipt", expected_sha256=expected_sha256)
         )
         verification = self.verify_transaction(source)
         state = verification["archive_state"]
@@ -4260,6 +4295,10 @@ class RpfExplorerService:
                 "Interrupted transaction cannot be reconciled safely: "
                 + json.dumps(verification, sort_keys=True)
             )
+        if before_commit is not None:
+            before_commit()
+        if expected_sha256 is not None and _sha256_file(source) != expected_sha256:
+            raise ValueError("Receipt changed before recovery; review again")
         if state == "applied":
             receipt["status"] = "applied"
             receipt["recovered_at"] = datetime.now(timezone.utc).isoformat()
@@ -4279,7 +4318,7 @@ class RpfExplorerService:
             return None
         payload = _read_json_object(lock, "RPF archive lock")
         pid = payload.get("pid")
-        if not isinstance(pid, int) or pid <= 0:
+        if type(pid) is not int or pid <= 0:
             raise ValueError("RPF archive lock has an invalid process id")
         return {
             **payload, "path": str(lock), "process_running": self._pid_is_running(pid),

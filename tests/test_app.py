@@ -3,14 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from allin1_sdk.app import _launch_arguments
-
 
 def test_frozen_graph_launcher_targets_packaged_desktop_sibling(tmp_path, monkeypatch):
     import allin1_sdk.cli as cli
 
     console = tmp_path / "allin1-sdk.exe"
-    desktop = tmp_path / "ALLIN1-SDK-Desktop.exe"
+    desktop = tmp_path / "allin1-sdk-desktop.exe"
     graph = tmp_path / "package-graph.json"
     console.write_bytes(b"MZconsole")
     desktop.write_bytes(b"MZdesktop")
@@ -39,7 +37,7 @@ def test_frozen_workbench_launcher_targets_packaged_desktop_sibling(tmp_path, mo
     import allin1_sdk.cli as cli
 
     agent = tmp_path / "ALLIN1-SDK-Agent.exe"
-    desktop = tmp_path / "ALLIN1-SDK-Desktop.exe"
+    desktop = tmp_path / "allin1-sdk-desktop.exe"
     package = tmp_path / "vehicle-package"
     agent.write_bytes(b"MZagent")
     desktop.write_bytes(b"MZdesktop")
@@ -80,7 +78,7 @@ def test_frozen_axle_configurator_targets_normal_desktop_sibling(tmp_path, monke
     import allin1_sdk.cli as cli
 
     agent = tmp_path / "ALLIN1-SDK-Agent.exe"
-    desktop = tmp_path / "ALLIN1-SDK-Desktop.exe"
+    desktop = tmp_path / "allin1-sdk-desktop.exe"
     workspace = tmp_path / "vehicle-authoring"
     source = workspace / "source"
     agent.write_bytes(b"MZagent")
@@ -145,18 +143,6 @@ def test_open_graph_cli_launches_desktop_through_shared_arguments(tmp_path, monk
     assert '"operation": "open_rpf_graph"' in result.output
     assert '"pid": 7312' in result.output
     assert launched == [(graph, None)]
-
-
-def test_desktop_accepts_direct_rpf_graph_launch_arguments(tmp_path):
-    graph = tmp_path / "package-graph.json"
-    game = tmp_path / "game"
-    parsed = _launch_arguments([
-        "--rpf-graph", str(graph), "--gta-path", str(game),
-        "--graph-node", "vehicle_example",
-    ])
-    assert parsed.rpf_graph == Path(graph)
-    assert parsed.gta_path == Path(game)
-    assert parsed.graph_node == "vehicle_example"
 
 
 def test_open_graph_cli_routes_a_focus_node(tmp_path, monkeypatch):
@@ -224,31 +210,6 @@ def test_open_axle_configurator_cli_launches_selected_demo(tmp_path, monkeypatch
     assert launched == [(workspace, "demobus", None)]
 
 
-def test_desktop_accepts_direct_vehicle_workbench_launch_arguments(tmp_path):
-    package = tmp_path / "vehicle.rar"
-    game = tmp_path / "game"
-    parsed = _launch_arguments([
-        "--vehicle-package", str(package), "--gta-path", str(game),
-    ])
-    assert parsed.vehicle_package == Path(package)
-    assert parsed.rpf_graph is None
-    assert parsed.gta_path == Path(game)
-
-
-def test_desktop_accepts_direct_axle_configurator_arguments(tmp_path):
-    workspace = tmp_path / "vehicle-authoring"
-    parsed = _launch_arguments([
-        "--axle-workspace", str(workspace), "--axle-model", "demobus",
-    ])
-    assert parsed.axle_workspace == workspace
-    assert parsed.axle_model == "demobus"
-    assert parsed.vehicle_package is None
-    assert parsed.workbench_package is None
-
-    with pytest.raises(SystemExit):
-        _launch_arguments(["--axle-model", "demobus"])
-
-
 def test_open_unified_workbench_cli_routes_category_and_counts(tmp_path, monkeypatch):
     from click.testing import CliRunner
 
@@ -272,40 +233,6 @@ def test_open_unified_workbench_cli_routes_category_and_counts(tmp_path, monkeyp
     assert '"weapons": 3' in result.output
     assert '"pid": 8452' in result.output
     assert launched == [(package, "weapons", None)]
-
-
-def test_desktop_accepts_direct_unified_workbench_arguments(tmp_path):
-    package = tmp_path / "mixed.zip"
-    parsed = _launch_arguments([
-        "--workbench-package", str(package),
-        "--workbench-category", "peds",
-    ])
-    assert parsed.workbench_package == package
-    assert parsed.workbench_category == "peds"
-    assert parsed.rpf_graph is None
-
-
-def test_desktop_accepts_maps_and_direct_map_project_arguments(tmp_path):
-    descriptor = tmp_path / "allin1.map.json"
-    parsed = _launch_arguments(["--map-project", str(descriptor)])
-    assert parsed.map_project == descriptor
-    assert parsed.workbench_package is None
-
-    package = tmp_path / "map.zip"
-    parsed = _launch_arguments([
-        "--workbench-package", str(package), "--workbench-category", "maps",
-    ])
-    assert parsed.workbench_category == "maps"
-
-
-def test_desktop_accepts_direct_model_material_arguments(tmp_path):
-    model = tmp_path / "example.yft"
-    parsed = _launch_arguments([
-        "--model-material-source", str(model),
-    ])
-    assert parsed.model_material_source == model
-    assert parsed.workbench_package is None
-    assert parsed.rpf_graph is None
 
 
 def test_open_model_material_cli_routes_validated_source(tmp_path, monkeypatch):
@@ -378,12 +305,3 @@ def test_open_package_graph_cli_routes_to_guarded_viewer(tmp_path, monkeypatch):
     assert '"sealed_rpf_nodes": 2' in result.output
     assert '"workspace_reused": false' in result.output
     assert launched == [(package, None)]
-
-
-def test_desktop_launch_arguments_default_to_workspace():
-    parsed = _launch_arguments([])
-    assert parsed.rpf_graph is None
-    assert parsed.vehicle_package is None
-    assert parsed.workbench_package is None
-    assert parsed.workbench_category == "auto"
-    assert parsed.gta_path is None

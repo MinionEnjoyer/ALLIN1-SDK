@@ -10,6 +10,7 @@
   ],
   "streaming": {
     "pack_name": "example_harmony_garage",
+    "mode": "ipl",
     "content_group": "EXAMPLE_HARMONY_GARAGE",
     "ipls": [
       "example_harmony_garage_placement"

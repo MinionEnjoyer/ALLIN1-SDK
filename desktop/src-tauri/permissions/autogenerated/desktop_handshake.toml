@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-handshake"
+description = "Enables the desktop_handshake command without any pre-configured scope."
+commands.allow = ["desktop_handshake"]
+
+[[permission]]
+identifier = "deny-desktop-handshake"
+description = "Denies the desktop_handshake command without any pre-configured scope."
+commands.deny = ["desktop_handshake"]

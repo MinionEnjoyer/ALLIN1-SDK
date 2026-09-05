@@ -468,28 +468,6 @@ def test_import_rpf_graph_cli_and_agent_command_surface(tmp_path, monkeypatch):
     assert (tmp_path / "workspace" / "rpf-graph.json").is_file()
 
 
-def test_rpf_graph_desktop_surface_uses_ports_and_shared_graph_model():
-    source = (
-        Path(__file__).parents[1] / "src" / "allin1_sdk" / "rpf_graph_ui.py"
-    ).read_text(encoding="utf-8")
-    assert "class RpfPackageGraphDialog" in source
-    assert 'f"out:{node_id}"' in source and 'f"in:{node_id}"' in source
-    assert "RpfPackageGraph.reparent_node" in source
-    assert "RpfPackageGraph.materialize" in source
-    assert "RpfPackageGraph.build" in source
-    assert "RpfPackageGraph.plan_origin_changes" in source
-    assert "_asset_preview_worker" in source
-    assert "render_asset_preview" in source
-    assert "_focus_initial_view" in source
-    assert "_zoom_mousewheel" in source
-    assert "_fit_graph" in source
-    assert 'text="100%"' in source
-    assert "self.state" not in source
-    assert "RpfPackageGraph.import_archive" in (
-        Path(__file__).parents[1] / "src" / "allin1_sdk" / "rpf_explorer.py"
-    ).read_text(encoding="utf-8")
-
-
 def test_rpf_graph_asset_previews_are_hash_bound_and_bounded(tmp_path):
     image_source = tmp_path / "diffuse.png"
     Image.new("RGB", (320, 120), "#35a667").save(image_source)

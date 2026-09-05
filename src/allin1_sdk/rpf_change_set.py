@@ -89,7 +89,7 @@ class RpfChangeSet:
     """Create and edit an inert list that compiles to a guarded atomic plan."""
 
     @classmethod
-    def create(cls, index: RpfIndex, destination: str | Path) -> Path:
+    def create(cls, index: RpfIndex, destination: str | Path, *, expected_archive_sha256: str | None = None) -> Path:
         source = index.source.resolve()
         if not source.is_file() or source.is_symlink():
             raise FileNotFoundError(f"RPF source archive not found: {source}")
@@ -102,6 +102,8 @@ class RpfChangeSet:
         if detected is not None:
             raise ValueError(f"RPF change sets must be stored outside GTA V: {detected}")
         source_sha256 = _sha256_file(source)
+        if expected_archive_sha256 is not None and source_sha256 != expected_archive_sha256:
+            raise ValueError("RPF source changed after review")
         if source.stat().st_size != index.archive_size:
             raise ValueError("RPF source changed while creating the change set")
         now = datetime.now(timezone.utc).isoformat()
@@ -284,9 +286,12 @@ class RpfChangeSet:
     @classmethod
     def _mutate(
         cls, path: str | Path, callback: Callable[[dict[str, Any]], Any],
+        *, expected_sha256: str | None = None,
     ) -> Any:
         source, payload = cls._read(path)
         before_sha256 = _sha256_file(source)
+        if expected_sha256 is not None and before_sha256 != expected_sha256:
+            raise ValueError("RPF change set changed after review")
         detected = _detected_gta_root(source)
         if detected is not None:
             raise ValueError(f"RPF change sets cannot be edited inside GTA V: {detected}")
@@ -300,11 +305,12 @@ class RpfChangeSet:
         return result
 
     @classmethod
-    def stage(
+    def prepare_stage(
         cls, path: str | Path, action: str, entry: str, *,
         archive_path: str = "", payload: str | Path | None = None,
-        new_entry: str | None = None,
-    ) -> str:
+        new_entry: str | None = None, action_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Prepare the same normalized row used by CLI and desktop, without writes."""
         if action not in CHANGE_ACTIONS:
             raise ValueError(f"Unsupported RPF change-set action: {action}")
         safe_archive = _safe_virtual_path(archive_path, allow_empty=True)
@@ -333,20 +339,31 @@ class RpfChangeSet:
         elif new_entry is not None:
             raise ValueError(f"RPF {action} cannot include new_entry")
 
+        item = {"id": _action_id(action_id or f"change-{uuid.uuid4().hex[:12]}"), "action": action,
+                "archive_path": safe_archive, "entry": safe_entry}
+        if prepared_payload is not None:
+            item["payload"] = prepared_payload
+        if safe_new_entry is not None:
+            item["new_entry"] = safe_new_entry
+        return item
+
+    @classmethod
+    def stage(cls, path: str | Path, action: str, entry: str, *, archive_path: str = "",
+              payload: str | Path | None = None, new_entry: str | None = None) -> str:
+        item = cls.prepare_stage(path, action, entry, archive_path=archive_path, payload=payload, new_entry=new_entry)
         def update(document: dict[str, Any]) -> str:
-            action_id = f"change-{uuid.uuid4().hex[:12]}"
-            item = {
-                "id": action_id, "action": action,
-                "archive_path": safe_archive, "entry": safe_entry,
-            }
-            if prepared_payload is not None:
-                item["payload"] = prepared_payload
-            if safe_new_entry is not None:
-                item["new_entry"] = safe_new_entry
             document["actions"].append(item)
-            return action_id
+            return item["id"]
 
         return cls._mutate(path, update)
+
+    @classmethod
+    def commit_actions(cls, path: str | Path, actions: list[dict[str, Any]], *, expected_sha256: str) -> None:
+        """Commit a reviewed ordered list; retain all unrelated document metadata."""
+        def update(document: dict[str, Any]) -> None:
+            document["actions"] = json.loads(json.dumps(actions))
+            cls._normalize(document, verify_files=True)
+        cls._mutate(path, update, expected_sha256=expected_sha256)
 
     @classmethod
     def remove(cls, path: str | Path, action_id: str) -> None:
@@ -383,19 +400,13 @@ class RpfChangeSet:
         cls._mutate(path, update)
 
     @classmethod
-    def compile_plan(
+    def preview_plan(
         cls, path: str | Path, service: RpfExplorerService,
-        destination: str | Path,
-    ) -> tuple[Path, dict[str, Any]]:
+    ) -> dict[str, Any]:
+        """Compile verified evidence in memory; no plan file or archive is written."""
         state = cls.validate(path, verify_files=True)
         if not state["actions"]:
             raise ValueError("RPF change set contains no staged actions")
-        output = Path(destination).expanduser().resolve()
-        if output.suffix.casefold() != ".json":
-            raise ValueError("RPF change-set plan must use a .json extension")
-        detected = _detected_gta_root(output)
-        if detected is not None:
-            raise ValueError(f"RPF change-set plans must be stored outside GTA V: {detected}")
         indexed = service.index(state["archive"])
         archive = state["archive_record"]
         if (
@@ -423,5 +434,21 @@ class RpfChangeSet:
         after = cls.validate(path, verify_files=True)
         if after["change_set_sha256"] != state["change_set_sha256"]:
             raise ValueError("RPF change set changed while compiling its plan")
+        return plan
+
+    @classmethod
+    def compile_plan(cls, path: str | Path, service: RpfExplorerService, destination: str | Path,
+                     *, expected_sha256: str | None = None, expected_plan: dict[str, Any] | None = None) -> tuple[Path, dict[str, Any]]:
+        output = Path(destination).expanduser().resolve()
+        if output.suffix.casefold() != ".json":
+            raise ValueError("RPF change-set plan must use a .json extension")
+        detected = _detected_gta_root(output)
+        if detected is not None:
+            raise ValueError(f"RPF change-set plans must be stored outside GTA V: {detected}")
+        plan = cls.preview_plan(path, service)
+        if expected_sha256 is not None and plan["change_set"]["sha256"] != expected_sha256:
+            raise ValueError("RPF change set changed after review")
+        if expected_plan is not None and {k: v for k, v in plan.items() if k != "created_at"} != expected_plan:
+            raise ValueError("RPF compiled plan changed after review")
         _write_json_new(output, plan)
         return output, plan

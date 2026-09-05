@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-select-package-zip-destination"
+description = "Enables the select_package_zip_destination command without any pre-configured scope."
+commands.allow = ["select_package_zip_destination"]
+
+[[permission]]
+identifier = "deny-select-package-zip-destination"
+description = "Denies the select_package_zip_destination command without any pre-configured scope."
+commands.deny = ["select_package_zip_destination"]

@@ -18,6 +18,7 @@ RELATION_GROUPS = {
     "high_detail_model": "assets",
     "model_dependency": "assets",
     "texture_dictionary": "assets",
+    "collision_dictionary": "assets",
     "text_labels": "assets",
     "vehicle_metadata": "metadata",
     "handling_metadata": "metadata",
@@ -32,6 +33,7 @@ ROLE_LABELS = {
     "high_detail_model": "High-detail model",
     "model_dependency": "Model dependency",
     "texture_dictionary": "Texture dictionary",
+    "collision_dictionary": "Collision dictionary",
     "text_labels": "Text labels",
     "vehicle_metadata": "Vehicle definition",
     "handling_metadata": "Handling ID",
@@ -41,7 +43,7 @@ ROLE_LABELS = {
     "registration": "Registration",
     "install_target": "Install target",
 }
-_ORPHAN_SUFFIXES = frozenset({".yft", ".ytd", ".gxt2"})
+_ORPHAN_SUFFIXES = frozenset({".ybn", ".yft", ".ytd", ".gxt2"})
 _CORE_META_NAMES = frozenset({
     "vehicles.meta", "handling.meta", "carvariations.meta", "carcols.meta",
 })
@@ -131,7 +133,7 @@ class PackageRelationshipAnalyzer:
     """Resolve typed vehicle-system links against a retained graph workspace."""
 
     @classmethod
-    def analyze(cls, graph: str | Path) -> dict[str, Any]:
+    def analyze(cls, graph: str | Path, *, persist: bool = True) -> dict[str, Any]:
         graph_path = Path(graph).expanduser().resolve()
         state = RpfPackageGraph.validate(graph_path, verify_sources=True)
         origin = state["payload"].get("origin")
@@ -388,7 +390,8 @@ class PackageRelationshipAnalyzer:
                 )),
             },
         }
-        RpfPackageGraph.set_semantic_report(graph_path, report)
+        if persist:
+            RpfPackageGraph.set_semantic_report(graph_path, report)
         return report
 
     @staticmethod

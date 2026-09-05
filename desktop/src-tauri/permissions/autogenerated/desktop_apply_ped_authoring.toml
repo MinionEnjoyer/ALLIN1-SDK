@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-apply-ped-authoring"
+description = "Enables the desktop_apply_ped_authoring command without any pre-configured scope."
+commands.allow = ["desktop_apply_ped_authoring"]
+
+[[permission]]
+identifier = "deny-desktop-apply-ped-authoring"
+description = "Denies the desktop_apply_ped_authoring command without any pre-configured scope."
+commands.deny = ["desktop_apply_ped_authoring"]

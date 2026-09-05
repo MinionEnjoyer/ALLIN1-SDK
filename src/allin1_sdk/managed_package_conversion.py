@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 import zipfile
 from dataclasses import asdict, dataclass
@@ -20,6 +21,7 @@ from allin1_sdk.addon_importer import (
     PackageScan,
 )
 from allin1_sdk.mods import ModManifest, open_mod_package
+from allin1_sdk.paths import gta_root_containing
 from allin1_sdk.vehicle_catalog import (
     ROAD_TRAFFIC_CATEGORIES,
     VehicleCatalog,
@@ -29,6 +31,13 @@ from allin1_sdk.vehicle_catalog import (
 
 
 MAX_CONVERTED_RPF_BYTES = 512 * 1024 * 1024
+
+
+def _safe_publication_path(path: Path) -> None:
+    for part in (path, *path.parents):
+        if part.is_symlink() or (part.exists() and getattr(part.lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+            raise ValueError("Publication paths must not use symbolic links or reparse points")
+
 SUPPORTED_CONVERSION_EDITIONS = frozenset({"legacy", "enhanced"})
 _MOD_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 _PACK_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -571,24 +580,18 @@ class ManagedVehiclePackageConverter:
             launcher_contract=contract,
         )
 
-    def publish(
-        self, package_root: str | Path, destination: str | Path,
-    ) -> PublishedManagedVehiclePackage:
-        """Publish one validated review folder as a deterministic ZIP archive."""
-        source = Path(package_root).expanduser().resolve(strict=True)
+    @staticmethod
+    def review_publication(package_root: str | Path) -> dict[str, Any]:
+        """Read-only inventory shared by desktop review and the existing ZIP writer."""
+        raw = Path(package_root).expanduser()
+        _safe_publication_path(raw)
+        source = raw.resolve(strict=True)
         if not source.is_dir():
             raise ValueError("Managed package publication requires a package folder")
-        output = Path(destination).expanduser().resolve(strict=False)
-        if output.suffix.casefold() != ".zip":
-            raise ValueError("Published managed packages must use a .zip filename")
-        if output.exists() or output.is_symlink():
-            raise ValueError(f"Published package already exists: {output}")
-        if output.is_relative_to(self.gta_path):
-            raise ValueError("Published packages may not be written inside GTA V")
-        if output.is_relative_to(source):
-            raise ValueError("Published archives may not be written inside their source")
-        output.parent.mkdir(parents=True, exist_ok=True)
-
+        # Validate redirection before parsing even the manifest's member paths.
+        _safe_publication_path(source / "mod.toml")
+        if (source / "mod.toml").stat().st_size > 4 * 1024 * 1024:
+            raise ValueError("Publication manifest exceeds size limit")
         manifest = ModManifest.load(source)
         if (
             manifest.schema_version != 2
@@ -609,11 +612,14 @@ class ManagedVehiclePackageConverter:
             *(Path(*item.source.parts) for item in manifest.files),
         }
         review = source / "allin1.review.json"
+        _safe_publication_path(review)
         if review.is_symlink() or not review.is_file():
             raise ValueError(
                 "Published managed vehicle packages require allin1.review.json"
             )
         try:
+            if review.stat().st_size > 4 * 1024 * 1024:
+                raise ValueError("Managed-package review exceeds size limit")
             evidence = json.loads(review.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"Invalid managed-package review evidence: {exc}") from exc
@@ -641,6 +647,56 @@ class ManagedVehiclePackageConverter:
             (path.as_posix() for path in member_paths), key=str.casefold,
         ))
 
+        members = []
+        for member in ordered:
+            path = source / Path(*PurePosixPath(member).parts)
+            _safe_publication_path(path)
+            if not path.is_file() or not path.resolve().is_relative_to(source):
+                raise ValueError(f"Publish member is missing or unsafe: {member}")
+            size = path.stat().st_size
+            limit = MAX_CONVERTED_RPF_BYTES if path.suffix.casefold() == ".rpf" else 4 * 1024 * 1024
+            if size > limit:
+                raise ValueError(f"Publish member exceeds size limit: {member}")
+            members.append({"path": member, "size": size, "sha256": _sha256_file(path)})
+        manifest.validate_payload()
+        catalog_file = next(item for item in manifest.files if item.destination.suffix.casefold() == ".json")
+        catalog = VehicleCatalog.load(source / Path(*catalog_file.source.parts))
+        if catalog.catalog_id != manifest.mod_id:
+            raise ValueError("Vehicle catalog identity does not match its package")
+        catalog.validate_package_ownership(manifest.dlc_packs, allow_traffic=True)
+        return {"source_package": str(source), "package_id": manifest.mod_id,
+                "name": manifest.name, "version": manifest.version, "edition": manifest.editions[0],
+                "dlc_pack": manifest.dlc_packs[0], "members": members,
+                "total_bytes": sum(row["size"] for row in members),
+                "vehicles": [row.to_dict() for row in catalog.vehicles],
+                "traffic_opt_in": any(row.traffic.enabled for row in catalog.vehicles)}
+
+
+    def publish(
+        self, package_root: str | Path, destination: str | Path,
+        *, expected_review: dict[str, Any] | None = None,
+    ) -> PublishedManagedVehiclePackage:
+        """Publish one validated review folder as a deterministic ZIP archive."""
+        _safe_publication_path(Path(package_root).expanduser())
+        _safe_publication_path(Path(destination).expanduser())
+        source = Path(package_root).expanduser().resolve(strict=True)
+        if not source.is_dir():
+            raise ValueError("Managed package publication requires a package folder")
+        output = Path(destination).expanduser().resolve(strict=False)
+        if output.suffix.casefold() != ".zip":
+            raise ValueError("Published managed packages must use a .zip filename")
+        if output.exists() or output.is_symlink():
+            raise ValueError(f"Published package already exists: {output}")
+        if output.is_relative_to(self.gta_path) or gta_root_containing(output):
+            raise ValueError("Published packages may not be written inside GTA V")
+        if output.is_relative_to(source):
+            raise ValueError("Published archives may not be written inside their source")
+        publication = self.review_publication(source)
+        if expected_review is not None and publication != expected_review:
+            raise ValueError("Prepared package changed after review; review publication again")
+        ordered = tuple(row["path"] for row in publication["members"])
+        expected_members = {row["path"]: row for row in publication["members"]}
+        output.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{output.stem}-", suffix=".zip", dir=output.parent,
         )
@@ -653,6 +709,7 @@ class ManagedVehiclePackageConverter:
             ) as archive:
                 for member in ordered:
                     path = source / Path(*PurePosixPath(member).parts)
+                    _safe_publication_path(path)
                     if path.is_symlink() or not path.is_file():
                         raise ValueError(f"Publish member is missing or unsafe: {member}")
                     info = zipfile.ZipInfo(member, date_time=(1980, 1, 1, 0, 0, 0))
@@ -663,10 +720,16 @@ class ManagedVehiclePackageConverter:
                     with path.open("rb") as input_stream, archive.open(
                         info, "w", force_zip64=info.file_size >= 2 * 1024**3,
                     ) as output_stream:
+                        written_size = 0
+                        written_digest = hashlib.sha256()
                         for chunk in iter(
                             lambda: input_stream.read(1024 * 1024), b"",
                         ):
                             output_stream.write(chunk)
+                            written_size += len(chunk)
+                            written_digest.update(chunk)
+                    if written_size != expected_members[member]["size"] or written_digest.hexdigest() != expected_members[member]["sha256"]:
+                        raise ValueError(f"Publish member changed while reading: {member}")
 
             with open_mod_package(temporary) as packaged:
                 catalog_file = next(
@@ -697,7 +760,17 @@ class ManagedVehiclePackageConverter:
                 }
             archive_size = temporary.stat().st_size
             archive_sha256 = _sha256_file(temporary)
-            temporary.replace(output)
+            # Reserve this exact filename so concurrent output cannot be replaced.
+            try:
+                claim = os.open(output, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError as exc:
+                raise ValueError(f"Published package already exists: {output}") from exc
+            os.close(claim)
+            try:
+                temporary.replace(output)
+            except Exception:
+                output.unlink(missing_ok=True)
+                raise
         except Exception:
             temporary.unlink(missing_ok=True)
             raise

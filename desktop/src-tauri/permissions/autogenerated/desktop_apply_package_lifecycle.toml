@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-apply-package-lifecycle"
+description = "Enables the desktop_apply_package_lifecycle command without any pre-configured scope."
+commands.allow = ["desktop_apply_package_lifecycle"]
+
+[[permission]]
+identifier = "deny-desktop-apply-package-lifecycle"
+description = "Denies the desktop_apply_package_lifecycle command without any pre-configured scope."
+commands.deny = ["desktop_apply_package_lifecycle"]

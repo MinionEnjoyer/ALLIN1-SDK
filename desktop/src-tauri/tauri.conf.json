@@ -1,0 +1,68 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ALLIN1 SDK",
+  "version": "0.6.4",
+  "identifier": "com.minionenjoyer.allin1sdk",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "ALLIN1 SDK",
+        "width": 1320,
+        "height": 840,
+        "minWidth": 720,
+        "minHeight": 560,
+        "center": true,
+        "visible": false,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "capabilities": ["desktop-main"],
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; object-src 'none'; frame-src 'none'; worker-src 'none'; child-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPCACHE/allin1-previews/**/*"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["../../assets/favicon.ico"],
+    "resources": {
+      "sidecar/ALLIN1-SDK-Desktop-Sidecar.exe": "sidecar/ALLIN1-SDK-Desktop-Sidecar.exe",
+      "standalone-resources/assets": "assets/",
+      "standalone-resources/docs": "docs/",
+      "standalone-resources/sdk": "sdk/",
+      "standalone-resources/examples": "examples/",
+      "standalone-resources/runtime": "runtime/",
+      "standalone-resources/tools": "tools/",
+      "standalone-resources/licenses": "licenses/",
+      "standalone-resources/README.md": "README.md",
+      "standalone-resources/RELEASE_NOTES.md": "RELEASE_NOTES.md",
+      "standalone-resources/CODE_SIGNING_POLICY.md": "CODE_SIGNING_POLICY.md",
+      "standalone-resources/RELEASE_SIGNING.md": "RELEASE_SIGNING.md",
+      "standalone-resources/desktop/README.md": "desktop/README.md",
+      "standalone-resources/LICENSE": "LICENSE",
+      "standalone-resources/build-identity.json": "build-identity.json",
+      "standalone-resources/resource-checksums.json": "resource-checksums.json"
+    },
+    "windows": {
+      "nsis": {
+        "template": "windows/installer.nsi",
+        "installerHooks": "windows/path-guards.nsh",
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}

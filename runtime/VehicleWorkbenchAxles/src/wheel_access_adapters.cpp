@@ -298,9 +298,7 @@ public:
     bool ReadWheelBoneId(const VehicleSnapshot& vehicle, std::uint32_t index,
                          std::int32_t& bone_id) override {
         std::uintptr_t wheel = 0;
-        return ResolveWheel(vehicle, index, wheel) &&
-               ReadMemory(wheel + wheel_id_offset_, bone_id) &&
-               IsCanonicalBoneId(bone_id);
+        return ResolveWheel(vehicle, index, wheel, &bone_id);
     }
 
     bool SupportsWheelGenerationToken() const noexcept override {
@@ -310,9 +308,13 @@ public:
     bool ReadWheelGenerationToken(const VehicleSnapshot& vehicle,
                                   std::uint64_t& generation) override {
         generation = 0;
+        std::uintptr_t vehicle_address = 0;
         std::uint32_t count = 0;
         std::uintptr_t wheel_array = 0;
-        if (!ResolveLayout(vehicle, count, wheel_array)) return false;
+        if (!ResolveLayoutHeader(vehicle, vehicle_address, count,
+                                 wheel_array)) {
+            return false;
+        }
 
         // FNV-1a is used only as a process-local identity fingerprint. Raw
         // addresses never leave this method and are reacquired on every call.
@@ -324,12 +326,8 @@ public:
         for (std::uint32_t index = 0; index < count; ++index) {
             std::uintptr_t wheel = 0;
             std::int32_t bone_id = 0;
-            if (!ReadMemory(wheel_array +
-                                static_cast<std::uintptr_t>(index) *
-                                    sizeof(std::uintptr_t),
-                            wheel) ||
-                !ReadMemory(wheel + wheel_id_offset_, bone_id) ||
-                !IsCanonicalBoneId(bone_id)) {
+            if (!ResolveIndexedWheel(vehicle_address, wheel_array, count,
+                                     index, wheel, bone_id)) {
                 return false;
             }
             MixGeneration(hash, static_cast<std::uint64_t>(wheel));
@@ -412,17 +410,23 @@ private:
         }
         address = reinterpret_cast<std::uintptr_t>(handle_to_address_(
             static_cast<std::int32_t>(vehicle.entity_id)));
-        return CanAccess(address + wheel_array_offset_, sizeof(std::uintptr_t),
-                         false) &&
-               CanAccess(address + wheel_count_offset_, sizeof(std::int32_t),
-                         false);
+        // The exact fields are validated by ReadMemory in
+        // ResolveLayoutHeader. Avoid duplicate VirtualQuery calls here.
+        const auto maximum_header_offset = std::max(
+            {wheel_array_offset_, wheel_count_offset_,
+             wheel_bone_map_offset_ + 9U});
+        return address >= 0x10000U &&
+               address <= std::numeric_limits<std::uintptr_t>::max() -
+                              maximum_header_offset;
     }
 
-    bool ResolveLayout(const VehicleSnapshot& vehicle, std::uint32_t& count,
-                       std::uintptr_t& wheel_array) const noexcept {
+    bool ResolveLayoutHeader(const VehicleSnapshot& vehicle,
+                             std::uintptr_t& vehicle_address,
+                             std::uint32_t& count,
+                             std::uintptr_t& wheel_array) const noexcept {
         count = 0;
         wheel_array = 0;
-        std::uintptr_t vehicle_address = 0;
+        vehicle_address = 0;
         std::int32_t signed_count = 0;
         if (!ResolveVehicle(vehicle, vehicle_address) ||
             !ReadMemory(vehicle_address + wheel_count_offset_, signed_count) ||
@@ -435,55 +439,89 @@ private:
                        false)) {
             return false;
         }
-        std::uint16_t seen_bones = 0;
-        for (std::int32_t index = 0; index < signed_count; ++index) {
-            std::uintptr_t wheel = 0;
-            std::int32_t bone_id = 0;
-            if (!ReadMemory(wheel_array +
-                                static_cast<std::uintptr_t>(index) *
-                                    sizeof(std::uintptr_t),
-                            wheel) ||
-                !CanAccess(wheel + wheel_id_offset_, sizeof(bone_id), false) ||
-                !ReadMemory(wheel + wheel_id_offset_, bone_id) ||
-                !IsCanonicalBoneId(bone_id)) {
-                return false;
-            }
-            std::uint8_t mapped_index = 0xffU;
-            if (!ReadMemory(vehicle_address + wheel_bone_map_offset_ +
-                                static_cast<std::uintptr_t>(bone_id - 11),
-                            mapped_index) ||
-                mapped_index != static_cast<std::uint8_t>(index)) {
-                return false;
-            }
-            const auto bit = static_cast<std::uint16_t>(1U << (bone_id - 11));
-            if ((seen_bones & bit) != 0) return false;
-            seen_bones = static_cast<std::uint16_t>(seen_bones | bit);
-        }
         count = static_cast<std::uint32_t>(signed_count);
         return true;
     }
 
-    bool ResolveWheel(const VehicleSnapshot& vehicle, std::uint32_t index,
-                      std::uintptr_t& wheel) const noexcept {
+    bool ResolveIndexedWheel(std::uintptr_t vehicle_address,
+                             std::uintptr_t wheel_array,
+                             std::uint32_t count, std::uint32_t index,
+                             std::uintptr_t& wheel,
+                             std::int32_t& bone_id) const noexcept {
         wheel = 0;
-        std::uint32_t count = 0;
-        std::uintptr_t wheel_array = 0;
-        if (!ResolveLayout(vehicle, count, wheel_array) || index >= count ||
+        bone_id = 0;
+        if (index >= count ||
             !ReadMemory(wheel_array +
                             static_cast<std::uintptr_t>(index) *
                                 sizeof(std::uintptr_t),
-                        wheel)) {
+                        wheel) ||
+            wheel < 0x10000U) {
             return false;
         }
-        const auto required = std::max(
-            {wheel_id_offset_ + static_cast<std::uint32_t>(sizeof(std::int32_t)),
+        const auto maximum_wheel_offset = std::max(
+            {wheel_id_offset_ +
+                 static_cast<std::uint32_t>(sizeof(std::int32_t)),
              dynamic_flags_offset_ + 4U +
                  static_cast<std::uint32_t>(sizeof(std::uint32_t)),
              steering_gain_offset_ +
                  static_cast<std::uint32_t>(sizeof(float)),
              static_force_offset_ +
                  static_cast<std::uint32_t>(sizeof(float))});
-        return CanAccess(wheel, required, false);
+        if (wheel > std::numeric_limits<std::uintptr_t>::max() -
+                        maximum_wheel_offset ||
+            !ReadMemory(wheel + wheel_id_offset_, bone_id) ||
+            !IsCanonicalBoneId(bone_id)) {
+            return false;
+        }
+        std::uint8_t mapped_index = 0xffU;
+        return ReadMemory(vehicle_address + wheel_bone_map_offset_ +
+                              static_cast<std::uintptr_t>(bone_id - 11),
+                          mapped_index) &&
+               mapped_index == static_cast<std::uint8_t>(index);
+    }
+
+    bool ResolveLayout(const VehicleSnapshot& vehicle, std::uint32_t& count,
+                       std::uintptr_t& wheel_array) const noexcept {
+        std::uintptr_t vehicle_address = 0;
+        if (!ResolveLayoutHeader(vehicle, vehicle_address, count,
+                                 wheel_array)) {
+            return false;
+        }
+        std::uint16_t seen_bones = 0;
+        for (std::uint32_t index = 0; index < count; ++index) {
+            std::uintptr_t wheel = 0;
+            std::int32_t bone_id = 0;
+            if (!ResolveIndexedWheel(vehicle_address, wheel_array, count,
+                                     index, wheel, bone_id)) {
+                return false;
+            }
+            const auto bit = static_cast<std::uint16_t>(1U << (bone_id - 11));
+            if ((seen_bones & bit) != 0) return false;
+            seen_bones = static_cast<std::uint16_t>(seen_bones | bit);
+        }
+        return true;
+    }
+
+    bool ResolveWheel(const VehicleSnapshot& vehicle, std::uint32_t index,
+                      std::uintptr_t& wheel,
+                      std::int32_t* resolved_bone_id = nullptr) const noexcept {
+        wheel = 0;
+        std::uintptr_t vehicle_address = 0;
+        std::uint32_t count = 0;
+        std::uintptr_t wheel_array = 0;
+        if (!ResolveLayoutHeader(vehicle, vehicle_address, count,
+                                 wheel_array)) {
+            return false;
+        }
+        std::int32_t bone_id = 0;
+        if (!ResolveIndexedWheel(vehicle_address, wheel_array, count, index,
+                                 wheel, bone_id)) {
+            return false;
+        }
+        if (resolved_bone_id) *resolved_bone_id = bone_id;
+        // Callers immediately validate the exact field they read or write.
+        // Do not VirtualQuery the entire wheel object on every accessor call.
+        return true;
     }
 
     Edition edition_{Edition::Unknown};

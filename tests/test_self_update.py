@@ -21,12 +21,28 @@ from allin1_sdk.self_update import (
     SdkRelease,
     StagedUpdate,
     _filesystem_path,
+    _extract_archive,
     discard_staged_update,
     inspect_release_archive,
     stage_release,
     update_available,
 )
 from allin1_sdk.updater_host import apply_staged_update
+from allin1_sdk.release_paths import tree_files
+
+
+def _stage_fixture(staged):
+    archive = staged.parent / "fixture.zip"
+    _release_archive(archive)
+    _extract_archive(archive, staged)
+
+
+def _refresh_fixture_manifest(staged):
+    files = tree_files(staged)
+    (staged / SDK_CHECKSUMS).write_text(json.dumps({
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in files.items() if name != SDK_CHECKSUMS
+    }))
 
 
 def _release_archive(path: Path, version: str = "0.6.0") -> bytes:
@@ -178,7 +194,7 @@ def test_external_helper_swaps_and_relaunches_with_rollback_boundary(tmp_path, m
     install.mkdir()
     staged.mkdir()
     (install / SDK_EXECUTABLE).write_bytes(b"MZold")
-    (staged / SDK_EXECUTABLE).write_bytes(b"MZnew")
+    _stage_fixture(staged)
     launched = []
     monkeypatch.setattr(
         "allin1_sdk.updater_host.subprocess.Popen",
@@ -187,9 +203,11 @@ def test_external_helper_swaps_and_relaunches_with_rollback_boundary(tmp_path, m
 
     result = apply_staged_update(install, staged, SDK_EXECUTABLE)
 
-    assert result.read_bytes() == b"MZnew"
+    assert result.read_bytes() == b"MZdesktop"
     assert not staged.exists()
     assert not (tmp_path / "SDK.previous").exists()
+    backup = next(tmp_path.glob("SDK.previous-*"))
+    assert (backup / SDK_EXECUTABLE).read_bytes() == b"MZold"
     assert launched[0][0] == [str(result)]
 
 
@@ -201,7 +219,7 @@ def test_external_helper_restores_previous_install_when_launch_fails(
     install.mkdir()
     staged.mkdir()
     (install / SDK_EXECUTABLE).write_bytes(b"MZold")
-    (staged / SDK_EXECUTABLE).write_bytes(b"MZnew")
+    _stage_fixture(staged)
 
     def fail_launch(*_args, **_kwargs):
         raise OSError("launch refused")
@@ -211,7 +229,7 @@ def test_external_helper_restores_previous_install_when_launch_fails(
         apply_staged_update(install, staged, SDK_EXECUTABLE)
 
     assert (install / SDK_EXECUTABLE).read_bytes() == b"MZold"
-    assert not staged.exists()
+    assert staged.exists()  # failed candidate retained, not destructively removed
     assert not (tmp_path / "SDK.previous").exists()
 
 
@@ -222,7 +240,7 @@ def test_external_helper_rolls_back_deep_packaged_tree(tmp_path, monkeypatch):
     install.mkdir(parents=True)
     staged.mkdir()
     (install / SDK_EXECUTABLE).write_bytes(b"MZold")
-    (staged / SDK_EXECUTABLE).write_bytes(b"MZnew")
+    _stage_fixture(staged)
     deep_member = (
         "_internal/lxml/isoschematron/resources/xsl/iso-schematron-xslt1/"
         "iso_abstract_expand.xsl"
@@ -230,6 +248,7 @@ def test_external_helper_rolls_back_deep_packaged_tree(tmp_path, monkeypatch):
     deep_file = _filesystem_path(staged / deep_member)
     deep_file.parent.mkdir(parents=True)
     deep_file.write_bytes(b"deep dependency")
+    _refresh_fixture_manifest(staged)
 
     def fail_launch(*_args, **_kwargs):
         raise OSError("launch refused")
@@ -239,7 +258,7 @@ def test_external_helper_rolls_back_deep_packaged_tree(tmp_path, monkeypatch):
         apply_staged_update(install, staged, SDK_EXECUTABLE)
 
     assert (install / SDK_EXECUTABLE).read_bytes() == b"MZold"
-    assert not staged.exists()
+    assert staged.exists()
     assert not (install.parent / "SDK.previous").exists()
 
 

@@ -225,3 +225,30 @@ def test_receipt_inspection_and_ownership_verification_detect_tampering(
     damaged = service.verify_ownership("grounded-test")
     assert damaged["healthy"] is False
     assert any("externally changed" in item for item in damaged["issues"])
+
+
+def test_rpf_ownership_probe_stays_outside_the_game_installation(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    game = tmp_path / "GTA V"
+    game.mkdir()
+    (game / "GTA5.exe").write_bytes(b"MZ")
+    service = ModIntegrationService(game)
+    outputs: list[Path] = []
+
+    def fake_extract(_archive, _entry, output, *, allow_missing=False):
+        assert allow_missing is True
+        outputs.append(output)
+        return False
+
+    monkeypatch.setattr(service, "_extract_rpf_entry", fake_extract)
+    matches = service._rpf_entry_matches({
+        "archive": "mods/update/update.rpf",
+        "entry": "common/data/dlclist.xml",
+        "owner": "grounded-test",
+    }, None)
+
+    assert matches is True
+    assert len(outputs) == 1
+    assert not outputs[0].is_relative_to(game.resolve())
+    assert not outputs[0].exists()

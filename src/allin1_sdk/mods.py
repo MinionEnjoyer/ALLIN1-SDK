@@ -19,9 +19,11 @@ from typing import Any, Iterable, Iterator
 
 from allin1_sdk.extensions import ExtensionManifest, ExtensionRegistry
 from allin1_sdk.processes import run_hidden
-from allin1_sdk.mod_package_contract import validate_mod_schema_envelope
+from allin1_sdk.mod_package_contract import validate_mod_schema_envelope, rpf_targets_overlap, split_nested_rpf_entry
 from allin1_sdk.official_vehicle_models import OFFICIAL_VEHICLE_MODELS
 from allin1_sdk.vehicle_catalog import VehicleCatalog
+from allin1_sdk.weapon_catalog import WeaponCatalog
+from allin1_sdk.release_paths import no_links, strict_json, unique_paths
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -49,21 +51,26 @@ _RESERVED_DESTINATIONS = frozenset({
     "scripts/allin1.dll",
     "scripts/allin1.toml",
 })
+_VEHICLE_WORKBENCH_RUNTIME_ROOT = "vehicleworkbenchaxles"
 MAX_PACKAGE_ARCHIVE_MEMBERS = 4096
 MAX_PACKAGE_ARCHIVE_MEMBER_BYTES = 4 * 1024 * 1024 * 1024
 MAX_PACKAGE_ARCHIVE_BYTES = 8 * 1024 * 1024 * 1024
 MAX_PACKAGE_COMPRESSION_RATIO = 1000
 _WINDOWS_INVALID_PATH_CHARS = frozenset('<>:"|?*')
 _WINDOWS_RESERVED_STEMS = frozenset({
-    "con", "prn", "aux", "nul",
+    "con", "prn", "aux", "nul", "conin$", "conout$",
     *(f"com{index}" for index in range(1, 10)),
     *(f"lpt{index}" for index in range(1, 10)),
+    *(f"com{index}" for index in "¹²³"),
+    *(f"lpt{index}" for index in "¹²³"),
 })
 
 
 def _relative_path(value: object, label: str) -> PurePosixPath:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must be a non-empty relative path")
+    if value != value.strip() or "\\" in value:
+        raise ValueError(f"{label} must use normalized relative paths, not Windows separators")
     normalized = value.strip().replace("\\", "/")
     raw_parts = normalized.split("/")
     path = PurePosixPath(normalized)
@@ -112,7 +119,7 @@ def _dlc_pack_list(value: object) -> tuple[str, ...]:
 
 def _contained_path(root: Path, relative: str | PurePosixPath) -> Path:
     """Return a lexical contained path after rejecting reparse aliases."""
-    base = root.resolve()
+    base = no_links(root).resolve()
     safe_relative = _relative_path(str(relative), "managed path")
     candidate = base / Path(*safe_relative.parts)
     canonical = candidate.resolve(strict=False)
@@ -156,6 +163,7 @@ class RpfEntryPatch:
     archive: PurePosixPath
     entry: PurePosixPath
     sha256: str | None = None
+    original_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -262,9 +270,10 @@ class ModManifest:
         validate_payload: bool = True,
         reserved_models: Iterable[str] | None = None,
     ) -> "ModManifest":
-        path = Path(manifest_path).resolve()
+        path = no_links(Path(manifest_path)).resolve()
         if path.is_dir():
             path = path / "mod.toml"
+        no_links(path)
         if not path.is_file():
             raise FileNotFoundError(f"Mod manifest not found: {path}")
         if path.name.casefold() != "mod.toml":
@@ -364,7 +373,7 @@ class ModManifest:
                     "RPF entry archives must be .rpf paths below the GTA V mods directory"
                 )
             key = (archive_key, entry.as_posix().casefold())
-            if key in rpf_destinations:
+            if any(key[0] == other[0] and rpf_targets_overlap(key[1], other[1]) for other in rpf_destinations):
                 raise ValueError(f"Duplicate RPF entry destination: {archive}/{entry}")
             rpf_destinations.add(key)
             checksum = raw_entry.get("sha256")
@@ -372,7 +381,12 @@ class ModManifest:
                 checksum = str(checksum).strip().lower()
                 if not _SHA256_PATTERN.fullmatch(checksum):
                     raise ValueError(f"Invalid SHA-256 for {source}")
-            rpf_entries.append(RpfEntryPatch(source, archive, entry, checksum))
+            original_checksum = raw_entry.get("original_sha256")
+            if original_checksum is not None and schema_version not in (3, 4):
+                raise ValueError("Original RPF checksums require schema_version = 3 or 4")
+            if "!" in entry.as_posix() and schema_version != 4:
+                raise ValueError("Nested RPF targets require schema_version = 4")
+            rpf_entries.append(RpfEntryPatch(source, archive, entry, checksum, original_checksum))
 
         if rpf_entries and mod_type not in {"rpf", "mixed"}:
             raise ValueError("RPF entry patches require an RPF or mixed package")
@@ -432,6 +446,26 @@ class ModManifest:
                 item.destination.as_posix().casefold(): item for item in files
             }
             for catalog in extension.gbay_catalogs:
+                if catalog.kind == "weapon":
+                    owned_file = files_by_destination[catalog.source.as_posix().casefold()]
+                    weapon_catalog = WeaponCatalog.load(
+                        _contained_path(path.parent, owned_file.source)
+                    )
+                    if weapon_catalog.catalog_id != catalog.catalog_id:
+                        raise ValueError(
+                            "Weapon catalog id must match its GBAY catalog declaration"
+                        )
+                    weapon_catalog.validate_package_ownership(dlc_packs)
+                    if not any(
+                        requirement.mod_id == "allin1.online-content"
+                        and requirement.guarantees_minimum("0.6.1")
+                        for requirement in package_requirements
+                    ):
+                        raise ValueError(
+                            "GBAY weapon catalogs require allin1.online-content>=0.6.1 "
+                            "with the package-weapon catalog runtime update"
+                        )
+                    continue
                 if catalog.kind != "vehicle":
                     continue
                 owned_file = files_by_destination[catalog.source.as_posix().casefold()]
@@ -523,16 +557,23 @@ class ModManifest:
                     ".asi", ".dll", ".ini", ".toml", ".addon64",
                 }
                 managed_tree = bool(parts) and parts[0] in {
-                    "scripts", "mods", "reshade-shaders",
+                    "scripts", "plugins", "mods", "reshade-shaders",
                 }
-                if not root_plugin and not managed_tree:
+                axle_runtime_data = (
+                    len(parts) >= 2
+                    and parts[0] == _VEHICLE_WORKBENCH_RUNTIME_ROOT
+                    and suffix == ".json"
+                )
+                if not root_plugin and not managed_tree and not axle_runtime_data:
                     raise ValueError(
                         "Mixed package files must target a supported root plug-in "
-                        "or scripts/mods/reshade-shaders directory"
+                        "or scripts/plugins/mods/reshade-shaders directory, or a "
+                        "JSON file "
+                        "below the VehicleWorkbenchAxles runtime tree"
                     )
 
     def validate_payload(self) -> None:
-        package_root = self.package_root.resolve()
+        package_root = no_links(self.package_root).resolve()
         for item in self.files:
             unresolved_source = package_root / Path(*item.source.parts)
             if unresolved_source.is_symlink():
@@ -557,15 +598,17 @@ def _archive_member_path(info: zipfile.ZipInfo) -> PurePosixPath | None:
     """Validate one ZIP member without trusting the host ZIP extractor."""
     if info.flag_bits & 0x1:
         raise ValueError(f"Encrypted ZIP members are not supported: {info.filename}")
-    normalized = info.filename.replace("\\", "/")
+    if info.orig_filename != info.filename:
+        raise ValueError("ZIP member contains a NUL")
+    normalized = info.filename
     is_directory = info.is_dir() or normalized.endswith("/")
-    normalized = normalized.rstrip("/") if is_directory else normalized
+    normalized = normalized[:-1] if is_directory else normalized
     if not normalized:
         return None
     relative = _relative_path(normalized, "ZIP member path")
     unix_mode = (info.external_attr >> 16) & 0xFFFF
     file_kind = stat.S_IFMT(unix_mode)
-    if stat.S_ISLNK(unix_mode) or file_kind not in {0, stat.S_IFREG, stat.S_IFDIR}:
+    if stat.S_ISLNK(unix_mode) or file_kind not in {0, stat.S_IFDIR if is_directory else stat.S_IFREG}:
         raise ValueError(
             f"ZIP members may not be links or special files: {info.filename}"
         )
@@ -634,6 +677,7 @@ def open_mod_package(
                 or relative == package_prefix
                 or package_prefix in relative.parents
             ]
+            unique_paths([relative.as_posix() for info, relative in members if not info.is_dir()])
             declared_total = 0
             for info, relative in extracted:
                 if info.is_dir():
@@ -710,7 +754,7 @@ class ModIntegrationService:
     """Installs optional mod packages with receipts, backups, and rollback."""
 
     def __init__(self, gta_path: str | Path) -> None:
-        candidate = Path(gta_path).expanduser().resolve()
+        candidate = no_links(Path(gta_path).expanduser()).resolve()
         if not candidate.is_dir() or not (
             (candidate / "GTA5.exe").is_file()
             or (candidate / "GTA5_Enhanced.exe").is_file()
@@ -729,25 +773,70 @@ class ModIntegrationService:
     def _receipt_path(self, mod_id: str) -> Path:
         if not _ID_PATTERN.fullmatch(mod_id):
             raise ValueError("Invalid mod id")
-        return self.state_root / f"{mod_id}.json"
+        return _contained_path(self.state_root, f"{mod_id}.json")
 
     def _read_receipt(self, mod_id: str) -> dict[str, Any]:
         path = self._receipt_path(mod_id)
         if not path.is_file():
             raise FileNotFoundError(f"Mod '{mod_id}' is not installed")
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = strict_json(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"Invalid install receipt for '{mod_id}'") from exc
-        if data.get("id") != mod_id or not isinstance(data.get("files"), list):
+        if not isinstance(data, dict) or data.get("id") != mod_id or not isinstance(data.get("files"), list):
             raise ValueError(f"Invalid install receipt for '{mod_id}'")
+        self._validate_receipt_paths(data)
         return data
 
+    def _validate_receipt_paths(self, receipt: dict[str, Any]) -> None:
+        """Preflight the entire rollback receipt before any destination mutation."""
+        mod_id = receipt["id"]
+        destinations = []
+        backup_prefix = f"ALLIN1_Backups/Mods/{mod_id}/"
+        applied_prefix = f"scripts/.allin1/mods/.payloads/{mod_id}/"
+        for item in receipt["files"]:
+            if not isinstance(item, dict):
+                raise ValueError("Invalid file rollback record")
+            destination = item.get("destination")
+            target = _contained_path(self.gta_path, destination)
+            no_links(target.with_name(target.name + ".disabled"))
+            destinations.append(str(destination))
+        unique_paths(destinations)
+        entries = receipt.get("rpf_entries", [])
+        if not isinstance(entries, list):
+            raise ValueError("Invalid RPF rollback records")
+        rpf_targets = set()
+        for item in entries:
+            if not isinstance(item, dict):
+                raise ValueError("Invalid RPF rollback record")
+            archive = _relative_path(item.get("archive"), "receipt archive")
+            entry = _relative_path(item.get("entry"), "receipt entry")
+            if archive.parts[0].casefold() != "mods":
+                raise ValueError("Receipt RPF archive must be below mods/")
+            _contained_path(self.gta_path, archive)
+            key = (archive.as_posix().casefold(), entry.as_posix().casefold())
+            if any(key[0] == old[0] and rpf_targets_overlap(key[1], old[1]) for old in rpf_targets):
+                raise ValueError("Duplicate receipt RPF destination")
+            rpf_targets.add(key)
+        for item in [*receipt["files"], *entries]:
+            for field, prefix in (("backup", backup_prefix), ("applied", applied_prefix)):
+                value = item.get(field)
+                if value is not None:
+                    safe = _relative_path(value, f"receipt {field}").as_posix()
+                    if not safe.casefold().startswith(prefix.casefold()):
+                        raise ValueError(f"Receipt {field} escapes its owned root")
+                    _contained_path(self.gta_path, safe)
+        _dlc_pack_list(receipt.get("dlc_packs"))
+        _dlc_pack_list(receipt.get("owned_dlc_packs"))
+
     def _write_receipt(self, receipt: dict[str, Any]) -> None:
+        self._validate_receipt_paths(receipt)
+        no_links(self.state_root)
         self.state_root.mkdir(parents=True, exist_ok=True)
         receipt_path = self._receipt_path(str(receipt["id"]))
-        temporary = receipt_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+        temporary = _contained_path(self.state_root, f".{receipt_path.name}.{uuid.uuid4().hex}.tmp")
+        with temporary.open("x", encoding="utf-8") as output:
+            output.write(json.dumps(receipt, indent=2))
         temporary.replace(receipt_path)
 
     def _set_dlc_registration(self, pack: str, enabled: bool) -> bool:
@@ -822,7 +911,8 @@ class ModIntegrationService:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.unlink(missing_ok=True)
         result = self._run_rpf_command(
-            "extract-entry", archive, PurePosixPath(entry).as_posix(), output,
+            "extract-exact-nested-entry" if "!" in str(entry) else "extract-exact-entry",
+            archive, PurePosixPath(entry).as_posix(), output,
         )
         if result.returncode == 0:
             if not output.is_file():
@@ -831,13 +921,23 @@ class ModIntegrationService:
         detail = (result.stderr or result.stdout or "unknown helper error").strip()
         if allow_missing and result.returncode == 5 and "not found" in detail.casefold():
             return False
+        # Never fall back to basename extraction with an older helper: backup,
+        # verification and restore must all address the same exact member.
         raise RuntimeError(f"Could not extract RPF entry '{entry}': {detail}")
 
     def _replace_rpf_entry(
         self, archive: Path, entry: str | PurePosixPath, payload: Path,
+        *, expected_sha256: str | None = None,
     ) -> None:
+        nested = "!" in str(entry)
+        if nested:
+            split_nested_rpf_entry(str(entry))
+            if not expected_sha256 or not _SHA256_PATTERN.fullmatch(expected_sha256):
+                raise ValueError("Nested member replacement requires the expected current checksum")
         result = self._run_rpf_command(
-            "replace-entry", archive, PurePosixPath(entry).as_posix(), payload,
+            "replace-exact-nested-entry" if nested else "replace-entry",
+            archive, PurePosixPath(entry).as_posix(), payload,
+            *([expected_sha256, _sha256(payload)] if nested else []),
         )
         if result.returncode:
             detail = (result.stderr or result.stdout or "unknown helper error").strip()
@@ -854,24 +954,43 @@ class ModIntegrationService:
     def _rpf_entry_matches(
         self, item: dict[str, Any], expected: Path | None,
     ) -> bool:
+        if item.get("original_sha256") and expected is not None:
+            backup = _contained_path(self.gta_path, item["backup"])
+            applied = _contained_path(self.gta_path, item["applied"])
+            if expected not in (backup, applied):
+                raise ValueError("Unrecognized managed RPF comparison payload")
+            for cached, cached_digest in ((backup, item["original_sha256"]), (applied, item["sha256"])):
+                if not cached.is_file() or _sha256(cached) != cached_digest:
+                    raise ValueError("Managed RPF comparison payload checksum mismatch")
         archive = _contained_path(self.gta_path, item["archive"])
-        probe = _contained_path(
-            self.state_root,
-            PurePosixPath(".probes")
-            / str(item.get("owner", "managed"))
-            / hashlib.sha256(
-                f"{item['archive']}\0{item['entry']}".encode("utf-8")
-            ).hexdigest(),
-        )
-        try:
+        probe_name = hashlib.sha256(
+            f"{item['archive']}\0{item['entry']}".encode("utf-8")
+        ).hexdigest()
+        with tempfile.TemporaryDirectory(prefix="allin1-rpf-probe-") as directory:
+            probe = Path(directory) / probe_name
             exists = self._extract_rpf_entry(
                 archive, item["entry"], probe, allow_missing=True,
             )
             if expected is None:
                 return not exists
             return exists and _sha256(probe) == _sha256(expected)
-        finally:
-            probe.unlink(missing_ok=True)
+
+    def _check_rpf_preconditions(self, manifest: ModManifest) -> None:
+        # Inspect every original before creating a mods copy, receipt or backup.
+        # The exact extraction command also fails closed with an older helper.
+        with tempfile.TemporaryDirectory(prefix="allin1-rpf-preflight-") as directory:
+            for index, item in enumerate(manifest.rpf_entries):
+                if item.original_sha256 is None:
+                    continue
+                archive = _contained_path(self.gta_path, item.archive)
+                if not archive.exists():
+                    archive = _contained_path(self.gta_path, PurePosixPath(*item.archive.parts[1:]))
+                if not archive.is_file():
+                    raise FileNotFoundError(f"Base RPF archive is missing: {item.archive}")
+                probe = Path(directory) / str(index)
+                self._extract_rpf_entry(archive, item.entry, probe)
+                if _sha256(probe) != item.original_sha256:
+                    raise ValueError(f"Original RPF member checksum mismatch: {item.archive}/{item.entry}")
 
     def _restore_rpf_record(self, item: dict[str, Any]) -> None:
         archive = _contained_path(self.gta_path, item["archive"])
@@ -882,7 +1001,9 @@ class ModIntegrationService:
                 raise FileNotFoundError(
                     f"Managed RPF entry backup is missing: {backup}"
                 )
-            self._replace_rpf_entry(archive, item["entry"], backup)
+            if item.get("original_sha256") and _sha256(backup) != item["original_sha256"]:
+                raise ValueError("Managed RPF original backup checksum mismatch")
+            self._replace_rpf_entry(archive, item["entry"], backup, expected_sha256=item.get("sha256"))
         else:
             self._delete_rpf_entry(archive, item["entry"])
 
@@ -1089,26 +1210,372 @@ class ModIntegrationService:
         if collisions:
             raise ValueError(f"File destination is owned by: {', '.join(sorted(collisions))}")
         rpf_collisions = {
-            owned_rpf_entries[
-                (item.archive.as_posix().casefold(), item.entry.as_posix().casefold())
-            ]
-            for item in manifest.rpf_entries
-            if (
-                item.archive.as_posix().casefold(), item.entry.as_posix().casefold()
-            ) in owned_rpf_entries
+            owner for item in manifest.rpf_entries
+            for (archive, entry), owner in owned_rpf_entries.items()
+            if archive == item.archive.as_posix().casefold()
+            and rpf_targets_overlap(entry, item.entry.as_posix())
         }
+        # Whole outer archives and their members cannot be owned independently.
+        rpf_collisions.update(
+            owner for item in manifest.rpf_entries for destination, owner in owned_destinations.items()
+            if destination == item.archive.as_posix().casefold()
+        )
+        rpf_collisions.update(
+            owner for item in manifest.files for (archive, _entry), owner in owned_rpf_entries.items()
+            if item.destination.as_posix().casefold() == archive
+        )
         if rpf_collisions:
             raise ValueError(
                 "RPF entry destination is owned by: "
                 + ", ".join(sorted(rpf_collisions))
             )
 
+    @staticmethod
+    def _review_finding(code: str, message: object) -> dict[str, str]:
+        return {"severity": "error", "code": code, "message": str(message)}
+
+    def review_install(self, manifest: ModManifest) -> dict[str, Any]:
+        """Build a mutation-free install/update review from the live game state."""
+        findings: list[dict[str, str]] = []
+        operations: list[dict[str, Any]] = []
+        replacing = self._receipt_path(manifest.mod_id).is_file()
+        previous_receipt: dict[str, Any] | None = None
+
+        try:
+            manifest.validate_payload()
+        except (OSError, TypeError, ValueError) as exc:
+            findings.append(self._review_finding("payload_invalid", exc))
+        if self.edition not in manifest.editions:
+            findings.append(self._review_finding(
+                "edition_unsupported",
+                f"{manifest.name} does not support GTA V {self.edition.title()}",
+            ))
+        try:
+            self._check_dependencies(manifest)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            findings.append(self._review_finding("dependency_blocked", exc))
+        try:
+            self._check_conflicts(manifest)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            findings.append(self._review_finding("conflict_blocked", exc))
+
+        if replacing:
+            try:
+                previous_receipt = self._read_receipt(manifest.mod_id)
+                verification = self.verify_ownership(manifest.mod_id)
+                for issue in verification["issues"]:
+                    findings.append(self._review_finding(
+                        "existing_ownership_invalid", issue,
+                    ))
+                self._check_dependents(
+                    manifest.mod_id, replacement_version=manifest.version,
+                )
+                if manifest.rpf_entries or previous_receipt.get("rpf_entries"):
+                    findings.append(self._review_finding(
+                        "rpf_update_requires_uninstall",
+                        "Updating a package that owns RPF entries requires "
+                        "uninstalling the existing version first",
+                    ))
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                findings.append(self._review_finding("replacement_blocked", exc))
+
+        backup_count = 0
+        for item in manifest.files:
+            try:
+                source = _contained_path(manifest.package_root, item.source)
+                target = _contained_path(self.gta_path, item.destination)
+                target_exists = target.exists() or target.is_symlink()
+                backup_required = target_exists
+                if target_exists and (not target.is_file() or target.is_symlink()):
+                    findings.append(self._review_finding(
+                        "destination_not_regular_file",
+                        f"Refusing to replace non-file destination: {item.destination}",
+                    ))
+                legacy_temporary = target.with_name(
+                    f".{target.name}.allin1-install"
+                )
+                if legacy_temporary.exists() or legacy_temporary.is_symlink():
+                    findings.append(self._review_finding(
+                        "temporary_path_occupied",
+                        "Refusing an occupied legacy install-temporary path: "
+                        f"{legacy_temporary.name}",
+                    ))
+                if backup_required:
+                    backup_count += 1
+                operations.append({
+                    "kind": "file",
+                    "source": item.source.as_posix(),
+                    "destination": item.destination.as_posix(),
+                    "payload_sha256": _sha256(source) if source.is_file() else None,
+                    "destination_exists": target_exists,
+                    "disposition": (
+                        "backup_and_replace" if backup_required else "create"
+                    ),
+                })
+            except (OSError, TypeError, ValueError) as exc:
+                findings.append(self._review_finding("destination_invalid", exc))
+
+        for item in manifest.rpf_entries:
+            operations.append({
+                "kind": "rpf_entry",
+                "source": item.source.as_posix(),
+                "archive": item.archive.as_posix(),
+                "entry": item.entry.as_posix(),
+                "disposition": "backup_and_replace_entry",
+            })
+
+        return {
+            "action": "install",
+            "ready": not any(item["severity"] == "error" for item in findings),
+            "package": {
+                "id": manifest.mod_id,
+                "name": manifest.name,
+                "version": manifest.version,
+                "type": manifest.mod_type,
+                "schema_version": manifest.schema_version,
+                "editions": list(manifest.editions),
+                "dependencies": list(manifest.dependencies),
+                "requires": [
+                    str(item) for item in manifest.package_requirements
+                ],
+                "conflicts": list(manifest.conflicts),
+            },
+            "target_edition": self.edition,
+            "replacing": replacing,
+            "installed_version": (
+                str(previous_receipt.get("version", ""))
+                if previous_receipt else None
+            ),
+            "operations": operations,
+            "findings": findings,
+            "rollback": {
+                "backup_count": backup_count,
+                "previous_receipt_preserved": replacing,
+                "receipt_created": True,
+            },
+        }
+
+    def review_uninstall(self, mod_id: str) -> dict[str, Any]:
+        """Build a mutation-free uninstall review from a validated receipt."""
+        package_id = mod_id.strip().casefold()
+        receipt = self._read_receipt(package_id)
+        verification = self.verify_ownership(package_id)
+        findings = [
+            self._review_finding("ownership_invalid", issue)
+            for issue in verification["issues"]
+        ]
+        try:
+            self._check_dependents(package_id)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            findings.append(self._review_finding("dependent_package_blocked", exc))
+
+        enabled = bool(receipt.get("enabled", True))
+        operations: list[dict[str, Any]] = []
+        restore_count = 0
+        for item in receipt["files"]:
+            try:
+                target = _contained_path(self.gta_path, item["destination"])
+                disabled = target.with_name(target.name + ".disabled")
+                current = target if enabled else disabled
+                backup_value = item.get("backup")
+                backup = (
+                    _contained_path(self.gta_path, str(backup_value))
+                    if backup_value else None
+                )
+                if backup is not None:
+                    restore_count += 1
+                    expected_backup = item.get("backup_sha256")
+                    if (
+                        backup.is_file()
+                        and expected_backup
+                        and _sha256(backup) != expected_backup
+                    ):
+                        findings.append(self._review_finding(
+                            "backup_changed",
+                            f"Managed mod backup was externally changed: {backup}",
+                        ))
+                if not enabled:
+                    if backup is None and (target.exists() or target.is_symlink()):
+                        findings.append(self._review_finding(
+                            "unmanaged_underlying_file",
+                            f"Unmanaged file appeared while the mod was disabled: {target}",
+                        ))
+                    if backup is not None and target.exists():
+                        if not target.is_file() or target.is_symlink():
+                            findings.append(self._review_finding(
+                                "underlying_not_regular_file",
+                                f"Underlying path is not a regular file: {target}",
+                            ))
+                        else:
+                            expected_underlying = item.get("backup_sha256")
+                            matches = (
+                                _sha256(target) == expected_underlying
+                                if expected_underlying else _sha256(target) == _sha256(backup)
+                            )
+                            if not matches:
+                                findings.append(self._review_finding(
+                                    "underlying_file_changed",
+                                    f"Underlying file changed while the mod was disabled: {target}",
+                                ))
+                operations.append({
+                    "kind": "file",
+                    "destination": str(item["destination"]),
+                    "active_path": str(current),
+                    "backup": str(backup_value) if backup_value else None,
+                    "disposition": "restore_backup" if backup else "remove",
+                })
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                findings.append(self._review_finding("receipt_path_invalid", exc))
+
+        for item in receipt.get("rpf_entries", []):
+            operations.append({
+                "kind": "rpf_entry",
+                "archive": item.get("archive"),
+                "entry": item.get("entry"),
+                "backup": item.get("backup"),
+                "disposition": "restore_entry" if item.get("backup") else "remove_entry",
+            })
+
+        return {
+            "action": "uninstall",
+            "ready": not any(item["severity"] == "error" for item in findings),
+            "package": {
+                "id": package_id,
+                "name": str(receipt.get("name", package_id)),
+                "version": str(receipt.get("version", "")),
+                "type": str(receipt.get("type", "unknown")),
+            },
+            "target_edition": self.edition,
+            "enabled": enabled,
+            "operations": operations,
+            "findings": findings,
+            "ownership": verification,
+            "rollback": {
+                "restore_count": restore_count,
+                "receipt_removed": True,
+                "extension_registry_rebuilt": True,
+            },
+        }
+
+    def review_enabled_state(self, mod_id: str, enabled: bool) -> dict[str, Any]:
+        """Build a mutation-free enable/disable review from live ownership state."""
+        package_id = mod_id.strip().casefold()
+        receipt = self._read_receipt(package_id)
+        current = bool(receipt.get("enabled", True))
+        action = "enable" if enabled else "disable"
+        verification = self.verify_ownership(package_id)
+        findings = [
+            self._review_finding("ownership_invalid", issue)
+            for issue in verification["issues"]
+        ]
+
+        if current == enabled:
+            findings.append(self._review_finding(
+                "state_unchanged",
+                f"Package '{package_id}' is already {action}d",
+            ))
+
+        requirements = tuple(
+            PackageRequirement.parse(str(value))
+            for value in receipt.get("requires", [])
+        )
+        try:
+            if enabled:
+                self._check_package_requirements(requirements)
+            else:
+                self._check_dependents(package_id)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            findings.append(self._review_finding(
+                "dependency_blocked" if enabled else "dependent_package_blocked",
+                exc,
+            ))
+
+        operations: list[dict[str, Any]] = []
+        for item in receipt["files"]:
+            try:
+                target = _contained_path(self.gta_path, item["destination"])
+                disabled = target.with_name(target.name + ".disabled")
+                source, destination = (
+                    (disabled, target) if enabled else (target, disabled)
+                )
+                if destination.exists() or destination.is_symlink():
+                    findings.append(self._review_finding(
+                        "state_destination_occupied",
+                        f"Cannot change package state; destination exists: {destination}",
+                    ))
+                operations.append({
+                    "kind": "file",
+                    "destination": str(item["destination"]),
+                    "current_path": str(source),
+                    "target_path": str(destination),
+                    "disposition": "enable_file" if enabled else "disable_file",
+                })
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                findings.append(self._review_finding("receipt_path_invalid", exc))
+
+        for item in receipt.get("rpf_entries", []):
+            operations.append({
+                "kind": "rpf_entry",
+                "archive": item.get("archive"),
+                "entry": item.get("entry"),
+                "disposition": "apply_entry" if enabled else "restore_entry",
+            })
+
+        dlc_packs = [
+            str(pack) for pack in receipt.get(
+                "owned_dlc_packs", receipt.get("dlc_packs", []),
+            )
+        ]
+        for pack in dlc_packs:
+            operations.append({
+                "kind": "dlc_registration",
+                "destination": pack,
+                "disposition": "register_dlc" if enabled else "unregister_dlc",
+            })
+
+        return {
+            "action": action,
+            "ready": not any(item["severity"] == "error" for item in findings),
+            "package": {
+                "id": package_id,
+                "name": str(receipt.get("name", package_id)),
+                "version": str(receipt.get("version", "")),
+                "type": str(receipt.get("type", "unknown")),
+            },
+            "target_edition": self.edition,
+            "enabled": current,
+            "current_enabled": current,
+            "target_enabled": enabled,
+            "operations": operations,
+            "findings": findings,
+            "ownership": verification,
+            "rollback": {
+                "receipt_state_restored": True,
+                "loose_move_count": len(receipt["files"]),
+                "rpf_entry_count": len(receipt.get("rpf_entries", [])),
+                "dlc_registration_count": len(dlc_packs),
+                "extension_registry_rebuilt": True,
+            },
+        }
+
     def install(self, manifest: ModManifest) -> ModStatus:
         manifest.validate_payload()
+        # Check every root and destination before backing up/copying the first
+        # file. A late hostile path must not cause an earlier write.
+        no_links(self.state_root)
+        no_links(self.backup_root)
+        for item in manifest.files:
+            target = _contained_path(self.gta_path, item.destination)
+            no_links(target.with_name(target.name + ".disabled"))
+            if target.exists() and not target.is_file():
+                raise ValueError("Install destination is not a regular file")
+        for item in manifest.rpf_entries:
+            _contained_path(self.gta_path, item.archive)
         if self.edition not in manifest.editions:
             raise ValueError(f"{manifest.name} does not support GTA V {self.edition.title()}")
         self._check_dependencies(manifest)
         self._check_conflicts(manifest)
+        self._check_rpf_preconditions(manifest)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         backup_dir = self.backup_root / manifest.mod_id / timestamp
         previous_receipt: dict[str, Any] | None = None
@@ -1156,9 +1623,15 @@ class ModIntegrationService:
                     backup = _contained_path(backup_dir, item.destination)
                     backup.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(target, backup)
-                temporary = target.with_name(f".{target.name}.allin1-install")
-                shutil.copy2(source, temporary)
-                temporary.replace(target)
+                legacy_temporary = target.with_name(
+                    f".{target.name}.allin1-install"
+                )
+                if legacy_temporary.exists() or legacy_temporary.is_symlink():
+                    raise ValueError(
+                        "Refusing an occupied legacy install-temporary path: "
+                        f"{legacy_temporary.name}"
+                    )
+                self._copy_atomic(source, target)
                 records.append({
                     "destination": item.destination.as_posix(),
                     "backup": str(backup.relative_to(self.gta_path)).replace("\\", "/")
@@ -1177,6 +1650,8 @@ class ModIntegrationService:
                 existed = self._extract_rpf_entry(
                     archive, item.entry, backup, allow_missing=True,
                 )
+                if item.original_sha256 is not None and (not existed or _sha256(backup) != item.original_sha256):
+                    raise ValueError(f"Original RPF member changed before replacement: {item.entry}")
                 if not existed:
                     backup.unlink(missing_ok=True)
                 applied = _contained_path(
@@ -1185,6 +1660,8 @@ class ModIntegrationService:
                 )
                 applied.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, applied)
+                if item.original_sha256 is not None and _sha256(applied) != item.sha256:
+                    raise ValueError(f"RPF replacement payload changed: {item.source}")
                 record = {
                     "owner": manifest.mod_id,
                     "archive": item.archive.as_posix(),
@@ -1194,8 +1671,10 @@ class ModIntegrationService:
                     "applied": str(applied.relative_to(self.gta_path)).replace("\\", "/"),
                     "sha256": _sha256(applied),
                 }
+                if item.original_sha256 is not None:
+                    record["original_sha256"] = item.original_sha256
                 rpf_records.append(record)
-                self._replace_rpf_entry(archive, item.entry, applied)
+                self._replace_rpf_entry(archive, item.entry, applied, expected_sha256=item.original_sha256)
                 if not self._rpf_entry_matches(record, applied):
                     raise RuntimeError(
                         f"RPF entry verification failed: {item.archive}/{item.entry}"
@@ -1217,7 +1696,7 @@ class ModIntegrationService:
                         registered_packs.append(pack)
 
             receipt = {
-                "schema_version": 2 if manifest.extension else 1,
+                "schema_version": manifest.schema_version,
                 "id": manifest.mod_id,
                 "name": manifest.name,
                 "version": manifest.version,
@@ -1283,8 +1762,29 @@ class ModIntegrationService:
             True, install_enabled,
         )
 
+    @staticmethod
+    def _copy_atomic(source: Path, target: Path) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(
+            f".{target.name}.allin1-{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            shutil.copy2(source, temporary)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def _rollback_records(self, records: Iterable[dict[str, Any]]) -> None:
-        for item in reversed(list(records)):
+        records = list(records)
+        unique_paths([str(item["destination"]) for item in records])
+        for item in records:
+            target = _contained_path(self.gta_path, item["destination"])
+            no_links(target.with_name(target.name + ".disabled"))
+            if item.get("backup"):
+                backup = _contained_path(self.gta_path, item["backup"])
+                if not backup.is_relative_to(no_links(self.backup_root).resolve()):
+                    raise ValueError("Rollback backup escapes backup root")
+        for item in reversed(records):
             target = _contained_path(self.gta_path, item["destination"])
             disabled = target.with_name(target.name + ".disabled")
             target.unlink(missing_ok=True)
@@ -1387,7 +1887,7 @@ class ModIntegrationService:
                     applied = _contained_path(self.gta_path, item["applied"])
                     self._replace_rpf_entry(
                         _contained_path(self.gta_path, item["archive"]),
-                        item["entry"], applied,
+                        item["entry"], applied, expected_sha256=item.get("original_sha256"),
                     )
                     changed_rpf_entries.append(item)
                 for pack in dlc_packs:
@@ -1415,7 +1915,7 @@ class ModIntegrationService:
                         applied = _contained_path(self.gta_path, item["applied"])
                         self._replace_rpf_entry(
                             _contained_path(self.gta_path, item["archive"]),
-                            item["entry"], applied,
+                            item["entry"], applied, expected_sha256=item.get("original_sha256"),
                         )
                 except Exception:
                     pass
@@ -1581,7 +2081,7 @@ class ModIntegrationService:
                     applied = _contained_path(self.gta_path, item["applied"])
                     self._replace_rpf_entry(
                         _contained_path(self.gta_path, item["archive"]),
-                        item["entry"], applied,
+                        item["entry"], applied, expected_sha256=item.get("original_sha256"),
                     )
                 except Exception:
                     pass

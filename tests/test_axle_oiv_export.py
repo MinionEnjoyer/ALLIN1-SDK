@@ -5,6 +5,7 @@ import json
 import struct
 import zipfile
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -270,7 +271,7 @@ def _runtime(stage: Path, target: str) -> StagedRuntime:
             "online_session_guard": "passed",
         },
         "validation_authority": "ALLIN1 OIV regression fixture",
-        "accepted_at": "2026-08-25T12:00:00Z",
+        "accepted_at": datetime.now(timezone.utc).isoformat(),
         "package_eligible": True,
         "redistribution_allowed": True,
         "license": license_name,

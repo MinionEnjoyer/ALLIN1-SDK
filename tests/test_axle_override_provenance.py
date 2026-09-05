@@ -267,6 +267,35 @@ def test_story_export_marks_automatic_authoring_gains_non_authoritative() -> Non
         story_native_runtime_configuration(configured)
 
 
+def test_story_export_locks_reviewed_geometry_without_live_position_access() -> None:
+    configured, bones = _signed_override_configuration()
+    configured = retarget_axle_configuration(configured, "story-enhanced")
+
+    payload = story_native_runtime_configuration(
+        configured,
+        bones=bones,
+        runtime_geometry_recompute=False,
+    )
+
+    schema = json.loads((
+        Path(__file__).resolve().parents[1]
+        / "runtime" / "VehicleWorkbenchAxles" / "schemas"
+        / "axle-config.schema.json"
+    ).read_text(encoding="utf-8"))
+    Draft202012Validator(schema).validate(payload)
+
+    assert [row["steeringGain"] for row in payload["axles"]] == pytest.approx(
+        [0.22776979648028195, 0.0, -1.0], abs=1.0e-9,
+    )
+    evidence = payload["steeringCalculation"]
+    assert evidence["mode"] == "automaticGeometry"
+    assert evidence["runtimeRecompute"] is False
+    assert "referenceSelection" not in evidence
+    assert evidence["referenceAxleOrder"] == 2
+    assert evidence["pivotAxleOrders"] == [1]
+    AxleConfiguration.from_dict(payload)
+
+
 @pytest.mark.parametrize(
     ("updates", "message"),
     (

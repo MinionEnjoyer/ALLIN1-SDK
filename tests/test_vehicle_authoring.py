@@ -10,7 +10,10 @@ from click.testing import CliRunner
 from allin1_sdk.agent_api import command_catalog, execute_request
 from allin1_sdk.addon_importer import AddonPackageInspector
 from allin1_sdk.cli import main
-from allin1_sdk.vehicle_authoring import VehicleAuthoringWorkspace
+from allin1_sdk.vehicle_authoring import (
+    VehicleAuthoringWorkspace,
+    VehicleTransmissionConfiguration,
+)
 from allin1_sdk.axle_configurator import (
     EXPORT_FIVEM_RUNTIME,
     PRESET_STEER_DRIVE_REAR,
@@ -122,6 +125,18 @@ def test_vehicle_authoring_workspace_copies_edits_validates_and_undoes(tmp_path)
         "fDriveBiasFront": "0.0",
     }
 
+    review = workspace.review_update("authorcar", {
+        "vehicle.gameName": "AUTHORCAR2",
+        "handling.fMass": "1625.5",
+    })
+    assert review.revision == 0
+    assert {item["field"] for item in review.changes} == {
+        "vehicle.gameName", "handling.fMass",
+    }
+    assert workspace.revision == 0
+    assert workspace.values("authorcar").values["vehicle.gameName"] == "AUTHORCAR"
+    assert (original / "vehicles.meta").read_bytes() == original_vehicle
+
     result = workspace.update("authorcar", {
         "vehicle.gameName": "AUTHORCAR2",
         "handling.fMass": "1625.5",
@@ -161,9 +176,21 @@ def test_axle_configuration_updates_flags_bias_and_manifest_with_undo_redo(tmp_p
         export_mode=EXPORT_FIVEM_RUNTIME,
     )
     original_flags = parse_handling_flags("440010")
+    original_handling = (workspace.source / "handling.meta").read_bytes()
+    review = workspace.review_axle_configuration(
+        config, bones=_axle_skeleton(), expected_revision=0,
+    )
+    assert review.revision == 0
+    assert review.configuration == config.to_dict()
+    assert {change["field"] for change in review.changes} == {
+        "axles.configuration", "handling.strHandlingFlags", "handling.fDriveBiasFront",
+    }
+    assert (workspace.source / "handling.meta").read_bytes() == original_handling
+    assert workspace.axle_configuration("authorcar") is None
     result = workspace.set_axle_configuration(
         config, bones=_axle_skeleton(), expected_revision=0,
     )
+    assert result.changes == review.changes
     assert result.revision == 1
     assert workspace.axle_configuration("authorcar").to_dict() == config.to_dict()
     handling = (workspace.source / "handling.meta").read_text("utf-8")
@@ -186,6 +213,56 @@ def test_axle_configuration_updates_flags_bias_and_manifest_with_undo_redo(tmp_p
     assert "fDriveBiasFront value=\"0.5\"" in (
         workspace.source / "handling.meta"
     ).read_text("utf-8")
+
+
+def test_transmission_profile_updates_gear_count_and_manifest_with_undo_redo(tmp_path):
+    workspace = VehicleAuthoringWorkspace.create(
+        _source(tmp_path), tmp_path / "transmission-workspace",
+    )
+    configuration = VehicleTransmissionConfiguration(
+        schema_version=1,
+        vehicle_model="authorcar",
+        transmission_type="sequential",
+        gear_ratios=(3.4, 2.35, 1.78, 1.39, 1.12, 0.92, 0.77),
+        reverse_gear_ratio=3.1,
+        final_drive_ratio=3.55,
+    )
+
+    review = workspace.review_transmission_configuration(
+        configuration, expected_revision=0,
+    )
+    assert {change["field"] for change in review.changes} == {
+        "transmission.configuration", "handling.nInitialDriveGears",
+    }
+    assert workspace.transmission_configuration("authorcar") is None
+    assert workspace.values("authorcar").values["handling.nInitialDriveGears"] == "6"
+
+    result = workspace.set_transmission_configuration(
+        configuration, expected_revision=0,
+    )
+    assert result.revision == 1
+    assert workspace.transmission_configuration("authorcar") == configuration
+    assert workspace.values("authorcar").values["handling.nInitialDriveGears"] == "7"
+
+    workspace.undo()
+    assert workspace.transmission_configuration("authorcar") is None
+    assert workspace.values("authorcar").values["handling.nInitialDriveGears"] == "6"
+
+    workspace.redo()
+    assert workspace.transmission_configuration("authorcar") == configuration
+    assert workspace.values("authorcar").values["handling.nInitialDriveGears"] == "7"
+
+
+def test_transmission_profile_rejects_invalid_ratios() -> None:
+    with pytest.raises(ValueError, match="Gear 2 ratio"):
+        VehicleTransmissionConfiguration(
+            schema_version=1,
+            vehicle_model="authorcar",
+            transmission_type="manual",
+            gear_ratios=(3.2, 0.0),
+            reverse_gear_ratio=3.0,
+            final_drive_ratio=3.4,
+        )
 
 def test_preview_axle_steering_cli_returns_read_only_signed_proposal(
     tmp_path, monkeypatch,
@@ -320,6 +397,10 @@ def test_vehicle_distribution_is_typed_traffic_opt_in_and_agent_accessible(tmp_p
     }, expected_revision=0)
     assert updated.traffic_enabled is True
     assert workspace.revision == 1
+    assert workspace.undo().revision == 2
+    assert workspace.distribution("authorcar").traffic_enabled is False
+    assert workspace.redo().revision == 3
+    assert workspace.distribution("authorcar").traffic_enabled is True
     catalog = workspace.distribution_catalog(
         "example.authorcar", "Author Vehicle", "authorcar",
     )
@@ -446,6 +527,20 @@ def test_vehicle_appearance_tuning_and_light_profiles_are_structured_and_undoabl
     assert appearance.available_kits[0].livery_names == ("AUTH_LIVERY_1",)
     assert appearance.light_profiles[0].values["headLight.intensity"] == "2.000000"
 
+    variation_source = workspace.source / "carvariations.meta"
+    before_review = variation_source.read_bytes()
+    review = workspace.review_appearance(
+        "authorcar",
+        colors=[{"indices": [10, 11, 12, 13], "liveries": [False, True, False]}],
+        kits=["123_authorkit"], light_settings=1, siren_settings=7,
+    )
+    assert review.revision == 0
+    assert {change["field"] for change in review.changes} == {
+        "variation.colors", "variation.sirenSettings",
+    }
+    assert workspace.revision == 0
+    assert variation_source.read_bytes() == before_review
+
     result = workspace.update_appearance(
         "authorcar",
         colors=[{"indices": [10, 11, 12, 13], "liveries": [False, True, False]}],
@@ -456,6 +551,22 @@ def test_vehicle_appearance_tuning_and_light_profiles_are_structured_and_undoabl
     assert changed.colors[0].indices == (10, 11, 12, 13)
     assert changed.colors[0].liveries == (False, True, False)
     assert changed.siren_settings == "7"
+
+    carcols_source = workspace.source / "carcols.meta"
+    before_detail_reviews = carcols_source.read_bytes()
+    kit_review = workspace.review_tuning_kit(
+        "authorcar", "123_authorkit", kit_type="MKT_SPECIAL",
+        livery_names=["AUTH_LIVERY_2"],
+    )
+    light_review = workspace.review_light_profile(
+        "authorcar", "1", {"headLight.intensity": "3.500000"},
+    )
+    assert {change["field"] for change in kit_review.changes} == {
+        "tuning.123_authorkit.kitType", "tuning.123_authorkit.liveryNames",
+    }
+    assert light_review.changes[0]["after"] == "3.500000"
+    assert workspace.revision == 1
+    assert carcols_source.read_bytes() == before_detail_reviews
 
     kit = workspace.update_tuning_kit(
         "authorcar", "123_authorkit", kit_type="MKT_SPECIAL",
@@ -655,6 +766,15 @@ def test_tuning_builder_inventories_parts_preserves_fields_and_edits_collections
     assets = {item.name: item for item in builder.assets}
     assert assets["author_spoiler"].referenced is True
     assert assets["author_bumper"].referenced is False
+
+    before_review = (workspace.source / "carcols.meta").read_bytes()
+    review = workspace.review_tuning_action(
+        "authorcar", "123_authorkit", "visibleMods", "update", index=0,
+        values={"modShopLabel": "AUTH_SPOILER"},
+    )
+    assert review.changes[0]["action"] == "update"
+    assert workspace.revision == 0
+    assert (workspace.source / "carcols.meta").read_bytes() == before_review
 
     updated = workspace.update_tuning_entry(
         "authorcar", "123_authorkit", "visibleMods", 0,

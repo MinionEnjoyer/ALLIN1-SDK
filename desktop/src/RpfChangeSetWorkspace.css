@@ -1,0 +1,12 @@
+.rpf-change-workspace select { width: 100%; min-width: 0; padding: 9px 10px; font: inherit; color: var(--text); background: var(--surface-muted); border: 1px solid var(--border); border-radius: 3px; }
+.rpf-change-panels > .gxt-pane > header { height: 74px; flex: 0 0 74px; }
+.rpf-change-workspace code { overflow-wrap: anywhere; }
+.rpf-change-workspace .gxt-evidence pre { min-width: 0; max-width: 100%; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; font-size: .75rem; }
+.rpf-change-workspace p { line-height: 1.6; }
+.rpf-change-payload { display: grid; gap: 8px; min-width: 0; font-size: .8rem; }
+.rpf-change-review-list { max-height: 340px; overflow: auto; padding-left: 24px; }
+.rpf-change-review-list li { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.rpf-change-review-list code, .rpf-change-review-list small { display: block; margin-top: 5px; }
+.rpf-change-workspace .gxt-rpf-package > .gxt-actions { margin-top: 14px; }
+.rpf-workspace-tabs { flex-wrap: wrap; }
+.rpf-history-heading h3 { margin: 0 auto 0 0; }

@@ -474,7 +474,7 @@ class VehicleQuickImportService:
         output = Path(destination).expanduser().resolve(strict=False)
         replaced_existing = output.exists() or output.is_symlink()
         if replaced_existing:
-            self._validate_replaceable_destination(output, refreshed.package_id)
+            self.validate_replaceable_destination(output, refreshed.package_id)
             result = self._replace_prepared_package(refreshed, output)
         else:
             result = self.converter.export(refreshed, output)
@@ -495,7 +495,7 @@ class VehicleQuickImportService:
         )
 
     @staticmethod
-    def _validate_replaceable_destination(output: Path, package_id: str) -> None:
+    def validate_replaceable_destination(output: Path, package_id: str) -> None:
         """Allow replacement only for an intact SDK-authored package of this ID."""
 
         if output.is_symlink() or not output.is_dir():

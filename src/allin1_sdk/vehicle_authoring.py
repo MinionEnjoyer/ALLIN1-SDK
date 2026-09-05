@@ -44,6 +44,10 @@ from allin1_sdk.axle_prefabs import load_prefab_axle_configuration
 
 
 AUTHORING_SCHEMA_VERSION = 1
+TRANSMISSION_SCHEMA_VERSION = 1
+TRANSMISSION_TYPES = (
+    "automatic", "manual", "sequential", "dual_clutch",
+)
 MAX_AUTHORING_MEMBER_BYTES = 512 * 1024 * 1024
 MAX_AUTHORING_XML_BYTES = 16 * 1024 * 1024
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_]{1,96}$")
@@ -516,6 +520,157 @@ class VehicleAuthoringResult:
         }
 
 
+@dataclass(frozen=True)
+class VehicleAuthoringUpdateReview:
+    workspace: Path
+    revision: int
+    model: str
+    changes: tuple[dict[str, str], ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": AUTHORING_SCHEMA_VERSION,
+            "workspace": str(self.workspace),
+            "revision": self.revision,
+            "model": self.model,
+            "changes": list(self.changes),
+        }
+
+
+@dataclass(frozen=True)
+class VehicleAuthoringAxleReview:
+    workspace: Path
+    revision: int
+    model: str
+    configuration: dict[str, Any]
+    changes: tuple[dict[str, str], ...]
+    findings: tuple[dict[str, Any], ...]
+    warnings: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": AUTHORING_SCHEMA_VERSION,
+            "workspace": str(self.workspace),
+            "revision": self.revision,
+            "model": self.model,
+            "configuration": self.configuration,
+            "changes": list(self.changes),
+            "findings": list(self.findings),
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
+class VehicleTransmissionConfiguration:
+    """ALLIN1 transmission profile paired with stock handling gear count."""
+
+    schema_version: int
+    vehicle_model: str
+    transmission_type: str
+    gear_ratios: tuple[float, ...]
+    reverse_gear_ratio: float
+    final_drive_ratio: float
+
+    def __post_init__(self) -> None:
+        if self.schema_version != TRANSMISSION_SCHEMA_VERSION:
+            raise ValueError("Unsupported vehicle transmission schema")
+        if not _IDENTIFIER.fullmatch(self.vehicle_model):
+            raise ValueError("Transmission vehicle model is invalid")
+        if self.vehicle_model != self.vehicle_model.casefold():
+            raise ValueError("Transmission vehicle model must be lowercase")
+        if self.transmission_type not in TRANSMISSION_TYPES:
+            raise ValueError(
+                "Transmission type must be automatic, manual, sequential, or dual_clutch"
+            )
+        if not 1 <= len(self.gear_ratios) <= 16:
+            raise ValueError("Transmission profiles require 1 through 16 forward gears")
+        for index, ratio in enumerate(self.gear_ratios, start=1):
+            self._validate_ratio(ratio, f"Gear {index} ratio")
+        self._validate_ratio(self.reverse_gear_ratio, "Reverse gear ratio")
+        self._validate_ratio(self.final_drive_ratio, "Final drive ratio")
+
+    @staticmethod
+    def _validate_ratio(value: Any, label: str) -> None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{label} must be numeric")
+        number = float(value)
+        if not math.isfinite(number) or not 0.1 <= number <= 10.0:
+            raise ValueError(f"{label} must be between 0.1 and 10.0")
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "VehicleTransmissionConfiguration":
+        allowed = {
+            "schema_version", "vehicle_model", "transmission_type",
+            "gear_ratios", "reverse_gear_ratio", "final_drive_ratio",
+        }
+        unknown = sorted(set(payload) - allowed)
+        if unknown:
+            raise ValueError(
+                "Unsupported transmission fields: " + ", ".join(unknown)
+            )
+        ratios = payload.get("gear_ratios")
+        if not isinstance(ratios, (list, tuple)):
+            raise ValueError("Transmission gear ratios must be an array")
+        return cls(
+            schema_version=payload.get("schema_version"),
+            vehicle_model=str(payload.get("vehicle_model", "")).strip().casefold(),
+            transmission_type=str(payload.get("transmission_type", "")).strip(),
+            gear_ratios=tuple(ratios),
+            reverse_gear_ratio=payload.get("reverse_gear_ratio"),
+            final_drive_ratio=payload.get("final_drive_ratio"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "vehicle_model": self.vehicle_model,
+            "transmission_type": self.transmission_type,
+            "gear_ratios": list(self.gear_ratios),
+            "reverse_gear_ratio": self.reverse_gear_ratio,
+            "final_drive_ratio": self.final_drive_ratio,
+        }
+
+
+@dataclass(frozen=True)
+class VehicleAuthoringTransmissionReview:
+    workspace: Path
+    revision: int
+    model: str
+    configuration: dict[str, Any]
+    changes: tuple[dict[str, str], ...]
+    warnings: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": AUTHORING_SCHEMA_VERSION,
+            "workspace": str(self.workspace),
+            "revision": self.revision,
+            "model": self.model,
+            "configuration": self.configuration,
+            "changes": list(self.changes),
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
+class VehicleAuthoringDistributionReview:
+    workspace: Path
+    revision: int
+    model: str
+    distribution: dict[str, Any]
+    changes: tuple[dict[str, str], ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": AUTHORING_SCHEMA_VERSION,
+            "workspace": str(self.workspace),
+            "revision": self.revision,
+            "model": self.model,
+            "distribution": self.distribution,
+            "changes": list(self.changes),
+        }
+
+
 class VehicleAuthoringWorkspace:
     """Copied package source with transactional structured metadata edits."""
 
@@ -593,6 +748,7 @@ class VehicleAuthoringWorkspace:
                 "identity_migration": "transactional",
                 "identity_fields_locked": ["kitName", "id"],
                 "axle_configurations": {},
+                "transmission_configurations": {},
                 "distribution": {
                     item.model.casefold(): {
                         "listed": True,
@@ -698,6 +854,287 @@ class VehicleAuthoringWorkspace:
         if configuration.vehicle_model != project_model.model.casefold():
             raise ValueError("Axle configuration model does not match its project key")
         return configuration
+
+    def transmission_configuration(
+        self, model: str,
+    ) -> VehicleTransmissionConfiguration | None:
+        project_model = self.inspect().model(model)
+        raw = self.manifest.get("transmission_configurations", {})
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, dict):
+            raise ValueError("Vehicle transmission configurations are invalid")
+        payload = raw.get(project_model.model.casefold())
+        if payload is None:
+            return None
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"Transmission configuration is invalid: {project_model.model}"
+            )
+        configuration = VehicleTransmissionConfiguration.from_dict(payload)
+        if configuration.vehicle_model != project_model.model.casefold():
+            raise ValueError(
+                "Transmission configuration model does not match its project key"
+            )
+        return configuration
+
+    def _transmission_review_context(
+        self,
+        configuration: VehicleTransmissionConfiguration,
+        *,
+        expected_revision: int | None,
+    ) -> tuple[
+        PackageScan, VehicleProject, Any, Any, str, dict[str, Any],
+        tuple[dict[str, str], ...], tuple[str, ...],
+    ]:
+        if expected_revision is not None and expected_revision != self.revision:
+            raise ValueError(
+                f"Vehicle authoring revision changed (expected {expected_revision}, "
+                f"found {self.revision})"
+            )
+        scan, project = self._scan_project()
+        model = project.model(configuration.vehicle_model)
+        if model.model.casefold() != configuration.vehicle_model:
+            raise ValueError(
+                "Transmission configuration model does not match the selected vehicle"
+            )
+        handling_matches = [
+            item for item in scan.handlings
+            if item.name.casefold() == model.handling_id.casefold()
+        ]
+        if len(handling_matches) != 1:
+            raise ValueError(
+                f"Handling record was not found uniquely: {model.handling_id}"
+            )
+        tree = self._read_tree(handling_matches[0].source)
+        handling_item = self._handling_item(tree, model.handling_id)
+        current_gears = _element_value(
+            _direct_child(handling_item, "nInitialDriveGears")
+        )
+        raw_configs = self.manifest.get("transmission_configurations", {})
+        if raw_configs is None:
+            raw_configs = {}
+        if not isinstance(raw_configs, dict):
+            raise ValueError("Vehicle transmission configurations are invalid")
+        next_config = configuration.to_dict()
+        previous_config = raw_configs.get(configuration.vehicle_model)
+        changes: list[dict[str, str]] = []
+        if previous_config != next_config:
+            changes.append({
+                "field": "transmission.configuration",
+                "before": (
+                    json.dumps(previous_config, sort_keys=True)
+                    if previous_config else ""
+                ),
+                "after": json.dumps(next_config, sort_keys=True),
+            })
+        next_gears = str(len(configuration.gear_ratios))
+        if current_gears != next_gears:
+            changes.append({
+                "field": "handling.nInitialDriveGears",
+                "before": current_gears,
+                "after": next_gears,
+            })
+        if not changes:
+            raise ValueError("Transmission configuration update contains no changed values")
+        warnings: list[str] = []
+        if any(
+            later >= earlier
+            for earlier, later in zip(
+                configuration.gear_ratios, configuration.gear_ratios[1:],
+            )
+        ):
+            warnings.append(
+                "Forward gear ratios are not strictly descending; confirm this is intentional."
+            )
+        return (
+            scan, project, model, tree, handling_matches[0].source,
+            next_config, tuple(changes), tuple(warnings),
+        )
+
+    def review_transmission_configuration(
+        self,
+        configuration: VehicleTransmissionConfiguration,
+        *,
+        expected_revision: int | None = None,
+    ) -> VehicleAuthoringTransmissionReview:
+        """Validate one ALLIN1 transmission profile without committing it."""
+        (
+            _scan, _project, model, _tree, _source, next_config, changes, warnings,
+        ) = self._transmission_review_context(
+            configuration, expected_revision=expected_revision,
+        )
+        return VehicleAuthoringTransmissionReview(
+            workspace=self.root,
+            revision=self.revision,
+            model=model.model,
+            configuration=next_config,
+            changes=changes,
+            warnings=warnings,
+        )
+
+    def set_transmission_configuration(
+        self,
+        configuration: VehicleTransmissionConfiguration,
+        *,
+        expected_revision: int | None = None,
+    ) -> VehicleAuthoringResult:
+        """Commit an ALLIN1 ratio profile and synchronize the stock gear count."""
+        (
+            _scan, before_project, model, tree, handling_source,
+            next_config, reviewed_changes, warnings,
+        ) = self._transmission_review_context(
+            configuration, expected_revision=expected_revision,
+        )
+        handling_item = self._handling_item(tree, model.handling_id)
+        current_gears = _element_value(
+            _direct_child(handling_item, "nInitialDriveGears")
+        )
+        next_gears = str(len(configuration.gear_ratios))
+        trees: dict[str, etree._ElementTree] = {}
+        changes = list(reviewed_changes)
+        if current_gears != next_gears:
+            _set_element_value(
+                handling_item, "nInitialDriveGears", next_gears, attribute=True,
+            )
+            trees[handling_source] = tree
+        history = self._new_history(
+            model.model, trees, tuple(changes),
+            operation="vehicle_transmission_configuration", snapshot_manifest=True,
+        )
+        previous_manifest = deepcopy(self.manifest)
+        try:
+            configs = self.manifest.setdefault("transmission_configurations", {})
+            if not isinstance(configs, dict):
+                raise ValueError("Vehicle transmission configurations are invalid")
+            configs[configuration.vehicle_model] = next_config
+            if trees:
+                self._commit_trees(trees)
+            after_scan, after_project = self._scan_project()
+            self._reject_new_findings(before_project, after_project, model.model)
+            after_handling = next(
+                item for item in after_scan.handlings
+                if item.name.casefold() == model.handling_id.casefold()
+            )
+            roundtrip_tree = self._read_tree(after_handling.source)
+            roundtrip_item = self._handling_item(roundtrip_tree, model.handling_id)
+            if _element_value(
+                _direct_child(roundtrip_item, "nInitialDriveGears")
+            ) != next_gears:
+                raise RuntimeError("Authored transmission gear count did not round-trip")
+            revision = self._finish_revision(history, after_project)
+        except Exception:
+            self.manifest = previous_manifest
+            self._restore_history(history)
+            shutil.rmtree(history, ignore_errors=True)
+            raise
+        return VehicleAuthoringResult(
+            self.root, revision, model.model, tuple(changes), history,
+            after_project, warnings,
+        )
+
+    def review_axle_configuration(
+        self,
+        configuration: AxleConfiguration,
+        *,
+        bones: Iterable[Any] = (),
+        expected_revision: int | None = None,
+    ) -> VehicleAuthoringAxleReview:
+        """Validate one axle update and describe its writes without committing it."""
+        if expected_revision is not None and expected_revision != self.revision:
+            raise ValueError(
+                f"Vehicle authoring revision changed (expected {expected_revision}, "
+                f"found {self.revision})"
+            )
+        scan, project = self._scan_project()
+        model = project.model(configuration.vehicle_model)
+        if model.model.casefold() != configuration.vehicle_model:
+            raise ValueError("Axle configuration model does not match the selected vehicle")
+        bone_rows = tuple(bones)
+        if (
+            configuration.steering_calculation is not None
+            or configuration.intentional_layout_override is not None
+        ) and not bone_rows:
+            raise ValueError(
+                "Signed steering and custom physical-order configurations require "
+                "the selected vehicle's canonical wheel-bone skeleton so their "
+                "evidence can be verified"
+            )
+        findings = validate_axle_configuration(
+            configuration,
+            bone_rows,
+            asset_names=(item.path for item in model.assets),
+        )
+        errors = [item for item in findings if item.severity == "error"]
+        if errors:
+            raise ValueError("Axle configuration failed validation: " + errors[0].message)
+
+        handling_matches = [
+            item for item in scan.handlings
+            if item.name.casefold() == model.handling_id.casefold()
+        ]
+        if len(handling_matches) != 1:
+            raise ValueError(f"Handling record was not found uniquely: {model.handling_id}")
+        tree = self._read_tree(handling_matches[0].source)
+        handling_item = self._handling_item(tree, model.handling_id)
+        flags_text = _element_value(
+            _direct_child(handling_item, "strHandlingFlags")
+        ) or "00000000"
+        flags_result: StockMetadataResult = stock_metadata_flags(
+            configuration, parse_handling_flags(flags_text),
+        )
+        flags_after = format_handling_flags(flags_result.updated_flags, flags_text)
+
+        raw_configs = self.manifest.get("axle_configurations", {})
+        if raw_configs is None:
+            raw_configs = {}
+        if not isinstance(raw_configs, dict):
+            raise ValueError("Vehicle axle configurations are invalid")
+        previous_config = raw_configs.get(configuration.vehicle_model.casefold())
+        next_config = configuration.to_dict()
+        changes: list[dict[str, str]] = []
+        if previous_config != next_config:
+            changes.append({
+                "field": "axles.configuration",
+                "before": json.dumps(previous_config, sort_keys=True) if previous_config else "",
+                "after": json.dumps(next_config, sort_keys=True),
+            })
+        if flags_after != flags_text:
+            changes.append({
+                "field": "handling.strHandlingFlags",
+                "before": flags_text,
+                "after": flags_after,
+            })
+        powered = {item.powered for item in configuration.axles}
+        if configuration.export_mode == EXPORT_FIVEM_RUNTIME and len(powered) > 1:
+            bias_before = _element_value(
+                _direct_child(handling_item, "fDriveBiasFront")
+            )
+            try:
+                usable_bias = 0.0 < float(bias_before) < 1.0
+            except ValueError:
+                usable_bias = False
+            if not usable_bias:
+                changes.append({
+                    "field": "handling.fDriveBiasFront",
+                    "before": bias_before,
+                    "after": "0.5",
+                })
+        if not changes:
+            raise ValueError("Axle configuration update contains no changed values")
+        warnings = tuple(dict.fromkeys((
+            *(item.message for item in findings if item.severity != "error"),
+            *flags_result.warnings,
+        )))
+        return VehicleAuthoringAxleReview(
+            workspace=self.root,
+            revision=self.revision,
+            model=model.model,
+            configuration=next_config,
+            changes=tuple(changes),
+            findings=tuple(item.to_dict() for item in findings),
+            warnings=warnings,
+        )
 
     def set_axle_configuration(
         self,
@@ -880,9 +1317,9 @@ class VehicleAuthoringWorkspace:
         candidate.catalog_entry("addon")
         return candidate
 
-    def set_distribution(
-        self, model: str, updates: dict[str, Any], *, expected_revision: int | None = None,
-    ) -> VehicleDistributionValues:
+    def _distribution_candidate(
+        self, model: str, updates: dict[str, Any], *, expected_revision: int | None,
+    ) -> tuple[VehicleDistributionValues, VehicleDistributionValues]:
         unknown = sorted(set(updates) - _DISTRIBUTION_FIELDS)
         if unknown:
             raise ValueError("Unsupported distribution fields: " + ", ".join(unknown))
@@ -914,18 +1351,87 @@ class VehicleAuthoringWorkspace:
         if not isinstance(candidate.listed, bool):
             raise ValueError("Distribution listed must be a boolean")
         candidate.catalog_entry("addon")
-        distribution = self.manifest.setdefault("distribution", {})
-        if not isinstance(distribution, dict):
-            raise ValueError("Vehicle authoring distribution settings are invalid")
         if candidate.to_dict() == current.to_dict():
             raise ValueError("Vehicle distribution update contains no changed values")
-        stored = candidate.to_dict()
-        stored.pop("model", None)
-        distribution[current.model.casefold()] = stored
-        self.manifest["revision"] = self.revision + 1
-        self.manifest["updated_utc"] = datetime.now(timezone.utc).isoformat()
-        self._write_manifest()
-        return candidate
+        return current, candidate
+
+    @staticmethod
+    def _distribution_change_value(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+    def review_distribution(
+        self, model: str, updates: dict[str, Any], *, expected_revision: int | None = None,
+    ) -> VehicleAuthoringDistributionReview:
+        current, candidate = self._distribution_candidate(
+            model, updates, expected_revision=expected_revision,
+        )
+        before = current.to_dict()
+        after = candidate.to_dict()
+        changes = tuple(
+            {
+                "field": f"distribution.{field}",
+                "before": self._distribution_change_value(before[field]),
+                "after": self._distribution_change_value(after[field]),
+            }
+            for field in sorted(after)
+            if field != "model" and before[field] != after[field]
+        )
+        return VehicleAuthoringDistributionReview(
+            workspace=self.root,
+            revision=self.revision,
+            model=candidate.model,
+            distribution=candidate.to_dict(),
+            changes=changes,
+        )
+
+    def apply_distribution(
+        self, model: str, updates: dict[str, Any], *, expected_revision: int | None = None,
+    ) -> VehicleAuthoringResult:
+        current, candidate = self._distribution_candidate(
+            model, updates, expected_revision=expected_revision,
+        )
+        review = self.review_distribution(
+            model, updates, expected_revision=expected_revision,
+        )
+        before_project = self.inspect()
+        history = self._new_history(
+            candidate.model, {}, review.changes,
+            operation="vehicle_distribution", snapshot_manifest=True,
+        )
+        previous_manifest = deepcopy(self.manifest)
+        try:
+            distribution = self.manifest.setdefault("distribution", {})
+            if not isinstance(distribution, dict):
+                raise ValueError("Vehicle authoring distribution settings are invalid")
+            stored = candidate.to_dict()
+            stored.pop("model", None)
+            distribution[current.model.casefold()] = stored
+            after_project = self.inspect()
+            self._reject_new_findings(before_project, after_project, candidate.model)
+            if self.distribution(candidate.model) != candidate:
+                raise RuntimeError("Authored vehicle distribution did not round-trip")
+            revision = self._finish_revision(history, after_project)
+        except Exception:
+            self.manifest = previous_manifest
+            self._restore_history(history)
+            shutil.rmtree(history, ignore_errors=True)
+            raise
+        return VehicleAuthoringResult(
+            self.root, revision, candidate.model, review.changes, history,
+            after_project,
+        )
+
+    def set_distribution(
+        self, model: str, updates: dict[str, Any], *, expected_revision: int | None = None,
+    ) -> VehicleDistributionValues:
+        result = self.apply_distribution(
+            model, updates, expected_revision=expected_revision,
+        )
+        return self.distribution(result.model)
 
     def distribution_catalog(
         self, package_id: str, package_name: str, source_pack: str,
@@ -1141,13 +1647,12 @@ class VehicleAuthoringWorkspace:
             light_profiles=tuple(profiles),
         )
 
-    def update(
-        self, model: str, updates: dict[str, str],
-    ) -> VehicleAuthoringResult:
+    def _review_update(
+        self, model: str, updates: dict[str, str], *, scan: PackageScan,
+    ) -> tuple[VehicleAuthoringValues, dict[str, str]]:
         unknown = sorted(set(updates) - set(EDITABLE_FIELDS))
         if unknown:
             raise ValueError("Unsupported vehicle authoring fields: " + ", ".join(unknown))
-        scan, before_project = self._scan_project()
         current = self.values(model, _scan=scan)
         normalized = {
             key: self._validate_value(key, str(value).strip())
@@ -1168,6 +1673,33 @@ class VehicleAuthoringWorkspace:
             missing = [item for item in requested if item.casefold() not in existing_kits]
             if missing:
                 raise ValueError("Unknown tuning kits: " + ", ".join(missing))
+        return current, changed
+
+    def review_update(
+        self, model: str, updates: dict[str, str],
+    ) -> VehicleAuthoringUpdateReview:
+        """Validate and normalize one field edit without changing the workspace."""
+        scan = AddonPackageInspector().inspect(self.source)
+        current, changed = self._review_update(model, updates, scan=scan)
+        return VehicleAuthoringUpdateReview(
+            workspace=self.root,
+            revision=self.revision,
+            model=current.model,
+            changes=tuple(
+                {
+                    "field": key,
+                    "before": current.values.get(key, ""),
+                    "after": value,
+                }
+                for key, value in changed.items()
+            ),
+        )
+
+    def update(
+        self, model: str, updates: dict[str, str],
+    ) -> VehicleAuthoringResult:
+        scan, before_project = self._scan_project()
+        current, changed = self._review_update(model, updates, scan=scan)
 
         trees: dict[str, etree._ElementTree] = {}
         for path in set(current.sources.values()):
@@ -1244,7 +1776,7 @@ class VehicleAuthoringWorkspace:
             project=after_project,
         )
 
-    def update_appearance(
+    def _review_appearance(
         self,
         model: str,
         *,
@@ -1252,9 +1784,15 @@ class VehicleAuthoringWorkspace:
         kits: list[str] | tuple[str, ...] | None = None,
         light_settings: int | str | None = None,
         siren_settings: int | str | None = None,
-    ) -> VehicleAuthoringResult:
-        """Replace structured variation data as one validated, undoable edit."""
-        scan, before_project = self._scan_project()
+        scan: PackageScan,
+    ) -> tuple[
+        VehicleAppearanceValues,
+        tuple[VehicleColorSet, ...],
+        tuple[str, ...],
+        str,
+        str,
+        tuple[dict[str, str], ...],
+    ]:
         current = self.appearance(model, _scan=scan)
         normalized_colors = (
             self._normalize_colors(colors) if colors is not None else current.colors
@@ -1299,6 +1837,59 @@ class VehicleAuthoringWorkspace:
                 changed.append({"field": field, "before": before, "after": after})
         if not changed:
             raise ValueError("Vehicle appearance update contains no changed values")
+        return (
+            current, normalized_colors, normalized_kits, normalized_light,
+            normalized_siren, tuple(changed),
+        )
+
+    def review_appearance(
+        self,
+        model: str,
+        *,
+        colors: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        kits: list[str] | tuple[str, ...] | None = None,
+        light_settings: int | str | None = None,
+        siren_settings: int | str | None = None,
+    ) -> VehicleAuthoringUpdateReview:
+        """Validate one structured appearance edit without changing the workspace."""
+        scan = AddonPackageInspector().inspect(self.source)
+        current, *_normalized, changes = self._review_appearance(
+            model,
+            colors=colors,
+            kits=kits,
+            light_settings=light_settings,
+            siren_settings=siren_settings,
+            scan=scan,
+        )
+        return VehicleAuthoringUpdateReview(
+            workspace=self.root,
+            revision=self.revision,
+            model=current.model,
+            changes=changes,
+        )
+
+    def update_appearance(
+        self,
+        model: str,
+        *,
+        colors: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        kits: list[str] | tuple[str, ...] | None = None,
+        light_settings: int | str | None = None,
+        siren_settings: int | str | None = None,
+    ) -> VehicleAuthoringResult:
+        """Replace structured variation data as one validated, undoable edit."""
+        scan, before_project = self._scan_project()
+        (
+            current, normalized_colors, normalized_kits, normalized_light,
+            normalized_siren, changed,
+        ) = self._review_appearance(
+            model,
+            colors=colors,
+            kits=kits,
+            light_settings=light_settings,
+            siren_settings=siren_settings,
+            scan=scan,
+        )
 
         tree = self._read_tree(current.source)
         item = self._variation_item(tree, model)
@@ -1332,7 +1923,7 @@ class VehicleAuthoringWorkspace:
         if normalized_siren != current.siren_settings:
             _set_element_value(item, "sirenSettings", normalized_siren, attribute=True)
         trees = {current.source: tree}
-        history = self._new_history(model, trees, tuple(changed))
+        history = self._new_history(model, trees, changed)
         previous_manifest = dict(self.manifest)
         try:
             self._commit_trees(trees)
@@ -1352,16 +1943,16 @@ class VehicleAuthoringWorkspace:
             shutil.rmtree(history, ignore_errors=True)
             raise
         return VehicleAuthoringResult(
-            self.root, revision, model, tuple(changed), history, after_project,
+            self.root, revision, model, changed, history, after_project,
         )
 
-    def update_tuning_kit(
-        self, model: str, kit_name: str, *, kit_type: str | None = None,
-        livery_names: list[str] | tuple[str, ...] | None = None,
-    ) -> VehicleAuthoringResult:
-        """Edit safe, structured fields on an existing linked tuning kit."""
-        before_scan, before_project = self._scan_project()
-        appearance = self.appearance(model, _scan=before_scan)
+    def _review_tuning_kit(
+        self, model: str, kit_name: str, *, kit_type: str | None,
+        livery_names: list[str] | tuple[str, ...] | None, scan: PackageScan,
+    ) -> tuple[
+        VehicleTuningKitSummary, str, tuple[str, ...], tuple[dict[str, str], ...],
+    ]:
+        appearance = self.appearance(model, _scan=scan)
         matches = [
             item for item in appearance.available_kits
             if item.name.casefold() == kit_name.casefold()
@@ -1397,6 +1988,31 @@ class VehicleAuthoringWorkspace:
             })
         if not changes:
             raise ValueError("Tuning-kit update contains no changed values")
+        return current, normalized_type, normalized_liveries, tuple(changes)
+
+    def review_tuning_kit(
+        self, model: str, kit_name: str, *, kit_type: str | None = None,
+        livery_names: list[str] | tuple[str, ...] | None = None,
+    ) -> VehicleAuthoringUpdateReview:
+        """Validate tuning-kit metadata without changing its carcols source."""
+        scan = AddonPackageInspector().inspect(self.source)
+        current, _kit_type, _liveries, changes = self._review_tuning_kit(
+            model, kit_name, kit_type=kit_type, livery_names=livery_names, scan=scan,
+        )
+        return VehicleAuthoringUpdateReview(
+            self.root, self.revision, model, changes,
+        )
+
+    def update_tuning_kit(
+        self, model: str, kit_name: str, *, kit_type: str | None = None,
+        livery_names: list[str] | tuple[str, ...] | None = None,
+    ) -> VehicleAuthoringResult:
+        """Edit safe, structured fields on an existing linked tuning kit."""
+        before_scan, before_project = self._scan_project()
+        current, normalized_type, normalized_liveries, changes = self._review_tuning_kit(
+            model, kit_name, kit_type=kit_type, livery_names=livery_names,
+            scan=before_scan,
+        )
         tree = self._read_tree(current.source)
         item = self._find_item(tree, "Kits", "kitName", current.name)
         if normalized_type != current.kit_type:
@@ -1410,7 +2026,7 @@ class VehicleAuthoringWorkspace:
             for label in normalized_liveries:
                 etree.SubElement(container, "Item").text = label
         trees = {current.source: tree}
-        history = self._new_history(model, trees, tuple(changes))
+        history = self._new_history(model, trees, changes)
         previous_manifest = dict(self.manifest)
         try:
             self._commit_trees(trees)
@@ -1423,18 +2039,19 @@ class VehicleAuthoringWorkspace:
             shutil.rmtree(history, ignore_errors=True)
             raise
         return VehicleAuthoringResult(
-            self.root, revision, model, tuple(changes), history, after_project,
+            self.root, revision, model, changes, history, after_project,
         )
 
     def tuning_builder(
         self, model: str, kit_name: str | None = None, *,
         _scan: PackageScan | None = None,
+        _tree: etree._ElementTree | None = None,
     ) -> VehicleTuningBuilderValues:
         """Return a structured inventory for one linked carcols tuning kit."""
         scan = _scan or AddonPackageInspector().inspect(self.source)
         appearance = self.appearance(model, _scan=scan)
         kit = self._resolve_tuning_kit(appearance, kit_name)
-        tree = self._read_tree(kit.source)
+        tree = _tree if _tree is not None else self._read_tree(kit.source)
         kit_item = self._find_item(tree, "Kits", "kitName", kit.name)
         entries: list[VehicleTuningEntry] = []
         for collection_name in TUNING_COLLECTIONS:
@@ -1491,50 +2108,166 @@ class VehicleAuthoringWorkspace:
             entries=tuple(entries), assets=assets, findings=findings,
         )
 
-    def add_tuning_entry(
-        self, model: str, kit_name: str, collection: str,
-        values: dict[str, str], *, duplicate_index: int | None = None,
-    ) -> VehicleAuthoringResult:
-        """Add or duplicate a structured tuning entry transactionally."""
+    def _prepare_tuning_action(
+        self, model: str, kit_name: str, collection: str, action: str, *,
+        index: int | None = None, new_index: int | None = None,
+        values: dict[str, str] | None = None,
+    ) -> tuple[
+        PackageScan, VehicleTuningBuilderValues, etree._ElementTree,
+        tuple[dict[str, str], ...],
+    ]:
         self._validate_collection(collection)
+        if action not in {"add", "duplicate", "update", "remove", "move"}:
+            raise ValueError(f"Unsupported tuning action: {action}")
         scan = AddonPackageInspector().inspect(self.source)
         builder = self.tuning_builder(model, kit_name, _scan=scan)
         tree = self._read_tree(builder.source)
         kit_item = self._find_item(tree, "Kits", "kitName", builder.kit_name)
         container = _direct_child(kit_item, collection)
-        if container is None:
+        if container is None and action == "add":
             container = etree.SubElement(kit_item, collection)
+        if container is None:
+            raise ValueError(f"Tuning collection does not exist: {collection}")
         items = [
             item for item in container
             if isinstance(item.tag, str) and _local_name(item) == "Item"
         ]
-        if duplicate_index is not None:
-            if duplicate_index < 0 or duplicate_index >= len(items):
-                raise ValueError(f"Tuning entry index is out of range: {duplicate_index}")
-            item = deepcopy(items[duplicate_index])
-            container.append(item)
-            self._apply_tuning_updates(item, collection, values)
-            action = "duplicate"
-        else:
+        changes: tuple[dict[str, str], ...]
+        requested = values or {}
+        if action == "add":
             item = etree.SubElement(container, "Item")
             initial: dict[str, str] = {}
             for field, (_kind, required, default) in _TUNING_SCHEMAS[collection].items():
-                if field in values:
-                    initial[field] = values[field]
+                if field in requested:
+                    initial[field] = requested[field]
                 elif default or required:
                     initial[field] = default
             self._apply_tuning_updates(item, collection, initial, creation=True)
-            action = "add"
-        self._validate_tuning_entry(item, collection, model, _scan=scan)
-        fields = self._tuning_entry_fields(item)
-        changes = ({
-            "field": f"tuning.{builder.kit_name}.{collection}",
-            "before": "", "after": json.dumps(fields, sort_keys=True),
-            "action": action,
-        },)
+            self._validate_tuning_entry(item, collection, model, _scan=scan)
+            after = self._tuning_entry_fields(item)
+            changes = ({
+                "field": f"tuning.{builder.kit_name}.{collection}",
+                "before": "", "after": json.dumps(after, sort_keys=True),
+                "action": "add",
+            },)
+        elif action == "duplicate":
+            if index is None or index < 0 or index >= len(items):
+                raise ValueError(f"Tuning entry index is out of range: {index}")
+            item = deepcopy(items[index])
+            container.append(item)
+            self._apply_tuning_updates(item, collection, requested)
+            self._validate_tuning_entry(item, collection, model, _scan=scan)
+            after = self._tuning_entry_fields(item)
+            changes = ({
+                "field": f"tuning.{builder.kit_name}.{collection}",
+                "before": "", "after": json.dumps(after, sort_keys=True),
+                "action": "duplicate",
+            },)
+        elif action == "update":
+            if index is None:
+                raise ValueError("Tuning entry update requires an index")
+            item = self._tuning_item(kit_item, collection, index)
+            before = self._tuning_entry_fields(item)
+            self._apply_tuning_updates(item, collection, requested)
+            self._validate_tuning_entry(item, collection, model, _scan=scan)
+            after = self._tuning_entry_fields(item)
+            if before == after:
+                raise ValueError("Tuning entry update contains no changed values")
+            changes = ({
+                "field": f"tuning.{builder.kit_name}.{collection}[{index}]",
+                "before": json.dumps(before, sort_keys=True),
+                "after": json.dumps(after, sort_keys=True), "action": "update",
+            },)
+        elif action == "remove":
+            if index is None:
+                raise ValueError("Tuning entry removal requires an index")
+            item = self._tuning_item(kit_item, collection, index)
+            before = self._tuning_entry_fields(item)
+            container.remove(item)
+            changes = ({
+                "field": f"tuning.{builder.kit_name}.{collection}[{index}]",
+                "before": json.dumps(before, sort_keys=True), "after": "",
+                "action": "remove",
+            },)
+        else:
+            if (
+                index is None or new_index is None or index < 0 or index >= len(items)
+                or new_index < 0 or new_index >= len(items)
+            ):
+                raise ValueError("Tuning entry move index is out of range")
+            if index == new_index:
+                raise ValueError("Tuning entry is already at the requested position")
+            item = items[index]
+            container.remove(item)
+            item_positions = [
+                position for position, child in enumerate(container)
+                if isinstance(child.tag, str) and _local_name(child) == "Item"
+            ]
+            insertion = (
+                item_positions[new_index] if new_index < len(item_positions)
+                else len(container)
+            )
+            container.insert(insertion, item)
+            changes = ({
+                "field": f"tuning.{builder.kit_name}.{collection}",
+                "before": str(index), "after": str(new_index), "action": "move",
+            },)
+
+        after_builder = self.tuning_builder(
+            model, builder.kit_name, _scan=scan, _tree=tree,
+        )
+        before_errors = {
+            (item.code, item.entry, item.message)
+            for item in builder.findings if item.severity == "error"
+        }
+        new_errors = [
+            item for item in after_builder.findings if item.severity == "error"
+            and (item.code, item.entry, item.message) not in before_errors
+        ]
+        if new_errors:
+            raise ValueError(
+                "Tuning edit introduced validation errors: "
+                + ", ".join(sorted({item.code for item in new_errors}))
+            )
+        return scan, builder, tree, changes
+
+    def review_tuning_action(
+        self, model: str, kit_name: str, collection: str, action: str, *,
+        index: int | None = None, new_index: int | None = None,
+        values: dict[str, str] | None = None,
+    ) -> VehicleAuthoringUpdateReview:
+        """Plan one tuning-entry action entirely in memory."""
+        _scan, _builder, _tree, changes = self._prepare_tuning_action(
+            model, kit_name, collection, action, index=index,
+            new_index=new_index, values=values,
+        )
+        return VehicleAuthoringUpdateReview(
+            self.root, self.revision, model, changes,
+        )
+
+    def _commit_prepared_tuning_action(
+        self, model: str, kit_name: str, collection: str, action: str, *,
+        index: int | None = None, new_index: int | None = None,
+        values: dict[str, str] | None = None,
+    ) -> VehicleAuthoringResult:
+        scan, builder, tree, changes = self._prepare_tuning_action(
+            model, kit_name, collection, action, index=index,
+            new_index=new_index, values=values,
+        )
         return self._commit_tuning_tree(
             model, builder.source, tree, changes,
             before_builder=builder, before_scan=scan,
+        )
+
+    def add_tuning_entry(
+        self, model: str, kit_name: str, collection: str,
+        values: dict[str, str], *, duplicate_index: int | None = None,
+    ) -> VehicleAuthoringResult:
+        """Add or duplicate a structured tuning entry transactionally."""
+        return self._commit_prepared_tuning_action(
+            model, kit_name, collection,
+            "duplicate" if duplicate_index is not None else "add",
+            index=duplicate_index, values=values,
         )
 
     def update_tuning_entry(
@@ -1542,52 +2275,16 @@ class VehicleAuthoringWorkspace:
         updates: dict[str, str],
     ) -> VehicleAuthoringResult:
         """Update scalar or array fields on one existing tuning entry."""
-        self._validate_collection(collection)
-        scan = AddonPackageInspector().inspect(self.source)
-        builder = self.tuning_builder(model, kit_name, _scan=scan)
-        tree = self._read_tree(builder.source)
-        kit_item = self._find_item(tree, "Kits", "kitName", builder.kit_name)
-        item = self._tuning_item(kit_item, collection, index)
-        before = self._tuning_entry_fields(item)
-        self._apply_tuning_updates(item, collection, updates)
-        self._validate_tuning_entry(item, collection, model, _scan=scan)
-        after = self._tuning_entry_fields(item)
-        if before == after:
-            raise ValueError("Tuning entry update contains no changed values")
-        changes = ({
-            "field": f"tuning.{builder.kit_name}.{collection}[{index}]",
-            "before": json.dumps(before, sort_keys=True),
-            "after": json.dumps(after, sort_keys=True),
-            "action": "update",
-        },)
-        return self._commit_tuning_tree(
-            model, builder.source, tree, changes,
-            before_builder=builder, before_scan=scan,
+        return self._commit_prepared_tuning_action(
+            model, kit_name, collection, "update", index=index, values=updates,
         )
 
     def remove_tuning_entry(
         self, model: str, kit_name: str, collection: str, index: int,
     ) -> VehicleAuthoringResult:
         """Remove one tuning entry while retaining a complete undo snapshot."""
-        self._validate_collection(collection)
-        scan = AddonPackageInspector().inspect(self.source)
-        builder = self.tuning_builder(model, kit_name, _scan=scan)
-        tree = self._read_tree(builder.source)
-        kit_item = self._find_item(tree, "Kits", "kitName", builder.kit_name)
-        container = _direct_child(kit_item, collection)
-        if container is None:
-            raise ValueError(f"Tuning collection does not exist: {collection}")
-        item = self._tuning_item(kit_item, collection, index)
-        before = self._tuning_entry_fields(item)
-        container.remove(item)
-        changes = ({
-            "field": f"tuning.{builder.kit_name}.{collection}[{index}]",
-            "before": json.dumps(before, sort_keys=True), "after": "",
-            "action": "remove",
-        },)
-        return self._commit_tuning_tree(
-            model, builder.source, tree, changes,
-            before_builder=builder, before_scan=scan,
+        return self._commit_prepared_tuning_action(
+            model, kit_name, collection, "remove", index=index,
         )
 
     def move_tuning_entry(
@@ -1595,45 +2292,18 @@ class VehicleAuthoringWorkspace:
         index: int, new_index: int,
     ) -> VehicleAuthoringResult:
         """Move a tuning option within its category order."""
-        self._validate_collection(collection)
-        scan = AddonPackageInspector().inspect(self.source)
-        builder = self.tuning_builder(model, kit_name, _scan=scan)
-        tree = self._read_tree(builder.source)
-        kit_item = self._find_item(tree, "Kits", "kitName", builder.kit_name)
-        container = _direct_child(kit_item, collection)
-        if container is None:
-            raise ValueError(f"Tuning collection does not exist: {collection}")
-        items = [
-            item for item in container
-            if isinstance(item.tag, str) and _local_name(item) == "Item"
-        ]
-        if index < 0 or index >= len(items) or new_index < 0 or new_index >= len(items):
-            raise ValueError("Tuning entry move index is out of range")
-        if index == new_index:
-            raise ValueError("Tuning entry is already at the requested position")
-        item = items[index]
-        container.remove(item)
-        item_positions = [
-            position for position, child in enumerate(container)
-            if isinstance(child.tag, str) and _local_name(child) == "Item"
-        ]
-        insertion = item_positions[new_index] if new_index < len(item_positions) else len(container)
-        container.insert(insertion, item)
-        changes = ({
-            "field": f"tuning.{builder.kit_name}.{collection}",
-            "before": str(index), "after": str(new_index), "action": "move",
-        },)
-        return self._commit_tuning_tree(
-            model, builder.source, tree, changes,
-            before_builder=builder, before_scan=scan,
+        return self._commit_prepared_tuning_action(
+            model, kit_name, collection, "move", index=index, new_index=new_index,
         )
 
-    def update_light_profile(
-        self, model: str, profile_id: str, updates: dict[str, str],
-    ) -> VehicleAuthoringResult:
-        """Edit scalar values in one existing carcols light profile."""
-        before_scan, before_project = self._scan_project()
-        appearance = self.appearance(model, _scan=before_scan)
+    def _review_light_profile(
+        self, model: str, profile_id: str, updates: dict[str, str], *,
+        scan: PackageScan,
+    ) -> tuple[
+        VehicleLightProfile, etree._ElementTree, dict[str, str],
+        tuple[dict[str, str], ...],
+    ]:
+        appearance = self.appearance(model, _scan=scan)
         matches = [
             item for item in appearance.light_profiles
             if item.profile_id.casefold() == str(profile_id).casefold()
@@ -1650,8 +2320,10 @@ class VehicleAuthoringWorkspace:
         item = self._find_item(tree, "Lights", "id", current.profile_id)
         elements = _scalar_element_map(item)
         changes: list[dict[str, str]] = []
+        normalized: dict[str, str] = {}
         for key, raw in updates.items():
             value = self._validate_profile_scalar(key, str(raw).strip(), elements[key])
+            normalized[key] = value
             before = _element_value(elements[key])
             if value == before:
                 continue
@@ -1666,8 +2338,30 @@ class VehicleAuthoringWorkspace:
             })
         if not changes:
             raise ValueError("Light-profile update contains no changed values")
+        return current, tree, normalized, tuple(changes)
+
+    def review_light_profile(
+        self, model: str, profile_id: str, updates: dict[str, str],
+    ) -> VehicleAuthoringUpdateReview:
+        """Validate light-profile scalars without changing their carcols source."""
+        scan = AddonPackageInspector().inspect(self.source)
+        _current, _tree, _normalized, changes = self._review_light_profile(
+            model, profile_id, updates, scan=scan,
+        )
+        return VehicleAuthoringUpdateReview(
+            self.root, self.revision, model, changes,
+        )
+
+    def update_light_profile(
+        self, model: str, profile_id: str, updates: dict[str, str],
+    ) -> VehicleAuthoringResult:
+        """Edit scalar values in one existing carcols light profile."""
+        before_scan, before_project = self._scan_project()
+        current, tree, _normalized, changes = self._review_light_profile(
+            model, profile_id, updates, scan=before_scan,
+        )
         trees = {current.source: tree}
-        history = self._new_history(model, trees, tuple(changes))
+        history = self._new_history(model, trees, changes)
         previous_manifest = dict(self.manifest)
         try:
             self._commit_trees(trees)
@@ -1680,14 +2374,14 @@ class VehicleAuthoringWorkspace:
             shutil.rmtree(history, ignore_errors=True)
             raise
         return VehicleAuthoringResult(
-            self.root, revision, model, tuple(changes), history, after_project,
+            self.root, revision, model, changes, history, after_project,
         )
 
-    def migrate_identity(
+    def _identity_plan(
         self, model: str, *, new_model: str | None = None,
         new_handling: str | None = None,
-    ) -> VehicleAuthoringResult:
-        """Rename a model/handling identity and every owned reference atomically."""
+    ) -> tuple:
+        """Validate identities, metadata rewrites, and asset destinations without writing."""
         scan, before_project = self._scan_project()
         current = before_project.model(model)
         target_model = self._validate_identifier(new_model or model, "model")
@@ -1773,6 +2467,26 @@ class VehicleAuthoringWorkspace:
               "after": target_handling}
              if target_handling.casefold() != current.handling_id.casefold() else None),
         )))
+        return before_project, trees, renames, changes, target_model, target_handling
+
+    def review_identity(
+        self, model: str, *, new_model: str | None = None,
+        new_handling: str | None = None,
+    ) -> dict[str, Any]:
+        project, trees, renames, changes, target_model, target_handling = self._identity_plan(
+            model, new_model=new_model, new_handling=new_handling)
+        return {"revision": self.revision, "model": model,
+                "new_model": target_model, "new_handling": target_handling,
+                "changes": list(changes), "renames": renames,
+                "metadata_sources": sorted(trees), "existing_errors": project.error_count}
+
+    def migrate_identity(
+        self, model: str, *, new_model: str | None = None,
+        new_handling: str | None = None,
+    ) -> VehicleAuthoringResult:
+        """Rename a model/handling identity and every owned reference atomically."""
+        before_project, trees, renames, changes, target_model, target_handling = self._identity_plan(
+            model, new_model=new_model, new_handling=new_handling)
         history = self._new_history(
             model, trees, changes, extra_files=tuple(item["before"] for item in renames),
             operation="vehicle_identity_migration", renames=tuple(renames),

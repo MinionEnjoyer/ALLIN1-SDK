@@ -10,6 +10,10 @@ from allin1_sdk.agent_api import command_catalog, execute_request
 from allin1_sdk.cli import main
 from allin1_sdk.mods import ModManifest
 from allin1_sdk.vehicle_package import VehicleAddonPackageBuilder
+from allin1_sdk.vehicle_authoring import (
+    VehicleAuthoringWorkspace,
+    VehicleTransmissionConfiguration,
+)
 
 
 def _prebuilt_package(root: Path, *, second: bool = False) -> Path:
@@ -104,3 +108,40 @@ def test_vehicle_package_cli_and_agent_api_use_the_same_guarded_builder(tmp_path
     }, audit_path=tmp_path / "audit.jsonl")
     assert response["ok"] is True
     assert (api_output / "mod.toml").is_file()
+
+
+def test_vehicle_package_preserves_authoring_profiles(tmp_path):
+    source = _prebuilt_package(tmp_path)
+    (source / "handling.meta").write_text("""<CHandlingDataMgr><HandlingData><Item>
+<handlingName>RS5B10</handlingName><nInitialDriveGears value="6" />
+</Item></HandlingData></CHandlingDataMgr>""", encoding="utf-8")
+    authored_rpf = source / "dlc.rpf.source"
+    authored_rpf.mkdir()
+    (authored_rpf / "content.xml").write_text("<content />", encoding="utf-8")
+    workspace = VehicleAuthoringWorkspace.create(
+        source, tmp_path / "authoring-workspace",
+    )
+    workspace.set_transmission_configuration(VehicleTransmissionConfiguration(
+        schema_version=1,
+        vehicle_model="rs5b10",
+        transmission_type="sequential",
+        gear_ratios=(3.3, 2.1, 1.5, 1.12, 0.9, 0.74),
+        reverse_gear_ratio=3.0,
+        final_drive_ratio=3.6,
+    ))
+
+    result = VehicleAddonPackageBuilder(tmp_path).build(
+        workspace.root, tmp_path / "profile-package",
+    )
+
+    assert result.profiles is not None
+    profiles = json.loads(result.profiles.read_text(encoding="utf-8"))
+    assert profiles["transmission_configurations"]["rs5b10"][
+        "transmission_type"
+    ] == "sequential"
+    manifest = ModManifest.load(result.manifest)
+    assert any(
+        item.destination.as_posix()
+        == "scripts/ALLIN1/VehicleProfiles/vehicle.rs5b10.json"
+        for item in manifest.files
+    )

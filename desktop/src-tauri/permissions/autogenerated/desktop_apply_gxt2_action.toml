@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-apply-gxt2-action"
+description = "Enables the desktop_apply_gxt2_action command without any pre-configured scope."
+commands.allow = ["desktop_apply_gxt2_action"]
+
+[[permission]]
+identifier = "deny-desktop-apply-gxt2-action"
+description = "Denies the desktop_apply_gxt2_action command without any pre-configured scope."
+commands.deny = ["desktop_apply_gxt2_action"]

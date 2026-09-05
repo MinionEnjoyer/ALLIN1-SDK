@@ -548,17 +548,3 @@ def test_rpf_program_cli_console_alias_and_agent_catalog(tmp_path):
         assert catalog[command]["risk"] == "authoring_write"
     assert catalog["inspect-rpf-program"]["risk"] == "read_only"
     assert catalog["list-rpf-program-templates"]["risk"] == "read_only"
-
-
-def test_rpf_program_desktop_is_embedded_typed_pin_canvas():
-    root = Path(__file__).parents[1] / "src" / "allin1_sdk"
-    source = (root / "rpf_program_ui.py").read_text(encoding="utf-8")
-    graph_ui = (root / "rpf_graph_ui.py").read_text(encoding="utf-8")
-    assert "class RpfProgramFrame" in source
-    assert 'f"pin:{node_id}"' in source and 'f"pout:{node_id}"' in source
-    assert "RpfPackageProgram.connect" in source
-    assert "RpfPackageProgram.plan" in source
-    assert "RpfPackageProgram.execute" in source
-    assert "PROGRAM_TEMPLATES.items()" in source
-    assert 'notebook.add(program_tab, text="Build Flow")' in graph_ui
-    assert "RpfProgramFrame(" in graph_ui

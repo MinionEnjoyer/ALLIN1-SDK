@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-select-report-destination"
+description = "Enables the select_report_destination command without any pre-configured scope."
+commands.allow = ["select_report_destination"]
+
+[[permission]]
+identifier = "deny-select-report-destination"
+description = "Denies the select_report_destination command without any pre-configured scope."
+commands.deny = ["select_report_destination"]

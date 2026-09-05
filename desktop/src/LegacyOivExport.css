@@ -1,0 +1,26 @@
+.oiv-export { flex: 0 0 auto; margin-top: 14px; padding: 16px; border: 1px solid var(--border); background: var(--surface); }
+.oiv-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.oiv-heading h3, .oiv-review h4 { margin: 0 0 6px; font-size: .95rem; }
+.oiv-heading p, .oiv-note { color: var(--muted); font-size: .8rem; line-height: 1.55; margin: 4px 0; }
+.oiv-form { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(240px, 2fr); gap: 16px; margin: 16px 0; }
+.oiv-form .form-field { min-width: 0; }
+.oiv-form label { color: var(--muted); font-size: .8rem; font-weight: 600; }
+.oiv-form input { min-width: 0; width: 100%; height: 34px; padding: 0 9px; color: var(--text); background: var(--surface-muted); border: 1px solid var(--border); border-radius: 3px; font: inherit; font-size: .82rem; }
+.oiv-form .input-action input { border-radius: 3px 0 0 3px; }
+.oiv-review { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); overflow-wrap: anywhere; font-size: .82rem; }
+.oiv-review dl { display: grid; grid-template-columns: 135px minmax(0, 1fr); gap: 9px 16px; line-height: 1.5; }
+.oiv-review dt { color: var(--muted); }
+.oiv-review dd { margin: 0; }
+.oiv-hash { font-family: var(--font-mono, monospace); font-size: .75rem; overflow-wrap: anywhere; }
+.oiv-actions { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 14px; }
+.oiv-actions span { font-size: .8rem; color: var(--muted); }
+.publish-table { width: 100%; border-collapse: collapse; margin: 16px 0; text-align: left; }
+.publish-table caption { text-align: left; font-weight: 650; margin-bottom: 8px; }
+.publish-table th, .publish-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.publish-table th { color: var(--muted); font-size: .75rem; }
+.publish-table th:last-child, .publish-table td:last-child { text-align: right; }
+.publish-members { margin: 16px 0; }
+.publish-members summary { cursor: pointer; font-weight: 600; }
+.publish-members div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.publish-members code { grid-column: 1 / -1; overflow-wrap: anywhere; color: var(--muted); font-size: .75rem; }
+@media (max-width: 900px) { .oiv-form { grid-template-columns: 1fr; } .oiv-heading { align-items: flex-start; flex-wrap: wrap; } .oiv-review dl { grid-template-columns: 1fr; gap: 4px; } .oiv-review dd { margin-bottom: 9px; } }

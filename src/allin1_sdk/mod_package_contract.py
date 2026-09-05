@@ -13,7 +13,7 @@ from pathlib import PurePosixPath
 from typing import Any, Iterable, Mapping
 
 
-SUPPORTED_MOD_SCHEMA_VERSIONS = frozenset({1, 2})
+SUPPORTED_MOD_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4})
 EXTENSION_API_VERSION = 1
 _HASH_PATTERN = re.compile(r"^(?:0x)?[0-9A-Fa-f]{8}$")
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{1,95}$")
@@ -32,10 +32,13 @@ _WINDOWS_DEVICE_NAMES = frozenset({
 def validate_mod_schema_envelope(
     data: Mapping[str, Any],
 ) -> tuple[int, Mapping[str, Any] | None]:
-    """Validate schema selection and the version-2 ALLIN1 envelope."""
+    """Validate legacy, extension, or exact-member package envelopes."""
     schema_version = data.get("schema_version")
-    if schema_version not in SUPPORTED_MOD_SCHEMA_VERSIONS:
-        raise ValueError("mod.toml schema_version must be 1 or 2")
+    if type(schema_version) is not int or schema_version not in SUPPORTED_MOD_SCHEMA_VERSIONS:
+        raise ValueError("Unsupported mod.toml schema_version; this reader supports 1, 2, 3 or 4")
+    if schema_version in (3, 4):
+        _validate_exact_rpf_package(data)
+        return schema_version, None
     raw_allin1 = data.get("allin1")
     if schema_version == 1:
         if raw_allin1 is not None:
@@ -65,6 +68,64 @@ def validate_mod_schema_envelope(
     ):
         raise ValueError("[allin1].requires must be an array of strings")
     return schema_version, raw_allin1
+
+
+def _validate_exact_rpf_package(data: Mapping[str, Any]) -> None:
+    """Schemas 3/4 are replacement-only exact member contracts.
+
+    Schemas 1/2 readers reject this envelope before any install. Do not emit
+    these preconditions in an older schema where they could be ignored.
+    """
+    schema = data["schema_version"]
+    allowed = {"schema_version", "id", "name", "version", "author", "type", "description",
+               "editions", "dependencies", "conflicts", "files", "dlc_packs", "rpf_entries"}
+    if set(data) - allowed:
+        raise ValueError(f"Unsupported schema-{schema} field(s): " + ", ".join(sorted(set(data) - allowed)))
+    if (data.get("type") != "rpf" or data.get("files", []) != []
+            or data.get("dlc_packs", []) != [] or data.get("dependencies") != ["openrpf"]):
+        raise ValueError(f"Schema {schema} requires an RPF member-only package with OpenRPF and no loose files or DLC registration")
+    if data.get("editions") not in (["legacy"], ["enhanced"]):
+        raise ValueError(f"Schema {schema} requires exactly one game edition")
+    entries = data.get("rpf_entries")
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 128:
+        raise ValueError(f"Schema {schema} requires 1–128 exact RPF replacements")
+    for row in entries:
+        if not isinstance(row, Mapping) or set(row) != {"source", "archive", "entry", "sha256", "original_sha256"}:
+            raise ValueError(f"Schema-{schema} members require source, archive, entry, sha256 and original_sha256")
+        _safe_path(row["source"], "RPF payload")
+        archive = _safe_path(row["archive"], "RPF archive")
+        if not archive.startswith("mods/") or not archive.lower().endswith(".rpf") or "!" in archive:
+            raise ValueError("Exact RPF packages require an explicit mods archive")
+        if schema == 4:
+            split_nested_rpf_entry(row["entry"])
+        else:
+            entry = _safe_path(row["entry"], "RPF entry")
+            if "!" in entry or any(part.lower().endswith(".rpf") for part in entry.split("/")):
+                raise ValueError("Schema 3 supports exact outer-archive files only; nested RPF targets are not supported")
+        for field in ("sha256", "original_sha256"):
+            if not isinstance(row[field], str) or not re.fullmatch(r"[a-f0-9]{64}", row[field]):
+                raise ValueError(f"Schema-{schema} {field} must be a lowercase SHA-256")
+
+
+def split_nested_rpf_entry(value: object) -> tuple[str, ...]:
+    """Schema 4: 1–8 explicit archive layers separated by !, then one file."""
+    if not isinstance(value, str) or len(value) > 2048:
+        raise ValueError("Nested RPF target must be a bounded string")
+    parts = tuple(_safe_path(part, "Nested RPF target") for part in value.split("!"))
+    if not 2 <= len(parts) <= 9:
+        raise ValueError("Schema 4 requires 1–8 explicit nested RPF layers")
+    for index, path in enumerate(parts):
+        components = path.split("/")
+        if (any(part.lower().endswith(".rpf") for part in components[:-1])
+                or components[-1].lower().endswith(".rpf") != (index < len(parts) - 1)):
+            raise ValueError("Each nested layer must name an RPF; the final target must be a non-archive file")
+    return parts
+
+
+def rpf_targets_overlap(left: str, right: str) -> bool:
+    """A child patch also conflicts with a package owning its parent RPF blob."""
+    left, right = left.replace("\\", "/").casefold(), right.replace("\\", "/").casefold()
+    return left == right or left.startswith(right + "!") or right.startswith(left + "!")
 
 
 def _safe_path(value: object, label: str) -> str:

@@ -1504,12 +1504,27 @@ def format_advisory(advisory: Mapping[str, object]) -> str:
     return "\n".join(lines)
 
 
-def default_assistant_root(environment: Mapping[str, str] | None = None) -> Path:
+def sdk_assistant_root(environment: Mapping[str, str] | None = None) -> Path:
+    """SDK-owned settings; never requires a Launcher installation."""
     values = os.environ if environment is None else environment
     base = values.get("LOCALAPPDATA") or values.get("XDG_DATA_HOME")
     if base:
-        return Path(base).expanduser().resolve() / "ALLIN1" / "Assistant"
-    return Path.home().resolve() / ".allin1" / "Assistant"
+        return Path(base).expanduser().resolve() / "ALLIN1-SDK" / "Assistant"
+    return Path.home().resolve() / ".allin1-sdk" / "Assistant"
+
+
+def default_assistant_root(environment: Mapping[str, str] | None = None) -> Path:
+    standalone = sdk_assistant_root(environment)
+    if (standalone / ASSISTANT_CONFIG).exists():
+        return standalone
+    values = os.environ if environment is None else environment
+    base = values.get("LOCALAPPDATA") or values.get("XDG_DATA_HOME")
+    legacy = (
+        Path(base).expanduser().resolve() / "ALLIN1" / "Assistant"
+        if base else Path.home().resolve() / ".allin1" / "Assistant"
+    )
+    # Read existing Launcher settings for compatibility, but never write there.
+    return legacy if (legacy / ASSISTANT_CONFIG).is_file() else standalone
 
 
 def _configured_capabilities(payload: Mapping[str, object], mode: str) -> tuple[str, ...]:
@@ -1574,7 +1589,8 @@ def load_assistant_settings(root: Path | None = None) -> AssistantSettings:
     path = target / ASSISTANT_CONFIG
     if not path.is_file():
         raise ValueError(
-            "The optional assistant is not configured. Use the launcher's SDK Manager first."
+            "The optional assistant is not configured. Open Standalone setup in "
+            "the SDK's Qwen panel. The Launcher is not required."
         )
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -2166,7 +2182,7 @@ def prompt_structured_assistant(
         raise ValueError("Structured assistant response schema root must be an object")
     settings = load_assistant_settings(root)
     if not settings.enabled:
-        raise ValueError("The optional assistant is disabled in the launcher SDK Manager")
+        raise ValueError("The optional assistant is disabled. Configure it in the SDK's Qwen panel.")
     request_fields = _provider_request_fields(settings, response_format)
     guidance = system_prompt.strip()
     if guidance and guidance != DEFAULT_SYSTEM_PROMPT:
@@ -2365,7 +2381,7 @@ def prompt_assistant(
         raise ValueError("Assistant timeouts are outside the supported range")
     settings = load_assistant_settings(root)
     if not settings.enabled:
-        raise ValueError("The optional assistant is disabled in the launcher SDK Manager")
+        raise ValueError("The optional assistant is disabled. Configure it in the SDK's Qwen panel.")
     sdk_build_id = _sdk_build_id()
     model_sha256 = settings.model_sha256
     llama_cpp_revision = settings.llama_cpp_revision

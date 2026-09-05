@@ -126,14 +126,6 @@ void ScriptMainBody() {
     if (g_stop_requested.load(std::memory_order_acquire)) return;
 
     vwa::story::StoryVehicleHost host(g_script_hook, CompiledEdition(), log);
-    const auto identity = host.DetectGame();
-    log.Write(vwa::LogLevel::Info, "game-identity",
-              std::string("Detected ") + vwa::ToString(identity.edition) +
-                  " build " + std::to_string(identity.build) +
-                  (identity.executable_fingerprint.empty()
-                       ? " without an executable fingerprint"
-                       : " with an executable SHA-256 fingerprint"));
-
 #if defined(VWA_ASI_EDITION_Legacy)
     vwa::LegacyWheelAccess wheel_access;
 #else
@@ -149,6 +141,20 @@ void ScriptMainBody() {
                   " configuration file(s); " +
                   std::to_string(catalog.active.size()) +
                   " non-conflicting model configuration(s) parsed");
+
+    // DetectGame performs the exact executable fingerprint only when there is
+    // at least one usable configuration. Empty installs therefore stop after
+    // their lightweight directory diagnostic instead of hashing GTA's image.
+    if (!catalog.active.empty()) {
+        const auto identity = host.DetectGame();
+        log.Write(vwa::LogLevel::Info, "game-identity",
+                  std::string("Detected ") +
+                      vwa::ToString(identity.edition) + " build " +
+                      std::to_string(identity.build) +
+                      (identity.executable_fingerprint.empty()
+                           ? " without an executable fingerprint"
+                           : " with an executable SHA-256 fingerprint"));
+    }
 
     vwa::AxleRuntime runtime(host, wheel_access, log, settings);
     const bool started = runtime.Start(std::move(catalog), resolver);

@@ -131,12 +131,14 @@ public:
 
 private:
     std::optional<VehicleSnapshot>
-    Snapshot(std::int32_t handle) const;
+    Snapshot(std::int32_t handle, bool verify_existence) const;
 
     const ScriptHookApi& api_;
     Edition compiled_edition_{Edition::Unknown};
     ILogSink& log_;
-    GameIdentity identity_;
+    mutable GameIdentity identity_;
+    std::filesystem::path image_path_;
+    mutable bool fingerprint_resolved_{false};
     mutable bool native_failure_logged_{false};
 };
 

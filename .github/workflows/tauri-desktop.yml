@@ -1,0 +1,140 @@
+name: Tauri desktop
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-desktop:
+    runs-on: windows-latest
+    env:
+      ALLIN1_NATIVE_RPF_TEST: "1"
+      ALLIN1_NATIVE_RUNTIME_TEST: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.19.0"
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install SDK and desktop dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test,release]"
+          pnpm --dir desktop install --frozen-lockfile
+
+      - name: Prepare real native authoring dependencies
+        shell: pwsh
+        run: |
+          dotnet publish tools/RpfPatcher/RpfPatcher.csproj -c Release -r win-x64 --self-contained true -o tools/RpfPatcher
+          if ($LASTEXITCODE -ne 0) { throw 'Native RPF publish failed' }
+          dotnet run --project tools/RpfPatcher.Tests/RpfPatcher.Tests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'Native RPF checks failed' }
+          Get-Command cmake, ctest -ErrorAction Stop
+
+      - name: Cache pinned portable Blender
+        uses: actions/cache@v4
+        with:
+          path: build/dependencies/blender-4.5.13-windows-x64*
+          key: blender-windows-x64-4.5.13-b5fdf800ce65fa2f
+
+      - name: Verify pinned Blender archive and prepare renderer gate
+        shell: pwsh
+        run: |
+          $archive = Join-Path $PWD 'build/dependencies/blender-4.5.13-windows-x64.zip'
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $archive) | Out-Null
+          if (-not (Test-Path -LiteralPath $archive)) {
+            Invoke-WebRequest 'https://mirror.blender.org/release/Blender4.5/blender-4.5.13-windows-x64.zip' -OutFile $archive
+          }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'b5fdf800ce65fa2f209e8f68d02667e4d720fa1c42f247c72d1882ab04decba6') { throw 'Blender archive checksum mismatch' }
+          Expand-Archive -LiteralPath $archive -DestinationPath (Split-Path -Parent $archive) -Force
+          $blender = Join-Path $PWD 'build/dependencies/blender-4.5.13-windows-x64/blender.exe'
+          if (-not (Test-Path -LiteralPath $blender -PathType Leaf)) { throw 'Blender dependency unavailable' }
+          "ALLIN1_BLENDER_EXECUTABLE=$blender" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Validate complete Python release gate with configured coverage threshold
+        shell: pwsh
+        run: python -m pytest --cov=allin1_sdk --cov-report=term-missing --cov-report=xml --junitxml=build/python-results.xml
+
+      - name: Validate React shell
+        shell: pwsh
+        run: |
+          pnpm --dir desktop test
+          if ($LASTEXITCODE -ne 0) { throw 'React happy-path gate failed' }
+          pnpm --dir desktop build
+          if ($LASTEXITCODE -ne 0) { throw 'React production build failed' }
+
+      - name: Validate Rust broker
+        shell: pwsh
+        env:
+          # Unit compilation is independent of installer staging. This override
+          # is scoped to this step, never the real candidate/installer build.
+          TAURI_CONFIG: '{"bundle":{"active":false,"resources":[]}}'
+        run: |
+          cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed' }
+          cargo check --locked --manifest-path desktop/src-tauri/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'Rust check failed' }
+
+      - name: Build, identify, extract and smoke-test the actual candidate bytes
+        shell: pwsh
+        run: |
+          ./scripts/build_tauri_desktop.ps1 -PythonExecutable (Get-Command python).Source -SevenZipExecutable 'C:\Program Files\7-Zip\7z.exe'
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate build failed' }
+          python -m pytest tests/test_nsis_containment.py -q
+          if ($LASTEXITCODE -ne 0) { throw 'Compiled NSIS guard regression checks failed' }
+
+      - name: Prepare unsigned manual-download notes
+        shell: pwsh
+        run: |
+          python scripts/release_notes.py --version (python -c "from allin1_sdk import __version__; print(__version__)") --output build/release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw 'Current release notes are invalid.' }
+          "Unsigned manual-download candidate from commit $env:GITHUB_SHA. Verify checksums and build identity. No publisher certificate or release approval is implied. Automatic-update verification is not bypassed." |
+            Set-Content build/UNSIGNED_BUILD.txt -Encoding utf8
+
+      - name: Upload unsigned candidates and smoke evidence (not publication)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ALLIN1-Tauri-${{ github.sha }}-unsigned
+          path: |
+            build/tauri-candidates/*/*-setup.exe
+            build/tauri-candidates/*/*-setup.exe.sha256
+            build/tauri-candidates/*/*-portable.zip
+            build/tauri-candidates/*/*-portable.zip.sha256
+            build/release-notes.md
+            build/UNSIGNED_BUILD.txt
+            build/tauri-candidates/*/_build_identity.json
+            build/tauri-candidates/*/candidate-validation.json
+            build/tauri-candidates/*/nsis-stage.json
+            build/tauri-candidates/*/nsis-staged-shell.exe
+            build/tauri-candidates/*/*.log
+            build/python-results.xml
+            coverage.xml
+          if-no-files-found: error
+          retention-days: 14

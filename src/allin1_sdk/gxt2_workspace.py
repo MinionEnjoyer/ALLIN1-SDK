@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 import shutil
 import struct
 import tempfile
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +22,8 @@ MAX_GXT2_TEXT_BYTES = 1024 * 1024
 MAX_GXT2_HISTORY_RECORDS = 10_000
 # Rockstar writes the uint32 value 0x47585432 in little-endian byte order.
 _MAGIC = b"2TXG"
+_LOCKS: dict[str, threading.RLock] = {}
+_HELD = threading.local()
 
 
 def _sha256_file(path: Path) -> str:
@@ -30,9 +35,18 @@ def _sha256_file(path: Path) -> str:
 
 
 def _write_json_atomic(path: Path, payload: object) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    _write_bytes_atomic(path, (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+
+
+def _write_bytes_atomic(path: Path, data: bytes) -> None:
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _is_sha256(value: object) -> bool:
@@ -58,6 +72,43 @@ def _label_hash(value: int | str) -> int:
 
 class Gxt2Workspace:
     """Parse, edit, undo, rebuild, and reparse one GXT2 dictionary."""
+
+    @staticmethod
+    @contextmanager
+    def operation_lock(root: str | Path):
+        from allin1_sdk.managed_package_conversion import _safe_publication_path
+        authored = Path(root).expanduser()
+        _safe_publication_path(authored)
+        workspace = authored.resolve(strict=True)
+        key = str(workspace)
+        with _LOCKS.setdefault(key, threading.RLock()):
+            held = getattr(_HELD, "paths", set())
+            if key in held:
+                yield
+                return
+            path = workspace / ".gxt2-operation.lock"
+            _safe_publication_path(path)
+            with path.open("a+b") as stream:
+                if stream.tell() == 0:
+                    stream.write(b"\0")
+                    stream.flush()
+                stream.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _HELD.paths = held | {key}
+                try:
+                    yield
+                finally:
+                    _HELD.paths = held
+                    stream.seek(0)
+                    if os.name == "nt":
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
     @staticmethod
     def parse(data: bytes) -> tuple[dict[str, object], ...]:
@@ -194,12 +245,15 @@ class Gxt2Workspace:
 
     @classmethod
     def validate(cls, root: str | Path) -> dict[str, Any]:
+        from allin1_sdk.managed_package_conversion import _safe_publication_path
+        _safe_publication_path(Path(root).expanduser())
         workspace = Path(root).expanduser().resolve()
         manifest_path = workspace / "gxt2-workspace.json"
         original = workspace / "original.gxt2"
         entries_path = workspace / "entries.json"
         history = workspace / "history"
         for path in (workspace, manifest_path, original, entries_path, history):
+            _safe_publication_path(path)
             if path.is_symlink():
                 raise ValueError(f"GXT2 workspace may not contain links: {path}")
         if not workspace.is_dir() or not original.is_file() or not history.is_dir():
@@ -232,6 +286,8 @@ class Gxt2Workspace:
         if len(records) > MAX_GXT2_HISTORY_RECORDS:
             raise ValueError("GXT2 workspace history exceeds the guarded limit")
         history_items = list(history.iterdir())
+        for path in history_items:
+            _safe_publication_path(path)
         expected_history_names = {
             name
             for sequence in range(1, len(records) + 1)
@@ -283,6 +339,11 @@ class Gxt2Workspace:
     def _mutate(
         cls, root: str | Path, action: str, update,
     ) -> Path:
+        with cls.operation_lock(root):
+            return cls._mutate_locked(root, action, update)
+
+    @classmethod
+    def _mutate_locked(cls, root: str | Path, action: str, update) -> Path:
         state = cls.validate(root)
         before = [dict(item) for item in state["entries"]]
         after = [dict(item) for item in before]
@@ -297,11 +358,12 @@ class Gxt2Workspace:
         sequence = len(records) + 1
         snapshot = state["history"] / f"{sequence:06d}.before.json"
         record = state["history"] / f"{sequence:06d}.json"
-        _write_json_atomic(snapshot, before)
+        before_bytes = state["entries_path"].read_bytes()
         before_hash = state["entries_sha256"]
-        _write_json_atomic(state["entries_path"], list(normalized))
-        after_hash = _sha256_file(state["entries_path"])
         try:
+            _write_bytes_atomic(snapshot, before_bytes)
+            _write_json_atomic(state["entries_path"], list(normalized))
+            after_hash = _sha256_file(state["entries_path"])
             _write_json_atomic(record, {
                 "sequence": sequence, "action": action,
                 "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -309,11 +371,12 @@ class Gxt2Workspace:
                 "snapshot": snapshot.name,
                 "snapshot_sha256": _sha256_file(snapshot),
             })
+            cls.validate(root)
         except Exception:
-            _write_json_atomic(state["entries_path"], before)
+            _write_bytes_atomic(state["entries_path"], before_bytes)
             snapshot.unlink(missing_ok=True)
+            record.unlink(missing_ok=True)
             raise
-        cls.validate(root)
         return record
 
     @classmethod
@@ -355,6 +418,11 @@ class Gxt2Workspace:
 
     @classmethod
     def undo(cls, root: str | Path) -> Path:
+        with cls.operation_lock(root):
+            return cls._undo_locked(root)
+
+    @classmethod
+    def _undo_locked(cls, root: str | Path) -> Path:
         state = cls.validate(root)
         records = sorted(
             path for path in state["history"].glob("*.json")
@@ -378,6 +446,13 @@ class Gxt2Workspace:
 
     @classmethod
     def build(cls, root: str | Path, destination: str | Path) -> tuple[Path, Path]:
+        with cls.operation_lock(root):
+            return cls._build_locked(root, destination)
+
+    @classmethod
+    def _build_locked(cls, root: str | Path, destination: str | Path) -> tuple[Path, Path]:
+        from allin1_sdk.managed_package_conversion import _safe_publication_path
+        _safe_publication_path(Path(destination).expanduser())
         state = cls.validate(root)
         output = Path(destination).expanduser().resolve()
         report = output.with_name(f"{output.name}.gxt2-validation.json")
@@ -387,20 +462,29 @@ class Gxt2Workspace:
             raise ValueError("GXT2 build output or validation report already exists")
         data = cls.encode(state["entries"])
         output.parent.mkdir(parents=True, exist_ok=True)
-        temporary = output.with_name(f".{output.name}.tmp")
-        temporary.write_bytes(data)
-        temporary.replace(output)
+        # Exclusive creation also protects against a file appearing after review.
+        stream = output.open("xb")
+        report_created = False
         try:
+            with stream:
+                stream.write(data)
             reparsed = cls.parse(output.read_bytes())
-            _write_json_atomic(report, {
+            if reparsed != cls._validate_entries(state["entries"]):
+                raise ValueError("GXT2 output differs from the validated workspace")
+            evidence = {
                 "schema_version": 1, "operation": "gxt2_text_build",
                 "status": "verified", "workspace": str(state["workspace"]),
                 "entry_count": len(reparsed), "size": len(data),
                 "sha256": _sha256_file(output),
                 "original_sha256": state["manifest"]["original_sha256"],
                 "source_binding": state["manifest"].get("source_binding", {}),
-            })
+            }
+            with report.open("x", encoding="utf-8") as receipt:
+                report_created = True
+                json.dump(evidence, receipt, indent=2)
         except Exception:
             output.unlink(missing_ok=True)
+            if report_created:
+                report.unlink(missing_ok=True)
             raise
         return output, report

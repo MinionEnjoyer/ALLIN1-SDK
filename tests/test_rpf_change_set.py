@@ -201,17 +201,6 @@ def test_rpf_change_set_cli_sdk_alias_and_agent_risk(tmp_path, monkeypatch):
     assert catalog["inspect-rpf-change-set"]["risk"] == "read_only"
 
 
-def test_rpf_change_set_desktop_is_embedded_in_explorer_workspace():
-    root = Path(__file__).parents[1] / "src" / "allin1_sdk"
-    ui = (root / "rpf_change_set_ui.py").read_text(encoding="utf-8")
-    explorer = (root / "rpf_explorer.py").read_text(encoding="utf-8")
-    assert "class RpfChangeSetFrame" in ui
-    assert "RpfChangeSet.stage" in ui
-    assert "RpfChangeSet.compile_plan" in ui
-    assert 'self.workspace_tabs.add(changes_tab, text="Visual Change Set")' in explorer
-    assert "self.change_set_frame = RpfChangeSetFrame(" in explorer
-
-
 def test_rpf_change_set_rejects_malformed_documents(tmp_path):
     index = _index(tmp_path)
     change_set = RpfChangeSet.create(index, tmp_path / "base.json")

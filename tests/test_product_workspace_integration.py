@@ -10,7 +10,6 @@ import pytest
 from click.testing import CliRunner
 
 from allin1_sdk.addon_sdk import AddonLinker, AddonManifest, AddonSdkCatalog
-from allin1_sdk import app as sdk_app
 import allin1_sdk.cli as sdk_cli
 import allin1_sdk.product_workspace as product_workspace
 from allin1_sdk.agent_api import command_risk, execute_request
@@ -198,24 +197,14 @@ def test_open_product_workspace_directory_uses_canonical_descriptor(
         return Process()
 
     monkeypatch.setattr(sdk_cli.subprocess, "Popen", fake_popen)
+    desktop = tmp_path / "allin1-sdk-desktop.exe"
+    monkeypatch.setattr(sdk_cli, "_frozen_desktop_executable", lambda _exe: desktop)
     pid, manifest = sdk_cli._open_addon_manifest_window(tmp_path)
 
     assert pid == 4242
+    assert launched["command"][:2] == [str(desktop), "--addon-manifest"]
     assert manifest.manifest_path == descriptor.resolve()
     assert launched["command"][-1] == str(descriptor.resolve())
-
-
-def test_direct_cli_api_open_is_transient() -> None:
-    calls: list[tuple[Path, bool]] = []
-
-    class Dialog:
-        def open_manifest_path(self, manifest: Path, *, remember: bool = True) -> None:
-            calls.append((manifest, remember))
-
-    selected = Path("allin1.workspace.json")
-    sdk_app._open_direct_addon_manifest(Dialog(), selected)
-
-    assert calls == [(selected, False)]
 
 
 def test_product_workspace_catalog_normalizes_legacy_repository_source(

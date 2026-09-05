@@ -40,24 +40,17 @@ def launcher_process_command(
         command = [str(candidate)]
     else:
         discovered = next((
-            resolved for name in ("ALLIN1-Launcher", "allin1-gui")
+            resolved for name in ("allin1-launcher-desktop",)
             if (resolved := shutil.which(name))
         ), None)
         if discovered:
             command = [discovered]
         else:
-            sdk_root = Path(project_root).expanduser().resolve()
-            core_root = sdk_root.parent / "ALLIN1"
-            source_gui = core_root / "src" / "allin1" / "gui.py"
-            source_python = core_root / ".venv" / "Scripts" / "python.exe"
-            if source_gui.is_file() and source_python.is_file():
-                command = [str(source_python), "-m", "allin1.gui"]
-                cwd = core_root
-            else:
-                raise ValueError(
-                    "ALLIN1 Launcher was not found. Install it, add allin1-gui to "
-                    "PATH, or set ALLIN1_LAUNCHER_EXECUTABLE."
-                )
+            raise ValueError(
+                "React ALLIN1 Launcher was not found. Add allin1-launcher-desktop to "
+                "PATH, or set ALLIN1_LAUNCHER_EXECUTABLE to the installed React "
+                "Launcher's executable. The SDK works without the Launcher."
+            )
     command.extend(("--workspace", "packages", "--package-id", normalized))
     if traffic_requested is not None:
         command.extend(("--traffic", "on" if traffic_requested else "off"))
@@ -81,7 +74,8 @@ def open_launcher_packages(
         executable=executable,
         environment=environment,
     )
-    return subprocess.Popen(command, cwd=cwd, close_fds=True)
+    return subprocess.Popen(command, cwd=cwd, close_fds=True,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def open_launcher_package(

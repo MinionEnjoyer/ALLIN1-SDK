@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
 import shutil
@@ -23,9 +24,62 @@ from allin1_sdk.mod_package_contract import (
 )
 
 
+log = logging.getLogger("allin1.extensions")
+
+
 EXTENSION_SCHEMA_VERSION = 1
 EXTENSION_API_VERSION = 1
 REGISTRY_SCHEMA_VERSION = 1
+PRELOAD_MANIFEST_SCHEMA_VERSION = 1
+PRELOAD_MANIFEST_ID = "allin1"
+PRELOAD_MAX_ENTRIES = 64
+PRELOAD_MAX_ENTRY_BYTES = 4 * 1024 * 1024
+PRELOAD_MAX_AGGREGATE_BYTES = 16 * 1024 * 1024
+PRELOAD_MAX_MANIFEST_BYTES = 256 * 1024
+PRELOAD_STATIC_ENTRIES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "config",
+        "path": "scripts/ALLIN1.toml",
+        "kind": "text",
+        "required": True,
+        "max_bytes": 256 * 1024,
+    },
+    {
+        "id": "extension-registry",
+        "path": "scripts/.allin1/extensions/registry.json",
+        "kind": "json",
+        "required": False,
+        "max_bytes": PRELOAD_MAX_ENTRY_BYTES,
+    },
+    {
+        "id": "characters",
+        "path": "scripts/ALLIN1_characters.json",
+        "kind": "json",
+        "required": False,
+        "max_bytes": PRELOAD_MAX_ENTRY_BYTES,
+    },
+    {
+        "id": "gear-prices",
+        "path": "scripts/prices_gear.toml",
+        "kind": "text",
+        "required": False,
+        "max_bytes": 256 * 1024,
+    },
+    {
+        "id": "story-vehicle-catalog",
+        "path": "scripts/ALLIN1/Catalogs/story-vehicles.json",
+        "kind": "json",
+        "required": False,
+        "max_bytes": PRELOAD_MAX_ENTRY_BYTES,
+    },
+    {
+        "id": "garage-map-runtime",
+        "path": "scripts/ALLIN1/Maps/runtime-detected.json",
+        "kind": "json",
+        "required": False,
+        "max_bytes": 1024 * 1024,
+    },
+)
 SUPPORTED_SETTING_TYPES = frozenset({
     "boolean", "integer", "number", "string", "choice",
 })
@@ -806,6 +860,9 @@ class ExtensionRegistry:
         self.registry_path = self.state_root / "registry.json"
         self.settings = ExtensionSettingsStore(self.state_root / "settings.json")
         self.receipt_root = self.gta_path / "scripts" / ".allin1" / "mods"
+        self.preload_manifest_path = (
+            self.gta_path / "scripts" / ".reactorv" / "preload" / "allin1.json"
+        )
 
     @staticmethod
     def _snapshot_file(path: Path) -> bytes | None:
@@ -827,6 +884,7 @@ class ExtensionRegistry:
         *,
         enabled: bool | None = None,
         settings: Mapping[str, Any] | None = None,
+        map_files: Iterable[Mapping[str, str]] | None = None,
     ) -> Path:
         self.builtin_root.mkdir(parents=True, exist_ok=True)
         target = self.builtin_root / f"{manifest.extension_id}.json"
@@ -843,7 +901,14 @@ class ExtensionRegistry:
         elif enabled is not None:
             current_enabled = bool(enabled)
         try:
-            payload = {"enabled": current_enabled, "extension": manifest.to_dict()}
+            normalized_map_files = self._normalize_builtin_map_files(
+                manifest, map_files,
+            )
+            payload = {
+                "enabled": current_enabled,
+                "extension": manifest.to_dict(),
+                "map_files": normalized_map_files,
+            }
             temporary = target.with_suffix(".json.tmp")
             temporary.write_text(
                 json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -868,7 +933,14 @@ class ExtensionRegistry:
         target_snapshot = self._snapshot_file(target)
         payload = json.loads(target.read_text(encoding="utf-8"))
         manifest = ExtensionManifest.from_dict(payload.get("extension"), target)
-        payload = {"enabled": bool(enabled), "extension": manifest.to_dict()}
+        map_files = self._normalize_builtin_map_files(
+            manifest, payload.get("map_files"),
+        )
+        payload = {
+            "enabled": bool(enabled),
+            "extension": manifest.to_dict(),
+            "map_files": map_files,
+        }
         try:
             temporary = target.with_suffix(".json.tmp")
             temporary.write_text(
@@ -919,6 +991,62 @@ class ExtensionRegistry:
                 + ", ".join(sorted(dependents))
             )
 
+    @staticmethod
+    def _expected_map_path(manifest: ExtensionManifest) -> str:
+        return f"scripts/ALLIN1/Maps/{manifest.extension_id}/maps.json"
+
+    @staticmethod
+    def _expected_builtin_map_root(manifest: ExtensionManifest) -> PurePosixPath:
+        return PurePosixPath("scripts/ALLIN1/Maps") / manifest.extension_id
+
+    @classmethod
+    def _normalize_builtin_map_files(
+        cls,
+        manifest: ExtensionManifest,
+        records: Iterable[Mapping[str, str]] | None,
+    ) -> list[dict[str, str]]:
+        """Validate the installer's immutable map authorization records."""
+        supplied = list(records or ())
+        if "world.maps" not in manifest.capabilities:
+            if supplied:
+                raise ValueError(
+                    "Built-in map files require the world.maps capability"
+                )
+            return []
+        if not supplied:
+            return []
+        expected_root = cls._expected_builtin_map_root(manifest)
+        normalized: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for record in supplied:
+            if not isinstance(record, Mapping) or set(record) != {"path", "sha256"}:
+                return []
+            try:
+                relative = _safe_relative(
+                    record.get("path"), "built-in map file path",
+                )
+            except ValueError:
+                return []
+            if (
+                relative.parent.as_posix().casefold()
+                != expected_root.as_posix().casefold()
+                or not relative.name.casefold().endswith(".maps.json")
+                or relative.name.casefold() == "maps.json"
+            ):
+                return []
+            path_key = relative.as_posix().casefold()
+            if path_key in seen:
+                return []
+            seen.add(path_key)
+            digest = str(record.get("sha256", "")).strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                return []
+            normalized.append({
+                "path": relative.as_posix(),
+                "sha256": digest,
+            })
+        return sorted(normalized, key=lambda item: item["path"].casefold())
+
     def _builtin_entries(self) -> list[_RegistryCandidate]:
         result: list[_RegistryCandidate] = []
         if not self.builtin_root.is_dir():
@@ -926,10 +1054,39 @@ class ExtensionRegistry:
         for path in sorted(self.builtin_root.glob("*.json")):
             payload = json.loads(path.read_text(encoding="utf-8"))
             manifest = ExtensionManifest.from_dict(payload.get("extension"), path)
+            enabled = bool(payload.get("enabled", True))
+            map_files = self._normalize_builtin_map_files(
+                manifest, payload.get("map_files"),
+            )
+            blocked = ""
+            if "world.maps" in manifest.capabilities:
+                expected_root = self._expected_builtin_map_root(manifest).as_posix()
+                if not map_files:
+                    blocked = (
+                        "Map descriptors lack built-in hashes below: "
+                        f"{expected_root}"
+                    )
+                elif enabled:
+                    for record in map_files:
+                        relative = record["path"]
+                        installed = self.gta_path / Path(
+                            *PurePosixPath(relative).parts
+                        )
+                        if (
+                            not installed.is_file()
+                            or self._file_sha256(installed) != record["sha256"]
+                        ):
+                            blocked = (
+                                "Map descriptor failed its built-in hash: "
+                                f"{relative}"
+                            )
+                            break
             result.append(_RegistryCandidate(
                 manifest=manifest,
-                requested_enabled=bool(payload.get("enabled", True)),
+                requested_enabled=enabled,
                 source="built-in",
+                map_files=tuple(map_files),
+                blocked_reason=blocked,
             ))
         return result
 
@@ -1048,7 +1205,13 @@ class ExtensionRegistry:
                 continue
         return result
 
-    def rebuild(self) -> dict[str, Any]:
+    def inspect(self) -> dict[str, Any]:
+        """Compute current authorization/settings without publishing files.
+
+        UI inspection must not create registries, backups or preload caches.
+        Rebuild uses this same computation so the read and write views cannot
+        disagree about dependency and hash drift.
+        """
         entries: dict[str, _RegistryCandidate] = {}
         for candidate in self._builtin_entries() + self._receipt_entries():
             extension_id = candidate.manifest.extension_id
@@ -1121,6 +1284,18 @@ class ExtensionRegistry:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "extensions": normalized,
         }
+        return payload
+
+    def installed_manifest(self, extension_id: str) -> ExtensionManifest:
+        """Read an exact installed manifest without rebuilding registry state."""
+        normalized = _identifier(extension_id, "extension id")
+        entries = [item for item in self.inspect()["extensions"] if item["id"] == normalized]
+        if not entries:
+            raise KeyError(f"Content package is not installed: {normalized}")
+        return ExtensionManifest.from_dict({key: value for key, value in entries[0].items() if key in _MANIFEST_FIELDS})
+
+    def rebuild(self) -> dict[str, Any]:
+        payload = self.inspect()
         self.state_root.mkdir(parents=True, exist_ok=True)
         temporary = self.registry_path.with_suffix(".json.tmp")
         backup = self.registry_path.with_suffix(".json.bak")
@@ -1131,7 +1306,180 @@ class ExtensionRegistry:
         if self.registry_path.exists():
             shutil.copy2(self.registry_path, backup)
         temporary.replace(self.registry_path)
+        try:
+            self._refresh_preload_manifest(payload)
+        except (OSError, ValueError, TypeError):
+            # The registry is the authorization boundary and has already been
+            # committed. A cache-manifest failure may reduce startup
+            # performance, but it must not roll back or misreport that state.
+            log.warning(
+                "Could not refresh ReactorV ALLIN1 preload manifest",
+                exc_info=True,
+            )
         return payload
+
+    @staticmethod
+    def _preload_entry_id(
+        prefix: str, package_id: str, label: str, relative_path: str,
+    ) -> str:
+        readable = f"{prefix}.{package_id}.{label}".lower()
+        if len(readable) <= 64 and _ID_PATTERN.fullmatch(readable):
+            return readable
+        digest = hashlib.sha256(
+            f"{prefix}\0{package_id}\0{label}\0{relative_path}".encode("utf-8")
+        ).hexdigest()[:20]
+        return f"{prefix}.{package_id[:34]}.{digest}"[:64]
+
+    def _refresh_preload_manifest(self, registry: Mapping[str, Any]) -> Path:
+        """Publish a bounded cache request from receipt-authorized registry data."""
+        entries: list[dict[str, Any]] = []
+        aggregate_bytes = 0
+        omitted = 0
+        for static in PRELOAD_STATIC_ENTRIES:
+            entry = dict(static)
+            source = self.gta_path / Path(*PurePosixPath(entry["path"]).parts)
+            source_bytes = source.stat().st_size if source.is_file() else 0
+            if (
+                not entry["required"]
+                and (
+                    source_bytes > entry["max_bytes"]
+                    or (
+                        aggregate_bytes + source_bytes
+                        > PRELOAD_MAX_AGGREGATE_BYTES
+                    )
+                )
+            ):
+                omitted += 1
+                continue
+            entries.append(entry)
+            aggregate_bytes += source_bytes
+        dynamic: list[tuple[str, str, str, int, dict[str, Any]]] = []
+        extensions = registry.get("extensions", [])
+        if not isinstance(extensions, list):
+            raise ValueError("extension registry has no extension list")
+        for extension in extensions:
+            if not isinstance(extension, Mapping) or not extension.get("enabled"):
+                continue
+            package_id = str(extension.get("id", "")).strip().lower()
+            if not _ID_PATTERN.fullmatch(package_id):
+                continue
+            gbay = extension.get("gbay", {})
+            raw_catalogs = gbay.get("catalogs", []) if isinstance(gbay, Mapping) else []
+            catalog_labels: dict[str, str] = {}
+            if isinstance(raw_catalogs, list):
+                for catalog in raw_catalogs:
+                    if not isinstance(catalog, Mapping):
+                        continue
+                    source = str(catalog.get("source", "")).replace("\\", "/")
+                    label = str(catalog.get("id", "")).strip().lower()
+                    if source and _ID_PATTERN.fullmatch(label):
+                        catalog_labels[source.casefold()] = label
+
+            for record in extension.get("catalog_files", []):
+                if not isinstance(record, Mapping):
+                    continue
+                relative = str(record.get("path", "")).replace("\\", "/")
+                label = catalog_labels.get(relative.casefold())
+                if label is None:
+                    continue
+                try:
+                    safe = _safe_relative(relative, "preload catalog path")
+                except ValueError:
+                    continue
+                # The managed cache consumer deliberately accepts only the
+                # scripts/ subtree. Catalogs elsewhere under GTA remain valid
+                # package content, but are read normally instead of widening
+                # the early handoff's least-privilege path boundary.
+                if not safe.parts or safe.parts[0].casefold() != "scripts":
+                    omitted += 1
+                    continue
+                source = self.gta_path / Path(*safe.parts)
+                if (
+                    not source.is_file()
+                    or source.stat().st_size > PRELOAD_MAX_ENTRY_BYTES
+                ):
+                    continue
+                dynamic.append((package_id, "catalog", safe.as_posix(),
+                    source.stat().st_size, {
+                    "id": self._preload_entry_id(
+                        "catalog", package_id, label, safe.as_posix(),
+                    ),
+                    "path": safe.as_posix(),
+                    "kind": "json",
+                    "required": False,
+                    "max_bytes": PRELOAD_MAX_ENTRY_BYTES,
+                }))
+
+            for record in extension.get("map_files", []):
+                if not isinstance(record, Mapping):
+                    continue
+                relative = str(record.get("path", "")).replace("\\", "/")
+                try:
+                    safe = _safe_relative(relative, "preload map path")
+                except ValueError:
+                    continue
+                if not safe.parts or safe.parts[0].casefold() != "scripts":
+                    omitted += 1
+                    continue
+                source = self.gta_path / Path(*safe.parts)
+                if (
+                    not source.is_file()
+                    or source.stat().st_size > PRELOAD_MAX_ENTRY_BYTES
+                ):
+                    continue
+                label = safe.name.lower().removesuffix(".json")
+                dynamic.append((package_id, "map", safe.as_posix(),
+                    source.stat().st_size, {
+                    "id": self._preload_entry_id(
+                        "map", package_id, label, safe.as_posix(),
+                    ),
+                    "path": safe.as_posix(),
+                    "kind": "json",
+                    "required": False,
+                    "max_bytes": PRELOAD_MAX_ENTRY_BYTES,
+                }))
+
+        seen_ids = {entry["id"].casefold() for entry in entries}
+        seen_paths = {entry["path"].casefold() for entry in entries}
+        for _package, _kind, _path, source_bytes, entry in sorted(
+            dynamic, key=lambda item: (item[0], item[1], item[2].casefold())
+        ):
+            if (
+                len(entries) >= PRELOAD_MAX_ENTRIES
+                or aggregate_bytes + source_bytes > PRELOAD_MAX_AGGREGATE_BYTES
+            ):
+                omitted += 1
+                continue
+            if (
+                entry["id"].casefold() in seen_ids
+                or entry["path"].casefold() in seen_paths
+            ):
+                continue
+            entries.append(entry)
+            aggregate_bytes += source_bytes
+            seen_ids.add(entry["id"].casefold())
+            seen_paths.add(entry["path"].casefold())
+
+        manifest = {
+            "schema_version": PRELOAD_MANIFEST_SCHEMA_VERSION,
+            "id": PRELOAD_MANIFEST_ID,
+            "entries": entries,
+        }
+        encoded = (
+            json.dumps(manifest, indent=2, sort_keys=False, allow_nan=False) + "\n"
+        ).encode("utf-8")
+        if len(encoded) > PRELOAD_MAX_MANIFEST_BYTES:
+            raise ValueError("ALLIN1 preload manifest exceeds its size limit")
+        self.preload_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.preload_manifest_path.with_suffix(".json.tmp")
+        temporary.write_bytes(encoded)
+        temporary.replace(self.preload_manifest_path)
+        if omitted:
+            log.warning(
+                "Omitted %d authorized preload entries after the %d-entry cap",
+                omitted, PRELOAD_MAX_ENTRIES,
+            )
+        return self.preload_manifest_path
 
     def read(self) -> dict[str, Any]:
         if not self.registry_path.is_file():

@@ -61,6 +61,29 @@ def _zip_tree(archive: Path, root: Path, prefix: str = "") -> None:
                 package.write(source, prefix + source.relative_to(root).as_posix())
 
 
+def _mixed_destination_package(
+    root: Path, destination: str,
+) -> Path:
+    package = root / "mixed-destination"
+    package.mkdir(parents=True)
+    (package / "payload.json").write_text("{}", encoding="utf-8")
+    (package / "mod.toml").write_text(
+        "schema_version = 1\n"
+        'id = "vehicle-workbench-runtime"\n'
+        'name = "Vehicle Workbench Runtime"\n'
+        'version = "1.0.0"\n'
+        'type = "mixed"\n'
+        'editions = ["enhanced"]\n'
+        'dependencies = []\n'
+        'conflicts = []\n'
+        '[[files]]\n'
+        'source = "payload.json"\n'
+        f'destination = "{destination}"\n',
+        encoding="utf-8",
+    )
+    return package
+
+
 @pytest.mark.parametrize("prefix", ["", "source-repo/package/"])
 def test_zip_import_accepts_one_root_or_nested_manifest(
     tmp_path: Path, prefix: str,
@@ -124,3 +147,159 @@ def test_sdk_cli_validates_zip_package(tmp_path: Path) -> None:
     result = CliRunner().invoke(main, ["validate-package", str(archive)])
     assert result.exit_code == 0, result.output
     assert '"schema_version": 2' in result.output
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "VehicleWorkbenchAxles/runtime.json",
+        "VehicleWorkbenchAxles/profiles/compatibility.json",
+    ],
+)
+def test_sdk_accepts_owned_vehicle_workbench_json_runtime_tree(
+    tmp_path: Path, destination: str,
+) -> None:
+    package = _mixed_destination_package(tmp_path, destination)
+
+    manifest = ModManifest.load(package)
+
+    assert manifest.files[0].destination.as_posix() == destination
+
+
+def test_sdk_accepts_isolated_plugin_runtime_tree(tmp_path: Path) -> None:
+    package = _mixed_destination_package(
+        tmp_path, "plugins/ReactorV/Renderer.dll",
+    )
+
+    manifest = ModManifest.load(package)
+
+    assert manifest.files[0].destination.as_posix() == (
+        "plugins/ReactorV/Renderer.dll"
+    )
+
+
+@pytest.mark.parametrize(
+    ("destination", "message"),
+    [
+        ("OtherRuntime/runtime.json", "Mixed package files"),
+        ("VehicleWorkbenchAxles.json", "Mixed package files"),
+        ("VehicleWorkbenchAxles/runtime.dll", "Mixed package files"),
+        ("VehicleWorkbenchAxles/tools/settings.exe", "Mixed package files"),
+        ("VehicleWorkbenchAxles/../escape.json", "traversal"),
+        ("VehicleWorkbenchAxles/runtime.json:alternate", "Windows-invalid"),
+    ],
+)
+def test_sdk_vehicle_workbench_runtime_tree_exception_stays_narrow(
+    tmp_path: Path, destination: str, message: str,
+) -> None:
+    package = _mixed_destination_package(tmp_path, destination)
+
+    with pytest.raises(ValueError, match=message):
+        ModManifest.load(package)
+
+
+def test_sdk_mixed_runtime_tree_cannot_target_launcher_reserved_root(
+    tmp_path: Path,
+) -> None:
+    package = _mixed_destination_package(tmp_path, "ScriptHookV.dll")
+
+    with pytest.raises(ValueError, match="reserved by the ALLIN1 launcher"):
+        ModManifest.load(package)
+
+
+def test_sdk_mixed_runtime_tree_rejects_case_insensitive_duplicate_destination(
+    tmp_path: Path,
+) -> None:
+    package = _mixed_destination_package(
+        tmp_path, "VehicleWorkbenchAxles/runtime.json",
+    )
+    (package / "other.json").write_text("{}", encoding="utf-8")
+    manifest_path = package / "mod.toml"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8")
+        + "[[files]]\n"
+        + 'source = "other.json"\n'
+        + 'destination = "vehicleworkbenchaxles/RUNTIME.JSON"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Duplicate destination"):
+        ModManifest.load(package)
+
+
+def test_sdk_runtime_tree_install_rejects_symlinked_parent_directory(
+    tmp_path: Path,
+) -> None:
+    game = tmp_path / "game"
+    game.mkdir()
+    (game / "GTA5_Enhanced.exe").write_bytes(b"exe")
+    outside = tmp_path / "outside-runtime"
+    outside.mkdir()
+    sentinel = outside / "sentinel.json"
+    sentinel.write_bytes(b"protected")
+    runtime_root = game / "VehicleWorkbenchAxles"
+    try:
+        runtime_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    package = _mixed_destination_package(
+        tmp_path, "VehicleWorkbenchAxles/runtime.json",
+    )
+    manifest = ModManifest.load(package)
+    service = mods.ModIntegrationService(game)
+
+    with pytest.raises(ValueError, match="symlink or junction"):
+        service.install(manifest)
+    assert sentinel.read_bytes() == b"protected"
+    assert not (service.state_root / "vehicle-workbench-runtime.json").exists()
+
+
+def test_sdk_runtime_tree_install_rejects_predictable_temporary_symlink(
+    tmp_path: Path,
+) -> None:
+    game = tmp_path / "game"
+    game.mkdir()
+    (game / "GTA5_Enhanced.exe").write_bytes(b"exe")
+    runtime_root = game / "VehicleWorkbenchAxles"
+    runtime_root.mkdir()
+    sentinel = tmp_path / "outside-sentinel.json"
+    sentinel.write_bytes(b"protected")
+    legacy_temporary = runtime_root / ".runtime.json.allin1-install"
+    try:
+        legacy_temporary.symlink_to(sentinel)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    package = _mixed_destination_package(
+        tmp_path, "VehicleWorkbenchAxles/runtime.json",
+    )
+    manifest = ModManifest.load(package)
+    service = mods.ModIntegrationService(game)
+
+    with pytest.raises(ValueError, match="legacy install-temporary"):
+        service.install(manifest)
+    assert sentinel.read_bytes() == b"protected"
+    assert not (runtime_root / "runtime.json").exists()
+    assert not (service.state_root / "vehicle-workbench-runtime.json").exists()
+
+
+def test_sdk_runtime_tree_install_rejects_occupied_legacy_temporary_file(
+    tmp_path: Path,
+) -> None:
+    game = tmp_path / "game"
+    game.mkdir()
+    (game / "GTA5_Enhanced.exe").write_bytes(b"exe")
+    runtime_root = game / "VehicleWorkbenchAxles"
+    runtime_root.mkdir()
+    legacy_temporary = runtime_root / ".runtime.json.allin1-install"
+    legacy_temporary.write_bytes(b"protected")
+    package = _mixed_destination_package(
+        tmp_path, "VehicleWorkbenchAxles/runtime.json",
+    )
+    manifest = ModManifest.load(package)
+    service = mods.ModIntegrationService(game)
+
+    with pytest.raises(ValueError, match="legacy install-temporary"):
+        service.install(manifest)
+    assert legacy_temporary.read_bytes() == b"protected"
+    assert not (runtime_root / "runtime.json").exists()
+    assert not (service.state_root / "vehicle-workbench-runtime.json").exists()

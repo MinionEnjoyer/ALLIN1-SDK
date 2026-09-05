@@ -25,6 +25,7 @@ MAX_GARAGES = 64
 MAX_IPLS_PER_SCOPE = 128
 WORLD_LEVEL_ID = "world"
 SUPPORTED_EDITIONS = frozenset({"legacy", "enhanced"})
+SUPPORTED_STREAMING_MODES = frozenset({"ipl", "none"})
 SUPPORTED_PORTAL_MODES = frozenset({"ped", "vehicle", "both"})
 SUPPORTED_VEHICLE_TYPES = frozenset({"land", "helicopter", "plane", "boat"})
 STORY_SAVE_POLICY = "story_save_only"
@@ -162,15 +163,21 @@ class MapStreaming:
     activation_radius: float = 300.0
     release_radius: float = 500.0
     keep_resident: bool = False
+    mode: str = "ipl"
 
     @classmethod
     def from_dict(cls, value: object) -> "MapStreaming":
         data = _object(value, "streaming")
         _reject_unknown(data, {
-            "pack_name", "content_group", "ipls", "activation_radius",
+            "pack_name", "mode", "content_group", "ipls", "activation_radius",
             "release_radius", "keep_resident",
         }, "streaming")
         pack_name = _pack_name(data.get("pack_name"), "streaming.pack_name")
+        mode = _text(
+            data.get("mode", "ipl"), "streaming.mode", maximum=16,
+        ).casefold()
+        if mode not in SUPPORTED_STREAMING_MODES:
+            raise ValueError("streaming.mode must be 'ipl' or 'none'")
         raw_group = data.get("content_group")
         content_group = (
             None if raw_group is None else
@@ -187,7 +194,14 @@ class MapStreaming:
         )
         if len({item.casefold() for item in ipls}) != len(ipls):
             raise ValueError("streaming.ipls contains duplicate names")
-        if content_group is None and not ipls:
+        if mode == "none" and content_group is not None:
+            raise ValueError(
+                "streaming.content_group must be omitted or null when "
+                "streaming.mode is 'none'"
+            )
+        if mode == "none" and ipls:
+            raise ValueError("streaming.ipls must be empty when streaming.mode is 'none'")
+        if mode == "ipl" and content_group is None and not ipls:
             raise ValueError("streaming must declare a content_group or at least one IPL")
         activation = _positive_number(
             data.get("activation_radius", 300.0), "streaming.activation_radius",
@@ -206,6 +220,7 @@ class MapStreaming:
             pack_name=pack_name,
             content_group=content_group,
             ipls=ipls,
+            mode=mode,
             activation_radius=activation,
             release_radius=release,
             keep_resident=_boolean(
@@ -216,6 +231,7 @@ class MapStreaming:
     def to_dict(self) -> dict[str, Any]:
         return {
             "pack_name": self.pack_name,
+            "mode": self.mode,
             "content_group": self.content_group,
             "ipls": list(self.ipls),
             "activation_radius": self.activation_radius,
@@ -555,10 +571,15 @@ class MapProject:
         if len(levels) > MAX_LEVELS:
             raise ValueError(f"map project may contain at most {MAX_LEVELS} levels")
         streaming = MapStreaming.from_dict(data.get("streaming"))
-        if not streaming.ipls and not any(level.ipls for level in levels):
+        level_ipls = any(level.ipls for level in levels)
+        if streaming.mode == "ipl" and not streaming.ipls and not level_ipls:
             raise ValueError(
                 "map project must declare at least one project or level IPL; "
                 "arbitrary content-group execution is not used by the Story runtime"
+            )
+        if streaming.mode == "none" and level_ipls:
+            raise ValueError(
+                "levels may not declare IPLs when streaming.mode is 'none'"
             )
         level_ids = [item.level_id for item in levels]
         if len(level_ids) != len(set(level_ids)):

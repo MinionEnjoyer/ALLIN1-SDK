@@ -53,6 +53,11 @@ def test_release_package_contains_launcher_contract_and_checksums(tmp_path):
     (app / "_internal").mkdir()
     (app / "_internal" / "python312.dll").write_bytes(b"runtime")
     (rpf / "RpfPatcher.exe").write_bytes(b"MZhelper")
+    (app / "tools" / "RpfPatcher").mkdir(parents=True)
+    (app / "tools" / "RpfPatcher" / "stale.dll").write_bytes(b"MZold dependency")
+    (app / "assets").mkdir()
+    (app / "assets" / "removed-resource.txt").write_text("stale")
+    (app / "_internal" / "checksums.json").write_text('{"dependency":"metadata"}')
 
     build_id = "0123456789abcdef0123456789abcdef01234567"
     archive, checksum = package_release(
@@ -63,10 +68,15 @@ def test_release_package_contains_launcher_contract_and_checksums(tmp_path):
     assert checksum.read_text().startswith(hashlib.sha256(archive.read_bytes()).hexdigest())
     with zipfile.ZipFile(archive) as package:
         names = set(package.namelist())
+        assert "tools/RpfPatcher/stale.dll" not in names
+        assert "assets/removed-resource.txt" not in names
+        assert "_internal/checksums.json" in names
         assert {
             "ALLIN1-SDK-Desktop.exe", "allin1-sdk.exe", "ALLIN1-SDK-Agent.exe",
             "ALLIN1-SDK-Updater.exe",
             "release.json", "checksums.json",
+            "RELEASE_NOTES.md", "CODE_SIGNING_POLICY.md", "RELEASE_SIGNING.md",
+            "desktop/README.md",
             "sdk/addon.schema.json", "sdk/runtime-api-contract.schema.json",
             "tools/RpfPatcher/RpfPatcher.exe",
             "assets/ALLIN1_SDK.png", "assets/favicon.ico",
@@ -105,6 +115,11 @@ def test_release_package_contains_launcher_contract_and_checksums(tmp_path):
             hashlib.sha256(package.read(name)).hexdigest() == digest
             for name, digest in checksums.items()
         )
+    assert (app / "tools/RpfPatcher/stale.dll").read_bytes() == b"MZold dependency"
+    original_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    with pytest.raises(FileExistsError, match="never overwrite"):
+        package_release(root, app, rpf, output, "0.5.0", build_id)
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == original_digest
 
 
 @pytest.mark.parametrize("value", ("", "contains spaces", "../escape", "x" * 129))
@@ -118,31 +133,39 @@ def test_release_workflow_binds_package_identity_to_github_commit():
         Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci-release.yml"
     ).read_text(encoding="utf-8")
 
-    assert workflow.count('--build-id "$env:GITHUB_SHA"') == 2
+    root = Path(__file__).resolve().parents[1]
+    tauri = (root / ".github/workflows/tauri-desktop.yml").read_text(encoding="utf-8")
+    builder = (root / "scripts/build_tauri_desktop.ps1").read_text(encoding="utf-8")
+    assert '-BuildId "$env:GITHUB_SHA" -Unsigned' in workflow
+    assert "./scripts/build_tauri_desktop.ps1" in tauri
+    assert "prepare --pnpm" in builder and "check --identity $candidateIdentity" in builder
+    assert "seal --identity $candidateIdentity" in builder
+    assert "contents: write" not in tauri and "gh release create" not in tauri
 
 
-def test_release_workflow_rewrites_signed_native_receipt_truthfully():
-    workflow = (
-        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci-release.yml"
-    ).read_text(encoding="utf-8")
-
-    signature_gate = workflow.index("Get-AuthenticodeSignature")
-    certificate_update = workflow.index(
-        "$receipt.authenticode_certificate_present = $true"
-    )
-    unsigned_update = workflow.index("$receipt.unsigned = $false")
-    assert signature_gate < certificate_update < unsigned_update
+def test_native_candidate_receipt_does_not_claim_a_signature_or_live_acceptance():
+    builder = (Path(__file__).resolve().parents[1] / "scripts/build_native_asi.ps1").read_text(encoding="utf-8")
+    assert "unsigned = [bool]$Unsigned" in builder
+    assert "authenticode_certificate_present = $false" in builder
+    assert "authenticode_certificate_present = $true" not in builder
+    assert "game_acceptance = 'not-tested'" in builder and "supported = $false" in builder
 
 
-def test_release_workflow_rehashes_signed_axle_settings_editor():
-    workflow = (
-        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci-release.yml"
-    ).read_text(encoding="utf-8")
+def test_native_candidate_hashes_the_actual_axle_settings_editor_in_both_receipts():
+    builder = (Path(__file__).resolve().parents[1] / "scripts/build_native_asi.ps1").read_text(encoding="utf-8")
+    assert "VehicleWorkbenchAxles.Settings.exe" in builder
+    assert "$settingsHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsEditor)" in builder
+    assert "sha256 = $settingsHash" in builder
+    assert "settings_editor_sha256 = $settingsHash" in builder
 
-    assert 'VehicleWorkbenchAxles.Settings.exe"' in workflow
-    assert "$receipt.settings_editor.sha256 = (Get-FileHash" in workflow
-    assert "$receipt.settings_editor.authenticode_certificate_present = $true" in workflow
-    assert "$metadata.settings_editor_sha256 = $receipt.settings_editor.sha256" in workflow
+
+def test_native_unit_ci_does_not_require_stale_installer_staging():
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/tauri-desktop.yml").read_text(encoding="utf-8")
+    unit_step = workflow.split("- name: Validate Rust broker")[1].split("- name:")[0]
+    assert 'TAURI_CONFIG:' in unit_step and '"resources":[]' in unit_step
+    assert "cargo test --locked" in unit_step and "cargo check --locked" in unit_step
+    packaging_step = workflow.split("- name: Build, identify, extract and smoke-test the actual candidate bytes")[1].split("- name:")[0]
+    assert 'TAURI_CONFIG' not in packaging_step
 
 
 def test_release_rejects_bundled_example_with_missing_source(tmp_path):

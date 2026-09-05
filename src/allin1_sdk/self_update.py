@@ -19,6 +19,7 @@ from typing import Callable
 from urllib.request import Request, urlopen
 
 from allin1_sdk import __version__
+from allin1_sdk.release_paths import contained, no_links, relative_path, strict_json, tree_files, unique_paths
 
 SDK_RELEASES_API = "https://api.github.com/repos/MinionEnjoyer/ALLIN1-SDK/releases/latest"
 SDK_REPOSITORY_URL = "https://github.com/MinionEnjoyer/ALLIN1-SDK"
@@ -93,11 +94,16 @@ def _github_request(url: str) -> Request:
 
 def fetch_latest_release(*, timeout: float = 8.0, opener=urlopen) -> SdkRelease:
     with opener(_github_request(SDK_RELEASES_API), timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+        payload = strict_json(_read_limited_response(response, 2 * 1024 * 1024))
     version = str(payload["tag_name"]).lstrip("vV")
     _version_key(version)
     expected_name = f"ALLIN1-SDK-{version}-win-x64.zip"
     assets = payload.get("assets", [])
+    if not isinstance(assets, list) or any(not isinstance(item, dict) for item in assets):
+        raise ValueError("Invalid SDK release asset catalog")
+    asset_names = [str(item.get("name", "")).casefold() for item in assets]
+    if len(asset_names) != len(set(asset_names)):
+        raise ValueError("SDK release asset catalog has duplicate identities")
     archive = next(
         (item for item in assets if str(item.get("name", "")).casefold()
          == expected_name.casefold()),
@@ -150,32 +156,80 @@ def _read_limited_response(response, limit: int) -> bytes:
 
 def _parse_checksum(content: bytes, archive_name: str) -> str:
     try:
-        line = next(value.strip() for value in content.decode("ascii").splitlines()
-                    if value.strip())
+        lines = [value.strip() for value in content.decode("ascii").splitlines() if value.strip()]
+        if len(lines) != 1:
+            raise ValueError("SDK checksum asset must contain exactly one digest")
+        line = lines[0]
     except (UnicodeDecodeError, StopIteration) as exc:
         raise ValueError("SDK checksum asset is empty or invalid") from exc
     parts = line.split()
     digest = parts[0].lower()
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ValueError("SDK checksum asset does not contain a SHA-256 digest")
-    if len(parts) > 1 and Path(parts[-1].lstrip("*")).name.casefold() != archive_name.casefold():
+    if len(parts) > 2 or (len(parts) == 2 and parts[-1].lstrip("*") != archive_name):
         raise ValueError("SDK checksum names a different archive")
     return digest
 
 
 def _safe_member(info: zipfile.ZipInfo) -> PurePosixPath:
-    if "\\" in info.filename or "\x00" in info.filename:
-        raise ValueError(f"unsafe SDK archive member: {info.filename}")
-    path = PurePosixPath(info.filename)
-    if path.is_absolute() or not path.parts or ".." in path.parts:
-        raise ValueError(f"unsafe SDK archive member: {info.filename}")
-    if any(":" in part for part in path.parts):
-        raise ValueError(f"unsafe SDK archive member: {info.filename}")
-    if stat.S_ISLNK(info.external_attr >> 16):
-        raise ValueError(f"SDK archive contains a symbolic link: {info.filename}")
+    if info.orig_filename != info.filename:
+        raise ValueError("SDK archive member contains a NUL")
+    path = relative_path(info.filename[:-1] if info.is_dir() else info.filename)
+    kind = stat.S_IFMT(info.external_attr >> 16)
+    if kind not in (0, stat.S_IFDIR if info.is_dir() else stat.S_IFREG) or info.external_attr & 0x400:
+        raise ValueError(f"SDK archive contains a link or special file: {info.filename}")
     if info.flag_bits & 0x1:
         raise ValueError(f"SDK archive contains an encrypted member: {info.filename}")
     return path
+
+
+def _archive_inventory(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
+    items = archive.infolist()
+    if len(items) > MAX_ARCHIVE_FILES or sum(i.file_size for i in items) > MAX_EXTRACTED_BYTES:
+        raise ValueError("SDK archive exceeds payload limits")
+    all_names = [_safe_member(item).as_posix() for item in items]
+    if len({name.casefold() for name in all_names}) != len(all_names):
+        raise ValueError("SDK archive contains a duplicate path")
+    files = {name: item for name, item in zip(all_names, items) if not item.is_dir()}
+    unique_paths(list(files))
+    folded_files = {n.casefold() for n in files}
+    for name in all_names:
+        if any(parent.as_posix().casefold() in folded_files
+               for parent in PurePosixPath(name).parents if parent.as_posix() != "."):
+            raise ValueError("SDK archive contains a file/directory collision")
+    return files
+
+
+def verify_release_tree(root: Path, expected_version: str | None = None) -> dict:
+    """Reverify actual staged bytes at consumption time, not a past smoke result."""
+    files = tree_files(root)
+    required = {SDK_EXECUTABLE, SDK_CLI_EXECUTABLE, SDK_AGENT_EXECUTABLE,
+                SDK_UPDATER_EXECUTABLE, SDK_RELEASE_METADATA, SDK_CHECKSUMS}
+    if not required <= files.keys():
+        raise ValueError("Staged SDK is missing release metadata or required payloads")
+    checksums = strict_json(files[SDK_CHECKSUMS].read_bytes())
+    metadata = strict_json(files[SDK_RELEASE_METADATA].read_bytes())
+    if not isinstance(checksums, dict):
+        raise ValueError("Invalid staged checksum manifest")
+    unique_paths(list(checksums))
+    if set(checksums) != files.keys() - {SDK_CHECKSUMS}:
+        raise ValueError("Staged checksum manifest does not exactly match payload")
+    for name, digest in checksums.items():
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"Invalid staged checksum: {name}")
+        if hashlib.sha256(_filesystem_path(contained(root, name)).read_bytes()).hexdigest() != digest:
+            raise ValueError(f"Staged checksum mismatch: {name}")
+    if not isinstance(metadata, dict) or metadata.get("product") != "ALLIN1-SDK":
+        raise ValueError("Invalid staged SDK identity")
+    version = str(metadata.get("version", ""))
+    _version_key(version)
+    if expected_version and _version_key(version) != _version_key(expected_version):
+        raise ValueError("Staged SDK version changed")
+    for field, name in (("entrypoint", SDK_EXECUTABLE), ("cli_entrypoint", SDK_CLI_EXECUTABLE),
+                        ("agent_entrypoint", SDK_AGENT_EXECUTABLE), ("updater_entrypoint", SDK_UPDATER_EXECUTABLE)):
+        if metadata.get(field) != name or files[name].read_bytes()[:2] != b"MZ":
+            raise ValueError(f"Invalid staged SDK entrypoint: {field}")
+    return metadata
 
 
 def _filesystem_path(path: Path) -> Path:
@@ -194,7 +248,8 @@ def inspect_release_archive(archive_path: Path, expected_version: str) -> str:
     if archive_path.stat().st_size > MAX_ARCHIVE_BYTES:
         raise ValueError("SDK archive exceeds the allowed size")
     with zipfile.ZipFile(archive_path) as archive:
-        files = [item for item in archive.infolist() if not item.is_dir()]
+        inventory = _archive_inventory(archive)
+        files = list(inventory.values())
         if len(files) > MAX_ARCHIVE_FILES:
             raise ValueError("SDK archive contains too many files")
         if sum(item.file_size for item in files) > MAX_EXTRACTED_BYTES:
@@ -216,10 +271,12 @@ def inspect_release_archive(archive_path: Path, expected_version: str) -> str:
         if missing:
             raise ValueError("SDK archive is missing: " + ", ".join(sorted(missing)))
         try:
-            metadata = json.loads(archive.read(names[SDK_RELEASE_METADATA]).decode("utf-8"))
-            checksums = json.loads(archive.read(names[SDK_CHECKSUMS]).decode("utf-8"))
+            metadata = strict_json(archive.read(names[SDK_RELEASE_METADATA]))
+            checksums = strict_json(archive.read(names[SDK_CHECKSUMS]))
         except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("SDK release metadata is invalid") from exc
+        if not isinstance(metadata, dict):
+            raise ValueError("SDK release metadata must be an object")
         version = str(metadata.get("version", "")).lstrip("vV")
         if _version_key(version) != _version_key(expected_version):
             raise ValueError("SDK package version does not match the selected release")
@@ -235,6 +292,7 @@ def inspect_release_archive(archive_path: Path, expected_version: str) -> str:
                 raise ValueError(f"SDK release metadata has an invalid {key}")
         if not isinstance(checksums, dict) or set(checksums) != set(names) - {SDK_CHECKSUMS}:
             raise ValueError("SDK checksum manifest does not exactly match the payload")
+        unique_paths(list(checksums))
         for name, expected in checksums.items():
             digest = str(expected).lower()
             if not re.fullmatch(r"[0-9a-f]{64}", digest):
@@ -252,6 +310,12 @@ def inspect_release_archive(archive_path: Path, expected_version: str) -> str:
 
 def _extract_archive(archive_path: Path, target: Path) -> None:
     with zipfile.ZipFile(archive_path) as archive:
+        _archive_inventory(archive)
+        # Validate every destination before creating even the first directory.
+        for info in archive.infolist():
+            destination = contained(target, _safe_member(info).as_posix())
+            if destination.exists() and not (info.is_dir() and destination.is_dir()):
+                raise FileExistsError(f"Staging destination already exists: {destination}")
         extracted: set[str] = set()
         for info in archive.infolist():
             relative = _safe_member(info)
@@ -261,12 +325,12 @@ def _extract_archive(archive_path: Path, target: Path) -> None:
                     f"SDK archive contains a duplicate path: {relative.as_posix()}"
                 )
             extracted.add(folded)
-            destination = _filesystem_path(target.joinpath(*relative.parts))
+            destination = _filesystem_path(contained(target, relative.as_posix()))
             if info.is_dir():
                 destination.mkdir(parents=True, exist_ok=True)
                 continue
             destination.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(info) as source, destination.open("wb") as output:
+            with archive.open(info) as source, destination.open("xb") as output:
                 shutil.copyfileobj(source, output)
 
 
@@ -279,7 +343,9 @@ def stage_release(
     progress: ProgressCallback | None = None,
 ) -> StagedUpdate:
     """Download and verify a release without touching the running installation."""
-    install_root = install_root.resolve(strict=True)
+    install_root = no_links(install_root).resolve(strict=True)
+    if relative_path(release.archive_name).name != release.archive_name:
+        raise ValueError("SDK archive download name must be a filename")
     if not (install_root / SDK_EXECUTABLE).is_file():
         raise ValueError("current SDK installation root is invalid")
     with opener(_github_request(release.checksum_url), timeout=timeout) as response:
@@ -321,6 +387,7 @@ def stage_release(
             inspect_release_archive(archive_path, release.version)
             staged.mkdir(parents=False)
             _extract_archive(archive_path, staged)
+            verify_release_tree(staged, release.version)
         return StagedUpdate(
             version=release.version,
             install_root=install_root,
@@ -329,6 +396,7 @@ def stage_release(
         )
     except Exception:
         if staged.exists():
+            tree_files(staged)
             shutil.rmtree(_filesystem_path(staged))
         raise
 
@@ -337,11 +405,12 @@ def schedule_staged_update(staged: StagedUpdate, *, process_id: int | None = Non
     """Launch the detached swap helper; the caller must then exit promptly."""
     if os.name != "nt":
         raise OSError("standalone SDK updates are currently supported only on Windows")
-    root = staged.install_root.resolve(strict=True)
-    pending = staged.staged_root.resolve(strict=True)
+    root = no_links(staged.install_root).resolve(strict=True)
+    pending = no_links(staged.staged_root).resolve(strict=True)
     if pending.parent != root.parent or not pending.name.startswith(root.name + ".updating-"):
         raise ValueError("update staging directory is outside the SDK installation boundary")
-    helper = staged.helper_source.resolve(strict=True)
+    verify_release_tree(pending, staged.version)
+    helper = no_links(staged.helper_source).resolve(strict=True)
     if helper.parent != pending or helper.name != SDK_UPDATER_EXECUTABLE:
         raise ValueError("staged updater executable is invalid")
     helper_copy = Path(tempfile.gettempdir()) / (
@@ -352,6 +421,7 @@ def schedule_staged_update(staged: StagedUpdate, *, process_id: int | None = Non
         str(helper_copy), "--wait-pid", str(process_id or os.getpid()),
         "--install-root", str(root), "--staged-root", str(pending),
         "--entrypoint", SDK_EXECUTABLE, "--delete-self", str(helper_copy),
+        "--expected-manifest-sha256", hashlib.sha256((pending / SDK_CHECKSUMS).read_bytes()).hexdigest(),
     ]
     flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(
         subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
@@ -365,9 +435,10 @@ def schedule_staged_update(staged: StagedUpdate, *, process_id: int | None = Non
 
 def discard_staged_update(staged: StagedUpdate) -> bool:
     """Remove only the exact sibling staging directory created for this update."""
-    root = staged.install_root.resolve(strict=True)
-    pending = staged.staged_root.resolve(strict=True)
+    root = no_links(staged.install_root).resolve(strict=True)
+    pending = no_links(staged.staged_root).resolve(strict=True)
     if pending.parent != root.parent or not pending.name.startswith(root.name + ".updating-"):
         raise ValueError("update staging directory is outside the SDK installation boundary")
+    tree_files(pending)
     shutil.rmtree(_filesystem_path(pending))
     return True

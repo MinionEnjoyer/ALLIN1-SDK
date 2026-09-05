@@ -54,7 +54,7 @@ from allin1_sdk.mods import ModIntegrationService, open_mod_package
 from allin1_sdk.map_contract import MapProject
 from allin1_sdk.map_package import MapAddonPackageBuilder
 from allin1_sdk.map_project import MapProjectResolver
-from allin1_sdk.map_workbench import looks_like_map_project, map_asset_entries
+from allin1_sdk.map_detection import looks_like_map_project, map_asset_entries
 from allin1_sdk.oiv_workbench import OivWorkbench
 from allin1_sdk.package_graph import PackageGraphWorkspace
 from allin1_sdk.package_relations import PackageRelationshipAnalyzer
@@ -124,11 +124,13 @@ from allin1_sdk.axle_runtime_bundler import (
 )
 from allin1_sdk.story_axle_runtime_builder import (
     STORY_TARGETS,
+    NativeAxleToolchainSettings,
     StoryAxleRuntimeBuildRequest,
     StoryAxleRuntimeSettings,
     build_story_axle_runtime_candidate,
     inspect_native_axle_toolchain,
 )
+from allin1_sdk.native_toolchain_settings import load_native_toolchain_settings
 from allin1_sdk.axle_oiv_export import (
     EnhancedOivTargetProfile,
     JsonOivIdentityStore,
@@ -464,18 +466,10 @@ def _open_graph_window(
     selected_game = gta_path.expanduser().resolve(strict=True) if gta_path else None
 
     executable = Path(sys.executable).resolve()
-    if getattr(sys, "frozen", False):
-        desktop = _frozen_desktop_executable(executable)
-        command = [str(desktop), "--rpf-graph", str(resolved)]
-    else:
-        interpreter = executable
-        if os.name == "nt":
-            windowed = executable.with_name("pythonw.exe")
-            if windowed.is_file():
-                interpreter = windowed
-        command = [
-            str(interpreter), "-m", "allin1_sdk.app", "--rpf-graph", str(resolved),
-        ]
+    desktop = _frozen_desktop_executable(executable)
+    command = [str(desktop), "--rpf-graph", str(resolved)]
+    if selected_node is not None:
+        command.extend(("--graph-node", selected_node))
     if selected_game is not None:
         command.extend(("--gta-path", str(selected_game)))
     options: dict[str, object] = {}
@@ -515,23 +509,11 @@ def _open_axle_configurator_window(
         )
     selected_game = gta_path.expanduser().resolve(strict=True) if gta_path else None
     executable = Path(sys.executable).resolve()
-    if getattr(sys, "frozen", False):
-        desktop = _frozen_desktop_executable(executable)
-        command = [
-            str(desktop), "--axle-workspace", str(workspace.root),
-            "--axle-model", selected,
-        ]
-    else:
-        interpreter = executable
-        if os.name == "nt":
-            windowed = executable.with_name("pythonw.exe")
-            if windowed.is_file():
-                interpreter = windowed
-        command = [
-            str(interpreter), "-m", "allin1_sdk.app",
-            "--axle-workspace", str(workspace.root),
-            "--axle-model", selected,
-        ]
+    desktop = _frozen_desktop_executable(executable)
+    command = [
+        str(desktop), "--axle-workspace", str(workspace.root),
+        "--axle-model", selected,
+    ]
     if selected_game is not None:
         command.extend(("--gta-path", str(selected_game)))
     options: dict[str, object] = {}
@@ -542,15 +524,9 @@ def _open_axle_configurator_window(
 
 
 def _frozen_desktop_executable(executable: Path | None = None) -> Path:
-    """Resolve the desktop sibling used by every frozen SDK entry point."""
-    current = (executable or Path(sys.executable)).resolve()
-    desktop_name = "ALLIN1-SDK-Desktop.exe"
-    if current.name.casefold() == desktop_name.casefold():
-        return current
-    desktop = current.with_name(desktop_name)
-    if not desktop.is_file():
-        raise FileNotFoundError(f"SDK desktop executable was not found: {desktop}")
-    return desktop
+    """Compatibility helper resolving the native desktop, never a Python GUI."""
+    from allin1_sdk.desktop_entry import desktop_executable
+    return desktop_executable(executable)
 
 
 def _open_workbench_window(
@@ -586,19 +562,8 @@ def _open_workbench_window(
     if category != "auto" and not counts[category]:
         raise ValueError(f"The selected package does not contain {category} metadata.")
     executable = Path(sys.executable).resolve()
-    if getattr(sys, "frozen", False):
-        desktop = _frozen_desktop_executable(executable)
-        command = [str(desktop), "--workbench-package", str(resolved)]
-    else:
-        interpreter = executable
-        if os.name == "nt":
-            windowed = executable.with_name("pythonw.exe")
-            if windowed.is_file():
-                interpreter = windowed
-        command = [
-            str(interpreter), "-m", "allin1_sdk.app",
-            "--workbench-package", str(resolved),
-        ]
+    desktop = _frozen_desktop_executable(executable)
+    command = [str(desktop), "--workbench-package", str(resolved)]
     command.extend(("--workbench-category", category))
     if selected_game is not None:
         command.extend(("--gta-path", str(selected_game)))
@@ -626,19 +591,8 @@ def _open_model_material_window(
     if not model_count:
         raise ValueError("The selected source does not contain a YDR, YDD, or YFT model.")
     executable = Path(sys.executable).resolve()
-    if getattr(sys, "frozen", False):
-        desktop = _frozen_desktop_executable(executable)
-        command = [str(desktop), "--model-material-source", str(resolved)]
-    else:
-        interpreter = executable
-        if os.name == "nt":
-            windowed = executable.with_name("pythonw.exe")
-            if windowed.is_file():
-                interpreter = windowed
-        command = [
-            str(interpreter), "-m", "allin1_sdk.app",
-            "--model-material-source", str(resolved),
-        ]
+    desktop = _frozen_desktop_executable(executable)
+    command = [str(desktop), "--model-material-source", str(resolved)]
     if selected_game is not None:
         command.extend(("--gta-path", str(selected_game)))
     options: dict[str, object] = {}
@@ -668,19 +622,8 @@ def _open_addon_manifest_window(source: Path) -> tuple[int, AddonManifest]:
     resolved = load_product_workspace(source).descriptor
     manifest = AddonManifest.load(resolved)
     executable = Path(sys.executable).resolve()
-    if getattr(sys, "frozen", False):
-        desktop = _frozen_desktop_executable(executable)
-        command = [str(desktop), "--addon-manifest", str(resolved)]
-    else:
-        interpreter = executable
-        if os.name == "nt":
-            windowed = executable.with_name("pythonw.exe")
-            if windowed.is_file():
-                interpreter = windowed
-        command = [
-            str(interpreter), "-m", "allin1_sdk.app",
-            "--addon-manifest", str(resolved),
-        ]
+    desktop = _frozen_desktop_executable(executable)
+    command = [str(desktop), "--addon-manifest", str(resolved)]
     options: dict[str, object] = {}
     if os.name == "nt":
         options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -1921,14 +1864,19 @@ def open_product_workspace(source: Path) -> None:
 @main.command("link")
 @click.argument("manifest", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
-def link(manifest: Path, output: Path) -> None:
+@click.option(
+    "--allow-failing-report",
+    is_flag=True,
+    help="Return success after writing a failing report for human review.",
+)
+def link(manifest: Path, output: Path, allow_failing_report: bool) -> None:
     """Write a linked integration and install-plan report."""
     report = AddonLinker().link(_manifest(manifest))
     destination = output.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(report.to_markdown(), encoding="utf-8")
     click.echo(f"Wrote {'passing' if report.valid else 'failing'} report: {destination}")
-    if not report.valid:
+    if not report.valid and not allow_failing_report:
         raise SystemExit(1)
 
 
@@ -2276,6 +2224,63 @@ def inspect_map_project(source: Path, gta_path: Path | None) -> None:
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(report.to_dict(), indent=2))
+
+
+@main.command("detect-map-placements")
+@click.argument("pack_name", required=False)
+@click.option(
+    "--descriptor",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help=(
+        "Validated map project used to supply streaming.pack_name and its requested "
+        "IPL names."
+    ),
+)
+@click.option(
+    "--expected-ipl", multiple=True,
+    help="Expected IPL/YMAP name to resolve; may be repeated.",
+)
+@click.option(
+    "--gta-path", required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Exact GTA installation containing the installed DLC pack.",
+)
+def detect_map_placements(
+    pack_name: str | None,
+    descriptor: Path | None,
+    expected_ipl: tuple[str, ...],
+    gta_path: Path,
+) -> None:
+    """Detect installed DLC YMAP names with recursive RPF provenance."""
+
+    expected: list[str] = []
+    try:
+        if descriptor is not None:
+            project = MapProject.load(descriptor)
+            descriptor_pack = project.streaming.pack_name
+            if pack_name is not None and pack_name.casefold() != descriptor_pack.casefold():
+                raise ValueError(
+                    f"PACK_NAME '{pack_name}' does not match descriptor pack "
+                    f"'{descriptor_pack}'."
+                )
+            pack_name = descriptor_pack
+            expected.extend(project.streaming.ipls)
+            for level in project.levels:
+                expected.extend(level.ipls)
+        if pack_name is None:
+            raise ValueError("Provide PACK_NAME or --descriptor.")
+        expected.extend(expected_ipl)
+        report = MapProjectResolver().detect_installed_dlc(
+            pack_name,
+            project_root=PROJECT_ROOT,
+            gta_path=gta_path,
+            expected_ipls=expected,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(report.to_dict(), indent=2))
+    if not report.valid:
+        raise SystemExit(1)
 
 
 @main.command("build-map-package")
@@ -3039,6 +3044,47 @@ def inspect_story_axle_runtimes(
     click.echo(json.dumps(report, indent=2))
 
 
+def _cli_native_toolchain_settings(
+    *,
+    mode: str | None,
+    cmake_path: Path | None,
+    ctest_path: Path | None,
+    visual_studio_path: Path | None,
+) -> NativeAxleToolchainSettings:
+    saved = load_native_toolchain_settings()
+    if not any((mode, cmake_path, ctest_path, visual_studio_path)):
+        return saved
+    return NativeAxleToolchainSettings(
+        mode=mode or saved.mode,
+        cmake_path=cmake_path if cmake_path is not None else saved.cmake_path,
+        ctest_path=ctest_path if ctest_path is not None else saved.ctest_path,
+        visual_studio_path=(
+            visual_studio_path
+            if visual_studio_path is not None else saved.visual_studio_path
+        ),
+    )
+
+
+def _native_toolchain_cli_options(function):
+    function = click.option(
+        "--toolchain-mode", type=click.Choice(("auto", "manual")),
+        help="Override the saved per-user Auto/Manual toolchain mode.",
+    )(function)
+    function = click.option(
+        "--cmake-path", type=click.Path(dir_okay=False, path_type=Path),
+        help="Explicit cmake.exe path; invalid paths remain BLOCKED.",
+    )(function)
+    function = click.option(
+        "--ctest-path", type=click.Path(dir_okay=False, path_type=Path),
+        help="Explicit ctest.exe path from the same CMake installation.",
+    )(function)
+    function = click.option(
+        "--visual-studio-path", type=click.Path(path_type=Path),
+        help="Visual Studio/Build Tools installation or exact x64 cl.exe.",
+    )(function)
+    return function
+
+
 @main.command("inspect-story-axle-toolchain")
 @click.option(
     "--source-root",
@@ -3048,10 +3094,25 @@ def inspect_story_axle_runtimes(
         "runtime source is inspected when omitted."
     ),
 )
-def inspect_story_axle_toolchain(source_root: Path | None) -> None:
+@_native_toolchain_cli_options
+def inspect_story_axle_toolchain(
+    source_root: Path | None,
+    toolchain_mode: str | None,
+    cmake_path: Path | None,
+    ctest_path: Path | None,
+    visual_studio_path: Path | None,
+) -> None:
     """Inspect the local native Story controller build prerequisites."""
     try:
-        report = inspect_native_axle_toolchain(source_root=source_root)
+        settings = _cli_native_toolchain_settings(
+            mode=toolchain_mode,
+            cmake_path=cmake_path,
+            ctest_path=ctest_path,
+            visual_studio_path=visual_studio_path,
+        )
+        report = inspect_native_axle_toolchain(
+            source_root=source_root, settings=settings,
+        )
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps({
@@ -3115,6 +3176,7 @@ def inspect_story_axle_toolchain(source_root: Path | None) -> None:
 )
 @click.option("--archives/--no-archives", default=True, show_default=True)
 @click.option("--build-id", default="allin1-sdk-local", show_default=True)
+@_native_toolchain_cli_options
 @click.option("--acknowledge-edit", is_flag=True, required=True)
 def build_story_axle_runtime(
     config_json: tuple[Path, ...], targets: tuple[str, ...],
@@ -3123,7 +3185,9 @@ def build_story_axle_runtime(
     configuration_directory: str, log_file: str,
     discovery_interval_ms: int, recovery_interval_ms: int,
     runtime_enabled: bool, restore_on_unload: bool, archives: bool,
-    build_id: str, acknowledge_edit: bool,
+    build_id: str, toolchain_mode: str | None,
+    cmake_path: Path | None, ctest_path: Path | None,
+    visual_studio_path: Path | None, acknowledge_edit: bool,
 ) -> None:
     """Compile and validate generic Legacy/Enhanced Story controller candidates."""
     del acknowledge_edit
@@ -3138,6 +3202,15 @@ def build_story_axle_runtime(
             )
         else:
             configurations = ()
+        toolchain_settings = _cli_native_toolchain_settings(
+            mode=toolchain_mode,
+            cmake_path=cmake_path,
+            ctest_path=ctest_path,
+            visual_studio_path=visual_studio_path,
+        )
+        toolchain_report = inspect_native_axle_toolchain(
+            settings=toolchain_settings,
+        )
         request = StoryAxleRuntimeBuildRequest(
             output_directory=output_dir,
             targets=targets or STORY_TARGETS,
@@ -3153,6 +3226,7 @@ def build_story_axle_runtime(
             build_id=build_id,
             create_archives=archives,
             protected_gta_roots=protected_gta_roots,
+            toolchain_report=toolchain_report,
         )
         # Package authors always compile the audited SDK-owned controller
         # source. Arbitrary native source trees are intentionally not accepted

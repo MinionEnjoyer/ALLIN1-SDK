@@ -7,6 +7,7 @@ from click.testing import CliRunner
 from allin1_sdk import cli as sdk_cli
 from allin1_sdk.agent_api import command_catalog, execute_request
 from allin1_sdk.cli import main
+from allin1_sdk.story_axle_runtime_builder import NativeAxleToolchainSettings
 
 
 def _toolchain_report(source_root: Path) -> SimpleNamespace:
@@ -29,8 +30,14 @@ def test_inspect_story_axle_toolchain_uses_typed_builder_report(
     source.mkdir()
     observed = {}
 
-    def inspect(*, source_root=None):
+    monkeypatch.setattr(
+        sdk_cli, "load_native_toolchain_settings",
+        lambda: NativeAxleToolchainSettings(),
+    )
+
+    def inspect(*, source_root=None, settings=None):
         observed["source_root"] = source_root
+        observed["settings"] = settings
         return _toolchain_report(source)
 
     monkeypatch.setattr(sdk_cli, "inspect_native_axle_toolchain", inspect)
@@ -44,6 +51,7 @@ def test_inspect_story_axle_toolchain_uses_typed_builder_report(
     assert payload["ready"] is True
     assert Path(payload["source_root"]) == source
     assert observed["source_root"] == source
+    assert observed["settings"] == NativeAxleToolchainSettings()
 
 
 def test_build_story_axle_runtime_requires_acknowledgement_and_maps_settings(
@@ -63,6 +71,14 @@ def test_build_story_axle_runtime_requires_acknowledgement_and_maps_settings(
         })
 
     monkeypatch.setattr(sdk_cli, "build_story_axle_runtime_candidate", build)
+    monkeypatch.setattr(
+        sdk_cli, "load_native_toolchain_settings",
+        lambda: NativeAxleToolchainSettings(),
+    )
+    monkeypatch.setattr(
+        sdk_cli, "inspect_native_axle_toolchain",
+        lambda **_kwargs: _toolchain_report(tmp_path / "native-source"),
+    )
     runner = CliRunner()
     arguments = [
         "build-story-axle-runtime",
@@ -114,7 +130,11 @@ def test_story_axle_controller_commands_are_guarded_in_agent_api(
     output = tmp_path / "controller-candidate"
     monkeypatch.setattr(
         sdk_cli, "inspect_native_axle_toolchain",
-        lambda *, source_root=None: _toolchain_report(source),
+        lambda *, source_root=None, settings=None: _toolchain_report(source),
+    )
+    monkeypatch.setattr(
+        sdk_cli, "load_native_toolchain_settings",
+        lambda: NativeAxleToolchainSettings(),
     )
     monkeypatch.setattr(
         sdk_cli, "build_story_axle_runtime_candidate",

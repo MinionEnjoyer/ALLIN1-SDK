@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -21,10 +22,12 @@ from lxml import etree
 from allin1_sdk.authoring_core import GuardedXmlWorkspace
 from allin1_sdk.native_assets import (
     MAX_MODEL_XML_BYTES,
+    MAX_MODEL_PARAMETER_ARRAY_ROWS,
     MODEL_PREVIEW_SUFFIXES,
     NATIVE_WORKSPACE_SCHEMA,
     NativeAssetInspector,
     NativeAssetReport,
+    NativeModelParameter,
     NativeModelScene,
     load_native_model_scene,
     resolve_shader_name,
@@ -98,6 +101,59 @@ def _validate_text(value: str, label: str, *, allow_empty: bool = False) -> str:
     if any(ord(character) < 32 for character in normalized):
         raise ValueError(f"{label} contains control characters")
     return normalized
+
+
+_FLOAT32_MAX = 3.4028234663852886e38
+_PARAMETER_AXES = ("x", "y", "z", "w")
+
+
+def normalize_model_parameter_values(
+    values: object, *, expected_rows: int,
+) -> tuple[tuple[str, str, str, str], ...]:
+    """Validate and canonically serialize an existing Vector4 parameter shape."""
+
+    if (
+        isinstance(expected_rows, bool) or not isinstance(expected_rows, int)
+        or not 0 <= expected_rows <= MAX_MODEL_PARAMETER_ARRAY_ROWS
+    ):
+        raise ValueError("Shader parameter row count is outside the guarded limit")
+    if not isinstance(values, (list, tuple)) or len(values) != expected_rows:
+        raise ValueError(
+            f"Shader parameter values must contain exactly {expected_rows} Vector4 "
+            f"row{'s' if expected_rows != 1 else ''}"
+        )
+    normalized_rows: list[tuple[str, str, str, str]] = []
+    for row_index, row in enumerate(values):
+        if not isinstance(row, (list, tuple)) or len(row) != 4:
+            raise ValueError(
+                f"Shader parameter row {row_index + 1} must contain exactly four components"
+            )
+        normalized: list[str] = []
+        for axis, value in zip(_PARAMETER_AXES, row, strict=True):
+            if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+                raise ValueError(
+                    f"Shader parameter row {row_index + 1} component {axis} must be numeric"
+                )
+            text = str(value).strip()
+            if not text or len(text) > 64 or any(ord(character) < 32 for character in text):
+                raise ValueError(
+                    f"Shader parameter row {row_index + 1} component {axis} is malformed"
+                )
+            try:
+                number = float(text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Shader parameter row {row_index + 1} component {axis} must be numeric"
+                ) from exc
+            if not math.isfinite(number) or abs(number) > _FLOAT32_MAX:
+                raise ValueError(
+                    f"Shader parameter row {row_index + 1} component {axis} must be a "
+                    "finite float32 value"
+                )
+            canonical = format(number, ".9g")
+            normalized.append("0" if float(canonical) == 0 else canonical)
+        normalized_rows.append((normalized[0], normalized[1], normalized[2], normalized[3]))
+    return tuple(normalized_rows)
 
 
 def _read_tree(path: Path) -> etree._ElementTree:
@@ -213,6 +269,7 @@ class ModelMaterialRecord:
     index: int
     shader: str
     textures: tuple[MaterialTextureBinding, ...]
+    parameters: tuple[NativeModelParameter, ...] = ()
     geometry_indices: tuple[int, ...] = ()
 
 
@@ -276,6 +333,7 @@ class ModelMaterialProject:
             "summary": {
                 "materials": len(self.materials),
                 "texture_bindings": sum(len(item.textures) for item in self.materials),
+                "numeric_parameters": sum(len(item.parameters) for item in self.materials),
                 "geometries": len(self.geometries),
                 "components": len(self.components),
                 "errors": self.error_count,
@@ -346,6 +404,7 @@ def _project_from_scene(
             index=item.index, shader=item.name,
             textures=tuple(MaterialTextureBinding(slot, texture, _texture_role(slot))
                            for slot, texture in item.texture_parameters),
+            parameters=item.parameters,
             geometry_indices=tuple(usage.get(item.index, ())),
         ) for item in scene.materials)
         geometries = tuple(geometries_list)
@@ -479,6 +538,10 @@ def inspect_model_xml(
         textures=tuple(
             MaterialTextureBinding(slot, texture, _texture_role(slot))
             for slot, texture in _material_parameters(shader)
+        ),
+        parameters=(
+            scene.materials[index].parameters
+            if index < len(scene.materials) else ()
         ),
         geometry_indices=tuple(usage.get(index, ())),
     ) for index, shader in enumerate(shaders))
@@ -672,6 +735,7 @@ class MaterialAuthoringWorkspace:
             "xml_sha256": project.sha256,
             "editable": [
                 "existing shader names", "existing texture bindings",
+                "existing numeric Vector and Array parameter components",
                 "existing geometry shader indices",
             ],
             "schema_nodes_synthesized": False,
@@ -777,6 +841,66 @@ class MaterialAuthoringWorkspace:
                 raise ValueError("Material edit does not change the selected shader")
             return self._commit(
                 subject=f"material:{material_index}", tree=tree,
+                changes=tuple(changes), before=before,
+            )
+
+    def set_parameter(
+        self, material_index: int, parameter_name: str, values: object, *,
+        expected_revision: int,
+    ) -> MaterialAuthoringResult:
+        """Edit one existing numeric shader parameter without changing its shape."""
+
+        with self._core.operation_lock():
+            self._refresh()
+            self._check_revision(expected_revision)
+            before = self.inspect()
+            tree = _read_tree(self.xml_path)
+            shaders = _shader_items(tree.getroot())
+            if (
+                isinstance(material_index, bool) or not isinstance(material_index, int)
+                or not 0 <= material_index < len(shaders)
+            ):
+                raise ValueError("Material index is outside the model shader catalog")
+            name = _validate_text(parameter_name, "Shader parameter name")
+            matches = [
+                parameter for parameter in shaders[material_index].xpath(
+                    "./*[local-name()='Parameters']/*[local-name()='Item']"
+                )
+                if parameter.get("name", "").strip().casefold() == name.casefold()
+                and parameter.get("type", "").strip().casefold() in {"vector", "array"}
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"Numeric shader parameter must resolve exactly once: {name}"
+                )
+            parameter = matches[0]
+            source_type = parameter.get("type", "").strip().casefold()
+            rows = (
+                (parameter,) if source_type == "vector"
+                else tuple(parameter.xpath("./*[local-name()='Value']"))
+            )
+            normalized = normalize_model_parameter_values(
+                values, expected_rows=len(rows),
+            )
+            changes: list[dict[str, str]] = []
+            for row_index, (row, requested) in enumerate(zip(rows, normalized, strict=True)):
+                canonical_row = normalize_model_parameter_values(
+                    [[row.get(component, "") for component in _PARAMETER_AXES]],
+                    expected_rows=1,
+                )[0]
+                for axis, before_value, after in zip(
+                    _PARAMETER_AXES, canonical_row, requested, strict=True,
+                ):
+                    if before_value != after:
+                        row.set(axis, after)
+                        changes.append({
+                            "field": f"parameter.{name}[{row_index}].{axis}",
+                            "before": before_value, "after": after,
+                        })
+            if not changes:
+                raise ValueError("Shader parameter edit does not change the selected value")
+            return self._commit(
+                subject=f"parameter:{material_index}:{name}", tree=tree,
                 changes=tuple(changes), before=before,
             )
 
@@ -929,4 +1053,5 @@ __all__ = [
     "inspect_model_bytes",
     "inspect_model_file",
     "inspect_model_xml",
+    "normalize_model_parameter_values",
 ]

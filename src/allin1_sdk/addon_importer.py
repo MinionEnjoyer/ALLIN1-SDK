@@ -25,6 +25,7 @@ from allin1_sdk.material_progression import (
     MaterialProgressionReport,
     audit_material_progressions,
 )
+from allin1_sdk.map_rpf_safety import inspect_startup_map_registration
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -1246,9 +1247,17 @@ class AddonPackageInspector:
                 item.edition.casefold(), item.name.casefold(),
             ), findings,
         )
-        peds = self._dedupe_records(
-            peds, lambda item: item.name.casefold(), findings,
-        )
+        # Keep every definition: silently selecting the first would hide an
+        # ambiguous authoring target and lose dependency-inspection evidence.
+        seen_peds: set[str] = set()
+        for ped in peds:
+            if ped.name.casefold() in seen_peds:
+                findings.append(PackageFinding(
+                    "warning", "duplicate_record",
+                    f"Duplicate ped metadata record retained for review: {ped.name}",
+                    ped.source,
+                ))
+            seen_peds.add(ped.name.casefold())
         self._report_source_record_duplicates(
             weapon_animation_records,
             lambda item: (
@@ -1835,6 +1844,7 @@ class AddonPackageInspector:
                                 f"batch: {exc}", member.path,
                             ))
                     promoted = 0
+                    parsed_metadata: list[tuple[str, ET.Element]] = []
                     for item, destination in zip(
                         selected_metadata, extracted_metadata,
                     ):
@@ -1852,6 +1862,7 @@ class AddonPackageInspector:
                                 virtual_source,
                             ))
                             continue
+                        parsed_metadata.append((virtual_source, xml_root))
                         found_vehicles = self._vehicle_records(
                             virtual_source, xml_root,
                         )
@@ -1908,6 +1919,15 @@ class AddonPackageInspector:
                             len(found_ammo), len(found_components),
                             len(found_component_links), len(found_animations),
                             len(found_shop_records), len(found_peds),
+                        ))
+                    for startup_finding in inspect_startup_map_registration(
+                        index, parsed_metadata,
+                    ):
+                        findings.append(PackageFinding(
+                            startup_finding.severity,
+                            startup_finding.code,
+                            startup_finding.message,
+                            startup_finding.path,
                         ))
                     if promoted:
                         findings.append(PackageFinding(

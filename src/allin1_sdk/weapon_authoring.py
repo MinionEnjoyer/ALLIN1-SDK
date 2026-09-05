@@ -30,6 +30,13 @@ from allin1_sdk.authoring_core import (
     GuardedXmlWorkspace,
     create_copied_workspace,
     safe_relative_path,
+    safe_xml_parser,
+)
+from allin1_sdk.weapon_camera import (
+    ADVANCED_FIELDS, advanced_values, set_advanced_value, validate_advanced_value,
+)
+from allin1_sdk.weapon_fire_rate import (
+    RPM_KEY, INTERVAL_KEY, fire_rate_values, set_fire_rate, validate_rpm,
 )
 
 
@@ -71,7 +78,7 @@ SHOP_FIELDS: dict[str, str] = {
     "shop.weaponUppercase": "weaponUppercase",
     "shop.availableInSP": "availableInSP",
 }
-EDITABLE_FIELDS = tuple((*WEAPON_FIELDS, *AMMO_FIELDS))
+EDITABLE_FIELDS = tuple((*WEAPON_FIELDS, *AMMO_FIELDS, *ADVANCED_FIELDS, RPM_KEY))
 EDITABLE_COMPONENT_FIELDS = tuple(COMPONENT_FIELDS)
 EDITABLE_SHOP_FIELDS = tuple(SHOP_FIELDS)
 
@@ -552,7 +559,12 @@ class WeaponAuthoringWorkspace:
         self, weapon_name: str, *, _scan: PackageScan | None = None,
     ) -> WeaponAuthoringValues:
         scan = _scan or AddonPackageInspector().inspect(self.source)
-        weapon = self._unique_weapon(scan, weapon_name)
+        return self.values_for_scan(scan, weapon_name)
+
+    @staticmethod
+    def values_for_scan(scan: PackageScan, weapon_name: str) -> WeaponAuthoringValues:
+        """Resolve the same weapon/ammo evidence for source and copied workspaces."""
+        weapon = WeaponAuthoringWorkspace._unique_weapon(scan, weapon_name)
         ammo_matches = [
             item for item in scan.ammo
             if item.name.casefold() == weapon.ammo_info.casefold()
@@ -566,6 +578,15 @@ class WeaponAuthoringWorkspace:
             "weapon.statName": weapon.stat_name,
         }
         sources = {"weapon": weapon.source}
+        # The inspector has already bounded and loaded loose XML. Opaque archive
+        # members remain read-only until extracted; never guess paths or fields.
+        entry = next((item for item in scan.entries if item.path == weapon.source), None)
+        if entry is not None and entry.content is not None:
+            tree = etree.ElementTree(etree.fromstring(entry.content, safe_xml_parser()))
+            if tree.docinfo.doctype:
+                raise ValueError("Weapon metadata must not contain a document type")
+            values.update(advanced_values(WeaponAuthoringWorkspace._record_item(tree, weapon.name, "weapon")))
+            values.update(fire_rate_values(WeaponAuthoringWorkspace._record_item(tree, weapon.name, "weapon")))
         affected = (weapon.name,)
         if ammo is not None:
             values.update({
@@ -577,14 +598,20 @@ class WeaponAuthoringWorkspace:
                 "ammo.primedFx": ammo.primed_fx,
             })
             sources["ammo"] = ammo.source
-            affected = self._weapons_using_ammo(scan, ammo.name)
+            affected = WeaponAuthoringWorkspace._weapons_using_ammo(scan, ammo.name)
         return WeaponAuthoringValues(weapon.name, values, sources, affected)
 
     def component_values(
         self, component_name: str, *, _scan: PackageScan | None = None,
     ) -> WeaponComponentAuthoringValues:
         scan = _scan or AddonPackageInspector().inspect(self.source)
-        component = self._unique_component(scan, component_name)
+        return self.component_values_for_scan(scan, component_name)
+
+    @staticmethod
+    def component_values_for_scan(
+        scan: PackageScan, component_name: str,
+    ) -> WeaponComponentAuthoringValues:
+        component = WeaponAuthoringWorkspace._unique_component(scan, component_name)
         affected = _casefold_unique(
             item.weapon_name for item in scan.weapon_component_links
             if item.component_name.casefold() == component.name.casefold()
@@ -650,18 +677,49 @@ class WeaponAuthoringWorkspace:
         )
         selected = tuple(item for item in records if item.source == selected_source)
         tree = self._core.read_tree(selected_source)
-        item, identity = self._shop_item(tree, weapon.name, selected)
+        return self._shop_values_from_tree(tree, weapon.name, selected_source, selected)
+
+    @classmethod
+    def shop_values_for_scan(
+        cls, scan: PackageScan, weapon_name: str, source: str | None = None,
+    ) -> WeaponShopAuthoringValues:
+        """Inspect bounded loose XML without creating an authoring workspace."""
+        weapon = cls._unique_weapon(scan, weapon_name)
+        records = tuple(record for record in scan.weapon_shop_records
+                        if record.weapon_name.casefold() == weapon.name.casefold())
+        selected_source = cls._select_relationship_source(records, source, "weapon shop")
+        selected = tuple(record for record in records if record.source == selected_source)
+        entry = next((entry for entry in scan.entries if entry.path == selected_source), None)
+        if entry is None or entry.content is None:
+            raise ValueError("Extract the weapon shop metadata into bounded loose XML first")
+        tree = etree.ElementTree(etree.fromstring(entry.content, safe_xml_parser()))
+        if tree.docinfo.doctype:
+            raise ValueError("Weapon shop metadata must not contain a document type")
+        return cls._shop_values_from_tree(tree, weapon.name, selected_source, selected)
+
+    @classmethod
+    def _shop_values_from_tree(
+        cls, tree: etree._ElementTree, weapon_name: str, source: str,
+        records: tuple[WeaponShopRecord, ...],
+    ) -> WeaponShopAuthoringValues:
+        item, identity = cls._shop_item(tree, weapon_name, records)
         values: dict[str, str] = {}
         representations: dict[str, str] = {}
         for field, node_name in SHOP_FIELDS.items():
+            nodes = [child for child in item if isinstance(child.tag, str) and _local_name(child) == node_name]
+            if len(nodes) > 1:
+                raise ValueError(f"Weapon-shop field {node_name} is duplicated")
             node = _direct_child(item, node_name)
+            if node is not None and (len(node) or ("ref" in node.attrib and "value" in node.attrib)
+                                     or (("ref" in node.attrib or "value" in node.attrib) and (node.text or "").strip())):
+                raise ValueError(f"Weapon-shop field {node_name} has an unsupported or ambiguous representation")
             values[field] = _element_value(node)
-            representations[field] = self._element_representation(node)
+            representations[field] = cls._element_representation(node)
         return WeaponShopAuthoringValues(
-            weapon=weapon.name,
-            source=selected_source,
+            weapon=weapon_name,
+            source=source,
             identity_field=_local_name(identity),
-            identity_representation=self._element_representation(identity),
+            identity_representation=cls._element_representation(identity),
             values=values,
             representations=representations,
         )
@@ -1243,150 +1301,195 @@ class WeaponAuthoringWorkspace:
         )
 
     def clone_animation_mappings(
-        self,
-        weapon_name: str,
-        template_weapon: str,
-        source: str | None = None,
-        *,
+        self, weapon_name: str, template_weapon: str, source: str | None = None, *,
         expected_revision: int | None = None,
+        expected_review_sha256: str | None = None,
     ) -> WeaponAuthoringResult:
         with self._core.operation_lock():
             self._core.refresh_manifest()
             self._check_revision(expected_revision)
-            scan, before_project = self._scan_project()
-            weapon = self._unique_weapon(scan, weapon_name)
-            template = self._animation_identity(scan, template_weapon)
-            if weapon.name.casefold() == template.casefold():
-                raise ValueError("Animation target and template weapons must differ")
-            existing = [
-                item for item in scan.weapon_animation_records
-                if item.weapon_name.casefold() == weapon.name.casefold()
-            ]
-            if existing:
-                raise ValueError(
-                    f"Animation target already has mappings: {weapon.name}"
-                )
-            template_records = tuple(
-                item for item in scan.weapon_animation_records
-                if item.weapon_name.casefold() == template.casefold()
-            )
-            selected_source = self._select_relationship_source(
-                template_records, source, "animation template",
-            )
-            selected = tuple(sorted(
-                (
-                    item for item in template_records
-                    if item.source == selected_source
-                ),
-                key=lambda item: (item.set_ordinal, item.ordinal),
-            ))
-            if not selected:
-                raise ValueError(
-                    f"Animation template has no mappings in {selected_source}"
-                )
-            counts: dict[int, int] = {}
-            for record in selected:
-                counts[record.set_ordinal] = counts.get(record.set_ordinal, 0) + 1
-            duplicated = sorted(index for index, count in counts.items() if count != 1)
-            if duplicated:
-                raise ValueError(
-                    "Animation template must appear exactly once per animation set; "
-                    "duplicate set ordinals: " + ", ".join(map(str, duplicated))
-                )
+            if expected_review_sha256 is not None:
+                review = self.review_animation_clone(weapon_name, template_weapon, source)
+                if review["review_sha256"] != expected_review_sha256:
+                    raise ValueError("Animation workspace or edits changed after review; review again")
+            return self._clone_animation_locked(weapon_name, template_weapon, source)
 
-            tree = self._core.read_tree(selected_source)
-            original_document = self._canonical_element(tree.getroot())
-            expected_templates: dict[int, bytes] = {}
-            changes: list[dict[str, str]] = []
-            for record in selected:
-                template_item = self._animation_item(tree, record)
-                expected_templates[record.set_ordinal] = \
-                    self._canonical_animation_item(template_item, template)
-                clone = deepcopy(template_item)
-                clone.set("key", weapon.name)
-                template_item.addnext(clone)
-                changes.append({
-                    "field": "animation.mapping",
-                    "before": template,
-                    "after": weapon.name,
-                    "source": selected_source,
-                    "set": record.set_name or str(record.set_ordinal),
-                })
-            expected_coverage = tuple(
-                (item.set_ordinal, item.set_name) for item in selected
+    def review_animation_clone(
+        self, weapon_name: str, template_weapon: str, source: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate complete per-set mapping additions without writing the copy."""
+        self._core.refresh_manifest()
+        result = self._clone_animation_locked(weapon_name, template_weapon, source, review_only=True)
+        assert isinstance(result, dict)
+        return result
+
+    def _clone_animation_locked(
+        self, weapon_name: str, template_weapon: str, source: str | None, *,
+        review_only: bool = False,
+    ) -> WeaponAuthoringResult | dict[str, Any]:
+        state_before = self.state_sha256() if review_only else ""
+        scan, before_project = self._scan_project()
+        weapon = self._unique_weapon(scan, weapon_name)
+        template = self._animation_identity(scan, template_weapon)
+        if weapon.name.casefold() == template.casefold():
+            raise ValueError("Animation target and template weapons must differ")
+        existing = [
+            item for item in scan.weapon_animation_records
+            if item.weapon_name.casefold() == weapon.name.casefold()
+        ]
+        if existing:
+            raise ValueError(
+                f"Animation target already has mappings: {weapon.name}"
             )
-            return self._commit(
-                subject=weapon.name,
-                subject_kind="animation",
-                affected_weapons=(weapon.name,),
-                trees={selected_source: tree},
-                changes=tuple(changes),
-                before_project=before_project,
-                verify=lambda after_scan: self._verify_animation_clone(
-                    after_scan,
-                    weapon.name,
-                    template,
-                    selected_source,
-                    expected_coverage,
-                    expected_templates,
-                    original_document,
-                ),
-                operation="weapon_animation_clone",
+        template_records = tuple(
+            item for item in scan.weapon_animation_records
+            if item.weapon_name.casefold() == template.casefold()
+        )
+        selected_source = self._select_relationship_source(
+            template_records, source, "animation template",
+        )
+        selected = tuple(sorted(
+            (
+                item for item in template_records
+                if item.source == selected_source
+            ),
+            key=lambda item: (item.set_ordinal, item.ordinal),
+        ))
+        if not selected:
+            raise ValueError(
+                f"Animation template has no mappings in {selected_source}"
             )
+        counts: dict[int, int] = {}
+        for record in selected:
+            counts[record.set_ordinal] = counts.get(record.set_ordinal, 0) + 1
+        duplicated = sorted(index for index, count in counts.items() if count != 1)
+        if duplicated:
+            raise ValueError(
+                "Animation template must appear exactly once per animation set; "
+                "duplicate set ordinals: " + ", ".join(map(str, duplicated))
+            )
+
+        tree = self._core.read_tree(selected_source)
+        original_document = self._canonical_element(tree.getroot())
+        expected_templates: dict[int, bytes] = {}
+        changes: list[dict[str, str]] = []
+        for record in selected:
+            template_item = self._animation_item(tree, record)
+            expected_templates[record.set_ordinal] = \
+                self._canonical_animation_item(template_item, template)
+            clone = deepcopy(template_item)
+            clone.set("key", weapon.name)
+            template_item.addnext(clone)
+            changes.append({
+                "field": "animation.mapping",
+                "before": template,
+                "after": weapon.name,
+                "source": selected_source,
+                "set": record.set_name or str(record.set_ordinal),
+            })
+        expected_coverage = tuple(
+            (item.set_ordinal, item.set_name) for item in selected
+        )
+        if review_only:
+            return self._relationship_review(
+                state_before, subject_kind="animation", weapon=weapon.name,
+                template_weapon=template, source=selected_source, changes=changes,
+                affected_weapons=[weapon.name],
+            )
+        return self._commit(
+            subject=weapon.name,
+            subject_kind="animation",
+            affected_weapons=(weapon.name,),
+            trees={selected_source: tree},
+            changes=tuple(changes),
+            before_project=before_project,
+            verify=lambda after_scan: self._verify_animation_clone(
+                after_scan,
+                weapon.name,
+                template,
+                selected_source,
+                expected_coverage,
+                expected_templates,
+                original_document,
+            ),
+            operation="weapon_animation_clone",
+        )
 
     def update_shop(
-        self,
-        weapon_name: str,
-        updates: dict[str, Any],
-        source: str | None = None,
-        *,
+        self, weapon_name: str, updates: dict[str, Any], source: str | None = None, *,
         expected_revision: int | None = None,
+        expected_review_sha256: str | None = None,
     ) -> WeaponAuthoringResult:
         with self._core.operation_lock():
             self._core.refresh_manifest()
             self._check_revision(expected_revision)
-            unknown = sorted(set(updates) - set(EDITABLE_SHOP_FIELDS))
-            if unknown:
-                raise ValueError(
-                    "Unsupported weapon-shop fields: " + ", ".join(unknown)
-                )
-            scan, before_project = self._scan_project()
-            current = self.shop_values(weapon_name, source, _scan=scan)
-            normalized = {
-                key: self._validate_shop_value(key, value)
-                for key, value in updates.items()
-            }
-            changed = {
-                key: value for key, value in normalized.items()
-                if value != current.values.get(key, "")
-            }
-            if not changed:
-                raise ValueError("Weapon-shop update contains no changed values")
-            tree = self._core.read_tree(current.source)
-            records = tuple(
-                item for item in scan.weapon_shop_records
-                if item.weapon_name.casefold() == current.weapon.casefold()
-                and item.source == current.source
+            if expected_review_sha256 is not None:
+                review = self.review_shop_update(weapon_name, updates, source)
+                if review["review_sha256"] != expected_review_sha256:
+                    raise ValueError("Shop workspace or edits changed after review; review again")
+            return self._update_shop_locked(weapon_name, updates, source)
+
+    def review_shop_update(
+        self, weapon_name: str, updates: dict[str, Any], source: str | None = None,
+    ) -> dict[str, Any]:
+        """Review the same existing shop record and node representations as save."""
+        self._core.refresh_manifest()
+        result = self._update_shop_locked(weapon_name, updates, source, review_only=True)
+        assert isinstance(result, dict)
+        return result
+
+    def _update_shop_locked(
+        self, weapon_name: str, updates: dict[str, Any], source: str | None, *,
+        review_only: bool = False,
+    ) -> WeaponAuthoringResult | dict[str, Any]:
+        state_before = self.state_sha256() if review_only else ""
+        unknown = sorted(set(updates) - set(EDITABLE_SHOP_FIELDS))
+        if unknown:
+            raise ValueError(
+                "Unsupported weapon-shop fields: " + ", ".join(unknown)
             )
-            item, _identity = self._shop_item(tree, current.weapon, records)
-            changes: list[dict[str, str]] = []
-            for key, value in changed.items():
-                before, after = _set_preserving_representation(
-                    item, SHOP_FIELDS[key], value,
-                )
-                changes.append({"field": key, "before": before, "after": after})
-            return self._commit(
-                subject=current.weapon,
-                subject_kind="shop",
-                affected_weapons=(current.weapon,),
-                trees={current.source: tree},
-                changes=tuple(changes),
-                before_project=before_project,
-                verify=lambda after_scan: self._verify_shop_values(
-                    after_scan, current.weapon, current.source, changed,
-                ),
-                operation="weapon_shop_edit",
+        scan, before_project = self._scan_project()
+        current = self.shop_values(weapon_name, source, _scan=scan)
+        normalized = {
+            key: self._validate_shop_value(key, value)
+            for key, value in updates.items()
+        }
+        changed = {
+            key: value for key, value in normalized.items()
+            if value != current.values.get(key, "")
+        }
+        if not changed:
+            raise ValueError("Weapon-shop update contains no changed values")
+        tree = self._core.read_tree(current.source)
+        records = tuple(
+            item for item in scan.weapon_shop_records
+            if item.weapon_name.casefold() == current.weapon.casefold()
+            and item.source == current.source
+        )
+        item, _identity = self._shop_item(tree, current.weapon, records)
+        changes: list[dict[str, str]] = []
+        for key, value in changed.items():
+            before, after = _set_preserving_representation(
+                item, SHOP_FIELDS[key], value,
             )
+            changes.append({"field": key, "before": before, "after": after, "source": current.source})
+        if review_only:
+            return self._relationship_review(
+                state_before, subject_kind="shop", weapon=current.weapon,
+                source=current.source, changes=changes, affected_weapons=[current.weapon],
+            )
+        return self._commit(
+            subject=current.weapon,
+            subject_kind="shop",
+            affected_weapons=(current.weapon,),
+            trees={current.source: tree},
+            changes=tuple(changes),
+            before_project=before_project,
+            verify=lambda after_scan: self._verify_shop_values(
+                after_scan, current.weapon, current.source, changed,
+            ),
+            operation="weapon_shop_edit",
+        )
 
     def update(
         self,
@@ -1395,13 +1498,39 @@ class WeaponAuthoringWorkspace:
         *,
         expected_revision: int | None = None,
         acknowledge_shared: bool = False,
+        expected_review_sha256: str | None = None,
     ) -> WeaponAuthoringResult:
         with self._core.operation_lock():
             self._core.refresh_manifest()
             self._check_revision(expected_revision)
+            if expected_review_sha256 is not None:
+                review = self.review_update(weapon_name, updates, acknowledge_shared=acknowledge_shared)
+                if review["review_sha256"] != expected_review_sha256:
+                    raise ValueError("Weapon workspace or edits changed after review; review again")
             return self._update_locked(
                 weapon_name, updates, acknowledge_shared=acknowledge_shared,
             )
+
+    def state_sha256(self) -> str:
+        """Bind desktop reviews to content bytes, not merely filenames and sizes."""
+        digest = hashlib.sha256(self.manifest_path.read_bytes())
+        scan = AddonPackageInspector().inspect(self.source)
+        for entry in sorted(scan.entries, key=lambda item: item.path):
+            digest.update(entry.path.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(_file_sha256(self._core.member(entry.path)).encode("ascii"))
+        return digest.hexdigest()
+
+    def review_update(
+        self, weapon_name: str, updates: dict[str, str], *, acknowledge_shared: bool = False,
+    ) -> dict[str, Any]:
+        """Parse and validate the same existing nodes as save, without touching files."""
+        self._core.refresh_manifest()
+        result = self._update_locked(
+            weapon_name, updates, acknowledge_shared=acknowledge_shared, review_only=True,
+        )
+        assert isinstance(result, dict)
+        return result
 
     def _update_locked(
         self,
@@ -1409,7 +1538,9 @@ class WeaponAuthoringWorkspace:
         updates: dict[str, str],
         *,
         acknowledge_shared: bool,
-    ) -> WeaponAuthoringResult:
+        review_only: bool = False,
+    ) -> WeaponAuthoringResult | dict[str, Any]:
+        state_before = self.state_sha256() if review_only else None
         unknown = sorted(set(updates) - set(EDITABLE_FIELDS))
         if unknown:
             raise ValueError("Unsupported weapon authoring fields: " + ", ".join(unknown))
@@ -1486,7 +1617,12 @@ class WeaponAuthoringWorkspace:
         )
         changes: list[dict[str, str]] = []
         for key, value in changed.items():
-            if key in WEAPON_FIELDS:
+            if key == RPM_KEY:
+                before, after, native_before, native_after = set_fire_rate(weapon_item, value)
+                changes.append({"field": INTERVAL_KEY, "before": native_before, "after": native_after})
+            elif key in ADVANCED_FIELDS:
+                before, after = set_advanced_value(weapon_item, key, value)
+            elif key in WEAPON_FIELDS:
                 before, after = _set_preserving_representation(
                     weapon_item,
                     WEAPON_FIELDS[key],
@@ -1501,6 +1637,19 @@ class WeaponAuthoringWorkspace:
                 )
             changes.append({"field": key, "before": before, "after": after})
         affected = current.affected_weapons if ammo_changed else (current.weapon,)
+        if review_only:
+            if self.state_sha256() != state_before:
+                raise ValueError("Weapon workspace changed during review; retry")
+            review = {
+                "workspace": str(self.root), "revision": self.revision,
+                "weapon": current.weapon, "changes": changes,
+                "affected_weapons": list(affected), "state_sha256": state_before,
+                "acknowledge_shared": acknowledge_shared,
+            }
+            review["review_sha256"] = hashlib.sha256(json.dumps(
+                review, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            return review
         return self._commit(
             subject=current.weapon,
             subject_kind="weapon",
@@ -1521,13 +1670,44 @@ class WeaponAuthoringWorkspace:
         *,
         expected_revision: int | None = None,
         acknowledge_shared: bool = False,
+        expected_review_sha256: str | None = None,
     ) -> WeaponAuthoringResult:
         with self._core.operation_lock():
             self._core.refresh_manifest()
             self._check_revision(expected_revision)
+            if expected_review_sha256 is not None:
+                review = self.review_component_update(
+                    component_name, updates, acknowledge_shared=acknowledge_shared,
+                )
+                if review["review_sha256"] != expected_review_sha256:
+                    raise ValueError("Component workspace or edits changed after review; review again")
             return self._update_component_locked(
                 component_name, updates, acknowledge_shared=acknowledge_shared,
             )
+
+    def review_component_update(
+        self, component_name: str, updates: dict[str, str], *,
+        acknowledge_shared: bool = False,
+    ) -> dict[str, Any]:
+        """Validate an existing component using the exact save path, without writes."""
+        self._core.refresh_manifest()
+        result = self._update_component_locked(
+            component_name, updates, acknowledge_shared=acknowledge_shared, review_only=True,
+        )
+        assert isinstance(result, dict)
+        return result
+
+    def _relationship_review(self, state_before: str, **details: Any) -> dict[str, Any]:
+        if self.state_sha256() != state_before:
+            raise ValueError("Weapon workspace changed during review; retry")
+        review = {
+            "workspace": str(self.root), "revision": self.revision,
+            "state_sha256": state_before, **details,
+        }
+        review["review_sha256"] = hashlib.sha256(json.dumps(
+            review, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        return review
 
     def _update_component_locked(
         self,
@@ -1535,7 +1715,9 @@ class WeaponAuthoringWorkspace:
         updates: dict[str, str],
         *,
         acknowledge_shared: bool,
-    ) -> WeaponAuthoringResult:
+        review_only: bool = False,
+    ) -> WeaponAuthoringResult | dict[str, Any]:
+        state_before = self.state_sha256() if review_only else ""
         unknown = sorted(set(updates) - set(EDITABLE_COMPONENT_FIELDS))
         if unknown:
             raise ValueError(
@@ -1570,6 +1752,12 @@ class WeaponAuthoringWorkspace:
                 item, COMPONENT_FIELDS[key], value,
             )
             changes.append({"field": key, "before": before, "after": after})
+        if review_only:
+            return self._relationship_review(
+                state_before, subject_kind="component", component=current.component,
+                changes=changes, affected_weapons=list(current.affected_weapons),
+                acknowledge_shared=acknowledge_shared,
+            )
         return self._commit(
             subject=current.component,
             subject_kind="component",
@@ -1590,20 +1778,38 @@ class WeaponAuthoringWorkspace:
         updates: dict[str, Any],
         *,
         expected_revision: int | None = None,
+        expected_review_sha256: str | None = None,
     ) -> WeaponAuthoringResult:
         with self._core.operation_lock():
             self._core.refresh_manifest()
             self._check_revision(expected_revision)
+            if expected_review_sha256 is not None:
+                review = self.review_attachment_update(weapon_name, component_name, updates)
+                if review["review_sha256"] != expected_review_sha256:
+                    raise ValueError("Attachment workspace or edits changed after review; review again")
             return self._update_attachment_locked(
                 weapon_name, component_name, updates,
             )
+
+    def review_attachment_update(
+        self, weapon_name: str, component_name: str, updates: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Review the exact weapon/component pair, preserving its attachment point."""
+        self._core.refresh_manifest()
+        result = self._update_attachment_locked(
+            weapon_name, component_name, updates, review_only=True,
+        )
+        assert isinstance(result, dict)
+        return result
 
     def _update_attachment_locked(
         self,
         weapon_name: str,
         component_name: str,
         updates: dict[str, Any],
-    ) -> WeaponAuthoringResult:
+        *, review_only: bool = False,
+    ) -> WeaponAuthoringResult | dict[str, Any]:
+        state_before = self.state_sha256() if review_only else ""
         unknown = sorted(set(updates) - set(ATTACHMENT_FIELDS))
         if unknown:
             raise ValueError("Unsupported attachment fields: " + ", ".join(unknown))
@@ -1655,6 +1861,12 @@ class WeaponAuthoringWorkspace:
             changes.append({
                 "field": "attachment.default", "before": before, "after": after,
             })
+        if review_only:
+            return self._relationship_review(
+                state_before, subject_kind="attachment", weapon=link.weapon_name,
+                component=link.component_name, attach_bone=link.attach_bone,
+                changes=changes, affected_weapons=[link.weapon_name],
+            )
         return self._commit(
             subject=f"{link.weapon_name}/{link.component_name}",
             subject_kind="attachment",
@@ -1669,11 +1881,13 @@ class WeaponAuthoringWorkspace:
         )
 
     def undo(
-        self, *, expected_revision: int | None = None,
+        self, *, expected_revision: int | None = None, expected_state_sha256: str | None = None,
     ) -> WeaponAuthoringResult:
         with self._core.operation_lock():
             self._core.refresh_manifest()
             self._check_revision(expected_revision)
+            if expected_state_sha256 is not None and self.state_sha256() != expected_state_sha256:
+                raise ValueError("Weapon workspace changed after undo review; review again")
             return self._undo_locked()
 
     def _undo_locked(self) -> WeaponAuthoringResult:
@@ -2307,6 +2521,10 @@ class WeaponAuthoringWorkspace:
 
     @classmethod
     def _validate_value(cls, key: str, value: str) -> str:
+        if key == RPM_KEY:
+            return validate_rpm(value)
+        if key in ADVANCED_FIELDS:
+            return validate_advanced_value(key, value)
         if key in {"ammo.ammoMax", "ammo.ammoMax50"}:
             try:
                 number = int(value, 10)
