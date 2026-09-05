@@ -263,6 +263,8 @@ In the Tauri desktop, choose Content Workbench > Peds. Open ped folder or Open a
 
 The workbench checks core definition fields, drawable and texture presence, props, movement clip sets, and expression sets. Preview decodes the exact package-owned drawable and texture dictionary on one background worker: the model panel is a diagnostic geometry/material view, while the texture panel shows the actual packaged texture sheet. These are inspection views rather than an exact in-game shader render. Double-click a related file or use Open selected asset to continue in Asset Viewer. It never executes package scripts or loads content into GTA V.
 
+For YMT-specific evidence, the read-only inspect-ped-ymt command accepts a loose binary YMT, exported .ymt.xml, folder, supported package archive, or direct RPF. It preserves exact nested member paths and hashes, classifies decoded CPedVariationInfo and CCreatureMetaData content, and keeps package registration, mount state, runtime compatibility, and in-game acceptance separate. A successful decode is not proof that a YMT is mounted, expands a game limit, or works in GTA V.
+
 Create authoring workspace copies and verifies every visible package member before enabling writes. Normal field edits keep the ped identity locked. Existing ped type, model type, props, clip dictionary, expression set, movement clip set, and creature metadata fields can be edited without inventing missing schema nodes. Apply records the current revision, retains a complete local snapshot, preserves each field's text/value/ref representation and unknown XML, reparses the package, and rolls back any validation regression.
 
 New from template handles the new-record boundary as a two-step reviewed plan. It copies the donor's complete peds.meta Item, including unknown fields and node order, but requires one exact target drawable and texture dictionary plus the requested props asset family to exist before the plan becomes ready. It never copies native bytes under a new filename, because their internal identity may still belong to the donor. The plan binds the workspace revision, inventory, every selected source hash, requested fields, and plan_sha256; any change invalidates it.
@@ -273,6 +275,7 @@ Console and Agent API commands create-ped-authoring, inspect-ped-authoring, plan
         (
             "ped", "peds.meta", "ydd", "ydr", "ytd", "props", "movement",
             "authoring", "clone", "template", "preview", "migration", "undo",
+            "ymt", "mpclothes", "cloth", "limit", "hotloader",
         ),
     ),
     HelpTopic(

@@ -86,6 +86,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk inspect-package-receipt` | Inspect one validated managed-package receipt without changing GTA V. | mod_id, --gta-path |
 | `allin1-sdk inspect-package-rpfs` | Index every loose RPF member of a package using temporary extraction. | source, --output-dir / -o, --gta-path |
 | `allin1-sdk inspect-ped-authoring` | Inspect a ped workspace, validation state, and editable values. | workspace, --ped |
+| `allin1-sdk inspect-ped-ymt` | Inventory and classify ped-related YMTs without editing or mounting them. | source, --edition, --gta-path, --output / -o |
 | `allin1-sdk inspect-product-workspace` | Audit a data-only product graph and each component's source coverage. | source, --include-files |
 | `allin1-sdk inspect-rpf` | Write the helper's human-readable RPF inventory. | archive, --gta-path, --output / -o |
 | `allin1-sdk inspect-rpf-change-set` | Inspect staged actions and optional source/payload verification. | change_set, --verify-files, --output / -o |
@@ -223,6 +224,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk sdk inspect-package-graph-relations` | Inspect persisted vehicle links and relationship findings. | graph, --output / -o |
 | `allin1-sdk sdk inspect-package-rpfs` | Index every loose RPF member of a package using temporary extraction. | source, --output-dir / -o, --gta-path |
 | `allin1-sdk sdk inspect-ped-authoring` | Inspect a ped workspace, validation state, and editable values. | workspace, --ped |
+| `allin1-sdk sdk inspect-ped-ymt` | Inventory and classify ped-related YMTs without editing or mounting them. | source, --edition, --gta-path, --output / -o |
 | `allin1-sdk sdk inspect-product-workspace` | Audit a data-only product graph and each component's source coverage. | source, --include-files |
 | `allin1-sdk sdk inspect-rpf` | Write the helper's human-readable RPF inventory. | archive, --gta-path, --output / -o |
 | `allin1-sdk sdk inspect-rpf-change-set` | Inspect staged actions and optional source/payload verification. | change_set, --verify-files, --output / -o |

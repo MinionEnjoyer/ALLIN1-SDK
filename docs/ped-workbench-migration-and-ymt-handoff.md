@@ -2,10 +2,10 @@
 
 ## Scope and sequence
 
-The current focus is the Ped Workbench, not the remaining RPF graph/program UI.
-Bring the existing Tkinter workflow into Tauri v2/React first. The requested
-YMT dependency inspector and diagnostic contract follow this baseline; none of
-the ped authoring/preview checks below certify a YMT limit expansion.
+The Ped Workbench migration remains the baseline for the YMT follow-on. The
+first read-only YMT inventory and diagnostic report tranche now follows that
+baseline; none of the ped authoring, preview, or YMT decoding checks below
+certify a YMT limit expansion.
 
 This task does not authorize Launcher edits, live GTA writes, engine patches,
 asset rewrites to make diagnostics pass, or distribution of a placeholder ASI.
@@ -50,8 +50,8 @@ shader fidelity, or an in-game acceptance test.
 
 | Existing infrastructure | Reuse / needed extension |
 |---|---|
-| `addon_importer.py`, `PackageAssetReader`, `RpfExplorerService` | Reuse bounded reads and explicit nested member IDs. Add a separate complete YMT catalog, content-based classifiers and evidence-backed dependency/mount graph. Ped filename candidates are not this graph. |
-| `native_assets.py`, native RPF helper | Native inspection/export exists. Confirm decoded YMT schema coverage before deriving relationships; unsupported content stays unsupported. No runtime residency assumptions. |
+| `addon_importer.py`, `PackageAssetReader`, `RpfExplorerService` | Reused for bounded reads and explicit nested member IDs. The first separate YMT catalog and content-backed relationship report is implemented; broader dependency/mount analysis remains. Ped filename candidates are not this graph. |
+| `native_assets.py`, native RPF helper | Complete bounded YMT-to-XML decode is now exposed for the inspector. Unsupported content stays unsupported. No runtime residency assumptions. |
 | `ped_authoring.py`, `authoring_core.py` | Existing copy, lock, transaction, validation and undo. The YMT inspector remains read-only and must not invoke authoring to make a report pass. |
 | `story_axle_runtime_builder.py` | Existing CMake/CTest/VS/MSVC/Windows SDK discovery, strict overrides, fingerprint checks, isolated C++17/CTest probe, x64 artifact/build receipts. Extract project-contract-based requirements only after regression coverage; do not copy axle-specific assumptions. |
 | `native_toolchain_settings.py`, Tkinter controller builder | Existing workstation-only choices and recheck behavior. A general build contract must preserve strict invalid overrides and use exactly the preflighted toolchain. |
@@ -63,36 +63,52 @@ No YMT expansion native project has been identified in this SDK source audit.
 No new third-party dependency was added or rebundled for the ped implementation.
 Any future decoder/native dependency requires a separate redistribution audit.
 
-## Next implementation tranche: read-only YMT inspector and contracts
+## Implemented first tranche: read-only YMT inventory and report
 
-1. Define independent evidence states: archive structure, metadata decoding,
-   dependency resolution, target runtime/build compatibility and in-game
-   acceptance. Static estimates, observations and unknown/unsupported values
-   have separate provenance. Unavailable is `null`/unsupported, never zero.
-2. Inspect loose metadata and supported package/RPF sources, including exact
-   nested layers and proposed packs without installation. A selected GTA
-   installation provides edition/build context, not implicit compatibility.
-3. Classify ped variation, creature and other YMT metadata from decoded content.
-   Preserve source identity, full member path, fingerprint, ped/model and
-   male/female/shared evidence. Distinguish resolved, missing, ambiguous and
-   unsupported references, competing definitions, cycles and dependency reasons.
-4. Preserve the complete discovered catalog separately from the resolved graph.
-   Registration/mounting evidence distinguishes present-on-disk from expected
-   participation. Unknown overrides, load order and residency stay explicit.
-5. Version diagnostic JSON schemas and clearly synthetic examples before a
-   native ASI exists. Include SDK/report/runtime versions, executable/build/hash,
-   edition, adapter/profile, session, metadata identities, observable state and
-   reference ownership, queues/failures and unsupported fields. Import and
-   explanation must work without runtime code.
-6. Define a separate acceptance-receipt schema/import trust boundary. Logs,
+`allin1-sdk inspect-ped-ymt` now inspects loose binary YMT, exported
+`*.ymt.xml`, supported folder/archive sources, and exact recursively indexed
+RPF members. It uses the existing bounded package/RPF readers and the pinned
+CodeWalker decoder, preserves binary and decoded hashes, and classifies
+`CPedVariationInfo` and `CCreatureMetaData` from decoded roots rather than
+filenames. The explicitly read-only CLI command is also available through the
+existing typed Agent API, generic desktop `execute` job boundary, and a
+purpose-built cancellable `inspect_ped_ymt` desktop protocol operation.
+
+The version-1 `sdk/ped-ymt-report.schema.json` contract keeps the complete
+catalog separate from content-backed relationships. It reports registration
+evidence separately from unknown mount state, preserves alternative/competing
+definitions, and records unresolved cloth ownership where `ownsCloth=true`
+does not expose an exact YLD identity. Archive structure, metadata decoding,
+dependency resolution, runtime compatibility, and in-game acceptance remain
+independent states. The operation is read-only and has no game write path.
+
+## Remaining read-only and contract work
+
+1. Extend dependency derivation beyond variation cloth ownership and same-root
+   alternatives. Add build-scoped fixtures for missing, ambiguous and cyclic
+   metadata references without inventing filename-only relationships.
+2. Add installed-DLC registration/load-order context while keeping
+   present-on-disk, declared participation, mount state and residency distinct.
+   Unknown overrides and runtime state stay explicit.
+3. Add the React presentation and report to Qwen evidence context. These
+   surfaces must consume the same domain report and schema as the existing
+   CLI/typed Agent/desktop-protocol operation.
+4. Define runtime diagnostic/profile schemas and clearly synthetic examples
+   before a native ASI exists. Include SDK/report/runtime versions,
+   executable/build/hash, edition, adapter/profile, session, metadata identities,
+   observable state and reference ownership, queues/failures and unsupported
+   fields. Import and explanation must work without runtime code.
+5. Define a separate acceptance-receipt schema/import trust boundary. Logs,
    signatures, successful compilation and runtime self-reports cannot create
    trusted acceptance or support for unknown game builds.
-7. Add an explicitly bounded, redacted support bundle. Exclude proprietary assets,
+6. Add an explicitly bounded, redacted support bundle. Exclude proprietary assets,
    executable dumps, credentials and unneeded personal/local paths. Use the same
    inspector/schema validation in desktop, CLI, typed Agent API and Qwen grounding.
 
-These YMT operations and schemas are **not implemented by the ped migration**.
-Do not expose a functional-looking YMT UI or report runtime expansion on that basis.
+The native YMT expansion runtime, runtime schemas, acceptance import, support
+bundle, and React/Qwen surfaces are **not implemented by this first tranche**.
+Do not expose a functional-looking hotloader UI or report runtime
+expansion on the basis of this read-only inventory.
 
 ## Subsequent build and package work
 

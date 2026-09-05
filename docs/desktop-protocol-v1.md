@@ -227,6 +227,12 @@ shell grants these separately and the WebView cannot change either flag.
   findings, revision and a copied-content/manifest digest. Duplicate identities
   remain inspectable but are not editable. Direct RPF sources must be extracted
   before authoring. No mounting, YMT capacity or runtime-acceptance conclusion.
+- `inspect_ped_ymt`: cancellable read-only inventory for a loose binary YMT,
+  exported `*.ymt.xml`, folder, supported package archive, or direct RPF.
+  `edition` is required as decoder context; `gta_path` is required when RPF
+  indexing cannot use an already supplied installation. The result follows
+  `sdk/ped-ymt-report.schema.json`, keeps archive/decoding/dependency/runtime/
+  acceptance evidence independent, and never mounts metadata or writes GTA.
 - `review_ped_authoring`: cancellable read-only review for `create`, `edit`,
   `migrate`, `clone` or `undo`. Create binds source hashes and a new outside-GTA
   destination. Other actions require the inspected revision and state SHA-256.

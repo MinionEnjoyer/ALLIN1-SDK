@@ -67,6 +67,7 @@ fn sidecar_command(app: &AppHandle) -> Result<Command, String> {
         .path()
         .resource_dir()
         .map_err(|error| format!("could not resolve Tauri resources: {error}"))?;
+    crate::runtime_location::validate(&resource_dir.join("sidecar").join(crate::runtime_location::SIDECAR_NAME))?;
     let sidecar_root = resource_dir
         .join("sidecar")
         .canonicalize()
@@ -78,6 +79,7 @@ fn sidecar_command(app: &AppHandle) -> Result<Command, String> {
     if executable.parent() != Some(sidecar_root.as_path()) {
         return Err("packaged sidecar escaped its resource directory".to_string());
     }
+    crate::runtime_location::validate(&executable)?;
     Ok(Command::new(executable))
 }
 

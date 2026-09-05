@@ -1,6 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--check-runtime-location") {
+        match allin1_sdk_desktop_lib::inspect_runtime_location() {
+            Ok(report) => println!("{report}"),
+            Err(error) => { eprintln!("{error}"); std::process::exit(1); }
+        }
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("--verify-embedded-frontend") {
         match allin1_sdk_desktop_lib::inspect_embedded_frontend() {
             Ok(report) => println!("{report}"),

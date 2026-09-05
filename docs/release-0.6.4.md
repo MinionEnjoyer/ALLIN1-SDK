@@ -1,8 +1,8 @@
 # ALLIN1 SDK 0.6.4 — prerelease guide
 
 **Not release-qualified.** SDK and Launcher target 0.6.4 independently; neither
-requires the other's source checkout at runtime. Suppressors Enhanced 1.2.1 is a
-separate mod release and is not part of this SDK package.
+requires the other's source checkout at runtime. SDK package support does not
+imply that a mod is included in the SDK distribution.
 
 The owner explicitly approved publishing `v0.6.4-rc.1` as an unsigned prerelease
 with native/live acceptance gaps disclosed. This does not mark the full-release

@@ -57,7 +57,11 @@ def _context(payload):
 
 def inspect(payload):
     source, plan, identity, capabilities = _context(payload)
-    return {"source": str(source), "state_sha256": identity, "plan": json.loads(json.dumps(plan.to_dict())), "capabilities": capabilities}
+    # Keep the request spelling separate from the filesystem-resolved identity.
+    # Windows short names (and separator/case variants) need not equal resolve().
+    # Only echo after _context has validated the path and inspected its contents.
+    return {"source": str(source), "requested_source": payload["source"], "state_sha256": identity,
+            "plan": json.loads(json.dumps(plan.to_dict())), "capabilities": capabilities}
 
 
 def review(payload):

@@ -60,6 +60,7 @@ from allin1_sdk.package_graph import PackageGraphWorkspace
 from allin1_sdk.package_relations import PackageRelationshipAnalyzer
 from allin1_sdk.paths import gta_root_containing, project_root
 from allin1_sdk.ped_authoring import PedAuthoringWorkspace
+from allin1_sdk.ped_ymt_inspector import PedYmtInspector
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.product_workspace import (
     ProductWorkspaceInspector, load_product_workspace,
@@ -5979,6 +5980,40 @@ def inspect_model_materials(
     click.echo(json.dumps(payload, indent=2))
 
 
+@main.command("inspect-ped-ymt")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--edition", required=True,
+    type=click.Choice(("legacy", "enhanced"), case_sensitive=False),
+    help="Decoder target only; this does not assert runtime compatibility.",
+)
+@click.option(
+    "--gta-path", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Matching GTA installation required for RPF indexing; auto-detected when omitted.",
+)
+@click.option(
+    "--output", "-o", type=click.Path(dir_okay=False, path_type=Path),
+    help="Write the versioned report instead of printing it.",
+)
+def inspect_ped_ymt(
+    source: Path, edition: str, gta_path: Path | None, output: Path | None,
+) -> None:
+    """Inventory and classify ped-related YMTs without editing or mounting them."""
+    try:
+        resolved = source.expanduser().resolve(strict=True)
+        game = gta_path.expanduser().resolve(strict=True) if gta_path else detect_gta_path()
+        report = PedYmtInspector(PROJECT_ROOT, game).inspect(
+            resolved, edition=edition,
+        )
+        if output:
+            written = report.write(output)
+            click.echo(f"Wrote read-only ped YMT report: {written}")
+        else:
+            click.echo(json.dumps(report.to_dict(), indent=2))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @main.command("create-material-workspace")
 @click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
@@ -6748,6 +6783,7 @@ for _command in (
     inspect_vehicle_distribution, set_vehicle_distribution,
     set_vehicle_fields, undo_vehicle_edit,
     create_ped_authoring, inspect_ped_authoring,
+    inspect_ped_ymt,
     plan_ped_clone, clone_ped_bundle,
     set_ped_fields, migrate_ped_identity, undo_ped_edit,
     create_weapon_authoring, inspect_weapon_authoring,

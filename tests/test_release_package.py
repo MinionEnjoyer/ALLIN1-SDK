@@ -168,6 +168,31 @@ def test_native_unit_ci_does_not_require_stale_installer_staging():
     assert 'TAURI_CONFIG' not in packaging_step
 
 
+def test_desktop_ci_retains_failed_test_evidence_without_uploading_partial_binaries():
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/tauri-desktop.yml").read_text(encoding="utf-8")
+    react_step = workflow.split("- name: Validate React shell")[1].split("- name:")[0]
+    assert "--reporter=json" in react_step and "../build/react-results.json" in react_step
+    diagnostics = workflow.split("- name: Retain diagnostic evidence even when qualification fails")[1]
+    assert "if: always()" in diagnostics
+    assert "build/python-results.xml" in diagnostics and "build/react-results.json" in diagnostics
+    assert "gate-*.json" in diagnostics and "coverage.xml" in diagnostics
+    assert "portable-lifecycle/portable-lifecycle.json" in diagnostics
+    assert "*.exe" not in diagnostics and "*.zip" not in diagnostics
+    candidates = workflow.split("- name: Upload unsigned candidates and smoke evidence (not publication)")[1].split("- name:")[0]
+    assert "always()" not in candidates and "if-no-files-found: error" in candidates
+    assert "portable-lifecycle/portable-lifecycle.json" in candidates
+
+
+def test_both_candidate_builders_require_portable_rehearsal_and_keep_release_gates_separate():
+    root = Path(__file__).resolve().parents[1]
+    for script in ("desktop_candidate.py", "desktop_smoke_candidate.py"):
+        source = (root / "scripts" / script).read_text(encoding="utf-8")
+        assert "from scripts.portable_lifecycle import rehearse" in source
+        assert 'portable["sha256"]' in source and 'execute_probes=True' in source
+        assert 'portable-lifecycle/portable-lifecycle.json' in source
+        assert '"release_readiness": "FAIL"' in source
+
+
 def test_release_rejects_bundled_example_with_missing_source(tmp_path):
     root = tmp_path / "source"
     example = root / "sdk" / "examples" / "broken"

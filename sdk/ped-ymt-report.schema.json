@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://allin1.dev/schemas/ped-ymt-report.schema.json",
+  "title": "ALLIN1 read-only ped YMT inspection report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "report_version",
+    "operation",
+    "generated_at",
+    "sdk_version",
+    "source",
+    "target",
+    "evidence_states",
+    "summary",
+    "catalog",
+    "dependencies",
+    "findings"
+  ],
+  "properties": {
+    "report_version": {"const": 1},
+    "operation": {"const": "inspect_ped_ymt"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "sdk_version": {"type": "string", "minLength": 1, "maxLength": 64},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "size", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "kind": {
+          "enum": ["folder", "rpf", "zip", "oiv", "rar", "7z", "ymt", "ymt_xml"]
+        },
+        "size": {"type": ["integer", "null"], "minimum": 0},
+        "sha256": {
+          "oneOf": [
+            {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decoder_edition", "gta_context", "runtime_compatibility"],
+      "properties": {
+        "decoder_edition": {"enum": ["Legacy", "Enhanced"]},
+        "gta_context": {"type": ["string", "null"]},
+        "runtime_compatibility": {"const": "unknown"}
+      }
+    },
+    "evidence_states": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archive_structure",
+        "metadata_decoding",
+        "dependency_resolution",
+        "target_runtime_compatibility",
+        "in_game_acceptance"
+      ],
+      "properties": {
+        "archive_structure": {"$ref": "#/$defs/evidenceState"},
+        "metadata_decoding": {"$ref": "#/$defs/evidenceState"},
+        "dependency_resolution": {"$ref": "#/$defs/evidenceState"},
+        "target_runtime_compatibility": {"$ref": "#/$defs/evidenceState"},
+        "in_game_acceptance": {"$ref": "#/$defs/evidenceState"}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ymt_definitions",
+        "decoded",
+        "ped_variation",
+        "creature_metadata",
+        "other",
+        "unknown",
+        "relationships",
+        "unresolved_relationships",
+        "declared_for_registration"
+      ],
+      "properties": {
+        "ymt_definitions": {"$ref": "#/$defs/count"},
+        "decoded": {"$ref": "#/$defs/count"},
+        "ped_variation": {"$ref": "#/$defs/count"},
+        "creature_metadata": {"$ref": "#/$defs/count"},
+        "other": {"$ref": "#/$defs/count"},
+        "unknown": {"$ref": "#/$defs/count"},
+        "relationships": {"$ref": "#/$defs/count"},
+        "unresolved_relationships": {"$ref": "#/$defs/count"},
+        "declared_for_registration": {"$ref": "#/$defs/count"}
+      }
+    },
+    "catalog": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {"$ref": "#/$defs/catalogEntry"}
+    },
+    "dependencies": {
+      "type": "array",
+      "maxItems": 2048,
+      "items": {"$ref": "#/$defs/dependency"}
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {"$ref": "#/$defs/finding"}
+    }
+  },
+  "$defs": {
+    "count": {"type": "integer", "minimum": 0},
+    "nullableString": {"type": ["string", "null"]},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "stringList": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {"type": "string"}
+    },
+    "evidenceState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "detail", "evidence"],
+      "properties": {
+        "status": {
+          "enum": ["observed", "partial", "unsupported", "unknown", "not_tested"]
+        },
+        "detail": {"type": "string", "minLength": 1},
+        "evidence": {"$ref": "#/$defs/stringList"}
+      }
+    },
+    "catalogEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "format", "package_member", "archive_path", "path", "size",
+        "indexed_size", "sha256", "decode_status", "decode_error",
+        "decoded_sha256", "decoder_edition", "root_type", "classification",
+        "identity", "sex", "classification_evidence", "sex_evidence",
+        "metrics", "registration_status", "registration_evidence", "mount_state"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "format": {"enum": ["binary_ymt", "codewalker_xml"]},
+        "package_member": {"$ref": "#/$defs/nullableString"},
+        "archive_path": {"$ref": "#/$defs/nullableString"},
+        "path": {"type": "string", "minLength": 1},
+        "size": {"type": "integer", "minimum": 1, "maximum": 134217728},
+        "indexed_size": {"type": ["integer", "null"], "minimum": 0},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "decode_status": {"enum": ["decoded", "unsupported"]},
+        "decode_error": {"$ref": "#/$defs/nullableString"},
+        "decoded_sha256": {
+          "oneOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "decoder_edition": {"enum": ["Legacy", "Enhanced"]},
+        "root_type": {"$ref": "#/$defs/nullableString"},
+        "classification": {
+          "enum": ["ped_variation", "creature_metadata", "other", "unknown"]
+        },
+        "identity": {"$ref": "#/$defs/nullableString"},
+        "sex": {"enum": ["male", "female", "shared", "unknown"]},
+        "classification_evidence": {"$ref": "#/$defs/stringList"},
+        "sex_evidence": {"$ref": "#/$defs/stringList"},
+        "metrics": {
+          "type": "object",
+          "maxProperties": 64,
+          "additionalProperties": {"type": ["integer", "string", "boolean", "null"]}
+        },
+        "registration_status": {"enum": ["declared", "not_observed"]},
+        "registration_evidence": {"$ref": "#/$defs/stringList"},
+        "mount_state": {"const": "unknown"}
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "source_id", "target_id", "target_kind", "kind",
+        "resolution", "reason", "evidence"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "source_id": {"type": "string", "minLength": 1},
+        "target_id": {"$ref": "#/$defs/nullableString"},
+        "target_kind": {"enum": ["cloth_resource", "ymt_definition"]},
+        "kind": {"enum": ["declares_cloth_ownership", "same_decoded_identity"]},
+        "resolution": {"enum": ["resolved", "unresolved", "ambiguous", "alternative", "unsupported"]},
+        "reason": {"type": "string", "minLength": 1},
+        "evidence": {"$ref": "#/$defs/stringList"}
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "code", "message", "source_id"],
+      "properties": {
+        "severity": {"enum": ["info", "warning", "error"]},
+        "code": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+        "message": {"type": "string", "minLength": 1},
+        "source_id": {"$ref": "#/$defs/nullableString"}
+      }
+    }
+  },
+  "$comment": "Runtime compatibility and in-game acceptance remain independent evidence states. Decoder success and package registration cannot promote either state."
+}

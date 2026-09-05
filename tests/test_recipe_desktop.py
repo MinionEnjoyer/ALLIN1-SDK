@@ -36,6 +36,28 @@ def test_managed_recipe_real_protocol_happy_path(tmp_path, archive):
     assert receipt["output_sha256"] == recipe.digest(recipe._inventory(output))
 
 
+def test_recipe_inspection_binds_request_spelling_to_canonical_source(tmp_path):
+    source = _oiv_folder(tmp_path)
+    # A trailing separator is portable; Windows also accepts forward slashes.
+    selected = source.as_posix() + "/"
+    _, session = dispatch_operation("inspect_authoring_workspace", {"module": "recipe", "source": selected})
+    assert session["requested_source"] == selected
+    assert session["source"] == str(source.resolve())
+    assert session["state_sha256"] == recipe._source_identity(source)
+    assert session["read_only"] and not session["game_write_performed"]
+
+
+def test_recipe_path_aliases_do_not_bypass_source_or_request_validation(tmp_path):
+    source = _oiv_folder(tmp_path)
+    output = tmp_path / "not-created"
+    pending = request(source.as_posix() + "/", output)
+    # Even a path spelling change requires another review; consent stays exact.
+    pending["source"] = str(source.resolve())
+    with pytest.raises(ValueError, match="changed|match"):
+        desktop.apply(pending)
+    assert not output.exists()
+
+
 def test_nested_batch_exports_complete_inert_recipe(tmp_path):
     source = _oiv_folder(tmp_path, '''<package><content><archive path="update/update.rpf"><archive path="child.rpf">
       <add source="data.xml">common/data/new.xml</add><delete>common/data/old.xml</delete>

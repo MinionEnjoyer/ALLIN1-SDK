@@ -55,6 +55,7 @@ def test_progressive_command_option_and_alias_suggestions(tmp_path):
         "inspect-package-receipt ",
         "inspect-package-rpfs ",
         "inspect-ped-authoring ",
+        "inspect-ped-ymt ",
         "inspect-product-workspace ",
         "inspect-rpf ", "inspect-rpf-change-set ", "inspect-rpf-graph ",
         "inspect-rpf-native-entry ",
@@ -68,7 +69,6 @@ def test_progressive_command_option_and_alias_suggestions(tmp_path):
         "inspect-weapon-animation ", "inspect-weapon-authoring ",
         "inspect-weapon-shop ",
         "inspect-workbench ",
-        "install-package ",
     ]
 
     options = suggestions_for("inspect-rpf --g", cwd=tmp_path)

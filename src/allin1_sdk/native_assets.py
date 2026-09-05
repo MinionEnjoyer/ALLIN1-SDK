@@ -4078,6 +4078,48 @@ class NativeAssetInspector:
             texture_previews=texture_previews,
         )
 
+    def decode_xml_bytes(
+        self, name: str, data: bytes, *, edition: str,
+        maximum_xml_bytes: int = 32 * 1024 * 1024,
+    ) -> bytes:
+        """Decode one complete native asset to bounded CodeWalker XML.
+
+        ``inspect_bytes`` intentionally truncates very large structured previews.
+        Dependency inspectors need the complete document, so this separate
+        read-only path fails closed instead of parsing a truncated preview.
+        """
+        self._require_patcher()
+        safe_name = Path(name).name
+        suffix = Path(safe_name).suffix.casefold()
+        if not safe_name or suffix not in NATIVE_XML_SUFFIXES:
+            raise ValueError(f"Native XML decoding is not supported for {name}")
+        if not data or len(data) > MAX_NATIVE_PREVIEW_BYTES:
+            raise ValueError("Native decode source is empty or exceeds guarded limits")
+        if maximum_xml_bytes <= 0 or maximum_xml_bytes > MAX_NATIVE_WORKSPACE_BYTES:
+            raise ValueError("Native XML output limit is outside guarded bounds")
+        normalized_edition = self._normalize_edition(edition)
+        with tempfile.TemporaryDirectory(prefix="allin1-native-decode-") as temporary:
+            root = Path(temporary)
+            source = root / safe_name
+            xml = root / f"{safe_name}.xml"
+            assets = root / "assets"
+            source.write_bytes(data)
+            completed = run_hidden(
+                self._asset_xml_args(source, xml, assets, normalized_edition),
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            if completed.returncode or not xml.is_file():
+                detail = (
+                    completed.stderr or completed.stdout or "conversion failed"
+                ).strip()
+                raise ValueError(f"Native XML decoding failed: {detail}")
+            size = xml.stat().st_size
+            if size <= 0 or size > maximum_xml_bytes:
+                raise ValueError(
+                    "Decoded native XML is empty or exceeds the guarded output limit"
+                )
+            return xml.read_bytes()
+
     def _convert(
         self, name: str, data: bytes, edition: str,
     ) -> _ConvertedAsset | None:

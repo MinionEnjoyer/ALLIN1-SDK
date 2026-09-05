@@ -174,6 +174,7 @@ READ_ONLY_COMMANDS = frozenset({
     "inspect-map-project",
     "inspect-package-graph-relations",
     "inspect-package-receipt",
+    "inspect-ped-ymt",
     "inspect-product-workspace",
     "inspect-rpf",
     "inspect-rpf-change-set",

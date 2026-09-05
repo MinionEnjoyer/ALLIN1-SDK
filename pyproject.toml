@@ -36,7 +36,10 @@ where = ["src"]
 # catalogs are runtime inputs; the remaining files are authoring references and
 # the auditable, fail-closed Story runtime source—not prebuilt game binaries.
 [tool.setuptools.data-files]
-"share/allin1-sdk/sdk" = ["sdk/map-project.schema.json"]
+"share/allin1-sdk/sdk" = [
+    "sdk/map-project.schema.json",
+    "sdk/ped-ymt-report.schema.json",
+]
 "share/allin1-sdk/sdk/examples/custom_garage" = [
     "sdk/examples/custom_garage/maps.json",
 ]

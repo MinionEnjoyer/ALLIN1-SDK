@@ -27,5 +27,6 @@ pub fn inspect(context: &tauri::Context<tauri::Wry>, build_id: &str, version: &s
     }
     Ok(json!({"schema_version": 1, "kind": "embedded_frontend_probe", "status": "PASS",
         "production": true, "build_id": build_id, "version": version, "assets": assets,
+        "runtime_location_probe_version": 1,
         "native_ui": "NOT TESTED", "release_ready": false}))
 }

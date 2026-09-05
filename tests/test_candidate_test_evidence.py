@@ -108,7 +108,7 @@ def test_real_python_gate_requires_actual_no_skip_framework_results(tmp_path, mo
     executable = candidate.external_executable(Path(sys.executable))
     identity = tmp_path / "identity.json"
     candidate.write_new(identity, {"schema_version": 1, "kind": "sdk_build_identity", "build_id": "disposable", "source": source,
-        "toolchain_files": {"python": {"path": str(executable), "sha256": candidate.sha256(executable)}}})
+        "toolchain_files": {"python": candidate.tool_identity(executable)}})
     command = [sys.executable, "-m", "pytest", "--cov=allin1_sdk", "--cov-report=term-missing"]
     if skip:
         with pytest.raises(subprocess.CalledProcessError): candidate.run_gate(tmp_path, identity, "python", command)

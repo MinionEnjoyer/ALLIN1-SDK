@@ -37,6 +37,7 @@ from allin1_sdk.agent_api import (
 PROTOCOL_VERSION = "1.0.0"
 SUPPORTED_VERSIONS = (PROTOCOL_VERSION,)
 OPERATIONS = frozenset({
+    "inspect_ped_ymt",
     "inspect_ped_workbench", "review_ped_authoring", "apply_ped_authoring",
     "list_rpf_transactions", "inspect_rpf_transaction", "review_rpf_transaction", "apply_rpf_transaction",
     "inspect_rpf_change_set", "review_rpf_change_set", "apply_rpf_change_set",
@@ -78,6 +79,7 @@ OPERATIONS = frozenset({
     "start_job", "cancel_job", "job_event", "result", "error", "shutdown",
 })
 CLIENT_OPERATIONS = frozenset({
+    "inspect_ped_ymt",
     "inspect_ped_workbench", "review_ped_authoring", "apply_ped_authoring",
     "list_rpf_transactions", "inspect_rpf_transaction", "review_rpf_transaction", "apply_rpf_transaction",
     "inspect_rpf_change_set", "review_rpf_change_set", "apply_rpf_change_set",
@@ -119,6 +121,7 @@ CLIENT_OPERATIONS = frozenset({
     "start_job", "cancel_job", "shutdown",
 })
 JOB_OPERATIONS = frozenset({
+    "inspect_ped_ymt",
     "inspect_ped_workbench", "review_ped_authoring",
     "list_rpf_transactions", "inspect_rpf_transaction", "review_rpf_transaction",
     "inspect_rpf_change_set", "review_rpf_change_set",
@@ -263,6 +266,7 @@ def _operation_risk(operation: str, payload: object) -> str:
         "preview_texture_workspace", "review_texture_edit", "review_texture_build",
         "assistant_status", "assistant_prompt",
         "inspect_weapon_workbench", "review_weapon_authoring",
+        "inspect_ped_ymt",
         "inspect_ped_workbench", "review_ped_authoring",
         "inspect_rpf_archive", "review_rpf_utility", "inspect_vehicle_project",
         "inspect_vehicle_authoring_workspace", "review_vehicle_authoring_workspace",
@@ -441,6 +445,59 @@ def _inspect_package(payload: object) -> tuple[str, dict[str, Any]]:
     else:
         result = _scan_summary(source, gta_path)
     return "read_only", dict(_bounded(result))
+
+
+def _inspect_ped_ymt(payload: object) -> tuple[str, dict[str, Any]]:
+    risk = "read_only"
+    if not isinstance(payload, dict):
+        raise ProtocolError("inspect_ped_ymt payload must be an object", risk=risk)
+    raw_source = payload.get("source")
+    if (
+        not isinstance(raw_source, str) or not raw_source.strip()
+        or "\0" in raw_source or len(raw_source) > _MAX_STRING
+    ):
+        raise ProtocolError("inspect_ped_ymt requires a source path", risk=risk)
+    try:
+        source = Path(raw_source).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise ProtocolError(f"YMT source was not found: {exc}", risk=risk) from exc
+    raw_edition = payload.get("edition")
+    if not isinstance(raw_edition, str) or raw_edition.casefold() not in {
+        "legacy", "enhanced",
+    }:
+        raise ProtocolError(
+            "inspect_ped_ymt edition must be Legacy or Enhanced", risk=risk,
+        )
+    raw_game = payload.get("gta_path")
+    if raw_game is not None and (
+        not isinstance(raw_game, str) or not raw_game.strip()
+        or "\0" in raw_game or len(raw_game) > _MAX_STRING
+    ):
+        raise ProtocolError("gta_path must be a valid path string", risk=risk)
+    try:
+        gta_path = (
+            Path(raw_game).expanduser().resolve(strict=True)
+            if isinstance(raw_game, str) else None
+        )
+    except OSError as exc:
+        raise ProtocolError(f"GTA path was not found: {exc}", risk=risk) from exc
+    if gta_path is not None and not gta_path.is_dir():
+        raise ProtocolError("GTA path must be a directory", risk=risk)
+    from allin1_sdk.paths import project_root
+    from allin1_sdk.ped_ymt_inspector import PedYmtInspector
+
+    try:
+        result = PedYmtInspector(project_root(), gta_path).inspect(
+            source, edition=raw_edition,
+        ).to_dict()
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ProtocolError(str(exc), risk=risk) from exc
+    bounded = _bounded(result)
+    if bounded != result:
+        raise ProtocolError(
+            "Ped YMT report exceeds desktop evidence limits", risk=risk,
+        )
+    return risk, dict(bounded)
 
 
 def _preview_asset(payload: object) -> tuple[str, dict[str, Any]]:
@@ -4923,6 +4980,8 @@ def dispatch_operation(
         )
     if operation == "inspect_package":
         return _inspect_package(payload)
+    if operation == "inspect_ped_ymt":
+        return _inspect_ped_ymt(payload)
     if operation == "preview_asset":
         return _preview_asset(payload)
     if operation == "render_vehicle_model":
@@ -5406,6 +5465,7 @@ class DesktopProtocolService:
                 "apply_model_material_build", "assistant_status", "assistant_prompt",
                 "configure_assistant",
                 "inspect_weapon_workbench", "review_weapon_authoring", "apply_weapon_authoring",
+                "inspect_ped_ymt",
                 "inspect_ped_workbench", "review_ped_authoring", "apply_ped_authoring",
                 "inspect_authoring_workspace", "review_workspace_action", "apply_workspace_action",
                 "inspect_gxt2_workspace", "review_gxt2_action", "apply_gxt2_action",

@@ -89,8 +89,10 @@ proposals and authoring limitations, not a guarantee of perfect in-game sight
 alignment. Animation compatibility and actual component behavior need live tests.
 See [shop/animation authoring](weapon-shop-animation-authoring.md).
 
-The planned YMT limit-expansion tool is not enabled just because Ped Workbench
-edits a descriptor. See the [ped migration/handoff](ped-workbench-migration-and-ymt-handoff.md)
+The read-only `inspect-ped-ymt` command inventories loose or packaged YMTs,
+classifies decoded ped/creature metadata, and reports registration and dependency
+evidence without mounting content. It does not enable YMT limit expansion or
+certify runtime compatibility. See the [ped migration/handoff](ped-workbench-migration-and-ymt-handoff.md)
 for the implemented surface and deferred runtime work.
 
 ### RPF Archives
