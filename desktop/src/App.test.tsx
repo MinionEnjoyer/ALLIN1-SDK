@@ -535,7 +535,7 @@ describe("ALLIN1 desktop shell", () => {
 
     expect(await screen.findByRole("tab", { name: "Core fields" })).toHaveAttribute("aria-selected", "true");
     expect(within(screen.getByRole("complementary", { name: "Vehicle evidence" })).getAllByRole("textbox")).toHaveLength(37);
-    const mass = screen.getByLabelText(/Mass/);
+    const mass = screen.getByRole("textbox", { name: "Mass" });
     expect(mass).toHaveValue("1685.0");
     await user.clear(mass);
     await user.type(mass, "1725.5");
@@ -556,7 +556,7 @@ describe("ALLIN1 desktop shell", () => {
     expect(await screen.findByRole("dialog", { name: "Undo the last vehicle edit?" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Undo edit" }));
     expect(await screen.findByText("Undo completed as revision 2.")).toBeInTheDocument();
-    expect(screen.getByLabelText(/Mass/)).toHaveValue("1685.0");
+    expect(screen.getByRole("textbox", { name: "Mass" })).toHaveValue("1685.0");
 
     await user.click(screen.getByRole("tab", { name: "Appearance" }));
     expect(screen.getByText("Structured appearance")).toBeInTheDocument();
@@ -621,7 +621,7 @@ describe("ALLIN1 desktop shell", () => {
     const transmissionType = screen.getByLabelText(/^Type/);
     expect(transmissionType).toHaveValue("dual_clutch");
     await user.selectOptions(transmissionType, "sequential");
-    const finalDrive = screen.getByLabelText(/Final drive/);
+    const finalDrive = screen.getByRole("textbox", { name: "Final drive" });
     await user.clear(finalDrive);
     await user.type(finalDrive, "3.7");
     await user.click(screen.getByRole("button", { name: "Review transmission" }));
@@ -629,7 +629,7 @@ describe("ALLIN1 desktop shell", () => {
     expect(within(transmissionDialog).getByText("sequential")).toBeInTheDocument();
     await user.click(within(transmissionDialog).getByRole("button", { name: "Save transmission revision" }));
     expect(await screen.findByText(/transmission change saved as revision 7/)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Final drive/)).toHaveValue(3.7);
+    expect(screen.getByRole("textbox", { name: "Final drive" })).toHaveValue("3.7");
 
     await user.click(screen.getByRole("tab", { name: "Output" }));
     expect(screen.getByRole("region", { name: "Vehicle distribution" })).toBeInTheDocument();

@@ -3,6 +3,7 @@ import type { DesktopClient } from "./types";
 import { AuthoringFeedback, useAuthoringWorkspace, type WorkspaceResult } from "./useAuthoringWorkspace";
 import "./OfflineAuthoring.css";
 import "./GraphWorkbench.css";
+import SliderField from "./SliderField";
 
 interface Node { id: string; type: string; name?: string; x: number; y: number; source?: string; size?: number; sha256?: string; config?: Record<string, string> }
 interface Edge { parent?: string; child?: string; from?: string; to?: string; from_port?: string; to_port?: string }
@@ -33,6 +34,8 @@ function NodeCanvas({ document, selected, select, move, locked }: { document: Do
     {document.edges && <><button className="quiet-button" disabled={!document.edges.some(edge => parentOf(edge) === selected)} onClick={() => setCollapsed(old => { const next = new Set(old); if (next.has(selected)) next.delete(selected); else next.add(selected); return next; })}>{collapsed.has(selected) ? "Expand selected branch" : "Collapse selected branch"}</button>
       <button className="quiet-button" disabled={!collapsed.size} onClick={() => setCollapsed(new Set())}>Expand all branches</button></>}
     {document.semantic && <label><input type="checkbox" checked={showRelations} onChange={e => setShowRelations(e.target.checked)} />Show vehicle relationships</label>}</div>
+    <details className="viewport-slider-settings"><summary>Graph zoom</summary><SliderField numeric commitValidOnly label="Graph zoom" unit="%" min={10} max={180} hardMin={10} hardMax={180} step={5} value={zoom * 100} resetValue={100}
+      onChange={value => { if (Number.isFinite(value) && value >= 10 && value <= 180) setZoom(value / 100); }} /></details>
     <div className="graph-canvas-scroll" ref={scroll} onPointerDown={e => {
       if ((e.target as Element).closest("[data-node]")) return;
       pan.current = { x: e.clientX, y: e.clientY, left: e.currentTarget.scrollLeft, top: e.currentTarget.scrollTop };

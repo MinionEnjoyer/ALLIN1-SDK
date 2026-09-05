@@ -1,3 +1,5 @@
+import SliderField from "./SliderField";
+
 export const rpmKey = "weapon.roundsPerMinute";
 export const intervalKey = "weapon.timeBetweenShots";
 
@@ -15,9 +17,10 @@ export function WeaponFireRate({ values, original, editable, disabled, onChange 
   const interval = dirty && valid ? String(60 / number) : original[intervalKey];
   return <section className="weapon-camera-group" aria-label="Fire rate">
     <h5>Fire rate</h5>
-    <label>Rounds per minute (RPM)<input aria-label="Rounds per minute (RPM)" inputMode="decimal"
-      value={value} disabled={disabled || !editable.includes(rpmKey)} aria-invalid={!valid}
-      aria-describedby="weapon-rpm-help" onChange={e => onChange({ [rpmKey]: e.target.value })} /></label>
+    <SliderField label="Rounds per minute (RPM)" value={value} resetValue={original[rpmKey]}
+      min={60} max={1800} step={10} fineStep={1} hardMin={1} hardMax={60000} unit="RPM"
+      disabled={disabled || !editable.includes(rpmKey)} describedBy="weapon-rpm-help"
+      onChange={next => onChange({ [rpmKey]: next })} />
     <p id="weapon-rpm-help">Nominal cyclic rate. The saved interval is 60 ÷ RPM seconds.
       Animation timing, burst settings and firing mode can also affect the rate in game.</p>
     <p><strong>{dirty && valid ? "Proposed shot interval" : "Saved shot interval"}</strong>{" "}

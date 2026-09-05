@@ -1,3 +1,4 @@
+import SliderField from "./SliderField";
 import type {
   VehicleDistributionValues,
   VehiclePackageBuildResult,
@@ -63,6 +64,7 @@ export function VehicleOutputEditor({
     onPackage({ ...packageDraft, ...values });
   };
   const editionSelected = packageDraft.legacy || packageDraft.enhanced;
+  const invalidWeight = !Number.isFinite(distribution.traffic_weight) || distribution.traffic_weight < 0 || distribution.traffic_weight > 100;
 
   return <>
     <div className="vehicle-authoring-intro output-editor-intro">
@@ -94,10 +96,10 @@ export function VehicleOutputEditor({
           </div>
           <div className="vehicle-traffic-row">
             <label className="output-check" htmlFor="vehicle-traffic-enabled"><input id="vehicle-traffic-enabled" type="checkbox" checked={distribution.traffic_enabled} onChange={(event) => updateDistribution({ traffic_enabled: event.target.checked })} disabled={busy} /><FieldLabel title="Allow ambient traffic" hint="explicit opt-in" /></label>
-            <label htmlFor="vehicle-traffic-weight"><FieldLabel title="Spawn weight" hint="0–100" /><input id="vehicle-traffic-weight" type="number" min="0" max="100" step="0.1" value={distribution.traffic_weight} onChange={(event) => updateDistribution({ traffic_weight: Number(event.target.value) })} disabled={busy || !distribution.traffic_enabled} /></label>
+            <SliderField numeric id="vehicle-traffic-weight" label="Spawn weight" min={0} max={100} hardMin={0} hardMax={100} step={.1} value={distribution.traffic_weight} onChange={value => updateDistribution({ traffic_weight: value })} disabled={busy || !distribution.traffic_enabled} />
           </div>
         </div>
-        <div className="vehicle-output-actions"><button type="button" className="quiet-button" onClick={onResetDistribution} disabled={busy || !distributionDirty}>Reset catalog</button><button type="button" className="primary-button" onClick={onReviewDistribution} disabled={busy || !distributionDirty}>Review distribution</button></div>
+        <div className="vehicle-output-actions"><button type="button" className="quiet-button" onClick={onResetDistribution} disabled={busy || !distributionDirty}>Reset catalog</button><button type="button" className="primary-button" onClick={onReviewDistribution} disabled={busy || !distributionDirty || invalidWeight}>Review distribution</button></div>
       </section>
 
       <section className="vehicle-output-panel" aria-labelledby="package-panel-heading">

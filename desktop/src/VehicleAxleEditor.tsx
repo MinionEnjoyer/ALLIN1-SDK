@@ -1,5 +1,6 @@
 import { useState, type CSSProperties } from "react";
 import type { VehicleAuthoringAxleSkeleton, VehicleAxle, VehicleAxleConfiguration } from "./types";
+import SliderField from "./SliderField";
 
 function axleLabel(axle: VehicleAxle) {
   const role = axle.logical_role === "middle" ? "Mid" : axle.logical_role[0].toLocaleUpperCase() + axle.logical_role.slice(1);
@@ -56,6 +57,8 @@ export function VehicleAxleEditor({
   const selected = axles.find((axle) => axle.physical_order === selectedOrder) ?? axles[0];
   const evidenceRequired = Boolean(configuration.steering_calculation || configuration.intentional_layout_override);
   const evidenceUnavailable = evidenceRequired && !skeleton;
+  const invalidSupport = axles.some(axle => axle.suspension && (!Number.isFinite(axle.suspension.support_weight) || axle.suspension.support_weight < .75 || axle.suspension.support_weight > 1.25));
+  const invalidLock = !Number.isFinite(referenceLock) || referenceLock < 1 || referenceLock > 80;
   const updateAxle = (values: Partial<VehicleAxle>, invalidateSteering = false) => {
     if (!selected) return;
     const next: VehicleAxleConfiguration = {
@@ -67,6 +70,7 @@ export function VehicleAxleEditor({
     onConfiguration(next);
   };
   const calculate = () => {
+    if (invalidLock) return;
     const request: Record<string, unknown> = { reference_lock_degrees: referenceLock };
     if (referenceOrder) request.reference_axle_order = referenceOrder;
     if (pivotPosition.trim()) request.pivot_longitudinal_position = Number(pivotPosition);
@@ -102,14 +106,14 @@ export function VehicleAxleEditor({
           <label className="axle-check"><input type="checkbox" checked={selected.service_brake} onChange={(event) => updateAxle({ service_brake: event.target.checked })} disabled={busy || evidenceUnavailable} /><span>Service brake<small>normal braking</small></span></label>
           <label className="axle-check"><input type="checkbox" checked={selected.handbrake} onChange={(event) => updateAxle({ handbrake: event.target.checked })} disabled={busy || evidenceUnavailable} /><span>Handbrake<small>parking brake</small></span></label>
         </div>
-        {selected.suspension && <label className="axle-support" htmlFor={`axle-support-${selected.physical_order}`}><span>Support weight<small>relative load contribution · 0.75–1.25</small></span><input id={`axle-support-${selected.physical_order}`} type="number" min="0.75" max="1.25" step="0.01" value={selected.suspension.support_weight} onChange={(event) => updateAxle({ suspension: { support_weight: Number(event.target.value) } })} disabled={busy || evidenceUnavailable} /></label>}
+        {selected.suspension && <SliderField numeric key={selected.physical_order} id={`axle-support-${selected.physical_order}`} label="Support weight" hint="relative load contribution" min={.75} max={1.25} hardMin={.75} hardMax={1.25} step={.01} value={selected.suspension.support_weight} onChange={value => updateAxle({ suspension: { ...selected.suspension!, support_weight: value } })} disabled={busy || evidenceUnavailable} />}
         <dl className="axle-evidence-list"><div><dt>Wheel bones</dt><dd>{selected.left_bone}<br />{selected.right_bone}</dd></div><div><dt>Runtime slots</dt><dd>{selected.left_runtime_index} / {selected.right_runtime_index}</dd></div><div><dt>Steering gain</dt><dd>{(selected.steering_gain ?? (selected.steered ? 1 : 0)).toFixed(3)} · {steeringState(selected).split(" ")[0]}</dd></div></dl>
       </section>}
     </div>
 
-    <fieldset className="axle-steering-settings"><legend>Signed steering geometry</legend><div className="axle-steering-fields"><label htmlFor="axle-reference-lock"><span>Reference lock<small>1–80 degrees</small></span><input id="axle-reference-lock" type="number" min="1" max="80" step="0.5" value={referenceLock} onChange={(event) => setReferenceLock(Number(event.target.value))} disabled={busy || !skeleton} /></label><label htmlFor="axle-reference-order"><span>Reference axle<small>automatic if blank</small></span><select id="axle-reference-order" value={referenceOrder} onChange={(event) => setReferenceOrder(Number(event.target.value))} disabled={busy || !skeleton}><option value={0}>Automatic</option>{axles.filter((axle) => axle.steered).map((axle) => <option key={axle.physical_order} value={axle.physical_order}>Axle {axle.physical_order}</option>)}</select></label><label htmlFor="axle-pivot-position"><span>Neutral pivot Y<small>only for all-steer layouts</small></span><input id="axle-pivot-position" type="number" step="0.01" value={pivotPosition} placeholder="Infer from fixed axles" onChange={(event) => setPivotPosition(event.target.value)} disabled={busy || !skeleton} /></label><button type="button" className="quiet-button" onClick={calculate} disabled={busy || !skeleton || !axles.some((axle) => axle.steered)}>Calculate gains</button></div></fieldset>
+    <fieldset className="axle-steering-settings"><legend>Signed steering geometry</legend><div className="axle-steering-fields"><SliderField numeric id="axle-reference-lock" label="Reference lock" min={1} max={80} hardMin={1} hardMax={80} step={.5} unit="degrees" value={referenceLock} resetValue={35} onChange={setReferenceLock} disabled={busy || !skeleton} /><label htmlFor="axle-reference-order"><span>Reference axle<small>automatic if blank</small></span><select id="axle-reference-order" value={referenceOrder} onChange={(event) => setReferenceOrder(Number(event.target.value))} disabled={busy || !skeleton}><option value={0}>Automatic</option>{axles.filter((axle) => axle.steered).map((axle) => <option key={axle.physical_order} value={axle.physical_order}>Axle {axle.physical_order}</option>)}</select></label><label htmlFor="axle-pivot-position"><span>Neutral pivot Y<small>only for all-steer layouts</small></span><input id="axle-pivot-position" type="number" step="0.01" value={pivotPosition} placeholder="Infer from fixed axles" onChange={(event) => setPivotPosition(event.target.value)} disabled={busy || !skeleton} /></label><button type="button" className="quiet-button" onClick={calculate} disabled={busy || !skeleton || invalidLock || !axles.some((axle) => axle.steered)}>Calculate gains</button></div></fieldset>
     <fieldset className="axle-runtime-settings"><legend>Runtime strategy</legend><label htmlFor="vehicle-axle-export-mode"><span>Export mode<small>{configuration.preset} · schema {configuration.schema_version}</small></span><select id="vehicle-axle-export-mode" value={configuration.export_mode} onChange={(event) => onConfiguration({ ...configuration, export_mode: event.target.value as VehicleAxleConfiguration["export_mode"] })} disabled={busy || evidenceUnavailable}><option value="stock_metadata">Stock metadata</option><option value="selective_runtime">Selective runtime</option></select></label>{configuration.intentional_layout_override && <button type="button" className="quiet-button" onClick={onRestoreCanonical} disabled={busy || !skeleton}>Restore canonical order</button>}</fieldset>
     {evidenceUnavailable && <div className="axle-evidence-lock" role="status"><strong>Skeleton evidence required</strong><span>This signed or reordered configuration remains read-only until its wheel-bone positions are reloaded and verified.</span></div>}
-    <div className="vehicle-authoring-actions"><button type="button" className="quiet-button" onClick={onReset} disabled={busy || !dirty}>Reset axle changes</button><button type="button" className="primary-button" onClick={onReview} disabled={busy || !dirty || evidenceUnavailable}>Review axle changes</button></div>
+    <div className="vehicle-authoring-actions"><button type="button" className="quiet-button" onClick={onReset} disabled={busy || !dirty}>Reset axle changes</button><button type="button" className="primary-button" onClick={onReview} disabled={busy || !dirty || evidenceUnavailable || invalidSupport}>Review axle changes</button></div>
   </>;
 }

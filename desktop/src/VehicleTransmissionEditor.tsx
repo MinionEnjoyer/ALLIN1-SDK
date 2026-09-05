@@ -1,4 +1,5 @@
 import type { VehicleTransmissionConfiguration, VehicleTransmissionType } from "./types";
+import SliderField from "./SliderField";
 
 const TRANSMISSION_LABELS: Record<VehicleTransmissionType, string> = {
   automatic: "Automatic",
@@ -72,8 +73,8 @@ export function VehicleTransmissionEditor({
         <div className="transmission-panel-heading"><strong id="transmission-settings-heading">Transmission</strong><span>schema {configuration.schema_version}</span></div>
         <div className="transmission-setting-fields">
           <label htmlFor="vehicle-transmission-type"><span>Type<small>runtime shift strategy</small></span><select id="vehicle-transmission-type" value={configuration.transmission_type} onChange={(event) => update({ transmission_type: event.target.value as VehicleTransmissionType })} disabled={busy}>{Object.entries(TRANSMISSION_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-          <label htmlFor="vehicle-final-drive"><span>Final drive<small>applies after each gear</small></span><input id="vehicle-final-drive" type="number" min="0.1" max="10" step="0.01" value={configuration.final_drive_ratio} onChange={(event) => update({ final_drive_ratio: Number(event.target.value) })} disabled={busy} /></label>
-          <label htmlFor="vehicle-reverse-ratio"><span>Reverse ratio<small>positive magnitude</small></span><input id="vehicle-reverse-ratio" type="number" min="0.1" max="10" step="0.01" value={configuration.reverse_gear_ratio} onChange={(event) => update({ reverse_gear_ratio: Number(event.target.value) })} disabled={busy} /></label>
+          <SliderField numeric id="vehicle-final-drive" label="Final drive" hint="applies after each gear" min={.1} max={10} hardMin={.1} hardMax={10} step={.01} value={configuration.final_drive_ratio} onChange={value => update({ final_drive_ratio: value })} disabled={busy} />
+          <SliderField numeric id="vehicle-reverse-ratio" label="Reverse ratio" hint="positive magnitude" min={.1} max={10} hardMin={.1} hardMax={10} step={.01} value={configuration.reverse_gear_ratio} onChange={value => update({ reverse_gear_ratio: value })} disabled={busy} />
         </div>
         <div className="transmission-boundary-note"><strong>Stock boundary</strong><span>GTA handling stores the gear count, not this ratio table. Runtime/export consumers read the saved ALLIN1 profile.</span></div>
       </section>
@@ -81,7 +82,7 @@ export function VehicleTransmissionEditor({
       <section className="transmission-ratios-panel" aria-labelledby="transmission-ratios-heading">
         <div className="transmission-panel-heading"><strong id="transmission-ratios-heading">Forward gears</strong><span>{configuration.gear_ratios.length} configured</span></div>
         <div className="transmission-ratio-table" role="group" aria-label="Forward gear ratios">
-          {configuration.gear_ratios.map((ratio, index) => <label key={index} htmlFor={`vehicle-gear-ratio-${index + 1}`}><span>Gear {index + 1}</span><input id={`vehicle-gear-ratio-${index + 1}`} type="number" min="0.1" max="10" step="0.001" value={ratio} onChange={(event) => updateRatio(index, Number(event.target.value))} disabled={busy} /></label>)}
+          {configuration.gear_ratios.map((ratio, index) => <SliderField numeric key={index} id={`vehicle-gear-ratio-${index + 1}`} label={`Gear ${index + 1}`} min={.1} max={10} hardMin={.1} hardMax={10} step={.01} fineStep={.001} value={ratio} onChange={value => updateRatio(index, value)} disabled={busy} />)}
         </div>
         <div className="transmission-gear-actions"><button type="button" className="quiet-button" onClick={removeGear} disabled={busy || configuration.gear_ratios.length <= 1}>Remove last</button><button type="button" className="quiet-button" onClick={addGear} disabled={busy || configuration.gear_ratios.length >= 16}>Add gear</button></div>
       </section>

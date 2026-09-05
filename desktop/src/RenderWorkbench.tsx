@@ -3,6 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import type { DesktopClient, PreviewArtifact } from "./types";
 import { AuthoringFeedback, useAuthoringWorkspace, type WorkspaceResult } from "./useAuthoringWorkspace";
 import "./OfflineAuthoring.css";
+import SliderField from "./SliderField";
 
 interface Settings {
   width: number; height: number; quality: string; samples: number | null; engine: string; device: string;
@@ -26,6 +27,10 @@ export default function RenderWorkbench({ client, onDirtyChange }: { client: Des
   const [snapshot, setSnapshot] = useState<RenderSnapshot | null>(null), [frame, setFrame] = useState<RenderSnapshot | null>(null);
   const draft = JSON.stringify({ source, texture, game, edition, blender, settings, camera });
   const [baseline, setBaseline] = useState(draft), [frameDraft, setFrameDraft] = useState(""), [exportedId, setExportedId] = useState("");
+  const bounded = (value: number, min: number, max: number) => Number.isFinite(value) && value >= min && value <= max;
+  const slidersValid = bounded(camera.yaw, -3600, 3600) && bounded(camera.pitch, -89, 89)
+    && bounded(settings.lens_mm, 18, 200) && bounded(settings.light_rotation_deg, -3600, 3600)
+    && bounded(settings.light_strength, .05, 10);
   const work = useAuthoringWorkspace(client, "render", value => {
     const s = value as RenderSnapshot;
     if (typeof s.render_ready !== "boolean" || (s.blender && !/^[a-f0-9]{64}$/.test(s.blender.sha256))) throw new Error("Invalid Blender dependency evidence");
@@ -38,7 +43,7 @@ export default function RenderWorkbench({ client, onDirtyChange }: { client: Des
   const choose = async (kind: "render_model" | "render_textures" | "gta_folder" | "blender_executable", setter: (path: string) => void) => {
     const selected = await work.choose(kind); if (selected) setter(selected);
   };
-  const renderFrame = () => work.run("inspect_authoring_workspace", {
+  const renderFrame = () => slidersValid && work.run("inspect_authoring_workspace", {
     source, ...(texture ? { texture_dictionary: texture } : {}), ...(game ? { gta_path: game } : {}), edition,
     ...(blender ? { blender_executable: blender } : {}), render: true, settings,
     camera: { ...camera, lod: camera.lod || null, component: camera.component || null },
@@ -52,7 +57,7 @@ export default function RenderWorkbench({ client, onDirtyChange }: { client: Des
   const numberField = (key: keyof Settings, label: string, min: number, max: number, step = 1) => <label>{label}<input type="number" min={min} max={max} step={step} value={settings[key] as number} onChange={e => setSettings({ ...settings, [key]: Number(e.target.value) })} /></label>;
   const choice = (key: keyof Settings, label: string, values: string[]) => <label>{label}<select value={settings[key] as string} onChange={e => setSettings({ ...settings, [key]: e.target.value })}>{values.map(value => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>;
   const reset = () => { const saved = JSON.parse(baseline); setSource(saved.source); setTexture(saved.texture); setGame(saved.game); setEdition(saved.edition); setBlender(saved.blender); setSettings(saved.settings); setCamera(saved.camera); setFrame(null); setFrameDraft(""); setSnapshot(null); };
-  return <section className="offline-workbench render-workbench" aria-label="Compiled render studio"><div className="offline-toolbar"><div><h3>Compiled render studio</h3><p>Render decoded geometry and linked texture pixels with the existing isolated Blender workflow.</p></div><button className="primary-button" disabled={work.locked || !source} onClick={() => void renderFrame()}>Render frame</button></div>
+  return <section className="offline-workbench render-workbench" aria-label="Compiled render studio"><div className="offline-toolbar"><div><h3>Compiled render studio</h3><p>Render decoded geometry and linked texture pixels with the existing isolated Blender workflow.</p></div><button className="primary-button" disabled={work.locked || !source || !slidersValid} onClick={() => void renderFrame()}>Render frame</button></div>
     <AuthoringFeedback work={work} />
     <div className="offline-panes"><section><header><span className="pane-kicker">Inputs</span><h4>Model & render host</h4></header><div className="offline-pane-body"><fieldset disabled={work.locked}>
       <button className="quiet-button" onClick={() => void choose("render_model", setSource)}>Choose render model</button><p className="source-path">{source || "Loose YFT, YDR or YDD"}</p>
@@ -64,9 +69,11 @@ export default function RenderWorkbench({ client, onDirtyChange }: { client: Des
       <button className="quiet-button" onClick={() => void work.run("inspect_authoring_workspace", blender ? { blender_executable: blender } : {})}>Check Blender</button>
       {snapshot && <p>{snapshot.blender ? `Blender ${snapshot.blender.version} verified` : "Blender is missing. Install it or locate its executable."}</p>}
       <p>Blender runs headlessly with factory settings and auto-execution disabled. No supplied scripts or .blend files are executed.</p>
-      <h5>Camera & selection</h5>{(["yaw", "pitch"] as const).map(key => <label key={key}>{key === "yaw" ? "Camera yaw" : "Camera pitch"}<input type="number" value={camera[key]} onChange={e => setCamera({ ...camera, [key]: Number(e.target.value) })} /></label>)}
+      <h5>Camera & selection</h5>{(["yaw", "pitch"] as const).map(key => <SliderField numeric key={key} label={key === "yaw" ? "Camera yaw" : "Camera pitch"}
+        min={key === "yaw" ? -180 : -89} max={key === "yaw" ? 180 : 89} hardMin={key === "yaw" ? -3600 : -89} hardMax={key === "yaw" ? 3600 : 89}
+        step={1} unit="degrees" value={camera[key]} resetValue={initialCamera()[key]} onChange={value => setCamera({ ...camera, [key]: value })} />)}
       <label>LOD name (blank: all)<input value={camera.lod} onChange={e => setCamera({ ...camera, lod: e.target.value })} /></label><label>Component name (blank: all)<input value={camera.component} onChange={e => setCamera({ ...camera, component: e.target.value })} /></label>
-      {numberField("lens_mm", "Lens (mm)", 18, 200)}
+      <SliderField numeric label="Lens (mm)" min={18} max={200} hardMin={18} hardMax={200} step={1} unit="mm" value={settings.lens_mm} resetValue={52} onChange={value => setSettings({ ...settings, lens_mm: value })} />
     </fieldset></div></section><section><header><span className="pane-kicker">Frame</span><h4>Compiled output</h4></header><div className="offline-pane-body render-frame-pane">
       {frame?.artifact && frame.render_record ? <><img className="compiled-frame" src={frame.artifact.preview_url || convertFileSrc(frame.artifact.path)} alt="Compiled Blender frame" /><p>{frame.render_record.width} × {frame.render_record.height} · {frame.render_record.elapsed_seconds.toFixed(1)} s</p>
         {frameDraft !== draft && <p className="action-notice">Settings changed. This is the previous completed frame; render again to apply them.</p>}
@@ -78,7 +85,9 @@ export default function RenderWorkbench({ client, onDirtyChange }: { client: Des
       {numberField("width", "Width (px)", 256, 15360)}{numberField("height", "Height (px)", 256, 15360)}
       {choice("quality", "Render quality", ["preview", "production", "maximum"])}{choice("engine", "Render engine", ["eevee", "cycles"])}{choice("device", "Render device", ["auto", "cpu", "gpu"])}
       <label>Samples (blank: quality default)<input type="number" min={1} max={4096} value={settings.samples ?? ""} onChange={e => setSettings({ ...settings, samples: e.target.value ? Number(e.target.value) : null })} /></label>
-      {choice("light_rig", "Light rig", ["studio", "outdoor", "dramatic", "neutral"])}{numberField("light_rotation_deg", "Light rotation (degrees)", -3600, 3600)}{numberField("light_strength", "Light strength", 0.05, 10, 0.05)}
+      {choice("light_rig", "Light rig", ["studio", "outdoor", "dramatic", "neutral"])}
+      <SliderField numeric label="Light rotation (degrees)" min={-180} max={180} hardMin={-3600} hardMax={3600} step={1} unit="degrees" value={settings.light_rotation_deg} resetValue={0} onChange={value => setSettings({ ...settings, light_rotation_deg: value })} />
+      <SliderField numeric label="Light strength" min={.05} max={10} hardMin={.05} hardMax={10} step={.05} unit="×" value={settings.light_strength} resetValue={1} onChange={value => setSettings({ ...settings, light_strength: value })} />
       {choice("background", "Background", ["studio_dark", "studio_light", "transparent", "custom"])}<label>Background color<input type="color" value={settings.background_color} onChange={e => setSettings({ ...settings, background_color: e.target.value })} /></label>
       {(["transparent", "ground_plane", "contact_shadows"] as const).map(key => <label className="runtime-checkbox" key={key}><input type="checkbox" checked={settings[key]} onChange={e => setSettings({ ...settings, [key]: e.target.checked })} />{key.replaceAll("_", " ")}</label>)}
       <button className="quiet-button" onClick={() => setSettings(defaults())}>Reset render settings</button><button className="quiet-button" disabled={draft === baseline && !frame} onClick={reset}>Discard render draft</button>

@@ -1,4 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
+import SliderField from "./SliderField";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DesktopClient, Envelope, VehicleViewportResult } from "./types";
 
@@ -333,6 +334,10 @@ export default function VehicleViewport({
         <button type="button" className="quiet-button compact vehicle-fit-button" onClick={resetView}>Reset view</button>
       </div>
 
+      <details className="viewport-slider-settings"><summary>View zoom</summary>
+        <SliderField numeric commitValidOnly label="Viewport zoom" unit="%" min={55} max={300} hardMin={55} hardMax={300} step={5}
+          value={zoom * 100} resetValue={100} onChange={value => { if (Number.isFinite(value) && value >= 55 && value <= 300) setZoom(value / 100); }} />
+      </details>
       <div className="vehicle-viewport-selectors">
         <label htmlFor={`viewport-lod-${model}`}><span>LOD</span><select id={`viewport-lod-${model}`} value={lod} onChange={(event) => {
           const next = event.target.value;

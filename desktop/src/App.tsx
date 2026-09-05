@@ -16,6 +16,8 @@ import { VehicleAxleEditor } from "./VehicleAxleEditor";
 import { VehicleOutputEditor, type VehiclePackageDraft } from "./VehicleOutputEditor";
 import { VehicleTransmissionEditor } from "./VehicleTransmissionEditor";
 import VehicleViewport from "./VehicleViewport";
+import SliderField from "./SliderField";
+import { handlingSlider } from "./handlingSliders";
 import QwenAssistant from "./QwenAssistant";
 import LegacyOivExport from "./LegacyOivExport";
 import QuickImportPublish from "./QuickImportPublish";
@@ -2047,7 +2049,14 @@ function ContentWorkbench({
             {authoringSession && <div hidden={authoringMode !== "identity"} className="vehicle-authoring-editor"><VehicleIdentityEditor key={`${authoringSession.workspace}:${authoringSession.selected_model}:${authoringSession.revision}`} client={client} session={authoringSession} disabled={authoringBusy || otherAuthoringDirty || !!pendingCreate || !!pendingEdit} onGuardChange={setIdentityGuarded} onSaved={value => adoptAuthoringSession(value, "Vehicle identity and linked assets migrated. Undo is available in workspace history.", "identity")} /></div>}
             {authoringMode === "identity" && authoringSession ? null : authoringMode === "edit" && authoringSession ? <div className="vehicle-authoring-editor" aria-live="polite">
               <div className="vehicle-authoring-intro"><strong>Copied workspace</strong><span>Values are validated by the Python authoring service before anything is saved.</span></div>
-              {VEHICLE_AUTHORING_FIELDS.map((group) => <fieldset key={group.title}><legend>{group.title}</legend>{group.fields.map(([field, label]) => <label key={field} htmlFor={`vehicle-authoring-${field}`}><span>{label}<small>{field}</small></span><input id={`vehicle-authoring-${field}`} value={authoringValues[field] ?? ""} onChange={(event) => { setAuthoringValues((values) => ({ ...values, [field]: event.target.value })); setAuthoringNotice(""); }} disabled={authoringBusy || !authoringSession.editable_fields.includes(field)} /></label>)}</fieldset>)}
+              {VEHICLE_AUTHORING_FIELDS.map((group) => <fieldset key={group.title}><legend>{group.title}</legend>{group.fields.map(([field, label]) => {
+                const range = handlingSlider(field);
+                const update = (value: string) => { setAuthoringValues(values => ({ ...values, [field]: value })); setAuthoringNotice(""); };
+                return range ? <SliderField key={field} id={`vehicle-authoring-${field}`} label={label} hint={field} {...range}
+                  value={authoringValues[field] ?? ""} resetValue={authoringSession.values[field]} onChange={update}
+                  disabled={authoringBusy || !authoringSession.editable_fields.includes(field)} />
+                  : <label key={field} htmlFor={`vehicle-authoring-${field}`}><span>{label}<small>{field}</small></span><input id={`vehicle-authoring-${field}`} value={authoringValues[field] ?? ""} onChange={event => update(event.target.value)} disabled={authoringBusy || !authoringSession.editable_fields.includes(field)} /></label>;
+              })}</fieldset>)}
               <div className="vehicle-authoring-actions"><button type="button" className="quiet-button" onClick={() => { setAuthoringValues({ ...authoringBaseline }); setAuthoringNotice("Field changes reset to the current saved revision."); }} disabled={authoringBusy || !fieldAuthoringDirty}>Reset fields</button><button type="button" className="primary-button" onClick={reviewAuthoringEdit} disabled={authoringBusy || !fieldAuthoringDirty}>Review changes</button></div>
             </div> : authoringMode === "appearance" && authoringSession && appearanceDraft ? <div className="vehicle-authoring-editor vehicle-appearance-editor" aria-live="polite">
               <div className="appearance-editor-tabs" role="tablist" aria-label="Appearance editor section"><button type="button" role="tab" aria-selected={appearanceSection === "presets"} className={appearanceSection === "presets" ? "active" : ""} onClick={() => selectAppearanceSection("presets")}>Presets</button><button type="button" role="tab" aria-selected={appearanceSection === "tuning"} className={appearanceSection === "tuning" ? "active" : ""} onClick={() => selectAppearanceSection("tuning")}>Tuning kit</button><button type="button" role="tab" aria-selected={appearanceSection === "lights"} className={appearanceSection === "lights" ? "active" : ""} onClick={() => selectAppearanceSection("lights")}>Light profile</button></div>

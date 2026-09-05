@@ -1,0 +1,28 @@
+.sdk-slider-field { min-width: 0; display: grid; gap: 5px; padding-block: 6px; }
+.sdk-slider-field.sdk-slider-field > label { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin: 0; font-size: .85rem; color: var(--text); }
+.sdk-slider-field > label small { color: var(--muted); font-size: .75rem; }
+.sdk-slider-field .sdk-slider-controls { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sdk-slider-field .sdk-slider-track { flex: 1 1 100px; min-width: 55px; }
+.sdk-slider-field.sdk-slider-field input[type="range"] { display: block; width: 100%; min-width: 0; min-height: 28px; height: 28px; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; accent-color: var(--brand-600, #248968); cursor: pointer; }
+.sdk-slider-field.sdk-slider-field input[type="range"] { appearance: none; }
+.sdk-slider-field input[type="range"]::-webkit-slider-runnable-track { height: 4px; border-radius: 4px; background: var(--border-strong); }
+.sdk-slider-field input[type="range"]::-webkit-slider-thumb { appearance: none; width: 15px; height: 15px; margin-top: -5.5px; border-radius: 50%; background: var(--brand-500); border: 1px solid var(--brand-600); }
+.sdk-slider-field input[type="range"]::-moz-range-track { height: 4px; border-radius: 4px; background: var(--border-strong); }
+.sdk-slider-field input[type="range"]::-moz-range-thumb { width: 15px; height: 15px; border-radius: 50%; background: var(--brand-500); border: 1px solid var(--brand-600); }
+.sdk-slider-field.sdk-slider-field input.sdk-slider-value { flex: 0 1 112px; width: 112px; min-width: 60px; min-height: 34px; padding: 6px 8px; font-size: .85rem; font-variant-numeric: tabular-nums; color: var(--text); background: var(--surface); border: 1px solid var(--border-strong, var(--border)); border-radius: 3px; }
+.sdk-slider-field .sdk-slider-reset { flex: 0 0 30px; min-height: 32px; padding: 2px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface-raised); color: var(--text); font-size: 1.1rem; }
+.sdk-slider-field :is(input,button):focus-visible { outline: 2px solid var(--accent, #248968); outline-offset: 2px; }
+.sdk-slider-field :disabled { cursor: default; opacity: .55; }
+.sdk-slider-field .sdk-slider-endpoints { display: flex; justify-content: space-between; font-size: .7rem; color: var(--muted); gap: 8px; }
+.sdk-slider-field .sdk-slider-help { display: block; color: var(--muted); font-size: .73rem; line-height: 1.4; overflow-wrap: anywhere; }
+.sdk-slider-field[data-invalid] input.sdk-slider-value { border-color: var(--danger, #b44c40); }
+.sdk-slider-field[data-invalid] .sdk-slider-help { color: var(--danger, #b44c40); }
+.weapon-camera-axes:has(.sdk-slider-field) { grid-template-columns: minmax(0, 1fr); }
+.transmission-ratio-table > .sdk-slider-field { border-bottom: 1px solid var(--border); padding: 10px; background: var(--surface); }
+.vehicle-authoring-editor .sdk-slider-field.sdk-slider-field > label { display: flex; padding: 0; font-size: .85rem; gap: 8px; }
+.vehicle-authoring-editor .sdk-slider-field.sdk-slider-field > label small { font: inherit; font-size: .75rem; }
+.vehicle-authoring-editor .axle-steering-fields { grid-template-columns: minmax(210px, 2fr) minmax(100px, 1fr) minmax(110px, 1fr); }
+.viewport-slider-settings { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.viewport-slider-settings > summary { cursor: pointer; font-size: .8rem; color: var(--muted); }
+@media (max-width: 1100px) { .vehicle-authoring-editor .axle-steering-fields { grid-template-columns: minmax(0, 1fr); } }
+@media (forced-colors: active) { .sdk-slider-field input[type="range"]::-webkit-slider-thumb { background: Highlight; border-color: ButtonText; } .sdk-slider-field input[type="range"]::-webkit-slider-runnable-track { background: CanvasText; } }

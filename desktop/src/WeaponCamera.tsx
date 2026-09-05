@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ScopeModelCalibration } from "./ScopeModelCalibration";
+import SliderField from "./SliderField";
 
 export interface CameraField {
   key: string; tag: string; attribute: string; label: string; group: string;
@@ -99,9 +100,13 @@ export function WeaponCamera({ fields, values, original, editable, disabled, onC
   const flagTokens = [...new Set(`${original[flagsKey] ?? ""} ${values[flagsKey] ?? ""}`.split(/\s+/).filter(Boolean))];
   const active = (values[flagsKey] ?? "").split(/\s+/).filter(Boolean);
   const renderGroup = (group: string) => <fieldset key={group}><legend>{group}</legend><div className="weapon-camera-axes">{fields.filter(field => field.group === group).map(field =>
-    <label key={field.key}>{field.attribute === "value" ? field.label : field.attribute.toUpperCase()}<input aria-label={field.label}
-      inputMode="decimal" value={values[field.key] ?? ""} disabled={disabled || !editable.includes(field.key)}
-      onChange={e => onChange({ [field.key]: e.target.value })} /><small>{field.unit}</small></label>)}</div></fieldset>;
+    <SliderField key={field.key} label={field.label} value={values[field.key] ?? ""} resetValue={original[field.key]}
+      min={field.unit === "metres" ? Math.max(-.1, field.minimum) : field.minimum}
+      max={field.unit === "metres" ? Math.min(.1, field.maximum) : field.maximum}
+      step={field.unit === "metres" ? .001 : .1} fineStep={Number(field.step)}
+      hardMin={field.minimum} hardMax={field.maximum} unit={field.unit}
+      disabled={disabled || !editable.includes(field.key)}
+      onChange={next => onChange({ [field.key]: next })} />)}</div></fieldset>;
   return <>
     {fields.length > 0 && <details className="weapon-camera-group" open><summary>First-person camera &amp; scope</summary>
       <p>Only existing source fields are editable. Position is in metres; rotation and FOV are in degrees. Missing axes are left untouched.</p>
