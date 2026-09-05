@@ -1,143 +1,80 @@
-# ALLIN1 SDK 0.6.4 — prerelease guide
+# ALLIN1 SDK 0.6.4 — release guide
 
-**Not release-qualified.** SDK and Launcher target 0.6.4 independently; neither
-requires the other's source checkout at runtime. Suppressors Enhanced 1.2.1 is a
-separate mod release and is not part of this SDK package.
+0.6.4 is a maintainer-approved **unsigned manual-download release**. SDK
+publication is independent of the separate Launcher. Package support does not
+mean that third-party mods or development fixtures are included in the SDK.
 
-The owner explicitly approved publishing `v0.6.4-rc.1` as an unsigned prerelease
-with native/live acceptance gaps disclosed. This does not mark the full-release
-milestone complete. The manual-download prerelease does not replace the stable
-Latest channel; its attached matrix and exact build identities describe the
-tested candidate bytes.
+## Architecture and retained safeguards
 
-## Mandatory 0.6.4 full-release milestone
+React/Tauri v2 is the only desktop interface. Tkinter adapters, GUI build jobs,
+Tcl/Tk and `_tkinter` are excluded; Python domain services and CLI/Agent API
+compatibility remain. Source and frozen-package checks enforce this boundary.
 
-**Both SDK and Launcher must be complete React/Tauri v2 replacements before the
-full 0.6.4 release.** A mixed Tkinter/React distribution does not meet this milestone.
-It is an unmet release gate, not a statement that migration is already complete.
-
-- Replicate every retained Tkinter user workflow and secondary action in React,
-  with happy-path, failure/recovery and state-preservation tests. Opening every
-  module alone is insufficient.
-- Switch all supported GUI entrypoints to Tauri. Remove Tkinter UI modules,
-  adapters, imports and legacy GUI build jobs from active product source; remove
-  Tcl/Tk and `_tkinter` from the distributed runtimes. Verify source, startup
-  processes and extracted installer/portable contents. Keep shared Python domain
-  services and CLI/Agent API compatibility.
-- Qualify standalone SDK and Launcher builds, native dialogs, preferences,
-  handoffs, cancellation, crash/close/restart and complete Windows lifecycle.
-  Include missing dependencies, spaces/long paths and user-data preservation.
-- Pass the full required automated gates and unchanged coverage thresholds
-  (SDK 80%, Launcher 91%). Required skipped checks remain untested, not passes.
-- Bind all package and approved Legacy/Enhanced acceptance evidence to the same
-  reviewed source, final artifacts, dependencies and independent sessions.
-- Publish only after separate approval, as explicitly unsigned manual downloads.
-  Keep automatic-update signature verification enforced.
-
-Tkinter source removal is complete following explicit approval: 26 SDK adapters
-and the old GUI build jobs are removed. GUI aliases and CLI deep links target
-Tauri; shared Python services remain. `scripts/tk_retirement.py` verifies source
-absence/imports/entrypoints, separately from frozen-payload and live qualification.
+Authoring still requires typed operations, reviewed destinations and explicit
+confirmation. Path containment, ownership, stale-content rejection, retained
+backups and rollback are not relaxed by the release validation decisions.
 
 ## Distribution decision
 
-0.6.4 targets **unsigned manual downloads**. No SignPath certificate, Azure
-enrollment or certificate delivery date is a prerequisite for this release path.
-Do not claim publisher-signed binaries; record actual signature status and ship
-final SHA-256 checksums and build identity. Existing updater trust checks remain
-enforced, and React update installation remains disabled. This decision does not
-waive tests, review, packaged lifecycle or independently bound live acceptance.
+The maintainer approved publication on September 5, 2026. No publisher signing
+certificate is promised or required for these unsigned manual downloads.
+Publish exact checksums and build identity. SHA-256 detects changed bytes but
+does not authenticate a publisher. Do not disable Windows security protections.
 
-## Assessment and scope
+Automatic-update signature verification remains enforced. React update
+installation is disabled until its trusted key/metadata workflow is ready.
+This release does not enable unsigned automatic updates.
 
-The SDK is in late functional migration. Its Python-backed authoring, review,
-validation and receipts are the strongest part; React is now a substantial
-working interface, not just a visual prototype. The outstanding risk is in the
-secondary/native paths and release engineering, not the number of pages built.
+## Validation scope
 
-0.6.4 includes the current vehicle/weapon/ped/map authoring work, native previews
-and optional Blender rendering, standalone assistant configuration, RPF package
-layout/build flow/text/binary/change-set/transaction tools, package recipes,
-vehicle Quick Import/publication, receipts and Data Tools. See the [SDK manual](sdk-guide.md)
-and exact [parity ledger](tauri-feature-parity.md) for limitations.
-
-Hardening separates shared nonvisual helpers from Tkinter, validates archive and
-manifest containment before writes, preserves recovery roots, binds package and
-runtime identity and rejects incomplete/stale release evidence. Specialist React
-workspaces are split from initial application code; loading errors never cause
-automatic whole-app reloads during unresolved work.
-
-The shared content-extension contract now matches Launcher read-only inspection:
-inspecting authorization or a manifest does not publish registries, backups or
-preload caches. Paired-source and filesystem-preservation regressions cover this
-boundary without requiring a Launcher at SDK runtime.
-
-## What this release does not claim
-
-- Not every Tkinter secondary action or native dialog has been qualified.
-- The planned YMT expansion runtime is not enabled by descriptor authoring.
-- Optics/animation/runtime authoring does not prove live game appearance or behavior.
-- SDK viewport/Blender images do not certify Reactor rendering in GTA.
-- Signed React update installation remains blocked pending signing identity/metadata.
-- Earlier local candidates, hashes and Tkinter test results do not qualify current source.
-
-## Qualification matrix
-
-| Gate | Requirement / current limit |
+| Check | Release policy / evidence |
 | --- | --- |
-| React happy paths | Exact versioned 29-module inventory, including XML and Lua editors; named assertions and no required skips; native cases enabled |
-| Python | Full suite at unchanged 80% coverage threshold; targeted protocol tests alone are insufficient |
-| Native components | Correct pinned dependencies, helpers, Rust broker and runtime capabilities; preserve exact evidence |
-| Package integrity | Fresh shell, sidecar, resources, portable ZIP and NSIS agree on one build identity |
-| Clean Windows lifecycle | Install, upgrade, repair, uninstall, rollback, missing dependencies, spaces/long paths and user-data preservation still required for current candidate |
-| Tkinter source removal | Complete; source and build-entrypoint guard enforced. Final packaged/process qualification remains separate |
-| Live Legacy / Enhanced | Final-artifact/dependency-bound independent session acceptance; separate approval required |
-| Manual publication | Reviewed source, explicit unsigned disclosure, exact checksums/build identity and separate approval; no automatic publishing |
+| Python | Full canonical suite and unchanged 80% branch-coverage threshold |
+| React | Complete workspace assertion inventory, including actual native workflows; no skipped checks |
+| Native components | Rust broker tests, RPF helper checks, both-edition controller builds and optional Blender test renderer |
+| Package integrity | One clean commit, build ID, shell, sidecar, embedded frontend, resources, installer and portable inventory |
+| Windows lifecycle | Same-machine SDK-only fresh install, upgrade, missing-file repair, uninstall, data preservation and manual rollback |
+| Desktop observations | Native startup, navigation, reviewed save, crash/restart recovery and clean shutdown exercised during preparation |
+| Pristine Windows | Not required for this publication; first-time shared-dependency bootstrap remains untested |
+| Live Legacy / Enhanced | Full independent final-build in-game acceptance remains unverified; no claim is inferred from exported files or rendered previews |
 
-The last pre-optimization baseline passed 221 React tests and 41 protocol/no-Tk
-tests without skips. Those counts are historical checkpoint evidence, not a
-current release PASS. Use the fresh test run's source digest and report for
-exact counts after this documentation/optimization pass.
+The four Windows tests blocked only by unavailable symbolic-link privileges
+have an explicit, version-scoped maintainer waiver. They stay in the suite and
+are reported as **WAIVED_NOT_PASSED**. No failed assertion, unrelated skip,
+coverage failure, or runtime security check is waived.
 
-## Build and identity
+The build accepts that specific exception only with
+`-AllowWindowsSymlinkSkips`. Its identity records the exception; framework
+evidence validates each exact test name and privilege-related skip reason.
+Without the flag, the existing no-skipped-tests rule remains in effect.
+
+Installer/lifecycle observations apply to the tested build IDs. The attached
+release validation summary distinguishes final-byte tests from earlier native
+observations; earlier dirty-source reports do not certify a new package.
+
+## Known limits
+
+- Not every secondary/native dialog has independent final-build acceptance.
+- Authoring support does not prove a model, animation, map or runtime works in GTA.
+- SDK viewport and Blender previews are not an in-game rendering certification.
+- Very long installation paths are refused with guidance to move the complete
+  SDK to a shorter local path. User projects need not move.
+- Missing shared dependencies on a pristine Windows system were not simulated
+  by uninstalling shared runtimes from the development machine.
+
+## Build and recovery
 
 Follow [validation](validation.md) and [desktop packaging](../desktop/README.md).
-The candidate pipeline binds source commit/digest, version, build ID, locks,
-toolchain, runtime/dependency identities and artifact hashes. A dirty-source test
-candidate is not a reviewed release simply because it displays 0.6.4.
+Use a clean source commit with matching Python, Cargo, frontend and Tauri
+versions. Build and verify the full installer and portable distribution.
+The current notes are in [RELEASE_NOTES.md](../RELEASE_NOTES.md); historical
+releases remain in the archive, not repeated in the main README.
 
-Portable metadata includes `release.json`, `checksums.json`, `build-identity.json`,
-`resource-checksums.json`, `allin1-sdk-desktop.exe` and the frozen sidecar. Keep
-their exact filenames and bytes. A compatible Launcher validates this contract;
-it cannot install an arbitrary renamed shell as a complete SDK.
+Portable files include `release.json`, `checksums.json`, `build-identity.json`,
+`resource-checksums.json`, `allin1-sdk-desktop.exe` and the frozen sidecar.
+Do not mix companions from different builds. Keep projects and receipts outside
+the application folder, back up settings before upgrades, and retain the
+previous complete installer or portable archive for manual rollback.
 
-## Upgrade and recovery
-
-Standalone use remains supported without Launcher/client registration. Do not
-overwrite authored projects or remove receipts during an application upgrade.
-Retained backup roots and hash-bound rollback reject wrong-target or modified
-state. Exact installer lifecycle behavior must be tested against the new sealed
-candidate, not inferred from service-level synthetic tests.
-
-For manual publication, provision independently reviewed live evidence and its
-identity/session pins. A matching log hash or valid PE header alone cannot
-establish readiness. Use [unsigned release preparation](../RELEASE_SIGNING.md)
-and the [distribution/signing policy](../CODE_SIGNING_POLICY.md).
-
-## Final release-pass handoff
-
-1. Finish outstanding secondary/native and frozen-process acceptance. Tk source
-   is removed; do not label any historical legacy bundle as the new React SDK.
-2. Freeze a reviewed source revision and generate fresh test/candidate evidence.
-   Earlier dirty-source test reports and local installers are not transferable.
-3. Verify installer and portable artifacts contain the same tested resources,
-   current manual and release notes. Test the full disposable Windows lifecycle.
-4. Obtain the required approved live acceptance and preserve exact identities.
-5. Keep the GitHub overview to one current “What's new” section. Render only
-   `RELEASE_NOTES.md` for this version; archive earlier release text separately.
-6. After all gates and explicit publication approval, finalize the notes, disclose
-   unsigned distribution, and publish the exact qualified assets with checksums.
-
-Legacy Tk build/publishing jobs have been removed. Tauri CI uploads unsigned
-candidates/evidence, including the complete portable ZIP; it does not publish
-GitHub Releases.
+CI builds unsigned candidates and evidence. Publication remains an explicit
+maintainer action, not an automatic side effect of tagging or a successful test.

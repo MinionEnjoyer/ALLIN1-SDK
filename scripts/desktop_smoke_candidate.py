@@ -58,7 +58,12 @@ def build_shell(root: Path, identity_path: Path, resources: Path, sidecar: Path,
                               expected, actual, identity=identity)
     with (folder / (portable["file"] + ".sha256")).open("x", encoding="utf-8") as stream:
         stream.write(f"{portable['sha256']}  {portable['file']}\n")
+    from scripts.portable_lifecycle import rehearse
+    lifecycle = rehearse(folder / portable["file"], portable["sha256"], folder / "portable-lifecycle", execute_probes=True)
     return {"native_shell_build": "PASS", "embedded_frontend": "PASS", "portable": portable,
+            "portable_lifecycle": {"status": lifecycle["status"],
+                "report_sha256": sha256(folder / "portable-lifecycle/portable-lifecycle.json"),
+                "long_path_runtime_supported": False},
             "shell_sha256": sha256(shell), "frontend_probe_sha256": sha256(folder / "frontend-probe.json")}
 
 
@@ -97,9 +102,12 @@ def build(root: Path, pnpm: str, *, with_shell: bool = False) -> Path:
             report.update(build_shell(root, identity_path, resources, sidecar, pnpm))
         check_source(root, identity_path)
         verify_inventory(resources)
+        owned_logs = ["publish.log", "freeze.log", "smoke_desktop_sidecar.py.log", "smoke_ped_desktop.py.log"]
+        if with_shell:
+            owned_logs.extend(["frontend.log", "native.log"])
         report.update(status="PASS", artifact_sha256=sha256(sidecar), artifact_bytes=sidecar.stat().st_size,
             resource_manifest_sha256=sha256(resources / "resource-checksums.json"),
-            logs={path.name: sha256(path) for path in folder.glob("*.log")})
+            logs={name: sha256(folder / name) for name in owned_logs})
     except Exception as error:
         report["error"] = str(error)
         raise

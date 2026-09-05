@@ -10,13 +10,45 @@ import pytest
 
 from scripts.desktop_candidate import (
     PLUGIN_NAMES, REQUIRED_GATES, check_source, compare_payload, execution_command,
-    gate_evidence, nsis_members, run_gate, write_new, write_portable,
+    gate_evidence, nsis_members, run_gate, tool_identity, write_new, write_portable,
 )
 
 
 def _fixture_tool_anchors(executable=Path(sys.executable)):
-    anchor = {"path": str(executable.resolve()), "sha256": hashlib.sha256(executable.read_bytes()).hexdigest()}
+    anchor = tool_identity(executable.resolve())
     return {name: anchor for name in ("python", "pnpm", "cargo", "dotnet")}
+
+
+def test_distributable_tool_identity_omits_paths_but_binds_exact_location_and_bytes(tmp_path):
+    selected = tmp_path / "selected compiler.exe"
+    copied = tmp_path / "another compiler.exe"
+    selected.write_bytes(b"same synthetic tool bytes")
+    copied.write_bytes(selected.read_bytes())
+    identity = tool_identity(selected)
+    encoded = json.dumps(identity)
+    assert set(identity) == {"sha256", "path_binding_sha256"}
+    assert str(tmp_path) not in encoded and selected.name not in encoded
+    assert identity["sha256"] == tool_identity(copied)["sha256"]
+    assert identity["path_binding_sha256"] != tool_identity(copied)["path_binding_sha256"]
+    selected.write_bytes(b"changed tool bytes")
+    assert identity["sha256"] != tool_identity(selected)["sha256"]
+
+
+@pytest.mark.parametrize("stale_anchor", ["other-location", "legacy-readable-path"])
+def test_candidate_gate_blocks_wrong_location_or_old_path_bearing_identity_before_execution(tmp_path, monkeypatch, stale_anchor):
+    from scripts import desktop_candidate as candidate
+    executable = candidate.external_executable(Path(sys.executable))
+    anchor = tool_identity(executable)
+    if stale_anchor == "other-location":
+        anchor["path_binding_sha256"] = "0" * 64
+    else:
+        anchor = {"path": str(executable), "sha256": anchor["sha256"]}
+    identity = {"toolchain_files": {"python": anchor}}
+    monkeypatch.setattr(candidate, "check_source", lambda *_: identity)
+    monkeypatch.setattr(candidate.subprocess, "run", lambda *_, **__: pytest.fail("Stale tool selection must not execute"))
+    with pytest.raises(ValueError, match="differs from its prepared identity"):
+        run_gate(tmp_path, tmp_path / "identity.json", "python", [sys.executable, "-m", "pytest"])
+    assert not (tmp_path / "gate-python.log").exists()
 
 
 def test_candidate_cli_resolves_build_helpers_from_an_unrelated_directory(tmp_path):

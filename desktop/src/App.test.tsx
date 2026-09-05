@@ -16,6 +16,7 @@ const catalog: DesktopCatalog = {
     { id: "models", label: "Models & Materials", shortcut: "Ctrl+4", phase: 5 },
     { id: "rpf", label: "RPF Archives", shortcut: "Ctrl+5", phase: 3 },
     { id: "recipes", label: "Package Recipes", shortcut: "Ctrl+6", phase: 4 },
+    { id: "data_tools", label: "Data Tools", shortcut: "Ctrl+9", phase: 5 },
     { id: "help", label: "Help Center", shortcut: "Ctrl+7", phase: 3 },
   ],
   commands: [{ name: "validate", description: "Validate a manifest", risk: "read_only", parameters: [] }],
@@ -376,6 +377,26 @@ function mockClient(): DesktopClient {
 }
 
 describe("ALLIN1 desktop shell", () => {
+  it.each(catalog.navigation)("honors the advertised $shortcut shortcut for $label", async (route) => {
+    const user = userEvent.setup();
+    render(<App client={mockClient()} />);
+    await screen.findByRole("heading", { name: "Package Linker" });
+    // Start away from the requested destination, including the default linker.
+    await user.click(screen.getByRole("button", { name: route.id === "help" ? /Asset Viewer Ctrl/ : /Help Center Ctrl/ }));
+    const key = route.shortcut.split("+").at(-1)!.toLowerCase();
+    await user.keyboard(`{Control>}${key}{/Control}`);
+    await waitFor(() => expect(screen.getByLabelText(`${route.label} workspace`)).toBeInTheDocument());
+  });
+
+  it("does not navigate with Ctrl+9 while editing console input", async () => {
+    const user = userEvent.setup();
+    render(<App client={mockClient()} />);
+    await screen.findByRole("heading", { name: "Package Linker" });
+    await user.click(screen.getByRole("textbox", { name: "SDK command" }));
+    await user.keyboard("{Control>}9{/Control}");
+    expect(screen.getByLabelText("Package Linker workspace")).toBeInTheDocument();
+  });
+
   it("loads the real catalog shape and navigates with accessible controls", async () => {
     const client = mockClient();
     const user = userEvent.setup();
@@ -521,7 +542,7 @@ describe("ALLIN1 desktop shell", () => {
     expect(screen.getByRole("button", { name: "Open weapon folder" })).toBeInTheDocument();
   });
 
-  it("creates a copied vehicle workspace and guards reviewed field revisions", async () => {
+  async function openEditableVehicle() {
     const user = userEvent.setup();
     render(<App client={createPreviewClient("workbench")} />);
     expect(await screen.findByRole("heading", { name: "Content Workbench" })).toBeInTheDocument();
@@ -535,6 +556,11 @@ describe("ALLIN1 desktop shell", () => {
 
     expect(await screen.findByRole("tab", { name: "Core fields" })).toHaveAttribute("aria-selected", "true");
     expect(within(screen.getByRole("complementary", { name: "Vehicle evidence" })).getAllByRole("textbox")).toHaveLength(37);
+    return user;
+  }
+
+  it("creates a copied vehicle workspace and guards reviewed field revisions", async () => {
+    const user = await openEditableVehicle();
     const mass = screen.getByRole("textbox", { name: "Mass" });
     expect(mass).toHaveValue("1685.0");
     await user.clear(mass);
@@ -557,7 +583,10 @@ describe("ALLIN1 desktop shell", () => {
     await user.click(screen.getByRole("button", { name: "Undo edit" }));
     expect(await screen.findByText("Undo completed as revision 2.")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Mass" })).toHaveValue("1685.0");
+  }, 12_000);
 
+  it("preserves vehicle appearance, tuning and light edits across reviewed revisions", async () => {
+    const user = await openEditableVehicle();
     await user.click(screen.getByRole("tab", { name: "Appearance" }));
     expect(screen.getByText("Structured appearance")).toBeInTheDocument();
     expect(screen.getAllByText(/123_comet6_modkit/).length).toBeGreaterThan(0);
@@ -568,7 +597,7 @@ describe("ALLIN1 desktop shell", () => {
     const appearanceDialog = await screen.findByRole("dialog", { name: "Save reviewed appearance?" });
     expect(within(appearanceDialog).getByText("variation.sirenSettings")).toBeInTheDocument();
     await user.click(within(appearanceDialog).getByRole("button", { name: "Save appearance revision" }));
-    expect(await screen.findByText(/appearance change saved as revision 3/)).toBeInTheDocument();
+    expect(await screen.findByText(/appearance change saved as revision 1/)).toBeInTheDocument();
     expect(screen.getByLabelText(/Siren settings/)).toHaveValue("7");
 
     await user.click(screen.getByRole("tab", { name: "Tuning kit" }));
@@ -582,7 +611,7 @@ describe("ALLIN1 desktop shell", () => {
     const tuningDialog = await screen.findByRole("dialog", { name: "Save reviewed tuning change?" });
     expect(within(tuningDialog).getByText("update entry")).toBeInTheDocument();
     await user.click(within(tuningDialog).getByRole("button", { name: "Save tuning revision" }));
-    expect(await screen.findByText(/tuning change saved as revision 4/)).toBeInTheDocument();
+    expect(await screen.findByText(/tuning change saved as revision 2/)).toBeInTheDocument();
     expect(screen.getByLabelText(/modShopLabel/)).toHaveValue("CM6_SPOILER_TRACK");
 
     await user.click(screen.getByRole("tab", { name: "Light profile" }));
@@ -595,9 +624,12 @@ describe("ALLIN1 desktop shell", () => {
     const lightDialog = await screen.findByRole("dialog", { name: "Save reviewed light profile?" });
     expect(within(lightDialog).getByText("light.1.headLight.intensity")).toBeInTheDocument();
     await user.click(within(lightDialog).getByRole("button", { name: "Save light revision" }));
-    expect(await screen.findByText(/light value saved as revision 5/)).toBeInTheDocument();
+    expect(await screen.findByText(/light value saved as revision 3/)).toBeInTheDocument();
     expect(screen.getByLabelText(/headLight\.intensity/)).toHaveValue("3.250000");
+  }, 12_000);
 
+  it("reviews axle, transmission and distribution changes before building a vehicle package", async () => {
+    const user = await openEditableVehicle();
     await user.click(screen.getByRole("tab", { name: "Axles" }));
     const schematic = screen.getByRole("region", { name: "comet6 axle schematic" });
     expect(within(schematic).getByRole("button", { name: /Axle 1.*same.*free/ })).toBeInTheDocument();
@@ -613,7 +645,7 @@ describe("ALLIN1 desktop shell", () => {
     const axleDialog = await screen.findByRole("dialog", { name: "Save reviewed axle configuration?" });
     expect(within(axleDialog).getByText("3")).toBeInTheDocument();
     await user.click(within(axleDialog).getByRole("button", { name: "Save axle revision" }));
-    expect(await screen.findByText(/axle change saved as revision 6/)).toBeInTheDocument();
+    expect(await screen.findByText(/axle change saved as revision 1/)).toBeInTheDocument();
     expect(screen.getByLabelText(/Handbrake/)).toBeChecked();
 
     await user.click(screen.getByRole("tab", { name: "Transmission" }));
@@ -628,7 +660,7 @@ describe("ALLIN1 desktop shell", () => {
     const transmissionDialog = await screen.findByRole("dialog", { name: "Save reviewed transmission profile?" });
     expect(within(transmissionDialog).getByText("sequential")).toBeInTheDocument();
     await user.click(within(transmissionDialog).getByRole("button", { name: "Save transmission revision" }));
-    expect(await screen.findByText(/transmission change saved as revision 7/)).toBeInTheDocument();
+    expect(await screen.findByText(/transmission change saved as revision 2/)).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Final drive" })).toHaveValue("3.7");
 
     await user.click(screen.getByRole("tab", { name: "Output" }));
@@ -642,7 +674,7 @@ describe("ALLIN1 desktop shell", () => {
     const distributionDialog = await screen.findByRole("dialog", { name: "Save reviewed distribution settings?" });
     expect(within(distributionDialog).getByText("Comet S2 → Comet S2 Track")).toBeInTheDocument();
     await user.click(within(distributionDialog).getByRole("button", { name: "Save distribution revision" }));
-    expect(await screen.findByText(/distribution change saved as revision 8/)).toBeInTheDocument();
+    expect(await screen.findByText(/distribution change saved as revision 3/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Choose…" }));
     expect(screen.getByText("C:\\SDK\\exports\\comet6-package")).toBeInTheDocument();

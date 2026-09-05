@@ -10,6 +10,17 @@ from allin1_sdk.release_identity import sha256
 from allin1_sdk.release_paths import contained, no_links, strict_json
 
 
+# Maintainer-approved 0.6.4 exception, opt-in and bound into build identity.
+# This permits only an unavailable Windows privilege, never a failed assertion.
+WINDOWS_SYMLINK_WAIVER = "windows-symlink-privilege-0.6.4"
+WINDOWS_SYMLINK_SKIPS = {
+    ("tests.test_mod_package_contract", "test_sdk_runtime_tree_install_rejects_symlinked_parent_directory"): "symlink creation is unavailable: [WinError 1314]",
+    ("tests.test_mod_package_contract", "test_sdk_runtime_tree_install_rejects_predictable_temporary_symlink"): "symlink creation is unavailable: [WinError 1314]",
+    ("tests.test_ped_desktop", "test_redirected_authoring_parent_is_refused"): "Creating directory symlinks is not available",
+    ("tests.test_rpf_tools", "test_native_workspace_rejects_symlinked_dependencies"): "Symbolic links are not available to this Windows test account",
+}
+
+
 def instrument(name: str, command: list[str], root: Path, folder: Path) -> list[str]:
     """Allow full canonical gates only; no selection flags or label-only scripts."""
     manifest = str(root / "desktop/src-tauri/Cargo.toml")
@@ -51,13 +62,27 @@ def report_bytes(path: Path, started: float, finished: float, *, replay: bool = 
     return path.read_bytes()
 
 
-def python_evidence(xml_bytes: bytes, coverage: dict, root: Path) -> dict:
+def python_evidence(xml_bytes: bytes, coverage: dict, root: Path, *, windows_symlink_waiver: bool = False) -> dict:
     cases = ET.fromstring(xml_bytes).findall(".//testcase")
     identities = [(row.get("classname"), row.get("name")) for row in cases]
     if not cases or any(not name for _, name in identities) or len(set(identities)) != len(cases):
         raise ValueError("Missing or ambiguous Python test evidence")
-    if any(row.find(tag) is not None for row in cases for tag in ("skipped", "failure", "error")):
+    if any(row.find(tag) is not None for row in cases for tag in ("failure", "error")):
         raise ValueError("Python candidate tests failed or were skipped")
+    waived = []
+    for row in cases:
+        skipped = row.find("skipped")
+        if skipped is None:
+            continue
+        key = (row.get("classname"), row.get("name"))
+        expected = WINDOWS_SYMLINK_SKIPS.get(key)
+        message = skipped.get("message", "")
+        matches = expected and (message.startswith(expected) if "WinError 1314" in expected else message == expected)
+        if not windows_symlink_waiver or not matches:
+            raise ValueError("Python candidate tests failed or were skipped without an applicable waiver")
+        waived.append("::".join(key))
+    if len(waived) == len(cases):
+        raise ValueError("Python candidate requires successfully executed tests")
     if coverage.get("meta", {}).get("branch_coverage") is not True:
         raise ValueError("Python candidate requires branch coverage")
     total = coverage.get("totals", {})
@@ -71,8 +96,12 @@ def python_evidence(xml_bytes: bytes, coverage: dict, root: Path) -> dict:
         path = no_links(Path(name) if Path(name).is_absolute() else root / name)
         if not path.is_relative_to(root / "src/allin1_sdk") or not path.is_file():
             raise ValueError("Coverage contains an unrelated or missing source file")
-    return {"tests": len(cases), "coverage_percent": percent, "coverage_threshold": 80,
-            "branch_coverage": True}
+    result = {"tests": len(cases), "coverage_percent": percent, "coverage_threshold": 80,
+              "branch_coverage": True}
+    if waived:
+        result.update(passed_tests=len(cases) - len(waived), waived_tests=sorted(waived),
+                      waiver=WINDOWS_SYMLINK_WAIVER, waived_checks_status="WAIVED_NOT_PASSED")
+    return result
 
 
 def react_evidence(report: dict, inventory: dict, root: Path, started: float, finished: float) -> dict:
@@ -120,7 +149,12 @@ def collect(name: str, root: Path, folder: Path, started: float, finished: float
     reports = {filename: report_bytes(folder / filename, started, finished, replay=replay) for filename in report_names(name)}
     evidence = {"schema_version": 1, "reports": {filename: {"sha256": sha256(folder / filename), "bytes": len(content)} for filename, content in reports.items()}}
     if name == "python":
-        evidence.update(python_evidence(reports["gate-python.xml"], strict_json(reports["gate-coverage.json"]), root))
+        identity = strict_json((folder / "_build_identity.json").read_bytes()) if (folder / "_build_identity.json").is_file() else {}
+        waiver = identity.get("python_skip_waiver")
+        if waiver is not None and (waiver != WINDOWS_SYMLINK_WAIVER or identity.get("sdk_version") != "0.6.4"):
+            raise ValueError("Unknown or wrong-version Python test waiver")
+        evidence.update(python_evidence(reports["gate-python.xml"], strict_json(reports["gate-coverage.json"]), root,
+                                        windows_symlink_waiver=waiver == WINDOWS_SYMLINK_WAIVER))
     elif name == "react":
         inventory = strict_json((root / "desktop/module-happy-paths.json").read_bytes())
         evidence.update(react_evidence(strict_json(reports["gate-react-results.json"]), inventory, root, started, finished))

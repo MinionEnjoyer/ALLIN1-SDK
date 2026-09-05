@@ -19,7 +19,7 @@ See the [mandatory release milestone](release-0.6.4.md#mandatory-064-full-releas
 ## 0.6.4 RC parity gate
 
 `desktop/module-happy-paths.json` is the release-owned inventory for the React
-application. It maps all 27 user-facing modules to an exact named happy-path
+application. It maps all 29 user-facing modules to an exact named happy-path
 test, including four opt-in native workflows. Candidate qualification enables
 those native tests and rejects any React run that merely exits successfully
 while reporting skips. The pre-optimization no-skip baseline was 23 files and
@@ -93,7 +93,7 @@ silently counted as migrated UI capability.
 | Streaming jobs | ad hoc Tk threads/progress dialogs | one read-only worker, ordered channel, bounded diagnostics | 2–3 | partial |
 | Cancellation | per-tool behavior | force-cancellable read-only worker; mutations gated | 2–6 | partial |
 | Crash recovery | process exit/hang risk | broker EOF detection, recoverable status, explicit restart | 2–3 | partial |
-| React module happy paths | n/a | versioned inventory maps all 27 declared React modules to named tests; runtime, Blender and RPF native cases enabled. No-skip baseline: 23 files / 221 tests. These mix fixture-backed UI tests and real Python/native integrations, not 221 packaged E2E tests | 2–6 | complete |
+| React module happy paths | n/a | versioned inventory maps all 29 declared React modules to named tests; runtime, Blender and RPF native cases must be enabled. Counts and pass/fail belong to each fresh source-bound run. These mix fixture-backed UI tests and real Python/native integrations, not packaged E2E tests | 2–6 | complete (inventory only) |
 | Windows packaged E2E | PyInstaller smoke tests | local release launch and real-sidecar navigation pass; clean-VM install suite pending | 2–6 | partial |
 | NSIS and portable package | PyInstaller ZIP | source-bound x64 NSIS installer and deterministic portable ZIP are generated and content/hash checked together; clean-VM install verification remains | 6 | partial |
 | Signing | Authenticode release policy | sign inner binaries, Tauri executable/installer, updater signature separately | 6 | not started |
@@ -149,11 +149,12 @@ or receipts. General orphan/missing-archive recovery, large/encrypted archive
 validation and native-dialog/clean-machine certification remain. See the
 [change-set workflow and boundaries](rpf-change-set-desktop.md).
 
-## UI callbacks that still mix orchestration and presentation
+## Historical Tkinter extraction reference
 
-The following modules are the priority extraction list. Their domain classes are
-already reusable, but the callbacks still choose paths, run work, map errors,
-and mutate widgets in one method:
+The following removed modules were the migration's original extraction list.
+They are not current source files or instructions to modify retired UI code.
+Use the current React mapping above and the release-owned test inventory for
+remaining qualification work.
 
 | UI module | Mixed callbacks observed | Extraction target |
 |---|---|---|

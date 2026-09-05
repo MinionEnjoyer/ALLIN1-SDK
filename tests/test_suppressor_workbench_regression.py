@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,39 @@ PRIVATE_PACKAGE = (
 ENHANCED_GAME = Path(
     r"D:\Programs\Steam\steamapps\common\Grand Theft Auto V Enhanced"
 )
+
+
+def _regression_paths(environment: dict[str, str]) -> tuple[Path, Path]:
+    """Local fixture locations are explicit, never bundled or auto-downloaded."""
+    result = []
+    for key, default, directory in (
+        ("SDK_SUPPRESSOR_REGRESSION_PACKAGE", PRIVATE_PACKAGE, False),
+        ("SDK_SUPPRESSOR_REGRESSION_GTA", ENHANCED_GAME, True),
+    ):
+        path = Path(environment[key]) if key in environment else default
+        valid = path.is_dir() if directory else path.is_file()
+        if key in environment and (not environment[key].strip() or not valid):
+            raise ValueError(f"{key} must name an existing {'directory' if directory else 'file'}")
+        result.append(path)
+    return result[0], result[1]
+
+
+def test_private_regression_fixture_accepts_explicit_local_paths(tmp_path: Path) -> None:
+    package = tmp_path / "local fixture with spaces.zip"
+    package.write_bytes(b"fixture")
+    game = tmp_path / "read-only game data"
+    game.mkdir()
+    assert _regression_paths({
+        "SDK_SUPPRESSOR_REGRESSION_PACKAGE": str(package),
+        "SDK_SUPPRESSOR_REGRESSION_GTA": str(game),
+    }) == (package, game)
+
+
+@pytest.mark.parametrize("key", ["SDK_SUPPRESSOR_REGRESSION_PACKAGE", "SDK_SUPPRESSOR_REGRESSION_GTA"])
+@pytest.mark.parametrize("value", ["", "missing-local-fixture"])
+def test_invalid_explicit_regression_fixture_fails_instead_of_skipping(key: str, value: str) -> None:
+    with pytest.raises(ValueError, match=key):
+        _regression_paths({key: value})
 
 
 def _entry(name: str, number: int) -> RpfEntryRecord:
@@ -284,14 +318,13 @@ destination = "scripts/Test/allin1.content.json"
     assert scan.scripted_weapon_systems[0].relationships_declared is True
 
 
-@pytest.mark.skipif(
-    not PRIVATE_PACKAGE.is_file() or not ENHANCED_GAME.is_dir(),
-    reason="private suppressor fixture and Enhanced GTA installation are local-only",
-)
 def test_private_suppressor_package_is_an_end_to_end_regression_fixture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with open_mod_package(PRIVATE_PACKAGE) as manifest:
+    package, source_game = _regression_paths(dict(os.environ))
+    if not package.is_file() or not source_game.is_dir():
+        pytest.skip("private suppressor fixture and Enhanced GTA installation are local-only; set SDK_SUPPRESSOR_REGRESSION_PACKAGE and SDK_SUPPRESSOR_REGRESSION_GTA")
+    with open_mod_package(package) as manifest:
         assert manifest.schema_version == 2
         assert manifest.extension is not None
         # Prove the same SDK lifecycle that the launcher uses can install the
@@ -306,7 +339,7 @@ def test_private_suppressor_package_is_an_end_to_end_regression_fixture(
         assert status.installed and status.mod_id == "realistic-suppressors"
         assert (game / "mods/update/x64/dlcpacks/rs_suppressor_heat/dlc.rpf").is_file()
 
-    scan = AddonPackageInspector(PROJECT_ROOT, ENHANCED_GAME).inspect(PRIVATE_PACKAGE)
+    scan = AddonPackageInspector(PROJECT_ROOT, source_game).inspect(package)
     assert "scripted_weapon_enhancement" in scan.package_kinds
     assert len(scan.scripted_weapon_systems) == 1
     assert not any(item.code == "opaque_rpf" for item in scan.findings)
@@ -324,8 +357,8 @@ def test_private_suppressor_package_is_an_end_to_end_regression_fixture(
     assert report.tiers[23].emissive_multiplier == pytest.approx(1.0)
 
     cli_result = CliRunner().invoke(main, [
-        "inspect-workbench", str(PRIVATE_PACKAGE), "--category", "weapons",
-        "--gta-path", str(ENHANCED_GAME),
+        "inspect-workbench", str(package), "--category", "weapons",
+        "--gta-path", str(source_game),
     ])
     assert cli_result.exit_code == 0, cli_result.output
     payload = json.loads(cli_result.output)

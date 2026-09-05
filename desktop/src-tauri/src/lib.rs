@@ -2,6 +2,7 @@ mod launch;
 mod protocol;
 mod package_probe;
 mod sidecar;
+mod runtime_location;
 
 use launch::{parse_launch_args, LaunchRequest};
 use protocol::Envelope;
@@ -17,6 +18,14 @@ use tauri::{Emitter, Manager, State, WindowEvent};
 
 struct LaunchState(Mutex<Option<LaunchRequest>>);
 struct CloseState(AtomicBool);
+
+pub fn inspect_runtime_location() -> Result<Value, String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let root = executable.parent().ok_or("SDK executable has no parent directory")?;
+    let mut report = runtime_location::inspect(root);
+    report["build_identity"] = build_identity().unwrap_or(Value::Null);
+    Ok(report)
+}
 
 #[tauri::command]
 fn desktop_frontend_ready(state: State<'_, CloseState>) {

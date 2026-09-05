@@ -1,11 +1,11 @@
 # ALLIN1 Tauri desktop
 
-> 0.6.4 development, not release-qualified. For current scope and known limits,
+> 0.6.4 unsigned manual-download release. For scope and known validation limits,
 > see the [release guide](../docs/release-0.6.4.md) and
 > [validation procedure](../docs/validation.md). Existing local installers may
 > predate current source; a checksum alone is not release approval.
 
-0.6.4 is being prepared for unsigned manual downloads. The workflow uploads
+0.6.4 uses unsigned manual downloads. The workflow uploads
 candidate installers, complete portable packages, checksums and evidence; it
 does not publish a release. See [release preparation](../RELEASE_SIGNING.md).
 
@@ -26,6 +26,14 @@ and verify its companion `.sha256`. Install for the current user and launch
 optional; there is no registration or first-run dependency on either.
 Game inspection still requires the relevant GTA V files, but package-only
 authoring, validation, previews, and linking do not require the game.
+
+Extract portable downloads completely into a short local folder. Very long
+installation paths are unsupported by the frozen Python service: the native
+shell checks its executable path against the installer's 240 UTF-16-unit limit
+and gives relocation guidance before starting it. Move the whole SDK folder,
+not just its executable; project folders do not need to move. The read-only
+`allin1-sdk-desktop.exe --check-runtime-location` reports this check without
+opening a window or launching the service. It does not qualify other dependencies.
 
 The installer carries Python, RpfPatcher with its .NET runtime, SDK schemas,
 assets, examples, documentation, and runtime authoring source. Native axle

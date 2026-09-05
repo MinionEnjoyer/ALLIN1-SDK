@@ -25,6 +25,38 @@ def test_complete_python_evidence_keeps_unchanged_threshold(python_report):
     assert result == {"tests": 1, "coverage_percent": 80, "coverage_threshold": 80, "branch_coverage": True}
 
 
+@pytest.mark.parametrize("key,reason", evidence.WINDOWS_SYMLINK_SKIPS.items())
+def test_specific_owner_waiver_reports_skips_without_claiming_pass(python_report, key, reason):
+    from xml.etree import ElementTree as ET
+    xml, coverage, root = python_report
+    tree = ET.fromstring(xml)
+    row = ET.SubElement(tree.find("testsuite"), "testcase", classname=key[0], name=key[1])
+    ET.SubElement(row, "skipped", message=reason)
+    document = ET.tostring(tree)
+    with pytest.raises(ValueError): evidence.python_evidence(document, coverage, root)
+    result = evidence.python_evidence(document, coverage, root, windows_symlink_waiver=True)
+    assert result["passed_tests"] == 1
+    assert result["waived_tests"] == ["::".join(key)]
+    assert result["waived_checks_status"] == "WAIVED_NOT_PASSED"
+    assert result["coverage_threshold"] == 80
+
+
+@pytest.mark.parametrize("case", ["different-test", "different-reason", "failure", "all-skipped", "coverage"])
+def test_symlink_waiver_never_hides_other_missing_evidence(python_report, case):
+    from xml.etree import ElementTree as ET
+    xml, coverage, root = python_report
+    tree = ET.fromstring(xml)
+    key, reason = next(iter(evidence.WINDOWS_SYMLINK_SKIPS.items()))
+    row = ET.SubElement(tree.find("testsuite"), "testcase", classname=key[0], name=key[1])
+    ET.SubElement(row, "skipped", message=reason)
+    if case == "different-test": row.set("name", "another_test")
+    elif case == "different-reason": row.find("skipped").set("message", "Fixture failed")
+    elif case == "failure": ET.SubElement(row, "failure", message="assertion failed")
+    elif case == "all-skipped": tree.find("testsuite").remove(tree.find(".//testcase"))
+    else: coverage["totals"]["percent_covered"] = 79
+    with pytest.raises(ValueError): evidence.python_evidence(ET.tostring(tree), coverage, root, windows_symlink_waiver=True)
+
+
 @pytest.mark.parametrize("case", ["empty", "skip", "failure", "error", "duplicate", "no-branch", "low", "boolean", "no-source", "outside-source", "missing-source"])
 def test_incomplete_python_evidence_is_not_qualification(python_report, case):
     xml, coverage, root = python_report
@@ -108,7 +140,7 @@ def test_real_python_gate_requires_actual_no_skip_framework_results(tmp_path, mo
     executable = candidate.external_executable(Path(sys.executable))
     identity = tmp_path / "identity.json"
     candidate.write_new(identity, {"schema_version": 1, "kind": "sdk_build_identity", "build_id": "disposable", "source": source,
-        "toolchain_files": {"python": {"path": str(executable), "sha256": candidate.sha256(executable)}}})
+        "toolchain_files": {"python": candidate.tool_identity(executable)}})
     command = [sys.executable, "-m", "pytest", "--cov=allin1_sdk", "--cov-report=term-missing"]
     if skip:
         with pytest.raises(subprocess.CalledProcessError): candidate.run_gate(tmp_path, identity, "python", command)

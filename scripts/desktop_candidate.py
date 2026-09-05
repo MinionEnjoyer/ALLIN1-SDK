@@ -72,13 +72,24 @@ def execution_command(command: list[str], executable: Path) -> tuple[list[str], 
     return [str(executable), *command[1:]], None
 
 
+def tool_identity(executable: Path) -> dict[str, str]:
+    """Pin bytes and selected location without shipping a developer-local path.
+
+    The build-only gate receipt retains the actual invocation. The distributable
+    identity needs only a one-way location binding to reject an independent
+    lookup that selects an identical executable from another installation.
+    """
+    return {"sha256": sha256(executable),
+            "path_binding_sha256": hashlib.sha256(str(executable).encode("utf-8")).hexdigest()}
+
+
 def write_new(path: Path, value: dict) -> None:
     no_links(path)
     with path.open("x", encoding="utf-8") as stream:
         stream.write(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
-def prepare(root: Path, pnpm: str) -> Path:
+def prepare(root: Path, pnpm: str, *, allow_windows_symlink_skips: bool = False) -> Path:
     source = source_identity(root)
     if not source["versions_agree"]:
         raise ValueError("Source versions disagree")
@@ -95,7 +106,7 @@ def prepare(root: Path, pnpm: str) -> Path:
                 raise FileNotFoundError(f"Candidate toolchain executable was not found: {name} ({command[0]})")
             resolved = str(authored.resolve(strict=True))
         executable = external_executable(Path(resolved))
-        toolchain_files[name] = {"path": str(executable), "sha256": sha256(executable)}
+        toolchain_files[name] = tool_identity(executable)
         invocation, _launcher = execution_command(command, executable)
         try:
             tools[name] = subprocess.check_output(invocation, text=True, timeout=30).strip()
@@ -112,6 +123,10 @@ def prepare(root: Path, pnpm: str) -> Path:
         "lockfiles": {name: sha256(contained(root, name)) for name in ["desktop/pnpm-lock.yaml", "desktop/src-tauri/Cargo.lock"]},
         "schema_versions": {"desktop_protocol": "1.0.0", "candidate_identity": 1, "candidate_gate": 2, "live_acceptance": 1},
         "release_qualified": False}
+    if allow_windows_symlink_skips:
+        if identity["sdk_version"] != "0.6.4":
+            raise ValueError("Windows symlink privilege waiver is approved only for SDK 0.6.4")
+        identity["python_skip_waiver"] = candidate_test_evidence.WINDOWS_SYMLINK_WAIVER
     path = destination / "_build_identity.json"
     write_new(path, identity)
     version = identity["sdk_version"]
@@ -179,7 +194,7 @@ def run_gate(
     executable_path = external_executable(Path(executable))
     tool_name = {"python": "python", "react": "pnpm", "frontend": "pnpm", "rust": "cargo", "native-rpf": "dotnet"}[name]
     anchor = identity.get("toolchain_files", {}).get(tool_name)
-    if anchor != {"path": str(executable_path), "sha256": sha256(executable_path)}:
+    if anchor != tool_identity(executable_path):
         raise ValueError("Candidate gate tool differs from its prepared identity; prepare a fresh candidate")
     measured_command = candidate_test_evidence.instrument(name, command, root, identity_path.parent)
     invocation, launcher_path = execution_command(measured_command, executable_path)
@@ -488,6 +503,9 @@ def seal(root: Path, identity_path: Path, sevenzip: Path) -> Path:
         ),
         expected, portable_sources, identity=identity,
     )
+    from scripts.portable_lifecycle import rehearse
+    portable_lifecycle = rehearse(destination / portable["file"], portable["sha256"],
+                                 destination / "portable-lifecycle", execute_probes=True)
     # Build a resource-only home from the *extracted* installer, not staging.
     smoke_home = destination / "extracted-resource-home"
     smoke_home.mkdir(exist_ok=False)
@@ -508,12 +526,16 @@ def seal(root: Path, identity_path: Path, sevenzip: Path) -> Path:
     receipt = {"schema_version": 1, "kind": "sdk_candidate_validation", "identity": identity,
         "installer": {"file": candidate.name, "sha256": digest, "bytes": candidate.stat().st_size},
         "portable": portable,
+        "portable_lifecycle": {"status": portable_lifecycle["status"],
+            "report_sha256": sha256(destination / "portable-lifecycle/portable-lifecycle.json"),
+            "environment": portable_lifecycle["environment"], "long_path_runtime_supported": False},
+        "nsis_install_upgrade_uninstall": "NOT TESTED",
         "payloads": expected, "installer_components": installer_components,
         "compiler_shell_sha256": compiler_shell_hash, "nsis_staging_capture": nsis_stage,
         "package_integrity": "PASS", "automated_packaged_smokes": "PASS",
         "tk_free_frozen_payload": no_tk,
         "embedded_frontend": "PASS", "frontend_probe_sha256": sha256(destination / "frontend-probe.json"),
-        "automated_full_suite": "PASS", "validation_gates": gates,
+        "automated_full_suite": "PASS_WITH_APPROVED_WAIVERS" if gates["python"]["evidence"].get("waived_tests") else "PASS", "validation_gates": gates,
         "live_acceptance": "NOT TESTED",
         "reviewed_clean_source": "FAIL" if identity["source"]["dirty"] else "NOT TESTED",
         "signature": "NOT TESTED", "release_readiness": "FAIL",
@@ -534,6 +556,7 @@ def main():
     parser.add_argument("action", choices=["prepare", "check", "gate", "capture", "seal"])
     parser.add_argument("--identity", type=Path)
     parser.add_argument("--pnpm", default="pnpm")
+    parser.add_argument("--allow-windows-symlink-skips", action="store_true", help="Apply only the maintainer-approved 0.6.4 Windows symlink privilege exception")
     parser.add_argument("--sevenzip", type=Path)
     parser.add_argument("--shell", type=Path)
     parser.add_argument("--name", choices=sorted(REQUIRED_GATES))
@@ -542,7 +565,7 @@ def main():
     parser.add_argument("--command-json")
     options = parser.parse_args()
     if options.action == "prepare":
-        print(prepare(ROOT, options.pnpm))
+        print(prepare(ROOT, options.pnpm, allow_windows_symlink_skips=options.allow_windows_symlink_skips))
     elif options.action == "check":
         check_source(ROOT, options.identity)
     elif options.action == "gate":

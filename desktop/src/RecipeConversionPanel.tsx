@@ -10,17 +10,25 @@ const conversions = [
   ["compile", "Compile recipe bundle", "Evaluate supported XML/text/PSO edits on copies and export an inert plan."],
 ] as const;
 type Conversion = typeof conversions[number][0];
-interface RecipeSession extends WorkspaceResult { capabilities: Record<Conversion, boolean> }
+interface RecipeSession extends WorkspaceResult { source: string; requested_source: string; capabilities: Record<Conversion, boolean> }
 
-export default function RecipeConversionPanel({ client, source, disabled = false, onGuardChange }: {
+type Props = {
   client: DesktopClient; source: string; disabled?: boolean; onGuardChange: (guarded: boolean) => void;
-}) {
+};
+
+export default function RecipeConversionPanel(props: Props) {
+  // A new selection must discard old sessions and cancel their in-flight reads.
+  return <RecipeConversionSession key={props.source} {...props} />;
+}
+
+function RecipeConversionSession({ client, source, disabled = false, onGuardChange }: Props) {
   const [session, setSession] = useState<RecipeSession | null>(null);
   const [action, setAction] = useState<Conversion>("managed");
   const [name, setName] = useState("converted-recipe"), [game, setGame] = useState(""), [archive, setArchive] = useState("");
   const work = useAuthoringWorkspace(client, "recipe", value => {
     const loaded = value as RecipeSession;
-    if (loaded.source !== source || !loaded.capabilities || conversions.some(([key]) => typeof loaded.capabilities[key] !== "boolean"))
+    if (loaded.requested_source !== source || typeof loaded.source !== "string" || !loaded.source
+      || !loaded.capabilities || conversions.some(([key]) => typeof loaded.capabilities[key] !== "boolean"))
       throw new Error("Recipe conversion evidence does not match the selected source");
     setSession(loaded);
     const available = conversions.find(([key]) => loaded.capabilities[key]);
@@ -33,7 +41,7 @@ export default function RecipeConversionPanel({ client, source, disabled = false
     if (!session || locked) return;
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._ -]{0,80}$/.test(name) || /[. ]$/.test(name)) { work.setError("Use a simple new output folder name, without path separators or trailing dots/spaces."); return; }
     const parent = await work.choose("authoring_parent");
-    if (parent) void work.run("review_workspace_action", { source, action, destination: `${parent}/${name}`,
+    if (parent) void work.run("review_workspace_action", { source: session.source, action, destination: `${parent}/${name}`,
       expected_state_sha256: session.state_sha256, ...(needsDecoder ? { gta_path: game } : {}), ...(action === "compile" ? { archive } : {}) });
   };
   return <section className="offline-workbench recipe-conversion" aria-label="Recipe conversion">
@@ -46,6 +54,7 @@ export default function RecipeConversionPanel({ client, source, disabled = false
       {!conversions.some(([key]) => session.capabilities[key]) && <p role="status">No supported conversion. Resolve the recipe findings first.</p>}
       <label>New output folder<input aria-label="Recipe output folder" value={name} disabled={locked} onChange={e => setName(e.target.value)} /></label>
     </div></section><section><header><h4>Read-only inputs</h4></header><div className="offline-pane-body">
+      <p className="source-path">{session.source}</p>
       {needsDecoder ? <><button className="quiet-button" disabled={locked} onClick={async () => { const p = await work.choose("gta_folder"); if (p) setGame(p); }}>Choose recipe decoder context</button><p className="source-path">{game || "No decoder context selected"}</p></> : <p>This conversion does not require a decoder context.</p>}
       {action === "compile" && <><button className="quiet-button" disabled={locked} onClick={async () => { const p = await work.choose("rpf"); if (p) setArchive(p); }}>Choose recipe outer archive</button><p className="source-path">{archive || "Select the exact existing outer archive named in the recipe"}</p></>}
       <button className="primary-button" disabled={locked || !session.capabilities[action] || (needsDecoder && !game) || (action === "compile" && !archive)} onClick={() => void review()}>Review recipe conversion</button>

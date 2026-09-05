@@ -85,7 +85,7 @@ jobs:
       - name: Validate React shell
         shell: pwsh
         run: |
-          pnpm --dir desktop test
+          pnpm --dir desktop test --reporter=default --reporter=json --outputFile.json=../build/react-results.json
           if ($LASTEXITCODE -ne 0) { throw 'React happy-path gate failed' }
           pnpm --dir desktop build
           if ($LASTEXITCODE -ne 0) { throw 'React production build failed' }
@@ -131,10 +131,30 @@ jobs:
             build/UNSIGNED_BUILD.txt
             build/tauri-candidates/*/_build_identity.json
             build/tauri-candidates/*/candidate-validation.json
+            build/tauri-candidates/*/portable-lifecycle/portable-lifecycle.json
             build/tauri-candidates/*/nsis-stage.json
             build/tauri-candidates/*/nsis-staged-shell.exe
             build/tauri-candidates/*/*.log
             build/python-results.xml
             coverage.xml
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Retain diagnostic evidence even when qualification fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # Diagnostic-only: a failed run must never publish partial binaries as
+          # a candidate, but its machine-readable failure evidence must survive.
+          name: ALLIN1-Tauri-${{ github.sha }}-${{ github.run_attempt }}-diagnostics
+          path: |
+            build/python-results.xml
+            build/react-results.json
+            coverage.xml
+            build/tauri-candidates/*/gate-*.json
+            build/tauri-candidates/*/gate-*.xml
+            build/tauri-candidates/*/*.log
+            build/tauri-candidates/*/candidate-validation.json
+            build/tauri-candidates/*/portable-lifecycle/portable-lifecycle.json
+          if-no-files-found: warn
           retention-days: 14

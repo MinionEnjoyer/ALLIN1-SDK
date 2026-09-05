@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join, basename } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -30,7 +30,9 @@ afterEach(() => { for (const root of roots.splice(0)) {
   rmSync(root, { recursive: true, force: true });
 } });
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "allin1-react-authoring-")); roots.push(root);
+  // Match the canonical paths returned by real native dialogs and Python.
+  // Hosted Windows TEMP may use RUNNER~1 rather than the full profile name.
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "allin1-react-authoring-"))); roots.push(root);
   const files = join(root, "Paths with spaces"); mkdirSync(files);
   const sdk = resolve(".."), localPython = resolve(sdk, "../ALLIN1/.venv/Scripts/python.exe");
   const python = process.env.ALLIN1_SDK_TEST_PYTHON || (existsSync(localPython) ? localPython : "python");

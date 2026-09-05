@@ -33,6 +33,16 @@ Supply the real pinned native helper/C++/.NET toolchain as required by the test.
 Missing prerequisites are not passed checks. Test fixtures create isolated
 authoring/game-like directories; synthetic executables are never launched.
 
+The native React render fixture expects the checksum-pinned Blender **4.5.13**
+used by CI, not whichever Steam/standalone installation happens to be newest.
+The Windows fixtures canonicalize temporary roots, including 8.3 profile aliases;
+recipe inspection separately binds the original selection to its resolved source.
+Conversion reviews still require the exact source content digest and confirmation.
+
+Tauri CI retains Python XML/coverage, React assertion JSON and candidate gate
+diagnostics even on failure. These diagnostic artifacts contain no partial
+installer/portable binaries and do not signify release qualification.
+
 The adjacent Launcher developer harness can explicitly run both products and
 validate the exact module/test names against fresh Vitest JSON:
 
@@ -69,10 +79,18 @@ Candidate gate schema 2 accepts only the complete canonical test/build commands
 and the exact tool executables recorded during preparation. It records and
 revalidates pytest XML/branch-coverage JSON, Vitest assertions and module mappings,
 Cargo test binaries/results and production frontend hashes. Missing checks or
-skipped tests fail even when a command exits zero. Earlier schema-1 gate receipts
+skipped tests fail even when a command exits zero, except the four exact Windows
+symlink privilege skips explicitly approved for 0.6.4 with
+`-AllowWindowsSymlinkSkips`. These are recorded as waived, not passed; all other
+skips and failures still block the build. Earlier schema-1 gate receipts
 must be regenerated; neither a successful log line nor a log checksum qualifies
 the current candidate. Frozen CArchive/PYZ/ZIP inventories must also exclude all
 Tk adapters, Tcl/Tk and Pillow Tk bindings.
+
+Distributable build identity contains tool versions, binary hashes and one-way
+location bindings, not developer-local tool paths. Build-only gate receipts keep
+the actual invocation for audit. An old path-bearing identity or a changed tool
+location requires fresh preparation; no independent fallback is accepted.
 
 ## Acceptance after a new candidate
 
@@ -90,6 +108,23 @@ change the existing product registration and shortcuts even with a different
 destination: qualify that collision risk before running it. Directory-only
 portable lifecycle checks do not establish NSIS registration or fresh-machine
 dependency acceptance, and a backup alone does not provide that isolation.
+
+Candidate sealing and diagnostic builds with `--with-shell` also run a disposable
+portable rehearsal against the exact ZIP hash. It checks extraction, relocation,
+fresh-folder repair, folder rollback, user-data preservation, and read-only native
+identity/service startup. Long installation paths must produce an actionable
+refusal; this is **not** a claim that the frozen service supports those paths.
+Results stay in `portable-lifecycle/portable-lifecycle.json`, including on failure.
+CI retains that report without uploading failed candidate binaries. To repeat it:
+
+```powershell
+python -m scripts.portable_lifecycle --archive <reviewed-portable.zip> --sha256 <reviewed-sha256> --output <new-disposable-folder> --execute-probes
+```
+
+Omit `--execute-probes` for archive/filesystem checks only. Older shells that do
+not advertise the read-only location probe are refused without trying unknown
+switches. The rehearsal neither changes Windows settings nor runs an installer,
+WebView, updater, or GTA. A passing rehearsal alone never qualifies a release.
 
 The final release path is explicitly unsigned manual download; no publisher
 certificate is promised. Keep automatic-update verification unchanged. Follow

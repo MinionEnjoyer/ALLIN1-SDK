@@ -11,6 +11,7 @@ from scripts import desktop_smoke_candidate as candidate
 def test_diagnostic_reports_limits_and_keeps_failed_run_evidence(tmp_path, monkeypatch, failure):
     folder = tmp_path / "candidate"
     folder.mkdir()
+    (folder / "unrelated-concurrent.log").write_text("Not evidence owned by this build")
     identity = {"build_id": "fixture", "release_qualified": False}
     monkeypatch.setattr(candidate, "prepare", lambda *_: folder / "identity.json")
     monkeypatch.setattr(candidate, "check_source", lambda *_: identity)
@@ -42,6 +43,9 @@ def test_diagnostic_reports_limits_and_keeps_failed_run_evidence(tmp_path, monke
     assert report["status"] == ("FAIL" if failure else "PASS")
     assert report["release_readiness"] == "FAIL"
     assert report["installer_lifecycle"] == report["full_test_qualification"] == "NOT TESTED"
+    assert "unrelated-concurrent.log" not in report.get("logs", {})
+    if not failure:
+        assert set(report["logs"]) == {"publish.log", "freeze.log", "smoke_desktop_sidecar.py.log", "smoke_ped_desktop.py.log"}
     assert all("makensis" not in " ".join(command) for command in commands)
 
 

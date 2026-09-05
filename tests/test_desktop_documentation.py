@@ -32,8 +32,8 @@ def test_current_guides_are_required_resources_and_versions_are_explicit():
     catalog = json.loads((ROOT / "docs/catalog.json").read_text())
     assert catalog["release"] == __version__
     assert catalog["product"] == "sdk"
-    assert "unsigned prerelease" in (ROOT / "README.md").read_text().lower()
-    assert "not a release-qualified stable build" in (ROOT / "README.md").read_text().lower()
+    assert "unsigned manual-download release" in (ROOT / "README.md").read_text().lower()
+    assert "validation coverage and known limits" in (ROOT / "README.md").read_text().lower()
     for name in catalog["documents"]: assert (ROOT / name).is_file(), name
 
 
@@ -56,11 +56,10 @@ def test_tauri_bundle_includes_every_staged_root_document():
         assert resources.get("standalone-resources/" + name) == name, name
 
 
-def test_full_release_milestone_requires_tkinter_removal():
+def test_release_keeps_architecture_security_and_validation_limits_explicit():
     guide = (ROOT / "docs/release-0.6.4.md").read_text(encoding="utf-8")
-    milestone = guide.split("## Mandatory 0.6.4 full-release milestone")[1].split("## Distribution decision")[0]
-    for requirement in ("both", "Tkinter", "_tkinter", "91%", "80%", "unsigned manual", "signature verification"):
-        assert requirement.lower() in milestone.lower()
+    for requirement in ("Tkinter", "_tkinter", "80%", "unsigned manual", "signature verification", "WAIVED_NOT_PASSED", "in-game acceptance remains unverified"):
+        assert requirement.lower() in guide.lower()
 
 
 def test_missing_release_guide_fails_before_resource_writes(tmp_path):

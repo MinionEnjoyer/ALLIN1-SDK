@@ -4326,7 +4326,7 @@ export default function App({ client = tauriClient }: { client?: DesktopClient }
         const next = (current + delta + catalog.navigation.length) % catalog.navigation.length;
         navigate(catalog.navigation[next].id);
       } else if (!editing && event.ctrlKey) {
-        const shortcuts: Record<string, WorkspaceId> = { "1": "linker", "2": "assets", "3": "workbench", i: "quick_import", "4": "models", "5": "rpf", "6": "recipes", "7": "help", "8": "receipts" };
+          const shortcuts: Record<string, WorkspaceId> = { "1": "linker", "2": "assets", "3": "workbench", i: "quick_import", "4": "models", "5": "rpf", "6": "recipes", "7": "help", "8": "receipts", "9": "data_tools" };
         const route = shortcuts[event.key.toLocaleLowerCase()];
         if (route) {
           event.preventDefault();

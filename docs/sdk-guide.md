@@ -1,8 +1,8 @@
-# ALLIN1 SDK guide — 0.6.4 development
+# ALLIN1 SDK guide — 0.6.4
 
 The SDK is an independent Story Mode authoring tool. Launcher and the ALLIN1
-gameplay client are optional. 0.6.4 is unreleased; current source tests do not
-qualify old local installers. React/Tauri v2 is the only desktop interface;
+gameplay client are optional. Use the published 0.6.4 build and its validation
+summary, not an older local installer. React/Tauri v2 is the only desktop interface;
 Tkinter source and GUI build targets have been removed.
 
 ## Choose the right installation mode

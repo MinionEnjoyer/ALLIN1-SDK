@@ -5,7 +5,8 @@ param(
     [string]$PnpmExecutable = 'pnpm',
     [string]$SevenZipExecutable = '7z',
     [switch]$SidecarOnly,
-    [switch]$SkipInstaller
+    [switch]$SkipInstaller,
+    [switch]$AllowWindowsSymlinkSkips
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,7 +17,9 @@ $python = (Resolve-Path -LiteralPath $PythonExecutable).Path
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw "Python executable was not found: $PythonExecutable"
 }
-$candidateIdentity = & $python (Join-Path $repo 'scripts\desktop_candidate.py') prepare --pnpm $PnpmExecutable
+$waiverArguments = @()
+if ($AllowWindowsSymlinkSkips) { $waiverArguments += '--allow-windows-symlink-skips' }
+$candidateIdentity = & $python (Join-Path $repo 'scripts\desktop_candidate.py') prepare --pnpm $PnpmExecutable @waiverArguments
 if ($LASTEXITCODE -ne 0) { throw 'Candidate source identity preparation failed.' }
 $candidateIdentity = $candidateIdentity.Trim()
 Write-Host "Candidate identity: $candidateIdentity"

@@ -1,4 +1,4 @@
-# ALLIN1 SDK 0.6.4 — unsigned prerelease
+# ALLIN1 SDK 0.6.4
 
 ## What's new
 
@@ -14,6 +14,8 @@
   build-identity checks.
 - Lighter initial UI loading, preserved authoring drafts, expanded regression
   tests and reorganized documentation.
+- Precise sliders with manual input, corrected workspace shortcuts, visible
+  save-review confirmation, and safer recipe selection and Windows path handling.
 
 ## Download and trust
 
@@ -30,11 +32,16 @@ React update installation is not enabled by this unsigned release policy.
 
 ## Release status
 
-**Prerelease `v0.6.4-rc.1`, not release-qualified.** Published by explicit
-prerelease approval; final native-window, installer/lifecycle and Legacy/Enhanced
-live acceptance remain untested. Privilege-dependent skipped checks are not
-passes. Use the attached validation matrix and exact build identity, not an
-older report. The stable release and its full acceptance gates remain pending.
+**Maintainer-approved release `v0.6.4`.** Full automated results, build identity
+and checksums accompany the downloads. Same-machine installer lifecycle and
+native desktop checks were exercised during release preparation.
+
+Four Windows symbolic-link privilege tests are explicitly waived, not passed.
+Pristine-Windows dependency installation is outside this release's acceptance
+scope. Full independent final-build native-dialog and Legacy/Enhanced in-game
+acceptance remain unverified; authoring/export does not certify game behavior.
+Very long installation paths are refused with relocation guidance. Install the
+SDK in a short local folder and keep its companions together.
 
 See the [SDK manual](docs/sdk-guide.md), [release checklist](docs/release-0.6.4.md)
 and [earlier release history](docs/archive/release-notes-before-0.6.4.md).

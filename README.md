@@ -7,9 +7,9 @@
 Create, inspect and package **GTA V Story Mode** mods for **Legacy and Enhanced**.
 Standalone: no ALLIN1 Launcher or gameplay client required.
 
-**0.6.4 — unsigned prerelease.** The interface is React/Tauri v2; Tkinter source
-and GUI build targets are removed. Python services remain. Final native/live
-acceptance is untested; this is not a release-qualified stable build.
+**0.6.4 — unsigned manual-download release.** The interface is React/Tauri v2;
+Tkinter source and GUI build targets are removed. Python services remain.
+See the release notes for validation coverage and known limits.
 
 ## What's new in 0.6.4
 
@@ -23,7 +23,7 @@ acceptance is untested; this is not a release-qualified stable build.
 ## Downloads
 
 [Published builds](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases) are on GitHub.
-0.6.4 prereleases are **unsigned manual downloads**, without a promised SignPath
+0.6.4 builds are **unsigned manual downloads**, without a promised SignPath
 certificate. Verify checksums and build identity; automatic-update installation
 remains disabled. Read the [download and trust policy](CODE_SIGNING_POLICY.md).
 

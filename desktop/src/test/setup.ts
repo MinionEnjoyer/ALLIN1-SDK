@@ -27,3 +27,6 @@ if (!Range.prototype.getClientRects) {
   Range.prototype.getClientRects = () => Object.assign([] as DOMRect[], { item: () => null });
   Range.prototype.getBoundingClientRect = () => new DOMRect(0, 0, 0, 0);
 }
+if (!HTMLElement.prototype.scrollIntoView) {
+  HTMLElement.prototype.scrollIntoView = () => undefined;
+}

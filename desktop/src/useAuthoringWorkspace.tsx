@@ -93,10 +93,18 @@ export function useAuthoringWorkspace(client: DesktopClient, module: WorkspaceMo
 }
 
 export function AuthoringFeedback({ work }: { work: ReturnType<typeof useAuthoringWorkspace> }) {
+  const reviewPanel = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!work.review) return;
+    // Reviews can be below a tall editor. Reveal the decision instead of leaving
+    // the user at a disabled toolbar, but never focus or activate Apply itself.
+    reviewPanel.current?.focus({ preventScroll: true });
+    reviewPanel.current?.scrollIntoView({ block: "start", behavior: "auto" });
+  }, [work.review]);
   return <>{work.error && <p className="error-banner" role="alert">{work.error}</p>}
     {work.notice && <p className="action-notice" role="status">{work.notice}</p>}
     {work.reading && <button className="quiet-button" onClick={work.cancel}>Cancel inspection</button>}
-    {work.review && <section className="authoring-review" aria-label="Authoring review"><h4>Review: {String(work.review.value.action)}</h4>
+    {work.review && <section ref={reviewPanel} tabIndex={-1} className="authoring-review" aria-label="Authoring review"><h4>Review: {String(work.review.value.action)}</h4>
       {work.review.value.candidate_only === true && <p><strong>Candidate only. Live game acceptance: NOT TESTED.</strong></p>}
       <p>Only the listed offline authoring files will change. This does not install anything into GTA V.</p>
       <dl>{["source", "destination", "offset", "length", "before", "after", "output_sha256"].filter(k => work.review!.value[k] !== undefined).map(key =>
