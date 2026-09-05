@@ -79,7 +79,10 @@ Candidate gate schema 2 accepts only the complete canonical test/build commands
 and the exact tool executables recorded during preparation. It records and
 revalidates pytest XML/branch-coverage JSON, Vitest assertions and module mappings,
 Cargo test binaries/results and production frontend hashes. Missing checks or
-skipped tests fail even when a command exits zero. Earlier schema-1 gate receipts
+skipped tests fail even when a command exits zero, except the four exact Windows
+symlink privilege skips explicitly approved for 0.6.4 with
+`-AllowWindowsSymlinkSkips`. These are recorded as waived, not passed; all other
+skips and failures still block the build. Earlier schema-1 gate receipts
 must be regenerated; neither a successful log line nor a log checksum qualifies
 the current candidate. Frozen CArchive/PYZ/ZIP inventories must also exclude all
 Tk adapters, Tcl/Tk and Pillow Tk bindings.

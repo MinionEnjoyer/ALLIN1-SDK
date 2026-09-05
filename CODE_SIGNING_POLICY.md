@@ -3,12 +3,11 @@
 ## Status
 
 The maintainer has selected **unsigned manual-download distribution for 0.6.4**.
-The release is still unreleased and not release-qualified. A SignPath certificate
-is not part of the near-term release plan; no approval, sponsorship or delivery
+The maintainer approved publication with the validation limits in the release
+guide. A SignPath certificate is not part of the release plan; no sponsorship or delivery
 date is claimed. No replacement signing provider is promised either.
 
-The older Azure signed-release job is disabled and retained only as a future
-integration reference. Neither an unset certificate nor that disabled job blocks
+The older Azure signed-release job has been removed. Neither an unset certificate nor that former job blocks
 preparing an explicitly unsigned manual package. Tests, reviewed source,
 packaged lifecycle, artifact identity and acceptance requirements still apply.
 See [release preparation](RELEASE_SIGNING.md).
@@ -45,9 +44,9 @@ and release notes are correct before approving a signing request.
 ## Release integrity controls
 
 1. Official release artifacts originate from a versioned tag in this repository.
-2. The Windows workflow checks out the pinned submodule revision, installs declared
-   dependencies, runs the complete automated test suite, and builds the desktop,
-   agent, and helper applications on a clean hosted runner.
+2. Builds use a clean source revision, pinned submodule and declared dependencies,
+   run complete automated suites, and bind desktop/service/helper artifacts to
+   their actual build environment. Local builds are not called clean-hosted builds.
 3. Inventory the exact shell, sidecar, helpers, resources and third-party payloads.
    Record their actual signature status; do not label them publisher-signed merely
    because a dependency already has a signature.

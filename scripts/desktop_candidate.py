@@ -89,7 +89,7 @@ def write_new(path: Path, value: dict) -> None:
         stream.write(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
-def prepare(root: Path, pnpm: str) -> Path:
+def prepare(root: Path, pnpm: str, *, allow_windows_symlink_skips: bool = False) -> Path:
     source = source_identity(root)
     if not source["versions_agree"]:
         raise ValueError("Source versions disagree")
@@ -123,6 +123,10 @@ def prepare(root: Path, pnpm: str) -> Path:
         "lockfiles": {name: sha256(contained(root, name)) for name in ["desktop/pnpm-lock.yaml", "desktop/src-tauri/Cargo.lock"]},
         "schema_versions": {"desktop_protocol": "1.0.0", "candidate_identity": 1, "candidate_gate": 2, "live_acceptance": 1},
         "release_qualified": False}
+    if allow_windows_symlink_skips:
+        if identity["sdk_version"] != "0.6.4":
+            raise ValueError("Windows symlink privilege waiver is approved only for SDK 0.6.4")
+        identity["python_skip_waiver"] = candidate_test_evidence.WINDOWS_SYMLINK_WAIVER
     path = destination / "_build_identity.json"
     write_new(path, identity)
     version = identity["sdk_version"]
@@ -531,7 +535,7 @@ def seal(root: Path, identity_path: Path, sevenzip: Path) -> Path:
         "package_integrity": "PASS", "automated_packaged_smokes": "PASS",
         "tk_free_frozen_payload": no_tk,
         "embedded_frontend": "PASS", "frontend_probe_sha256": sha256(destination / "frontend-probe.json"),
-        "automated_full_suite": "PASS", "validation_gates": gates,
+        "automated_full_suite": "PASS_WITH_APPROVED_WAIVERS" if gates["python"]["evidence"].get("waived_tests") else "PASS", "validation_gates": gates,
         "live_acceptance": "NOT TESTED",
         "reviewed_clean_source": "FAIL" if identity["source"]["dirty"] else "NOT TESTED",
         "signature": "NOT TESTED", "release_readiness": "FAIL",
@@ -552,6 +556,7 @@ def main():
     parser.add_argument("action", choices=["prepare", "check", "gate", "capture", "seal"])
     parser.add_argument("--identity", type=Path)
     parser.add_argument("--pnpm", default="pnpm")
+    parser.add_argument("--allow-windows-symlink-skips", action="store_true", help="Apply only the maintainer-approved 0.6.4 Windows symlink privilege exception")
     parser.add_argument("--sevenzip", type=Path)
     parser.add_argument("--shell", type=Path)
     parser.add_argument("--name", choices=sorted(REQUIRED_GATES))
@@ -560,7 +565,7 @@ def main():
     parser.add_argument("--command-json")
     options = parser.parse_args()
     if options.action == "prepare":
-        print(prepare(ROOT, options.pnpm))
+        print(prepare(ROOT, options.pnpm, allow_windows_symlink_skips=options.allow_windows_symlink_skips))
     elif options.action == "check":
         check_source(ROOT, options.identity)
     elif options.action == "gate":

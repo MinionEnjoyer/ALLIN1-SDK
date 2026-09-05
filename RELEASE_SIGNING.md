@@ -2,20 +2,21 @@
 
 ## 0.6.4 distribution policy
 
-0.6.4 is being prepared as an **unsigned manual-download release**, not a
+0.6.4 is an **unsigned manual-download release**, not a
 SignPath-certified release. No certificate provider or approval date is promised.
-This policy choice is not release approval. The source is still unreleased;
-the [release checklist](docs/release-0.6.4.md) retains the remaining gates.
+Publication was explicitly approved by the maintainer; the
+[release guide](docs/release-0.6.4.md) records validation scope and limitations.
 
 1. Identify and review one clean source revision, version and dependency set.
 2. Run full automated gates and build a fresh candidate from those exact inputs.
 3. Verify the shell, sidecar, installer, portable payload, resources and embedded
    identities agree. Record actual signature status without claiming a project
    publisher certificate. Preserve any genuine third-party signatures.
-4. Exercise isolated Windows install, upgrade, repair, uninstall and rollback,
-   including missing dependencies, spaces/long paths and user-data preservation.
-5. Obtain the required independently bound acceptance for the exact final
-   artifacts. Obtain separate approval before launching GTA or publishing.
+4. Exercise SDK install, upgrade, repair, uninstall and manual rollback with
+   user-data preservation. Label same-machine results accurately. Pristine-Windows
+   dependency bootstrap is not required for this publication.
+5. Record exact final artifact checks separately from earlier native observations
+   and unverified live-game acceptance. Never launch GTA without approval.
 6. Review only the current [release notes](RELEASE_NOTES.md), disclose unsigned
    distribution, and include final checksums and build identity with the assets.
 
