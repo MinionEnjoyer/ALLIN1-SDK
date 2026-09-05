@@ -2768,7 +2768,7 @@ def test_new_rpf_cli_index_extract_and_plan(tmp_path, monkeypatch):
 
     class FakeService:
         def __init__(self, project_root, gta_path, **_kwargs):
-            assert Path(project_root).name == "ALLIN1-SDK"
+            assert Path(project_root).resolve() == Path(__file__).resolve().parents[1]
             assert Path(gta_path) == game
 
         def index(self, source):
@@ -3268,7 +3268,7 @@ def test_rpf_transaction_cli_requires_acknowledgement_and_routes_actions(
 
     class FakeService:
         def __init__(self, project_root, gta_path, **_kwargs):
-            assert Path(project_root).name == "ALLIN1-SDK"
+            assert Path(project_root).resolve() == Path(__file__).resolve().parents[1]
             assert Path(gta_path) == game
 
         def apply_change_plan(self, selected, *, receipt_root=None, progress=None):
@@ -3335,7 +3335,7 @@ def test_rpf_cli_add_delete_history_recovery_canary_and_output(tmp_path, monkeyp
 
     class FakeService:
         def __init__(self, project_root, gta_path, **kwargs):
-            assert Path(project_root).name == "ALLIN1-SDK"
+            assert Path(project_root).resolve() == Path(__file__).resolve().parents[1]
             assert Path(gta_path) == game
             if kwargs.get("workspace_roots"):
                 assert kwargs["workspace_roots"] == (workspace.resolve(),)
