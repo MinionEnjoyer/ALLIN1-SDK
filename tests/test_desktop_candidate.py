@@ -8,6 +8,16 @@ from pathlib import Path
 
 import pytest
 
+
+def test_windows_frontend_gate_uses_tauri_release_target():
+    script = (Path(__file__).resolve().parents[1] / "scripts/build_tauri_desktop.ps1").read_text(encoding="utf-8")
+    platform = "$env:TAURI_ENV_PLATFORM = 'windows'"
+    debug = "$env:TAURI_ENV_DEBUG = $null"
+    assert script.index(platform) < script.index("$frontendGateCommand =")
+    assert script.index(debug) < script.index("$frontendGateCommand =")
+    assert "$env:TAURI_ENV_PLATFORM = $previousTauriPlatform" in script
+    assert "$env:TAURI_ENV_DEBUG = $previousTauriDebug" in script
+
 from scripts.desktop_candidate import (
     PLUGIN_NAMES, REQUIRED_GATES, check_source, compare_payload, execution_command,
     gate_evidence, nsis_members, run_gate, tool_identity, write_new, write_portable,

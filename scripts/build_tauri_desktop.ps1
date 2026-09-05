@@ -100,6 +100,8 @@ $previousTestPython = $env:ALLIN1_SDK_TEST_PYTHON
 $previousNativeRpfTest = $env:ALLIN1_NATIVE_RPF_TEST
 $previousNativeRuntimeTest = $env:ALLIN1_NATIVE_RUNTIME_TEST
 $previousBlenderExecutable = $env:ALLIN1_BLENDER_EXECUTABLE
+$previousTauriPlatform = $env:TAURI_ENV_PLATFORM
+$previousTauriDebug = $env:TAURI_ENV_DEBUG
 $candidateBlender = Join-Path $repo 'build\dependencies\blender-4.5.13-windows-x64\blender.exe'
 if (-not (Test-Path -LiteralPath $candidateBlender -PathType Leaf)) {
     throw "Candidate qualification requires the pinned Blender executable: $candidateBlender"
@@ -111,6 +113,10 @@ $env:ALLIN1_SDK_TEST_PYTHON = $python
 $env:ALLIN1_NATIVE_RPF_TEST = '1'
 $env:ALLIN1_NATIVE_RUNTIME_TEST = '1'
 $env:ALLIN1_BLENDER_EXECUTABLE = $candidateBlender
+# Match the release context Tauri supplies to beforeBuildCommand. Otherwise the
+# independent frontend gate defaults to Safari while NSIS embeds Chrome output.
+$env:TAURI_ENV_PLATFORM = 'windows'
+$env:TAURI_ENV_DEBUG = $null
 try {
     & $PnpmExecutable install --frozen-lockfile
     if ($LASTEXITCODE -ne 0) { throw 'pnpm install failed.' }
@@ -162,6 +168,8 @@ finally {
     $env:ALLIN1_NATIVE_RPF_TEST = $previousNativeRpfTest
     $env:ALLIN1_NATIVE_RUNTIME_TEST = $previousNativeRuntimeTest
     $env:ALLIN1_BLENDER_EXECUTABLE = $previousBlenderExecutable
+    $env:TAURI_ENV_PLATFORM = $previousTauriPlatform
+    $env:TAURI_ENV_DEBUG = $previousTauriDebug
     Pop-Location
 }
 
