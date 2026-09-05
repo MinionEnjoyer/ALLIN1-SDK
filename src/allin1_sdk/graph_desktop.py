@@ -117,7 +117,10 @@ def _package_import_review(payload):
     if destination.is_relative_to(source) or source.is_relative_to(destination):
         raise ValueError("Package graph output must be separate from its source")
     with tempfile.TemporaryDirectory(prefix="allin1-package-graph-review-") as temporary:
-        temporary_root = Path(temporary)
+        # PackageGraphWorkspace resolves its root (including Windows 8.3 TEMP
+        # aliases). Use that same spelling when rebasing the reviewed outputs,
+        # after checking the lexical ancestry for links.
+        temporary_root = no_links(Path(temporary)).resolve(strict=True)
         project = PackageGraphWorkspace(temporary_root).import_package(source)
         document = strict_json(project.graph.read_bytes())
         _graph_inputs(document)
@@ -155,7 +158,7 @@ def _import_review(payload):
     archive, service, index, identity = _archive_inputs(payload.get("archive"), payload.get("gta_path"))
     destination = path(payload.get("destination"), new=True, writable=True)
     with tempfile.TemporaryDirectory(prefix="allin1-graph-intake-review-") as temporary:
-        copied = Path(temporary) / "imported"
+        copied = no_links(Path(temporary)).resolve(strict=True) / "imported"
         graph = RpfPackageGraph.import_archive(index, service, copied)
         document = strict_json(graph.read_bytes())
         _graph_inputs(document)
@@ -185,7 +188,8 @@ def _expansion_review(payload, selected, state):
         raise ValueError("Archive expansion already exists")
     path(str(selected.with_name(f".{selected.name}.tmp")), new=True, writable=True)
     with tempfile.TemporaryDirectory(prefix="allin1-graph-expansion-review-") as temporary:
-        graph = Path(temporary) / "graph.json"
+        temporary = no_links(Path(temporary)).resolve(strict=True)
+        graph = temporary / "graph.json"
         graph.write_bytes(selected.read_bytes())
         report = RpfPackageGraph.expand_sealed_archive(graph, node["id"], service)
         document = strict_json(graph.read_bytes())

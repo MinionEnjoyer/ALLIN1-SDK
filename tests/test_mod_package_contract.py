@@ -248,9 +248,10 @@ def test_sdk_runtime_tree_install_rejects_symlinked_parent_directory(
     manifest = ModManifest.load(package)
     service = mods.ModIntegrationService(game)
 
-    with pytest.raises(ValueError, match="symlink or junction"):
+    with pytest.raises(ValueError, match="symlink or junction|escapes the allowed root"):
         service.install(manifest)
     assert sentinel.read_bytes() == b"protected"
+    assert not (outside / "runtime.json").exists()
     assert not (service.state_root / "vehicle-workbench-runtime.json").exists()
 
 

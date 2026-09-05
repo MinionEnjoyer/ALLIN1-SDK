@@ -148,8 +148,24 @@ def test_reviewed_preview_bundle_preserves_real_failure_counts(graph, tmp_path):
 
 
 @pytest.mark.parametrize("archive", [False, True])
-def test_package_import_relationship_review_and_exact_reopen(tmp_path, archive):
+@pytest.mark.parametrize("temporary_alias", [False, True])
+def test_package_import_relationship_review_and_exact_reopen(tmp_path, archive, temporary_alias, monkeypatch):
     import zipfile
+    if temporary_alias:
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        from allin1_sdk import graph_desktop
+        original = graph_desktop.tempfile.TemporaryDirectory
+        @contextmanager
+        def aliased_temporary(**kwargs):
+            with original(**kwargs) as temporary:
+                # A portable stand-in for Windows short/long TEMP spellings:
+                # the existing directory's lexical and resolved paths differ.
+                child = Path(temporary) / "lexical-alias"
+                child.mkdir()
+                yield str(child / "..")
+        monkeypatch.setattr(graph_desktop, "tempfile", SimpleNamespace(
+            **{**vars(graph_desktop.tempfile), "TemporaryDirectory": aliased_temporary}))
     from test_vehicle_authoring import _source
     from allin1_sdk.desktop_protocol import dispatch_operation
     from allin1_sdk.workspace_desktop import _inventory
