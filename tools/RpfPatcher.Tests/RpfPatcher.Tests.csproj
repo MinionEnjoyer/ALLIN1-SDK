@@ -5,6 +5,7 @@
     <RpfPatcherProject Condition="'$(RpfPatcherProject)' == ''">../RpfPatcher/RpfPatcher.csproj</RpfPatcherProject>
   </PropertyGroup>
   <ItemGroup>
+    <None Include="../../tests/fixtures/native_animation.ycd.xml" Link="native_animation.ycd.xml" CopyToOutputDirectory="PreserveNewest" />
     <ProjectReference Include="$(RpfPatcherProject)" />
   </ItemGroup>
 </Project>

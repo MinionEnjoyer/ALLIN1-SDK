@@ -1,0 +1,9 @@
+.native-workspace .native-context { justify-content: flex-start; padding: 12px; border: 1px solid var(--border); background: var(--surface); gap: 12px; flex-wrap: wrap; }
+.native-workspace label { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.native-workspace :is(input:not([type=checkbox]), select) { min-height: 33px; padding: 6px 8px; color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 4px; min-width: 0; max-width: 100%; }
+.native-workspace > .quiet-button { align-self: flex-start; }
+.native-workspace > div, .native-workspace p, .native-workspace span { min-width: 0; overflow-wrap: anywhere; }
+.native-workspace pre { max-height: 400px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; border: 1px solid var(--border); background: var(--surface); }
+.native-workspace audio { max-width: 100%; width: 500px; }
+.native-empty { border: 1px dashed var(--border-strong); padding: 24px; max-width: 780px; color: var(--muted); }
+.native-empty h4 { margin-top: 0; color: var(--text); }

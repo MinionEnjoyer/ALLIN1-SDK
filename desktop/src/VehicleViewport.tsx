@@ -372,7 +372,7 @@ export default function VehicleViewport({
 
       {collisionVisible && collisionDictionary && <div className="vehicle-collision-legend" aria-label="Collision overlay legend" aria-live="polite">
         <span className="exact"><i aria-hidden="true" /><b>Triangle mesh</b><strong>{(collisionDictionary.primitive_counts.find((item) => item.kind === "Triangle")?.count ?? 0).toLocaleString()}</strong></span>
-        <span className="diagnostic"><i aria-hidden="true" /><b>Box hulls</b><strong>{(collisionDictionary.primitive_counts.find((item) => item.kind === "Box")?.count ?? 0).toLocaleString()}</strong></span>
+        <span className="diagnostic"><i aria-hidden="true" /><b>Primitive surfaces</b><strong>{collisionDictionary.primitive_counts.filter(item => item.kind !== "Triangle" && item.overlay).reduce((sum, item) => sum + item.count, 0).toLocaleString()}</strong></span>
         <span className="unrendered"><i aria-hidden="true" /><b>Count only</b><strong>{collisionDictionary.unrendered_polygon_count.toLocaleString()}</strong></span>
       </div>}
 
@@ -444,7 +444,7 @@ export default function VehicleViewport({
             <div><dt>SHA-256</dt><dd title={collisionDictionary.sha256}>{collisionDictionary.sha256.slice(0, 12)}…</dd></div>
           </dl>
           <div className="vehicle-collision-primitives" role="list" aria-label="Collision primitive types">
-            {collisionDictionary.primitive_counts.map((item) => <div key={item.kind} role="listitem" className={item.fidelity === "exact mesh" ? "exact" : item.fidelity === "diagnostic hull" ? "diagnostic" : "unrendered"}><span><strong>{item.kind}</strong><small>{item.fidelity}</small></span><b>{item.count.toLocaleString()}</b></div>)}
+            {collisionDictionary.primitive_counts.map((item) => <div key={item.kind} role="listitem" className={item.fidelity === "exact mesh" ? "exact" : item.overlay ? "diagnostic" : "unrendered"}><span><strong>{item.kind}</strong><small>{item.fidelity}</small></span><b>{item.count.toLocaleString()}</b></div>)}
           </div>
           {collisionDictionary.warnings.map((warning, index) => <p key={`${warning}-${index}`} className="vehicle-collision-warning">{warning}</p>)}
         </div>}

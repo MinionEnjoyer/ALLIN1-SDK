@@ -10,6 +10,7 @@ def test_every_react_module_has_named_happy_path_evidence():
     names = [item["module"] for item in modules]
     assert len(names) == len(set(names))
     assert set(names) == {
+        "native-resources", "archive-browser",
         "data-tools",
         "xml-editor", "lua-editor",
         "application-shell", "help-center", "package-linker", "asset-viewer",

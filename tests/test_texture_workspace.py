@@ -75,6 +75,30 @@ def test_texture_catalog_and_dds_metadata(tmp_path):
     assert (metadata.width, metadata.height, metadata.mip_levels) == (16, 8, 1)
 
 
+def test_texture_rename_preserves_dependency_and_is_undoable(tmp_path):
+    root = _workspace(tmp_path)
+    editor = TextureDictionaryWorkspace(root)
+    dependency = root / "edit/assets/diffuse.dds"
+    original = dependency.read_bytes()
+    result = editor.rename("diffuse", "new_diffuse")
+    assert result.texture.name == "new_diffuse"
+    assert result.texture.file_name == "diffuse.dds"
+    assert dependency.read_bytes() == original
+    editor.restore_latest()
+    assert editor.catalog().textures[0].name == "diffuse"
+    assert dependency.read_bytes() == original
+
+
+@pytest.mark.parametrize("name", ["normal", "diffuse", "../bad", None])
+def test_texture_rename_rejects_collision_unchanged_or_unsafe_name(tmp_path, name):
+    root = _workspace(tmp_path)
+    editor = TextureDictionaryWorkspace(root)
+    before = editor.state_sha256()
+    with pytest.raises(ValueError):
+        editor.rename("diffuse", name)
+    assert editor.state_sha256() == before
+
+
 def test_replace_texture_from_raster_updates_xml_and_keeps_history(tmp_path):
     workspace = _workspace(tmp_path)
     source = tmp_path / "replacement.png"

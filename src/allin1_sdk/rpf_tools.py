@@ -1967,8 +1967,8 @@ class RpfExplorerService:
             raise ValueError("Expected an RPF archive diff report")
         authored = Path(destination).expanduser().resolve()
         base = authored.with_suffix("") if authored.suffix.casefold() in {".json", ".md"} else authored
-        json_path = base.with_suffix(".json")
-        markdown_path = base.with_suffix(".md")
+        json_path = Path(f"{base}.json")
+        markdown_path = Path(f"{base}.md")
         _write_json_atomic(json_path, report)
 
         def cell(value: object) -> str:

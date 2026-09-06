@@ -2,12 +2,15 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, rmSync
 import { tmpdir } from "node:os";
 import { resolve, join, basename } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import BinaryWorkspace from "./BinaryWorkspace";
+import NativeWorkspace from "./NativeWorkspace";
 import App from "./App";
 import DataToolsWorkspace from "./DataToolsWorkspace";
+import Gxt2Workspace from "./Gxt2Workspace";
 import MapWorkbench, { newMapTemplate } from "./MapWorkbench";
 import GraphWorkbench from "./GraphWorkbench";
 import RuntimeWorkbench from "./RuntimeWorkbench";
@@ -83,6 +86,100 @@ function editCode(language: string, text: string) {
   act(() => view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } }));
 }
 
+for (const mode of ["whole_archive", "member"]) {
+it.runIf(process.env.ALLIN1_NATIVE_RPF_TEST === "1")(`RPF publication React native ${mode} export retains exact build-to-install lineage`, async context => {
+  const { files, paths, client, user, invoke, python, sdk } = fixture();
+  if (mode === "member") {
+    const guard = spawnSync(python, ["-c", `from allin1_sdk.rpf_tools import RpfExplorerService
+RpfExplorerService._require_game_closed()`], { cwd: sdk, encoding: "utf8", windowsHide: true, timeout: 30000,
+      env: { ...process.env, PYTHONPATH: join(sdk, "src") } });
+    if (guard.status !== 0 && guard.stderr.includes("Close GTA V before changing an RPF archive")) context.skip();
+    expect(guard.status, guard.stderr || guard.stdout).toBe(0);
+  }
+  const setup = spawnSync(python, ["-c", `import json,sys
+from pathlib import Path
+from allin1_sdk.paths import project_root
+from allin1_sdk.rpf_builder import RpfArchiveBuilder
+from allin1_sdk.rpf_tools import RpfExplorerService
+from allin1_sdk.gxt2_workspace import Gxt2Workspace
+from allin1_sdk import gxt2_desktop as desktop
+root=Path(sys.argv[1]);source=root/'source';source.mkdir()
+nested=source/'x64/american.rpf.source';nested.mkdir(parents=True)
+for folder,text in ((source,'Root dictionary'),(nested,'Nested dictionary')):
+ (folder/'global.gxt2').write_bytes(Gxt2Workspace.encode([{'hash':256,'text':text}]))
+game=root/'decoder';game.mkdir();(game/'GTA5_Enhanced.exe').write_bytes(b'non-executable test marker')
+# Only the global process check is isolated. Every archive is test-owned and
+# native indexing/replacement/verification remains real; never launch this marker.
+assert root.parent.name.startswith('allin1-react-authoring-')
+assert (game/'GTA5_Enhanced.exe').read_bytes()==b'non-executable test marker'
+RpfExplorerService._require_game_closed=staticmethod(lambda:None)
+archive,_=RpfArchiveBuilder(project_root(),game).build(source,root/'text-fixture.rpf')
+service=RpfExplorerService(project_root(),game);index=service.index(archive)
+raw,binding=service.read_gxt2_entry(index,index.entry('x64/american.rpf::global.gxt2'))
+binding['gta_path']=str(game)
+workspace=Gxt2Workspace().export_bytes('global.gxt2',raw,root/'text-workspace',source_binding=binding)
+Gxt2Workspace.set_text(workspace,256,'Edited dictionary')
+context={'workspace':str(workspace)};session=desktop.inspect(context)
+payload={**context,'action':'package_rpf','destination':str(root/'rpf-build'),'expected_state_sha256':session['state_sha256']}
+review=desktop.review(payload);built=desktop.apply({**payload,'review_sha256':review['review_sha256'],'authoring_confirmed':True})
+print(json.dumps({'workspace':str(workspace),'build':built['destination'],'archive':str(archive),'game':str(game)}))`, files],
+    { cwd: sdk, encoding: "utf8", windowsHide: true, timeout: 60000, env: { ...process.env, PYTHONPATH: join(sdk, "src") } });
+  expect(setup.status, setup.stderr || setup.stdout).toBe(0);
+  const input = JSON.parse(setup.stdout), original = readFileSync(input.archive);
+  paths.gxt2_workspace = input.workspace; paths.rpf_package_source = input.build;
+  client.applyGxt2Action = vi.fn(async payload => invoke("apply_gxt2_action", payload));
+  const destination = join(files, "published.zip");
+  client.selectPackageZipDestination = vi.fn(async () => destination);
+  render(<Gxt2Workspace client={client} onGuardChange={() => {}} />);
+  await user.click(screen.getByRole("button", { name: "Open text workspace" }));
+  await user.click(await screen.findByRole("button", { name: "Configure ALLIN1 export" }));
+  await user.click(screen.getByRole("button", { name: "Choose RPF build folder" }));
+  await user.type(screen.getByLabelText("Author", { exact: true }), "Native fixture");
+  await user.type(screen.getByLabelText("GTA-relative archive destination"), "mods/update/text-fixture.rpf");
+  await user.selectOptions(screen.getByLabelText("Export scope"), mode);
+  await user.click(screen.getByRole("button", { name: "Review ALLIN1 ZIP" }));
+  await screen.findByRole("heading", { name: "Review: Export ALLIN1 ZIP" });
+  expect(screen.getByText("sdk-artifact.json")).toBeInTheDocument();
+  await user.click(screen.getByRole("checkbox"));
+  await user.click(screen.getByRole("button", { name: "Export ALLIN1 ZIP" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("ALLIN1 ZIP exported and validated");
+  expect(readFileSync(input.archive)).toEqual(original);
+  const installed = spawnSync(python, ["-c", `import json,sys,shutil,zipfile
+from pathlib import Path
+from allin1_sdk.artifact_contract import validate_manifest
+root=Path(sys.argv[1]);mode=sys.argv[2]
+sys.path.insert(0,str(Path.cwd().parent/'ALLIN1/src'))
+from allin1.mods import ModIntegrationService,open_mod_package
+with zipfile.ZipFile(root/'published.zip') as archive:
+ artifact=validate_manifest(json.loads(archive.read('sdk-artifact.json')))
+ evidence=json.loads(archive.read('allin1.rpf-build.json'))
+ assert evidence['input_build_status']=='recorded'
+ assert evidence['input_build']['build_fingerprint']==artifact['build']['build_fingerprint']
+ assert artifact['build']['mode'].startswith('development_')
+ assert set(artifact['outputs'])==set(archive.namelist())-{'sdk-artifact.json'}
+if mode=='member':
+ from scripts.smoke_rpf_member_install import verify_export
+ from allin1_sdk.gxt2_workspace import Gxt2Workspace
+ verify_export(root/'published.zip',root/'text-fixture.rpf',Path.cwd()/'tools/RpfPatcher/RpfPatcher.exe',root/'decoder',Path.cwd().parent/'ALLIN1/src',Gxt2Workspace.encode([{'hash':256,'text':'Root dictionary'}]))
+else:
+ game=root/'install-test';game.mkdir();(game/'GTA5_Enhanced.exe').write_bytes(b'test marker')
+ target=game/'mods/update/text-fixture.rpf';target.parent.mkdir(parents=True);shutil.copyfile(root/'text-fixture.rpf',target)
+ service=ModIntegrationService(game);service._check_dependencies=lambda _:None
+ with open_mod_package(root/'published.zip') as manifest:
+  service.install(manifest)
+  receipt=service._read_receipt(manifest.mod_id)['sdk_provenance']
+  assert receipt['artifact_id']==artifact['artifact_id']
+  assert receipt['build_fingerprint']==artifact['build']['build_fingerprint']
+  service.uninstall(manifest.mod_id)
+ assert target.read_bytes()==(root/'text-fixture.rpf').read_bytes()
+print('Lineage verified')`, files, mode],
+    { cwd: sdk, encoding: "utf8", windowsHide: true, timeout: 60000, env: { ...process.env, PYTHONPATH: `${join(sdk, "src")};${sdk}` } });
+  expect(installed.status, installed.stderr || installed.stdout).toBe(0);
+  expect(installed.stdout).toContain("Lineage verified");
+  expect(readFileSync(input.archive)).toEqual(original);
+}, 120000);
+}
+
 it("code draft survives keyboard Back, sidebar navigation and native close requests", async () => {
   const { client, user } = fixture();
   client.initialLaunchRequest = async () => null;
@@ -91,7 +188,7 @@ it("code draft survives keyboard Back, sidebar navigation and native close reque
   client.closeWindow = vi.fn();
   render(<App client={client} />);
   await user.click(await screen.findByRole("button", { name: /Data Tools/ }));
-  await user.click(await screen.findByRole("button", { name: "XML & Lua editor" }));
+  await user.click(await screen.findByRole("button", { name: "XML, JSON & Lua editor" }));
   await user.click(screen.getByRole("button", { name: "New LUA" }));
   await screen.findByRole("textbox", { name: "LUA source editor" });
   editCode("LUA", "return { retained = true }");
@@ -112,8 +209,8 @@ it("XML editor React happy path validates real source, reviews a diff and saves 
   const source = join(files, "vehicle.meta"); paths.code_source = source;
   writeFileSync(source, '<Vehicle><Name>Original</Name></Vehicle>');
   render(<DataToolsWorkspace client={client} onGuardChange={() => {}} />);
-  await user.click(screen.getByRole("button", { name: "XML & Lua editor" }));
-  await user.click(screen.getByRole("button", { name: "Open XML / Lua" }));
+  await user.click(screen.getByRole("button", { name: "XML, JSON & Lua editor" }));
+  await user.click(screen.getByRole("button", { name: "Open XML / JSON / Lua" }));
   expect(await screen.findByText("Syntax check passed")).toBeInTheDocument();
   editCode("XML", '<Vehicle><Name>Edited</Name></Vehicle>');
   expect(screen.getByRole("button", { name: "Metadata reports" })).toBeDisabled();
@@ -134,7 +231,7 @@ it("XML editor React happy path validates real source, reviews a diff and saves 
 it("Lua editor React happy path creates syntax-checked source and exports a copy without execution", async () => {
   const { files, client, user } = fixture();
   render(<DataToolsWorkspace client={client} onGuardChange={() => {}} />);
-  await user.click(screen.getByRole("button", { name: "XML & Lua editor" }));
+  await user.click(screen.getByRole("button", { name: "XML, JSON & Lua editor" }));
   await user.click(screen.getByRole("button", { name: "New LUA" }));
   await screen.findByRole("textbox", { name: "LUA source editor" });
   editCode("LUA", 'local config <const> = { rpm = 900 }\nreturn config\n');
@@ -154,8 +251,8 @@ it("code editor preserves malformed and stale drafts and releases its guard only
   const source = join(files, "source.xml"); paths.code_source = source;
   writeFileSync(source, '<original/>');
   render(<DataToolsWorkspace client={client} onGuardChange={() => {}} />);
-  await user.click(screen.getByRole("button", { name: "XML & Lua editor" }));
-  await user.click(screen.getByRole("button", { name: "Open XML / Lua" }));
+  await user.click(screen.getByRole("button", { name: "XML, JSON & Lua editor" }));
+  await user.click(screen.getByRole("button", { name: "Open XML / JSON / Lua" }));
   await screen.findByRole("textbox", { name: "XML source editor" });
   editCode("XML", '<broken>');
   await user.click(screen.getByRole("button", { name: "Check syntax" }));
@@ -176,6 +273,544 @@ it("code editor preserves malformed and stale drafts and releases its guard only
   await user.click(screen.getByRole("button", { name: "Close / discard draft" }));
   expect(screen.getByRole("button", { name: "Metadata reports" })).toBeEnabled();
 }, 30000);
+
+it("JSON editor repairs real source, blocks invalid saves, and preserves reviewed bytes and a backup", async () => {
+  const { files, paths, client, user } = fixture();
+  const source = join(files, "config.json"); paths.code_source = source;
+  const original = '{\n  "broken":\n}';
+  writeFileSync(source, original);
+  render(<DataToolsWorkspace client={client} onGuardChange={() => {}} />);
+  await user.click(screen.getByRole("button", { name: "XML, JSON & Lua editor" }));
+  await user.click(screen.getByRole("button", { name: "Open XML / JSON / Lua" }));
+  await screen.findByRole("textbox", { name: "JSON source editor" });
+  expect(screen.getByText(/Line 3, column 1/)).toBeInTheDocument();
+  editCode("JSON", '{"value": NaN}');
+  await user.click(screen.getByRole("button", { name: "Review save" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Syntax check failed");
+  expect(readFileSync(source, "utf8")).toBe(original);
+  const draft = '{ "enabled": true, "value": 123456789012345678901234567890 }\n';
+  editCode("JSON", draft);
+  expect(screen.getByRole("button", { name: "Metadata reports" })).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "Check syntax" }));
+  expect(await screen.findByText("Syntax check passed")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Review save" }));
+  await screen.findByRole("region", { name: "Code save diff" });
+  expect(readFileSync(source, "utf8")).toBe(original);
+  await confirm(user);
+  expect(readFileSync(source, "utf8")).toBe(draft);
+  const result = await (client.applyWorkspaceAction as ReturnType<typeof vi.fn>).mock.results[0].value;
+  expect(readFileSync(result.payload.result.backup, "utf8")).toBe(original);
+}, 30000);
+
+it("JSON editor creates a new source document through reviewed save-copy", async () => {
+  const { files, client, user } = fixture();
+  render(<DataToolsWorkspace client={client} onGuardChange={() => {}} />);
+  await user.click(screen.getByRole("button", { name: "XML, JSON & Lua editor" }));
+  await user.click(screen.getByRole("button", { name: "New JSON" }));
+  await screen.findByRole("textbox", { name: "JSON source editor" });
+  editCode("JSON", '{"new": true}\n');
+  expect(screen.getByLabelText("New copy filename")).toHaveValue("untitled.json");
+  await user.click(screen.getByRole("button", { name: "Review save a copy" }));
+  expect(existsSync(join(files, "untitled.json"))).toBe(false);
+  await confirm(user);
+  expect(readFileSync(join(files, "untitled.json"), "utf8")).toBe('{"new": true}\n');
+}, 30000);
+
+it("native model workspace displays and exports the real evidence-scoped asset report", async () => {
+  const {files,client,user,sdk}=fixture();
+  const root=join(files,"native-model");mkdirSync(root);
+  mkdirSync(join(root,"original"));mkdirSync(join(root,"edit"));mkdirSync(join(root,"edit","assets"));
+  const original=Buffer.from("SDK-owned test snapshot");
+  writeFileSync(join(root,"original","asset.ydr"),original);
+  writeFileSync(join(root,"edit","asset.ydr.xml"),readFileSync(join(sdk,"tests","fixtures","animation_skin.ydr.xml")));
+  writeFileSync(join(root,"native-workspace.json"),JSON.stringify({schema_version:1,operation:"native_asset_workspace",edition:"Legacy",
+    source:{name:"asset.ydr",snapshot:"original/asset.ydr",size:original.length,sha256:createHash("sha256").update(original).digest("hex")},
+    xml:{path:"edit/asset.ydr.xml"},dependencies:[]}));
+  render(<NativeWorkspace client={client} request={{workspace:root,requestId:1}} onGuardChange={()=>{}}/>);
+  expect(await screen.findByLabelText("Skeleton ambiguity & transforms")).toHaveTextContent("pass");
+  expect(screen.getByLabelText("Attachment placement")).toHaveTextContent("not checked");
+  await user.click(screen.getByRole("button",{name:"Review asset report export"}));
+  const output=join(files,"asset.ydr.asset-validation.json");
+  expect(existsSync(output)).toBe(false);
+  await confirm(user);
+  const report=JSON.parse(readFileSync(output,"utf8"));
+  expect(report.runtime_status).toBe("not_tested");
+  expect(report.static_status).toBe("incomplete");
+  expect(report.source_identity.original_sha256).toBe(createHash("sha256").update(original).digest("hex"));
+  expect(readFileSync(join(root,"original","asset.ydr"))).toEqual(original);
+},30000);
+
+it.runIf(process.env.ALLIN1_NATIVE_RPF_TEST === "1").each(["Legacy", "Enhanced"])("native rebuild React preserves actual %s SDK/helper provenance", async edition => {
+  const {files,client,user,sdk,python}=fixture();
+  const prepared=spawnSync(python,["-c",`import pathlib,sys,subprocess
+from allin1_sdk.native_assets import NativeAssetInspector
+sdk=pathlib.Path(sys.argv[1]);root=pathlib.Path(sys.argv[2]);edition=sys.argv[3]
+source=root/'source.ydr'
+subprocess.run([str(sdk/'tools/RpfPatcher/RpfPatcher.exe'),'asset-from-xml',str(sdk/'tests/fixtures/animation_skin.ydr.xml'),str(source),str(root),'legacy' if edition=='Legacy' else 'gen9'],check=True,capture_output=True)
+NativeAssetInspector(sdk).export_workspace(source,root/'native',edition=edition)
+`,sdk,files,edition],{cwd:sdk,encoding:"utf8",windowsHide:true,timeout:30000,env:{...process.env,PYTHONPATH:join(sdk,"src")}});
+  if(prepared.status!==0)throw new Error(prepared.stderr||String(prepared.error));
+  const original=readFileSync(join(files,"source.ydr"));
+  render(<NativeWorkspace client={client} request={{workspace:join(files,"native"),requestId:1}} onGuardChange={()=>{}}/>);
+  await screen.findByLabelText("Native output filename");
+  await user.clear(screen.getByLabelText("Native output filename"));
+  await user.type(screen.getByLabelText("Native output filename"),"rebuilt.ydr");
+  await user.click(screen.getByRole("button",{name:"Review verified native build"}));
+  expect(await screen.findByText("Native build identity")).toBeInTheDocument();
+  expect(existsSync(join(files,"rebuilt.ydr"))).toBe(false);
+  await confirm(user);
+  const report=JSON.parse(readFileSync(join(files,"rebuilt.ydr.allin1.json"),"utf8"));
+  expect(report.artifact.edition).toBe(edition);
+  expect(report.artifact.outputs["rebuilt.ydr"]).toBe(createHash("sha256").update(readFileSync(join(files,"rebuilt.ydr"))).digest("hex"));
+  expect(report.artifact.build.resource_files["tools/RpfPatcher/RpfPatcher.exe"]).toBe(createHash("sha256").update(readFileSync(join(sdk,"tools/RpfPatcher/RpfPatcher.exe"))).digest("hex"));
+  expect(screen.getByText(new RegExp(report.artifact.artifact_id))).toBeInTheDocument();
+  expect(readFileSync(join(files,"source.ydr"))).toEqual(original);
+  expect(readFileSync(join(files,"native/original/source.ydr"))).toEqual(original);
+},60000);
+
+it("package validation connects model and metadata evidence to a reviewed React export", async () => {
+  const {files,paths,client,user,sdk}=fixture();
+  const source=join(files,"package"), comparison=join(files,"comparison");mkdirSync(source);mkdirSync(comparison);
+  const metadata=(texture:string)=>`<CVehicleModelInfo__InitDataList><InitDatas><Item><modelName>car</modelName><txdName>${texture}</txdName></Item></InitDatas></CVehicleModelInfo__InitDataList>`;
+  writeFileSync(join(source,"car.ydr.xml"),readFileSync(join(sdk,"tests/fixtures/animation_skin.ydr.xml")));
+  writeFileSync(join(source,"vehicles.meta"),metadata("first"));
+  writeFileSync(join(comparison,"vehicles.meta"),metadata("second"));
+  paths.package_folder=source;
+  render(<DataToolsWorkspace client={client} onGuardChange={()=>{}}/>);
+  await user.click(screen.getByRole("button",{name:"Validate asset package"}));
+  await user.click(screen.getByRole("button",{name:"Choose source"}));
+  paths.package_folder=comparison;
+  await user.click(screen.getByRole("button",{name:"Choose comparison context"}));
+  await user.click(screen.getByRole("button",{name:"Inspect data"}));
+  expect(await screen.findByLabelText("Metadata collisions")).toHaveTextContent("intentional replacement or a conflict");
+  expect(screen.getByLabelText("Skin weights & palettes")).toHaveTextContent("pass");
+  expect(screen.getByLabelText("Attachment placement")).toHaveTextContent("not checked");
+  await user.click(screen.getByRole("button",{name:"Review asset report export"}));
+  const output=join(files,"asset-validation-report","asset-validation.json");
+  expect(existsSync(output)).toBe(false);
+  await confirm(user);
+  const report=JSON.parse(readFileSync(output,"utf8"));
+  expect(report.files).toHaveLength(2);
+  expect(report.runtime_status).toBe("not_tested");
+  expect(report.comparison_definition_count).toBe(1);
+  expect(readFileSync(join(source,"vehicles.meta"),"utf8")).toBe(metadata("first"));
+},30000);
+
+it.runIf(process.env.ALLIN1_NATIVE_RPF_TEST==="1")("native metadata React report decodes archetypes and exports exact source/XML hashes",async()=>{
+  const {files,paths,client,user,python,sdk}=fixture();
+  const setup=spawnSync(python,["-c",`from pathlib import Path
+import sys
+from test_native_relationships import YTYP
+from allin1_sdk.paths import project_root
+from allin1_sdk.processes import run_hidden
+root=Path(sys.argv[1]);source=root/'fixture.ytyp.xml';source.write_bytes(YTYP)
+package=root/'package';package.mkdir()
+result=run_hidden([str(project_root()/'tools/RpfPatcher/RpfPatcher.exe'),'asset-from-xml',str(source),str(package/'fixture.ytyp'),str(root),'gen9'],capture_output=True,text=True,timeout=60)
+assert result.returncode==0,result.stderr
+print(package)`,files],{cwd:sdk,encoding:"utf8",windowsHide:true,timeout:60000,
+    env:{...process.env,PYTHONPATH:[join(sdk,"src"),join(sdk,"tests")].join(process.platform==="win32"?";":":")}});
+  expect(setup.status,setup.stderr||setup.stdout).toBe(0);
+  paths.package_folder=setup.stdout.trim();
+  const original=readFileSync(join(paths.package_folder,"fixture.ytyp"));
+  render(<DataToolsWorkspace client={client} onGuardChange={()=>{}}/>);
+  await user.click(screen.getByRole("button",{name:"Validate asset package"}));
+  await user.click(screen.getByRole("button",{name:"Choose source"}));
+  await user.selectOptions(screen.getByLabelText("Package validation edition"),"Enhanced");
+  await user.click(screen.getByRole("button",{name:"Inspect data"}));
+  await user.click(await screen.findByText("Metadata decoding evidence · 1 sources"));
+  expect(screen.getByRole("table",{name:"Metadata source and decoding coverage"})).toHaveTextContent("1 mapped definitions");
+  await user.click(screen.getByRole("button",{name:"Review asset report export"}));
+  await confirm(user);
+  const report=JSON.parse(readFileSync(join(files,"asset-validation-report/asset-validation.json"),"utf8"));
+  expect(report.metadata_evidence[0].source_sha256).toBe(createHash("sha256").update(original).digest("hex"));
+  expect(report.metadata_evidence[0].xml_sha256).toMatch(/^[a-f0-9]{64}$/);
+  expect(report.definition_count).toBe(1);
+  expect(report.runtime_status).toBe("not_tested");
+  expect(readFileSync(join(paths.package_folder,"fixture.ytyp"))).toEqual(original);
+},60000);
+
+it("package texture costs render from real validated DDS payloads",async()=>{
+  const {files,paths,client,user,python,sdk}=fixture();
+  const setup=spawnSync(python,["-c",`from pathlib import Path
+import sys
+from test_texture_validation import package_fixture
+print(package_fixture(Path(sys.argv[1])))`,files],{cwd:sdk,encoding:"utf8",windowsHide:true,timeout:30000,
+    env:{...process.env,PYTHONPATH:[join(sdk,"src"),join(sdk,"tests")].join(process.platform==="win32"?";":":")}});
+  if(setup.status!==0) throw new Error(setup.stderr);
+  paths.package_folder=setup.stdout.trim();
+  render(<DataToolsWorkspace client={client} onGuardChange={()=>{}}/>);
+  await user.click(screen.getByRole("button",{name:"Validate asset package"}));
+  await user.click(screen.getByRole("button",{name:"Choose source"}));
+  await user.click(screen.getByRole("button",{name:"Inspect data"}));
+  expect(await screen.findByText("Validated texture storage subtotal · 4 bytes")).toBeInTheDocument();
+  expect(screen.getByLabelText("Texture dependencies")).toHaveTextContent("pass");
+  expect(screen.getByRole("table",{name:"Verified texture payload costs"})).toHaveTextContent("fixture_diffuse");
+  await user.click(screen.getByRole("button",{name:"Review asset report export"}));
+  await confirm(user);
+  const report=JSON.parse(readFileSync(join(files,"asset-validation-report/asset-validation.json"),"utf8"));
+  expect(report.texture_resolutions[0].payload_sha256).toBe(report.texture_costs[0].sha256);
+},30000);
+
+it("parent texture React report resolves only selected shared context and exports its metadata hash",async()=>{
+  const {files,paths,client,user,python,sdk}=fixture();
+  const setup=spawnSync(python,["-c",`from pathlib import Path
+import sys,json
+from test_texture_parents import parent_package
+source,context,metadata=parent_package(Path(sys.argv[1]))
+print(json.dumps({'source':str(source),'context':str(context),'metadata':str(metadata)}))`,files],{cwd:sdk,encoding:"utf8",windowsHide:true,timeout:30000,
+    env:{...process.env,PYTHONPATH:[join(sdk,"src"),join(sdk,"tests")].join(process.platform==="win32"?";":":")}});
+  if(setup.status!==0)throw new Error(setup.stderr);
+  const input=JSON.parse(setup.stdout),original=readFileSync(input.metadata);
+  render(<DataToolsWorkspace client={client} onGuardChange={()=>{}}/>);
+  await user.click(screen.getByRole("button",{name:"Validate asset package"}));
+  paths.package_folder=input.source;await user.click(screen.getByRole("button",{name:"Choose source"}));
+  paths.package_folder=input.context;await user.click(screen.getByRole("button",{name:"Choose comparison context"}));
+  await user.click(screen.getByRole("button",{name:"Inspect data"}));
+  await user.click(await screen.findByText("Resolved texture dependencies · 1"));
+  await user.click(screen.getByText("fixture_diffuse · comparison:shared.ytd.xml"));
+  expect(screen.getByRole("list",{name:"Selected texture lookup chain"})).toHaveTextContent("shared · comparison:shared.ytd.xml");
+  await user.click(screen.getByText("Texture parent declaration provenance · 1"));
+  expect(screen.getByRole("table",{name:"Selected texture parent metadata"})).toHaveTextContent(createHash("sha256").update(original).digest("hex"));
+  await user.click(screen.getByRole("button",{name:"Review asset report export"}));await confirm(user);
+  const report=JSON.parse(readFileSync(join(files,"asset-validation-report/asset-validation.json"),"utf8"));
+  expect(report.texture_resolutions[0].parent_chain).toEqual([{child:"paint",parent:"shared"}]);
+  expect(report.runtime_status).toBe("not_tested");
+  expect(readFileSync(input.metadata)).toEqual(original);
+},30000);
+
+it("package attachment anchors render and export real metadata-to-model evidence",async()=>{
+  const {files,paths,client,user,python,sdk}=fixture();
+  const setup=spawnSync(python,["-c",`from pathlib import Path
+import sys
+from test_attachment_validation import package_fixture
+print(package_fixture(Path(sys.argv[1])/'package'))`,files],{cwd:sdk,encoding:"utf8",windowsHide:true,timeout:30000,
+    env:{...process.env,PYTHONPATH:[join(sdk,"src"),join(sdk,"tests")].join(process.platform==="win32"?";":":")}});
+  if(setup.status!==0) throw new Error(setup.stderr);
+  paths.package_folder=setup.stdout.trim();
+  render(<DataToolsWorkspace client={client} onGuardChange={()=>{}}/>);
+  await user.click(screen.getByRole("button",{name:"Validate asset package"}));
+  await user.click(screen.getByRole("button",{name:"Choose source"}));
+  await user.click(screen.getByRole("button",{name:"Inspect data"}));
+  await user.click(await screen.findByText("Resolved attachment anchors · 1"));
+  await user.click(screen.getByText("WEAPON_TEST → COMPONENT_TEST · tip"));
+  expect(screen.getByRole("table",{name:"Authored skeleton anchor matrix · tip"})).toHaveTextContent("1.00000");
+  expect(screen.getByLabelText("Attachment placement")).toHaveTextContent("in-game assembly have not been proved");
+  await user.click(screen.getByRole("button",{name:"Review asset report export"}));
+  await confirm(user);
+  const report=JSON.parse(readFileSync(join(files,"asset-validation-report/asset-validation.json"),"utf8"));
+  expect(report.attachment_bindings[0]).toMatchObject({parent_source:"body.ydr.xml",child_source:"clip.ydr.xml",bone_tag:42});
+  expect(report.attachment_bindings[0].skeleton_matrix[2][3]).toBe(1);
+  expect(report.runtime_status).toBe("not_tested");
+},30000);
+
+it("fragment React report exports real child relationships and separate authored matrices",async()=>{
+  const {files,paths,client,user,python,sdk}=fixture();
+  const setup=spawnSync(python,["-c",`from pathlib import Path
+import sys
+from lxml import etree
+from test_fragment_validation import fragment
+root=Path(sys.argv[1])/'package'
+root.mkdir()
+(root/'fixture.yft.xml').write_bytes(etree.tostring(fragment()))
+print(root)`,files],{cwd:sdk,encoding:"utf8",windowsHide:true,timeout:30000,
+    env:{...process.env,PYTHONPATH:[join(sdk,"src"),join(sdk,"tests")].join(process.platform==="win32"?";":":")}});
+  if(setup.status!==0)throw new Error(setup.stderr);
+  paths.package_folder=setup.stdout.trim();
+  const original=readFileSync(join(paths.package_folder,"fixture.yft.xml"));
+  render(<DataToolsWorkspace client={client} onGuardChange={()=>{}}/>);
+  await user.click(screen.getByRole("button",{name:"Validate asset package"}));
+  await user.click(screen.getByRole("button",{name:"Choose source"}));
+  await user.click(screen.getByRole("button",{name:"Inspect data"}));
+  await user.click(await screen.findByText("Fragment physics-child evidence · 1"));
+  await user.click(screen.getByText("fixture.yft.xml · LOD1 child 0"));
+  expect(screen.getByRole("table",{name:"Physics matrix · serialized 4×4 rows"})).toHaveTextContent("5.00000");
+  await user.click(screen.getByRole("button",{name:"Review asset report export"}));await confirm(user);
+  const report=JSON.parse(readFileSync(join(files,"asset-validation-report/asset-validation.json"),"utf8"));
+  expect(report.fragment_children[0]).toMatchObject({source:"fixture.yft.xml",bone_tag:42,bone_indices:[1],position_offset:[2,3,4]});
+  expect(report.fragment_children[0].drawables[0].matrix[3]).toEqual([8,9,10]);
+  expect(report.runtime_status).toBe("not_tested");
+  expect(readFileSync(join(paths.package_folder,"fixture.yft.xml"))).toEqual(original);
+},30000);
+
+it("shared-rig React report requires explicit hashed owners and revalidation before export",async()=>{
+  const {files,paths,client,user,python,sdk}=fixture();
+  const setup=spawnSync(python,["-c",`from pathlib import Path
+import sys,json
+from test_shared_rig_validation import fixture
+root,context,binding=fixture(Path(sys.argv[1]))
+print(json.dumps({'source':str(root),'comparison':str(context),'binding':binding}))`,files],{cwd:sdk,encoding:"utf8",windowsHide:true,timeout:30000,
+    env:{...process.env,PYTHONPATH:[join(sdk,"src"),join(sdk,"tests")].join(process.platform==="win32"?";":":")}});
+  if(setup.status!==0)throw new Error(setup.stderr);
+  const input=JSON.parse(setup.stdout),original=readFileSync(join(input.source,"car.ydr.xml"));
+  render(<DataToolsWorkspace client={client} onGuardChange={()=>{}}/>);
+  await user.click(screen.getByRole("button",{name:"Validate asset package"}));
+  paths.package_folder=input.source;await user.click(screen.getByRole("button",{name:"Choose source"}));
+  paths.package_folder=input.comparison;await user.click(screen.getByRole("button",{name:"Choose comparison context"}));
+  await user.click(screen.getByRole("button",{name:"Inspect data"}));
+  await user.click(await screen.findByText("Explicit shared-rig context · 0 selected"));
+  expect(screen.getByRole("button",{name:"Use selected shared rig"})).toBeDisabled();
+  await user.selectOptions(screen.getByLabelText("Model drawable"),JSON.stringify([input.binding.model,0,input.binding.model_sha256]));
+  await user.selectOptions(screen.getByLabelText("Shared skeleton drawable"),JSON.stringify([input.binding.rig,0,input.binding.rig_sha256]));
+  await user.click(screen.getByRole("button",{name:"Use selected shared rig"}));
+  expect(screen.getByRole("button",{name:"Review report export"})).toBeDisabled();
+  expect(screen.getByRole("button",{name:"Optimize & recover"})).toBeDisabled();
+  await user.click(screen.getByRole("button",{name:"Inspect data"}));
+  expect(await screen.findByRole("heading",{name:"Skin weights & palettes · pass"})).toBeInTheDocument();
+  await user.click(screen.getByText("Selected shared-rig evidence · 1"));
+  await user.click(screen.getByRole("button",{name:"Review report export"}));await confirm(user);
+  const report=JSON.parse(readFileSync(join(files,"asset-validation-report/asset-validation.json"),"utf8"));
+  expect(report.shared_rigs[0]).toMatchObject(input.binding);
+  expect(report.runtime_status).toBe("not_tested");
+  expect(readFileSync(join(input.source,"car.ydr.xml"))).toEqual(original);
+},30000);
+
+it("validation-to-optimization handoff retains explicit rigs and shared texture context",async()=>{
+  const {files,paths,client,user,python,sdk}=fixture();
+  const setup=spawnSync(python,["-c",`from pathlib import Path
+import sys,json
+from test_optimization_context import shared_request
+print(json.dumps(shared_request(Path(sys.argv[1]))))`,files],{cwd:sdk,encoding:"utf8",windowsHide:true,timeout:30000,
+    env:{...process.env,PYTHONPATH:[join(sdk,"src"),join(sdk,"tests")].join(process.platform==="win32"?";":":")}});
+  if(setup.status!==0)throw new Error(setup.stderr);
+  const input=JSON.parse(setup.stdout),binding=input.settings.rig_bindings[0];
+  render(<DataToolsWorkspace client={client} onGuardChange={()=>{}}/>);
+  await user.click(screen.getByRole("button",{name:"Validate asset package"}));
+  paths.package_folder=input.source;await user.click(screen.getByRole("button",{name:"Choose source"}));
+  paths.package_folder=input.comparison;await user.click(screen.getByRole("button",{name:"Choose comparison context"}));
+  await user.click(screen.getByRole("button",{name:"Inspect data"}));
+  await user.click(await screen.findByText("Explicit shared-rig context · 0 selected"));
+  await user.selectOptions(screen.getByLabelText("Model drawable"),JSON.stringify([binding.model,binding.drawable,binding.model_sha256]));
+  await user.selectOptions(screen.getByLabelText("Shared skeleton drawable"),JSON.stringify([binding.rig,binding.rig_drawable,binding.rig_sha256]));
+  await user.click(screen.getByRole("button",{name:"Use selected shared rig"}));
+  await user.click(screen.getByRole("button",{name:"Inspect data"}));
+  await user.click(await screen.findByRole("button",{name:"Optimize with this validation context"}));
+  expect(screen.getByText(/Validation context copied from the asset report/)).toBeInTheDocument();
+  expect(screen.queryByRole("button",{name:"Queue texture candidate"})).not.toBeInTheDocument();
+  await user.click(screen.getByText("Optimization validation context"));
+  expect(screen.getByText(input.comparison)).toBeInTheDocument();
+  await user.click(screen.getByText("Explicit shared-rig context · 1 selected"));
+  expect(screen.getByRole("button",{name:"Remove shared rig 1"})).toBeInTheDocument();
+  await user.click(screen.getByRole("button",{name:"Inspect optimization inputs"}));
+  await user.selectOptions(await screen.findByLabelText("Declared material role"),"color");
+  fireEvent.change(screen.getByLabelText("Candidate mip count"),{target:{value:"5"}});
+  await user.click(screen.getByRole("button",{name:"Queue texture candidate"}));
+  await user.click(screen.getByRole("button",{name:"Preview optimization candidates"}));
+  await user.click(await screen.findByRole("button",{name:"Review optimized package export"}));await confirm(user);
+  const receipt=JSON.parse(readFileSync(join(files,"optimized-package/optimization.json"),"utf8"));
+  expect(receipt.validation_context.shared_rig_count).toBe(1);
+  for(const name of ["before_report","after_report"]){
+    expect(receipt[name].shared_rigs[0]).toMatchObject(binding);
+    expect(receipt[name].texture_resolutions.some((row:{dictionary:string})=>row.dictionary==="comparison:shared.ytd.xml")).toBe(true);
+  }
+  expect(existsSync(join(files,"optimized-package/package/shared.ydr.xml"))).toBe(false);
+},60000);
+
+it("optimization React refuses a normal-map candidate even after a color declaration",async()=>{
+  const {files,paths,client,user,python,sdk}=fixture();
+  const setup=spawnSync(python,["-c",`from pathlib import Path
+import json,sys
+from test_optimization_package import request
+from test_material_roles import change_slot
+payload=request(Path(sys.argv[1]));change_slot(payload['source'],'BumpSampler',mixed=True)
+print(json.dumps(payload))`,files],{cwd:sdk,encoding:"utf8",windowsHide:true,timeout:30000,
+    env:{...process.env,PYTHONPATH:[join(sdk,"src"),join(sdk,"tests")].join(process.platform==="win32"?";":":")}});
+  expect(setup.status,setup.stderr||setup.stdout).toBe(0);
+  paths.package_folder=JSON.parse(setup.stdout).source;
+  const original=readFileSync(join(paths.package_folder,"assets/diffuse.dds"));
+  render(<DataToolsWorkspace client={client} onGuardChange={()=>{}}/>);
+  await user.click(screen.getByRole("button",{name:"Optimize & recover"}));
+  await user.click(screen.getByRole("button",{name:"Choose optimization package"}));
+  await user.click(screen.getByRole("button",{name:"Inspect optimization inputs"}));
+  await user.selectOptions(await screen.findByLabelText("Declared material role"),"color");
+  expect(screen.getByText(/Color conversion blocked for this material usage/)).toHaveTextContent("normal");
+  expect(screen.getByRole("button",{name:"Queue texture candidate"})).toBeDisabled();
+  expect(screen.queryByRole("button",{name:"Review optimized package export"})).not.toBeInTheDocument();
+  expect(readFileSync(join(paths.package_folder,"assets/diffuse.dds"))).toEqual(original);
+},30000);
+
+it("optimization React path previews measured candidates, exports exact originals, and recovers them",async()=>{
+  const {files,paths,client,user,python,sdk}=fixture(),guard=vi.fn();
+  const setup=spawnSync(python,["-c",`from pathlib import Path
+import json,sys
+from test_optimization_package import request
+print(json.dumps(request(Path(sys.argv[1]))))`,files],{cwd:sdk,encoding:"utf8",windowsHide:true,timeout:30000,
+    env:{...process.env,PYTHONPATH:[join(sdk,"src"),join(sdk,"tests")].join(process.platform==="win32"?";":":")}});
+  if(setup.status!==0)throw new Error(setup.stderr);
+  paths.package_folder=JSON.parse(setup.stdout).source;
+  const original=readFileSync(join(paths.package_folder,"assets/diffuse.dds"));
+  render(<DataToolsWorkspace client={client} onGuardChange={guard}/>);
+  await user.click(screen.getByRole("button",{name:"Optimize & recover"}));
+  await user.click(screen.getByRole("button",{name:"Choose optimization package"}));
+  await user.click(screen.getByRole("button",{name:"Inspect optimization inputs"}));
+  expect(await screen.findByRole("button",{name:"Queue texture candidate"})).toBeDisabled();
+  await user.selectOptions(screen.getByLabelText("Declared material role"),"color");
+  fireEvent.change(screen.getByLabelText("Candidate mip count"),{target:{value:"5"}});
+  await user.click(screen.getByRole("button",{name:"Queue texture candidate"}));
+  expect(guard).toHaveBeenLastCalledWith(true);
+  await user.click(screen.getByRole("button",{name:"Preview optimization candidates"}));
+  expect(await screen.findByAltText("Before fixture_diffuse")).toHaveAttribute("src",expect.stringContaining("data:image/png;base64,"));
+  expect(screen.getByAltText("After fixture_diffuse")).toBeInTheDocument();
+  await user.click(screen.getByText("Exact pixel comparison · fixture_diffuse"));
+  await user.click(screen.getByRole("button",{name:"Inspect exact pixels fixture_diffuse"}));
+  expect(await screen.findByAltText("before exact pixels fixture_diffuse")).toHaveAttribute("width","64");
+  expect(screen.getByAltText("after exact pixels fixture_diffuse")).toHaveAttribute("width","64");
+  expect(screen.getByAltText("difference exact pixels fixture_diffuse")).toBeInTheDocument();
+  expect(screen.getByText(/All files outside the explicitly selected/)).toBeInTheDocument();
+  await user.click(screen.getByRole("button",{name:"Review optimized package export"}));
+  await confirm(user);
+  const output=join(files,"optimized-package");
+  const receipt=JSON.parse(readFileSync(join(output,"optimization.json"),"utf8"));
+  expect(screen.getByRole("table",{name:"Texture costs fixture_diffuse"})).toBeInTheDocument();
+  expect(screen.getByText(/not measured GPU residency, streaming behavior or driver allocations/)).toBeInTheDocument();
+  expect(receipt.storage_delta_bytes).toBeLessThan(0);
+  expect(readFileSync(join(output,"originals/assets/diffuse.dds"))).toEqual(original);
+  expect(readFileSync(join(paths.package_folder,"assets/diffuse.dds"))).toEqual(original);
+  paths.package_folder=output;
+  await user.click(screen.getByRole("button",{name:"Open recovery package"}));
+  await user.click(await screen.findByRole("button",{name:"Review exact original recovery"}));
+  await confirm(user);
+  expect(readFileSync(join(files,"recovered-package/assets/diffuse.dds"))).toEqual(original);
+  expect(readFileSync(join(files,"recovered-package/car.ydr.xml"))).toEqual(readFileSync(join(output,"originals/car.ydr.xml")));
+},30000);
+
+it("diagnostic React path distinguishes file drift from crash causality and exports redacted evidence",async()=>{
+  const {files,paths,client,user,python,sdk}=fixture();
+  const setup=spawnSync(python,["-c",`from pathlib import Path
+import sys,json
+from test_diagnostic_trail import fixture,session_file
+from test_crash_evidence import event_file,collected_session
+root=Path(sys.argv[1]);payload,artifact,_=fixture(root)
+session,_=session_file(root,payload,artifact)
+crash=event_file(root,payload)
+session=collected_session(root,payload,artifact,[{'attempt':1,'status':'observed','events':[crash.read_text()],'query_truncated':False}])
+(root/'runtime.log').write_text('session_start controller=1.4.0'+chr(10)+'PrivateMachine'+chr(10)+'password=do-not-export'+chr(10))
+(Path(payload['gta_path'])/'scripts/owned.asi').write_bytes(b'stale installed bytes')
+print(json.dumps({**payload,'session':str(session),'crash':str(crash)}))`,files],{cwd:sdk,encoding:"utf8",windowsHide:true,timeout:30000,
+    env:{...process.env,PYTHONPATH:[join(sdk,"src"),join(sdk,"tests")].join(process.platform==="win32"?";":":")}});
+  if(setup.status!==0)throw new Error(setup.stderr);
+  const input=JSON.parse(setup.stdout);
+  render(<DataToolsWorkspace client={client} onGuardChange={()=>{}}/>);
+  await user.click(screen.getByRole("button",{name:"Trace build to game"}));
+  paths.code_source=input.source;
+  await user.click(screen.getByRole("button",{name:"Choose artifact manifest"}));
+  paths.code_source=input.comparison;
+  await user.click(screen.getByRole("button",{name:"Choose installation receipt"}));
+  paths.gta_folder=input.gta_path;
+  await user.click(screen.getByRole("button",{name:"Choose diagnostic installation"}));
+  paths.code_source=input.session;
+  await user.click(screen.getByRole("button",{name:"Choose runtime session"}));
+  paths.metadata=input.crash;
+  await user.click(screen.getByRole("button",{name:"Choose crash event XML"}));
+  await user.click(screen.getByRole("button",{name:"Clear crash event"}));
+  await user.click(screen.getByText("Selected diagnostic log excerpts · 0"));
+  paths.binary_source=join(files,"runtime.log");
+  await user.click(screen.getByRole("button",{name:"Choose diagnostic log"}));
+  fireEvent.change(screen.getByLabelText("Additional private terms (one per line)"),{target:{value:"PrivateMachine"}});
+  await user.click(screen.getByRole("button",{name:"Inspect data"}));
+  expect(await screen.findByText(/Build-to-game evidence · cause not established/)).toBeInTheDocument();
+  expect(screen.getByText(/Current bytes differ from the installation receipt/,{selector:"li"})).toBeInTheDocument();
+  expect(screen.getByText(/Normal exit and crash cannot be distinguished/,{selector:"li"})).toBeInTheDocument();
+  expect(screen.getByLabelText("Redacted diagnostic preview")).not.toHaveTextContent("do-not-export");
+  expect(screen.getByRole("button",{name:"Review report export"})).toBeDisabled();
+  await user.click(screen.getByRole("checkbox",{name:/I reviewed these exact redacted excerpts/}));
+  await user.click(screen.getByRole("button",{name:"Review report export"}));
+  await confirm(user);
+  const exported=readFileSync(join(files,"diagnostic-trail-report/diagnostic-trail.json"),"utf8");
+  const report=JSON.parse(exported);
+  expect(report.crash_cause).toBe("not_established");
+  expect(report.crash_evidence.status).toBe("application_crash_recorded");
+  expect(report.crash_evidence.source).toBe("launcher_session_event_query");
+  expect(report.crash_evidence.matches[0].faulting_module).toBe("ntdll.dll");
+  expect(exported).not.toContain("PRIVATE-");
+  expect(report.findings.map((f:{code:string})=>f.code)).toContain("session_receipt_link");
+  expect(report.findings.find((f:{code:string})=>f.code==="process_identity_observed").evidence.executable).toBe("<game>/GTA5.exe");
+  expect(exported).not.toContain(files);
+  expect(exported).not.toContain("PrivateMachine");
+  const bundle=JSON.parse(readFileSync(join(files,"diagnostic-trail-report/diagnostic-bundle.json"),"utf8"));
+  expect(bundle.artifact_id).toBe(report.artifact_id);
+  expect(bundle.session_id).toBe(report.session_id);
+  expect(readFileSync(join(files,"diagnostic-trail-report/log-01.txt"),"utf8")).toContain("session_start controller=1.4.0");
+  expect(readFileSync(join(files,"diagnostic-trail-report/log-01.txt"),"utf8")).not.toContain("do-not-export");
+},30000);
+
+it.skipIf(process.env.ALLIN1_NATIVE_RPF_TEST!=="1")("installed RPF React diagnostics recheck an exact nested member and export without changing game bytes",async()=>{
+  const {files,paths,client,user,python,sdk}=fixture();
+  const setup=spawnSync(python,["-c",`from pathlib import Path
+import sys,json,shutil
+from test_package_intake import native_archive
+from test_diagnostic_rpf import receipt_for
+from allin1_sdk.workspace_desktop import file_hash
+root=Path(sys.argv[1]);archive,game=native_archive(root,'Enhanced')
+(game/'mods').mkdir();shutil.copyfile(archive,game/'mods/dlc.rpf')
+artifact,receipt=receipt_for(file_hash(root/'source/vehicles.rpf.source/vehicles.meta'),'Enhanced')
+(root/'artifact.json').write_text(json.dumps(artifact));(root/'receipt.json').write_text(json.dumps(receipt))
+print(str(game))`,files],{cwd:sdk,encoding:"utf8",windowsHide:true,timeout:30000,
+    env:{...process.env,PYTHONPATH:[join(sdk,"src"),join(sdk,"tests")].join(process.platform==="win32"?";":":")}});
+  if(setup.status!==0)throw new Error(setup.stderr);
+  const game=setup.stdout.trim(),original=readFileSync(join(game,"mods/dlc.rpf"));
+  render(<DataToolsWorkspace client={client} onGuardChange={()=>{}}/>);
+  await user.click(screen.getByRole("button",{name:"Trace build to game"}));
+  paths.code_source=join(files,"artifact.json");await user.click(screen.getByRole("button",{name:"Choose artifact manifest"}));
+  paths.code_source=join(files,"receipt.json");await user.click(screen.getByRole("button",{name:"Choose installation receipt"}));
+  paths.gta_folder=game;await user.click(screen.getByRole("button",{name:"Choose diagnostic installation"}));
+  await user.click(screen.getByRole("button",{name:"Inspect data"}));
+  await user.click(await screen.findByText("Installed RPF member identities · 1"));
+  expect(screen.getByRole("table",{name:"Current installed RPF members"})).toHaveTextContent("vehicles.rpf!vehicles.meta");
+  expect(screen.getByRole("table",{name:"Current installed RPF members"})).toHaveTextContent("match");
+  await user.click(screen.getByRole("button",{name:"Review report export"}));await confirm(user);
+  const exported=JSON.parse(readFileSync(join(files,"diagnostic-trail-report/diagnostic-trail.json"),"utf8"));
+  expect(exported.rpf_members[0].status).toBe("match");
+  expect(exported.crash_cause).toBe("not_established");
+  expect(readFileSync(join(game,"mods/dlc.rpf"))).toEqual(original);
+},30000);
+
+it.skipIf(process.env.ALLIN1_NATIVE_RPF_TEST!=="1").each(["folder","single RPF handoff"])("packed RPF React path validates exact members and optimizes with recoverable original containers (%s)",async(mode)=>{
+  const {files,paths,client,user,python,sdk}=fixture();
+  const setup=spawnSync(python,["-c",`from pathlib import Path
+import sys,json,shutil
+from test_package_intake import native_archive
+root=Path(sys.argv[1]);archive,game=native_archive(root,'Enhanced',size=16)
+package=root/'packed';package.mkdir();shutil.copyfile(archive,package/'dlc.rpf')
+print(json.dumps({'archive':str(archive),'game':str(game),'package':str(package)}))`,files],{cwd:sdk,encoding:"utf8",windowsHide:true,timeout:60000,
+    env:{...process.env,PYTHONPATH:[join(sdk,"src"),join(sdk,"tests")].join(process.platform==="win32"?";":":")}});
+  if(setup.status!==0)throw new Error(setup.stderr);
+  const input=JSON.parse(setup.stdout);paths.rpf=input.archive;paths.gta_folder=input.game;paths.package_folder=input.package;
+  const original=readFileSync(input.archive);
+  render(<DataToolsWorkspace client={client} onGuardChange={()=>{}}/>);
+  await user.click(screen.getByRole("button",{name:"Validate asset package"}));
+  await user.click(screen.getByRole("button",{name:"Choose RPF archive"}));
+  await user.selectOptions(screen.getByLabelText("Package validation edition"),"Enhanced");
+  await user.click(screen.getByRole("button",{name:"Choose decoder installation"}));
+  await user.click(screen.getByRole("button",{name:"Inspect data"}));
+  await user.click(await screen.findByText(/Archive\/member provenance ·/));
+  expect(screen.getByRole("table",{name:"Exact archive member identities"})).toHaveTextContent("vehicles.rpf::car.ydr");
+  if(mode==="folder"){
+    await user.click(screen.getByRole("button",{name:"Optimize & recover"}));
+    await user.click(screen.getByRole("button",{name:"Choose optimization package"}));
+    await user.selectOptions(screen.getByLabelText("Optimization edition"),"Enhanced");
+    await user.click(screen.getByRole("button",{name:"Choose optimization decoder context"}));
+  }else{
+    await user.click(screen.getByRole("button",{name:"Optimize with this validation context"}));
+    expect(screen.getByLabelText("Optimization edition")).toHaveValue("Enhanced");
+  }
+  await user.click(screen.getByRole("button",{name:"Inspect optimization inputs"}));
+  await user.selectOptions(await screen.findByLabelText("Declared material role"),"color");
+  fireEvent.change(screen.getByLabelText("Candidate mip count"),{target:{value:"5"}});
+  await user.click(screen.getByRole("button",{name:"Queue texture candidate"}));
+  await user.click(screen.getByRole("button",{name:"Preview optimization candidates"}));
+  await user.click(await screen.findByText("Verified RPF rebuilds · 1"));
+  await user.click(screen.getByRole("button",{name:"Review optimized package export"}));
+  await confirm(user);
+  expect(readFileSync(join(files,"optimized-package/originals/dlc.rpf"))).toEqual(original);
+  expect(readFileSync(join(files,"optimized-package/package/dlc.rpf"))).not.toEqual(original);
+  expect(readFileSync(join(input.package,"dlc.rpf"))).toEqual(original);
+  const receipt=JSON.parse(readFileSync(join(files,"optimized-package/optimization.json"),"utf8"));
+  expect(receipt.archive_rebuilds).toHaveLength(1);
+  expect(receipt.source_kind).toBe(mode==="folder"?"package_folder":"rpf_archive");
+  expect(readFileSync(input.archive)).toEqual(original);
+  expect(receipt.storage_delta_bytes).toBeLessThan(0);
+  expect(receipt.before_report.runtime_status).toBe("not_tested");
+},90000);
 
 it("data tools React happy path compares real metadata and exports reviewed reports", async () => {
   const { files, paths, client, user } = fixture();
@@ -355,6 +990,36 @@ it("package layout React happy path imports a real folder, renames, arranges, sa
   expect(readFileSync(join(source, "example.bin"), "utf8")).toBe("owned fixture");
   expect(guard).toHaveBeenLastCalledWith(false);
 }, 30000);
+
+it.runIf(process.env.ALLIN1_NATIVE_RPF_TEST === "1").each(["Legacy","Enhanced"])("package layout React binds actual %s RPF construction identity",async edition=>{
+  const {files,client,paths,user,sdk,python}=fixture();
+  const source=join(files,"source");mkdirSync(source);
+  const nested=join(source,"nested.rpf.source");mkdirSync(nested);
+  writeFileSync(join(nested,"owned.bin"),"SDK-owned fixture");
+  const game=join(files,"Synthetic decoder");mkdirSync(game);
+  writeFileSync(join(game,edition==="Legacy"?"GTA5.exe":"GTA5_Enhanced.exe"),"MZ-fixture-never-executed");
+  paths.graph_source=source;paths.gta_folder=game;
+  render(<GraphWorkbench client={client} module="graph" onGuardChange={()=>{}}/>);
+  await user.click(screen.getByRole("button",{name:"Graph from folder"}));
+  await user.click(await screen.findByRole("button",{name:"Review graph save"}));await confirm(user);
+  await user.click(screen.getByRole("button",{name:"Decoder game folder"}));
+  await user.clear(screen.getByLabelText("Output / report name"));
+  await user.type(screen.getByLabelText("Output / report name"),"built.rpf");
+  await user.click(screen.getByRole("button",{name:"Review RPF build"}));
+  expect(await screen.findByText("RPF construction identity")).toBeInTheDocument();
+  expect(existsSync(join(files,"built.rpf"))).toBe(false);
+  await confirm(user);
+  const output=join(files,"built.rpf"),report=JSON.parse(readFileSync(output+".validation.json","utf8"));
+  expect(report.edition).toBe(edition);
+  expect(report.source_kind).toBe("rpf_package_graph");
+  expect(report.archive.sha256).toBe(createHash("sha256").update(readFileSync(output)).digest("hex"));
+  expect(report.build.resource_files["tools/RpfPatcher/RpfPatcher.exe"]).toBe(createHash("sha256").update(readFileSync(join(sdk,"tools/RpfPatcher/RpfPatcher.exe"))).digest("hex"));
+  expect(screen.getByText(new RegExp(report.report_sha256))).toBeInTheDocument();
+  const verify=spawnSync(python,["-c","import json,sys;from allin1_sdk.artifact_contract import verify_seal;verify_seal(json.load(open(sys.argv[1],encoding='utf-8')),'report_sha256')",output+".validation.json"],
+    {cwd:sdk,encoding:"utf8",windowsHide:true,timeout:30000,env:{...process.env,PYTHONPATH:join(sdk,"src")}});
+  expect(verify.status,verify.stderr).toBe(0);
+  expect(readFileSync(join(nested,"owned.bin"),"utf8")).toBe("SDK-owned fixture");
+},60000);
 
 it.runIf(!!process.env.ALLIN1_BLENDER_EXECUTABLE)("render studio React happy path decodes a real model, renders in Blender and exports verified pixels", async () => {
   const { files, paths, client, user } = fixture(), guard = vi.fn();

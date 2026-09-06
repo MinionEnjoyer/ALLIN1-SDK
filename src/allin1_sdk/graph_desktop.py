@@ -319,6 +319,8 @@ def review(payload):
             path(str(report), new=True, writable=True)
             path(str(report.with_name(f".{report.name}.tmp")), new=True, writable=True)
             outputs.append(str(report))
+            from allin1_sdk import artifact_identity
+            details["build"] = artifact_identity.current(resource_root=project_root())
         elif action == "plan_origin":
             if document.get("origin", {}).get("type") != "rpf_archive_import":
                 raise ValueError("Origin planning requires an imported RPF graph")
@@ -396,7 +398,24 @@ def apply(payload):
             return {"output": str(output), "report": str(report), "output_sha256": digest(_inventory(output)), "preview_summary": evidence["summary"]}
         builder = RpfArchiveBuilder(project_root(), payload["gta_path"])
         if action == "build":
+            from allin1_sdk import artifact_identity
+            from allin1_sdk.artifact_contract import verify_seal, validate_build
+            build = artifact_identity.current(resource_root=project_root())
             output, report = RpfPackageGraph.build(selected, builder, output)
+            try:
+                evidence = strict_json(report.read_bytes())
+                verify_seal(evidence, "report_sha256")
+                validate_build(evidence.get("build"))
+                if evidence["build"] != build or evidence["archive"]["sha256"] != file_hash(output):
+                    raise ValueError("RPF construction identity changed during the reviewed build")
+            except (OSError, ValueError, KeyError):
+                output.unlink()
+                report.unlink()
+                raise
+            return {"output": str(output), "report": str(report), "output_sha256": file_hash(output),
+                    "provenance": {"build_fingerprint": build["build_fingerprint"], "build_mode": build["mode"],
+                                   "construction_report_sha256": evidence["report_sha256"],
+                                   "scope": "Sealed construction receipt, not an installable package manifest or in-game acceptance."}}
         else:
             output, report = RpfPackageGraph.plan_origin_changes(selected, builder, builder.service, output)
         return {"output": str(output), "report": str(report), "output_sha256": file_hash(output)}

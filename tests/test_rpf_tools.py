@@ -2183,10 +2183,10 @@ def test_native_asset_helper_renders_collision_geometry(tmp_path, monkeypatch):
  <Materials><Item><Type value="27" /></Item></Materials>
  <Vertices>
 0, 0, 0
-1, 0, 0
+0, 1, 1
 1, 1, 0
 0, 1, 0
-0.5, 0.5, 1
+1, 0, 1
  </Vertices>
  <Polygons>
   <Triangle m="0" v1="0" v2="1" v3="4" f1="0" f2="0" f3="0" />
@@ -2207,11 +2207,11 @@ def test_native_asset_helper_renders_collision_geometry(tmp_path, monkeypatch):
     assert report.metadata["collision_polygon_count"] == 2
     assert report.metadata["collision_material_count"] == 1
     assert report.metadata["collision_primitives"] == "Box: 1, Triangle: 1"
-    assert report.metadata["collision_render_triangles"] == 5
+    assert report.metadata["collision_render_triangles"] == 13
     assert report.metadata["collision_preview"] == "isometric geometry diagnostic"
     assert report.collision_scene is not None
     assert report.collision_scene.primitive_counts == (("Box", 1), ("Triangle", 1))
-    assert report.collision_scene.render_triangle_count == 5
+    assert report.collision_scene.render_triangle_count == 13
     assert report.collision_scene.bounds["size"] == [1.0, 1.0, 1.0]
 
 

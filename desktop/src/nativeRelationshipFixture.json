@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "format": ".ymap",
+  "nodes": [
+    {
+      "id": "entity:0",
+      "label": "0: unpositioned",
+      "kind": "entity",
+      "fields": {
+        "index": 0,
+        "archetype": "unpositioned",
+        "parent_index": -1,
+        "lod_level": "",
+        "lod_distance": 0.0,
+        "flags": 0
+      }
+    },
+    {
+      "id": "reference:archetype:unpositioned",
+      "label": "unpositioned",
+      "kind": "archetype",
+      "fields": {},
+      "search": "unpositioned"
+    },
+    {
+      "id": "entity:1",
+      "label": "1: chair",
+      "kind": "entity",
+      "fields": {
+        "index": 1,
+        "archetype": "chair",
+        "parent_index": 0,
+        "lod_level": "",
+        "lod_distance": 0.0,
+        "flags": 0
+      },
+      "position": [
+        10.0,
+        20.0,
+        30.0
+      ]
+    },
+    {
+      "id": "reference:archetype:chair",
+      "label": "chair",
+      "kind": "archetype",
+      "fields": {},
+      "search": "chair"
+    },
+    {
+      "id": "entity:2",
+      "label": "2: chair",
+      "kind": "entity",
+      "fields": {
+        "index": 2,
+        "archetype": "chair",
+        "parent_index": 8,
+        "lod_level": "",
+        "lod_distance": 0.0,
+        "flags": 0
+      },
+      "position": [
+        12.0,
+        20.0,
+        30.0
+      ]
+    },
+    {
+      "id": "entity:8",
+      "label": "Missing entity 8",
+      "kind": "missing parent",
+      "fields": {}
+    },
+    {
+      "id": "document",
+      "label": "test_map",
+      "kind": "map",
+      "fields": {}
+    },
+    {
+      "id": "reference:parent map:parent_map",
+      "label": "parent_map",
+      "kind": "parent map",
+      "fields": {},
+      "search": "parent_map"
+    }
+  ],
+  "edges": [
+    {
+      "source": "entity:0",
+      "target": "reference:archetype:unpositioned",
+      "label": "archetype",
+      "resolution": "external: unresolved"
+    },
+    {
+      "source": "entity:1",
+      "target": "reference:archetype:chair",
+      "label": "archetype",
+      "resolution": "external: unresolved"
+    },
+    {
+      "source": "entity:1",
+      "target": "entity:0",
+      "label": "parent",
+      "resolution": "local"
+    },
+    {
+      "source": "entity:2",
+      "target": "reference:archetype:chair",
+      "label": "archetype",
+      "resolution": "external: unresolved"
+    },
+    {
+      "source": "entity:2",
+      "target": "entity:8",
+      "label": "parent",
+      "resolution": "missing parent index"
+    },
+    {
+      "source": "document",
+      "target": "reference:parent map:parent_map",
+      "label": "parent map",
+      "resolution": "external: unresolved"
+    }
+  ],
+  "node_count": 8,
+  "edge_count": 6,
+  "truncated": false,
+  "warnings": [
+    "Entity 0 has no position; its original index is retained"
+  ],
+  "read_only": true,
+  "scope": "Decoded document only. External names/hashes are references, not proof of installed asset resolution."
+}

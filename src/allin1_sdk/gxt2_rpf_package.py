@@ -62,6 +62,8 @@ def _verification_entries(index, entry):
 
 
 def review(root, entries, state, destination):
+    from allin1_sdk import artifact_identity
+    build_identity = artifact_identity.current()
     if os.name != "nt":
         raise ValueError("RPF package publication currently requires Windows exclusive directory rename")
     archive, game, binding = _source(state)
@@ -95,8 +97,11 @@ def review(root, entries, state, destination):
         raise ValueError("Not enough temporary disk space for RPF payload verification")
     if _hash(archive) != binding["outer_archive_sha256"]:
         raise ValueError("Original RPF changed during package review")
+    if artifact_identity.current() != build_identity:
+        raise ValueError("SDK build changed during RPF package review")
     # Relative layout keeps the original filename (NG keys can depend on it).
     return {
+        "build": build_identity,
         "archive_name": archive.name, "archive_size": archive.stat().st_size,
         "entry_id": entry.id, "entry_size_before": len(original), "entry_size_after": len(encoded),
         "payload_sha256": payload_hash, "original_sha256": state["source_sha256"],
@@ -111,6 +116,11 @@ def review(root, entries, state, destination):
 
 def build(root, entries, state, destination, reviewed, review_sha256):
     from allin1_sdk.gxt2_desktop import _context, _digest, _path
+    from allin1_sdk import artifact_identity
+    from allin1_sdk.artifact_contract import validate_build
+    build_identity = validate_build(reviewed.get("build"))
+    if artifact_identity.current() != build_identity:
+        raise ValueError("SDK build changed after RPF package review")
     archive, game, binding = _source(state)
     # All mutation authority is restricted to the generated temporary directory.
     with tempfile.TemporaryDirectory(prefix=".allin1-rpf-package-", dir=destination.parent) as temporary:
@@ -173,6 +183,7 @@ def build(root, entries, state, destination, reviewed, review_sha256):
             "schema_version": 1, "operation": "gxt2_rpf_package", "status": "verified",
             "source_binding": binding, "workspace": str(root), "workspace_state_sha256": _digest(state),
             "review_sha256": review_sha256, "review": reviewed,
+            "build": build_identity,
             "archive": {"path": f"archive/{archive.name}", "size": output_archive.stat().st_size, "sha256": archive_hash},
             "replacement": {"entry_id": entry.id, "path": "payload/replacement.gxt2", "sha256": reviewed["payload_sha256"]},
             "transaction": {"status": receipt["status"], "plan_id": receipt["plan_id"],
@@ -189,10 +200,13 @@ def build(root, entries, state, destination, reviewed, review_sha256):
         # existing output is replaced. Temporary transaction backups are not shipped.
         if os.name != "nt":
             raise ValueError("RPF package publication currently requires Windows exclusive directory rename")
+        if artifact_identity.current() != build_identity:
+            raise ValueError("SDK build changed during RPF packaging; staged output discarded")
         publication.rename(destination)
     return {"kind": "gxt2_rpf_packaged", "destination": str(destination),
             "archive": str(destination / "archive" / archive.name), "sha256": archive_hash,
             "report": str(destination / "rpf-package.json"), "report_sha256": report_hash,
             "payload_sha256": reviewed["payload_sha256"], "verified_payloads": len(comparisons),
             "source_binding": binding, "review_sha256": review_sha256,
+            "build_fingerprint": build_identity["build_fingerprint"], "build_mode": build_identity["mode"],
             "file_write_performed": True, "game_write_performed": False}

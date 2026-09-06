@@ -9,6 +9,12 @@ from allin1_sdk import gxt2_desktop as desktop, rpf_package_publication as publi
 from allin1_sdk.gxt2_workspace import Gxt2Workspace
 from allin1_sdk.mods import open_mod_package
 from test_gxt2_rpf_package import workspace, pending as rpf_pending
+from test_artifact_identity import build as fixture_build
+
+
+@pytest.fixture(autouse=True)
+def deterministic_publication_identity(monkeypatch):
+    monkeypatch.setattr(publisher.artifact_identity, "current", fixture_build)
 
 
 @pytest.fixture
@@ -37,10 +43,19 @@ def test_exports_exact_portable_zip_and_launcher_manifest(prepared, monkeypatch)
     assert original.read_bytes() == before and list(game.iterdir()) == []
     with zipfile.ZipFile(result["archive"]) as package:
         assert package.namelist() == [row["path"] for row in review["rpf_publication"]["members"]]
-        for name in ["mod.toml", "allin1.rpf-build.json", "README.txt"]:
+        for name in ["mod.toml", "allin1.rpf-build.json", "README.txt", "sdk-artifact.json"]:
             text = package.read(name).decode()
             assert request["workspace"] not in text and str(game) not in text and "C:\\Users" not in text
         assert "ENTIRE RPF" in package.read("README.txt").decode()
+        from allin1_sdk.artifact_contract import validate_manifest
+        artifact = validate_manifest(json.loads(package.read("sdk-artifact.json")))
+        assert artifact["artifact_id"] == result["artifact_id"] == review["rpf_publication"]["artifact_id"]
+        assert artifact["build"]["build_fingerprint"] == result["build_fingerprint"]
+        assert set(artifact["outputs"]) == set(package.namelist()) - {"sdk-artifact.json"}
+        assert artifact["inputs"] == review["rpf_publication"]["source_files"]
+        evidence = json.loads(package.read("allin1.rpf-build.json"))
+        assert evidence["input_build_status"] == "recorded"
+        assert evidence["input_build"]["build_fingerprint"] == result["input_build_fingerprint"]
     with open_mod_package(result["archive"]) as manifest:
         assert manifest.schema_version == 1 and manifest.mod_type == "rpf"
         assert manifest.name == 'Text "日本語"' and manifest.editions == ("enhanced",)
@@ -51,8 +66,10 @@ def test_exports_exact_portable_zip_and_launcher_manifest(prepared, monkeypatch)
     if launcher.is_dir():
         monkeypatch.syspath_prepend(str(launcher))
         from allin1.mods import open_mod_package as launcher_open
+        from allin1.sdk_provenance import read
         with launcher_open(result["archive"]) as manifest:
             assert manifest.mod_id == "test.text" and manifest.files[0].sha256 == result["payload_sha256"]
+            assert read(manifest, "enhanced")["artifact"] == artifact
 
 
 @pytest.mark.parametrize("target", ["update/source.rpf", "mods/../source.rpf", "mods/C:/source.rpf", "mods/CON/source.rpf", "mods/update/other.rpf", "mods/update/source.rpf!nested.rpf", "mods//source.rpf"])
@@ -173,6 +190,64 @@ def test_launcher_installs_and_restores_only_a_temporary_game_target(prepared, m
         assert publisher._hash(target) == result["payload_sha256"]
     receipt = json.loads(service._receipt_path("test.text").read_text())
     assert len(receipt["files"]) == 1 and not receipt["rpf_entries"]
+    lineage = receipt["sdk_provenance"]
+    assert lineage["artifact_id"] == result["artifact_id"]
+    assert lineage["build_fingerprint"] == result["build_fingerprint"]
+    assert lineage["files"][0]["sha256"] == publisher._hash(target)
     service.uninstall("test.text")
     assert target.read_bytes() == b"original temporary archive"
     assert not service._receipt_path("test.text").exists()
+
+
+@pytest.mark.parametrize("when", ["after_review", "during_export"])
+def test_changed_publication_build_never_publishes(prepared, monkeypatch, when):
+    from allin1_sdk.artifact_contract import seal
+    from contextlib import contextmanager
+    request, _, _ = prepared
+    payload, _ = reviewed(request)
+    def changed():
+        value = fixture_build()
+        value.pop("build_fingerprint")
+        value["executable_sha256"] = "e" * 64
+        return seal(value, "build_fingerprint")
+    if when == "after_review":
+        monkeypatch.setattr(publisher.artifact_identity, "current", changed)
+    else:
+        native_open = publisher.open_mod_package
+        @contextmanager
+        def inject(path):
+            with native_open(path) as manifest:
+                yield manifest
+            monkeypatch.setattr(publisher.artifact_identity, "current", changed)
+        monkeypatch.setattr(publisher, "open_mod_package", inject)
+    with pytest.raises(ValueError, match="changed|Stale"):
+        desktop.apply(payload)
+    assert not Path(request["destination"]).exists()
+    assert not list(Path(request["destination"]).parent.glob(".allin1-rpf-publish-*"))
+
+
+@pytest.mark.parametrize("change", ["old_report", "missing_build", "corrupt_build", "review_mismatch"])
+def test_input_build_is_preserved_or_explicitly_unrecorded(prepared, change):
+    request, _, _ = prepared
+    path = Path(request["source_package"]) / "rpf-package.json"
+    report = json.loads(path.read_bytes())
+    if change == "old_report":
+        report.pop("build")
+        report["review"].pop("build")
+    elif change == "missing_build":
+        report.pop("build")
+    elif change == "corrupt_build":
+        report["build"]["executable_sha256"] = "f" * 64
+    else:
+        report["review"]["build"] = None
+    path.write_text(json.dumps(report))
+    if change != "old_report":
+        with pytest.raises(ValueError): desktop.review(request)
+        assert not Path(request["destination"]).exists()
+        return
+    payload, review = reviewed(request)
+    assert review["rpf_publication"]["input_build_fingerprint"] is None
+    result = desktop.apply(payload)
+    with zipfile.ZipFile(result["archive"]) as package:
+        evidence = json.loads(package.read("allin1.rpf-build.json"))
+        assert evidence["input_build_status"] == "not_recorded" and evidence["input_build"] is None

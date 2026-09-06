@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "format": ".rel",
+  "nodes": [
+    {
+      "id": "record:0",
+      "label": "demo_a",
+      "kind": "Dat54LoopingSound",
+      "fields": {
+        "normalized_index": 0,
+        "family": 54,
+        "hash": "0xE447962A",
+        "type_id": 1
+      }
+    },
+    {
+      "id": "record:1",
+      "label": "demo_b",
+      "kind": "Dat54LoopingSound",
+      "fields": {
+        "normalized_index": 1,
+        "family": 54,
+        "hash": "0x354C3836",
+        "type_id": 1
+      }
+    },
+    {
+      "id": "reference:category:354C3836",
+      "label": "demo_b",
+      "kind": "category reference",
+      "fields": {
+        "hash": "0x354C3836",
+        "candidate_count": 0
+      }
+    },
+    {
+      "id": "reference:sound:583F009A",
+      "label": "demo_external",
+      "kind": "sound reference",
+      "fields": {
+        "hash": "0x583F009A",
+        "candidate_count": 0
+      }
+    },
+    {
+      "id": "document",
+      "label": "Dat54 container catalog",
+      "kind": "REL document",
+      "fields": {
+        "family": 54
+      }
+    },
+    {
+      "id": "container:0",
+      "label": "audio/demo.awc",
+      "kind": "container path",
+      "fields": {
+        "path": "audio/demo.awc",
+        "path_truncated": false,
+        "resolution": "unresolved catalog entry"
+      },
+      "search": "demo.awc"
+    }
+  ],
+  "edges": [
+    {
+      "source": "record:0",
+      "target": "reference:category:354C3836",
+      "label": "category",
+      "resolution": "external: unresolved"
+    },
+    {
+      "source": "record:0",
+      "target": "record:1",
+      "label": "sound",
+      "resolution": "local"
+    },
+    {
+      "source": "record:1",
+      "target": "reference:sound:583F009A",
+      "label": "sound",
+      "resolution": "external: unresolved"
+    },
+    {
+      "source": "document",
+      "target": "container:0",
+      "label": "declares container",
+      "resolution": "external: unresolved"
+    }
+  ],
+  "node_count": 6,
+  "edge_count": 4,
+  "truncated": false,
+  "warnings": [
+    "Typed decoder references only; unknown fields and unsupported variants are not inferred from XML names.",
+    "REL graph analysis normalizes XML in memory. It does not verify a rebuild or perform audio playback."
+  ],
+  "read_only": true,
+  "scope": "Dat54 decoded document only. Links use typed decoder hash references; external hashes are unresolved and record indices refer to the normalized inventory."
+}

@@ -5,7 +5,7 @@ import type { DesktopClient } from "./types";
 import "./code-editor.css";
 
 type Validation = { valid: boolean; scope: string; diagnostics: { line: number; column: number; message: string }[] };
-type Session = WorkspaceResult & { source: string | null; name: string; language: "xml" | "lua";
+type Session = WorkspaceResult & { source: string | null; name: string; language: "xml" | "json" | "lua";
   chunks: string[]; validation: Validation; line_ending: "LF" | "CRLF"; can_save: boolean; draft_check: boolean };
 const chunks = (text: string) => text.match(/[\s\S]{1,8192}/gu) ?? [];
 
@@ -31,7 +31,7 @@ export default function CodeWorkspace({ client, onGuardChange }: { client: Deskt
     if (!session || work.locked) return;
     let destination: string | undefined;
     if (copy) {
-      if (!/^[\w][\w .-]{0,100}\.(xml|meta|lua)$/i.test(filename)) { work.setError("Use a simple new .xml, .meta or .lua filename."); return; }
+      if (!/^[\w][\w .-]{0,100}\.(xml|meta|json|lua)$/i.test(filename)) { work.setError("Use a simple new .xml, .meta, .json or .lua filename."); return; }
       const parent = await work.choose("authoring_parent");
       if (!parent) return;
       destination = parent.replace(/[\\/]$/, "") + "/" + filename;
@@ -39,12 +39,12 @@ export default function CodeWorkspace({ client, onGuardChange }: { client: Deskt
     await work.run("review_workspace_action", { ...context, action: copy ? "save_copy" : "save",
       expected_state_sha256: session.state_sha256, ...(destination ? { destination } : {}) });
   };
-  return <section className="workspace-section code-workspace" aria-label="XML and Lua editor">
-    <div className="section-heading"><div><span className="eyebrow">Source authoring</span><h2>XML &amp; Lua</h2>
+  return <section className="workspace-section code-workspace" aria-label="XML, JSON and Lua editor">
+    <div className="section-heading"><div><span className="eyebrow">Source authoring</span><h2>XML, JSON &amp; Lua</h2>
       <p>Edit source, check syntax, then review exactly what will be saved. Scripts are never executed.</p></div></div>
     <div className="heading-actions">
-      <button disabled={work.locked || dirty} onClick={() => void open()}>Open XML / Lua</button>
-      {(["xml", "lua"] as const).map(language => <button key={language} disabled={work.locked || dirty}
+      <button disabled={work.locked || dirty} onClick={() => void open()}>Open XML / JSON / Lua</button>
+      {(["xml", "json", "lua"] as const).map(language => <button key={language} disabled={work.locked || dirty}
         onClick={() => void work.run("inspect_authoring_workspace", { document: { language } })}>New {language.toUpperCase()}</button>)}
       <button disabled={work.locked || !session} onClick={() => void work.run("inspect_authoring_workspace", context)}>Check syntax</button>
       <button className="primary-button" disabled={work.locked || !dirty || !session?.can_save} onClick={() => void save(false)}>Review save</button>
@@ -62,7 +62,7 @@ export default function CodeWorkspace({ client, onGuardChange }: { client: Deskt
         <p>{validation?.scope}. This is not game compatibility or runtime certification.</p>
         {validatedDraft === draft && validation?.diagnostics.map((item, index) => <p key={index}>Line {item.line}, column {item.column}: {item.message}</p>)}
       </section>
-    </> : <div className="pane-empty"><strong>Source files, with a deliberate save boundary</strong><p>Open text XML/META or Lua, or start a new document. UTF-8, up to 64 KiB and 2,000 lines. Compiled resources and FiveM-specific Lua syntax extensions are not supported here.</p></div>}
+    </> : <div className="pane-empty"><strong>Source files, with a deliberate save boundary</strong><p>Open text XML/META, JSON or Lua, or start a new document. UTF-8, up to 64 KiB and 2,000 lines. JSON comments and trailing commas, compiled resources and FiveM-specific Lua syntax extensions are not supported here.</p></div>}
     {work.review && <section className="code-diff" aria-label="Code save diff"><h3>Save diff</h3>
       <pre>{String(work.review.value.diff) || "Unchanged content; a new copy will be created."}</pre>
       {work.review.value.diff_truncated === true && <p>Diff preview is abbreviated. The save is bound to the entire draft.</p>}

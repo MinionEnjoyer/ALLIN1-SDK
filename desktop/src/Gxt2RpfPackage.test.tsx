@@ -15,6 +15,7 @@ async function setup(mode = "rpf_package") {
   await user.click(screen.getByRole("button", { name: "Open text workspace" }));
   await screen.findByRole("textbox", { name: "Game text" });
   const result = (payload: Record<string, unknown>) => ({ kind: "gxt2_rpf_packaged", destination: payload.destination,
+    build_fingerprint: "f".repeat(64), build_mode: "development_dirty",
     archive: `${payload.destination}/archive/text-fixture.rpf`, sha256: "9".repeat(64), report: `${payload.destination}/rpf-package.json`,
     report_sha256: "8".repeat(64), payload_sha256: "d".repeat(64), verified_payloads: 4,
     source_binding: gxt2PreviewSession({ archive_workspace: true }).source_binding,

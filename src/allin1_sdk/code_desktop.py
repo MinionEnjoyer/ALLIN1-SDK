@@ -1,9 +1,10 @@
-"""Bounded XML/Lua source editing. Parsing never executes scripts or entities."""
+"""Bounded XML/JSON/Lua source editing. Parsing never executes scripts or entities."""
 from __future__ import annotations
 
 import codecs
 import difflib
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -18,8 +19,9 @@ from allin1_sdk.workspace_desktop import digest, path
 MAX_BYTES = 64 * 1024
 MAX_LINES = 2000
 CHUNK_SIZE = 8192
-LANGUAGES = {".xml": "xml", ".meta": "xml", ".lua": "lua"}
+LANGUAGES = {".xml": "xml", ".meta": "xml", ".lua": "lua", ".json": "json"}
 TEMPLATES = {"xml": '<?xml version="1.0" encoding="UTF-8"?>\n<root>\n</root>\n',
+             "json": '{}\n',
              "lua": "-- Lua 5.4 source; the SDK never executes this file.\nlocal config = {}\nreturn config\n"}
 
 
@@ -46,7 +48,7 @@ def _document(payload):
         raise ValueError("Unexpected code document fields")
     language = document.get("language", "xml")
     if not isinstance(language, str) or language not in TEMPLATES:
-        raise ValueError("Choose XML or Lua")
+        raise ValueError("Choose XML, JSON or Lua")
     chunks = document.get("chunks")
     if chunks is not None and (not isinstance(chunks, list) or len(chunks) > 16
                               or any(not isinstance(s, str) or len(s) > CHUNK_SIZE for s in chunks)):
@@ -59,7 +61,7 @@ def _context(payload):
     source = path(payload["source"]) if payload.get("source") else None
     if source:
         if not source.is_file() or source.suffix.casefold() not in LANGUAGES:
-            raise ValueError("Choose a text .xml, .meta or .lua file")
+            raise ValueError("Choose a text .xml, .meta, .json or .lua file")
         if source.stat().st_size > MAX_BYTES:
             raise ValueError("Code editor input exceeds 64 KiB")
         with source.open("rb") as stream:
@@ -96,6 +98,44 @@ def validate(text, language):
         except (etree.XMLSyntaxError, ValueError) as exc:
             line, column = getattr(exc, "position", (1, 1))
             diagnostics.append({"line": line, "column": column, "message": str(exc)[:500]})
+    elif language == "json":
+        def reject_constant(value):
+            raise ValueError(f"Non-JSON numeric constant: {value}")
+
+        def unique_keys(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"Duplicate JSON object key: {key[:100]}")
+                result[key] = value
+            return result
+
+        try:
+            # Parse for diagnostics only. Never reserialize: retain exact numbers,
+            # whitespace and escapes in the reviewed source bytes.
+            depth, quoted, escaped = 0, False, False
+            for char in text:
+                if quoted:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        quoted = False
+                elif char == '"':
+                    quoted = True
+                elif char in "[{":
+                    depth += 1
+                    if depth > 128:
+                        raise ValueError("JSON nesting exceeds the 128-level syntax-check limit")
+                elif char in "]}":
+                    depth -= 1
+            json.loads(text, parse_constant=reject_constant, object_pairs_hook=unique_keys,
+                       parse_int=str, parse_float=str)
+        except json.JSONDecodeError as exc:
+            diagnostics.append({"line": exc.lineno, "column": exc.colno, "message": exc.msg[:500]})
+        except (ValueError, RecursionError) as exc:
+            diagnostics.append({"line": 1, "column": 1, "message": str(exc)[:500]})
     elif language == "lua":
         from antlr4 import CommonTokenStream, InputStream
         from antlr4.error.ErrorListener import ErrorListener
@@ -126,7 +166,9 @@ def validate(text, language):
     else:
         raise ValueError("Unsupported code language")
     return {"valid": not diagnostics, "diagnostics": diagnostics,
-            "scope": "XML well-formedness; DTD/entities disabled" if language == "xml" else "Lua 5.4 syntax; no script execution or game API validation"}
+            "scope": {"xml": "XML well-formedness; DTD/entities disabled",
+                      "json": "Strict JSON syntax and unique object keys; no JSON Schema or game-schema validation",
+                      "lua": "Lua 5.4 syntax; no script execution or game API validation"}[language]}
 
 
 def inspect(payload):
@@ -160,7 +202,7 @@ def _plan(payload):
     elif payload.get("action") == "save_copy":
         target = path(payload.get("destination"), new=True, writable=True)
         if LANGUAGES.get(target.suffix.casefold()) != language:
-            raise ValueError("Output extension must match the XML or Lua document")
+            raise ValueError("Output extension must match the XML, JSON or Lua document")
         backup = None
     else:
         raise ValueError("Choose save or save_copy for a code document")

@@ -171,7 +171,7 @@ fn rpf_utility_file_name(suggested_name: &str, extension: &str, fallback: &str) 
 
 #[tauri::command]
 async fn select_rpf_utility_destination(action: String, suggested_name: String) -> Result<Option<String>, String> {
-    if matches!(action.as_str(), "export_native_workspace" | "extract_subtree" | "extract_archive") {
+    if matches!(action.as_str(), "export_native_workspace" | "extract_subtree" | "extract_archive" | "extract_selection") {
         let safe_name = rpf_utility_file_name(&suggested_name, "", "rpf-export");
         return Ok(rfd::AsyncFileDialog::new()
             .set_title("Choose parent folder for the new RPF export")
@@ -288,6 +288,7 @@ fn validated_texture_authoring_operation(operation: &str) -> Result<&'static str
         "apply_texture_edit" => Ok("apply_texture_edit"),
         "apply_texture_history" => Ok("apply_texture_history"),
         "apply_texture_build" => Ok("apply_texture_build"),
+        "apply_texture_export" => Ok("apply_texture_export"),
         _ => Err(format!(
             "texture authoring operation is not allowlisted: {operation}"
         )),
@@ -411,12 +412,15 @@ async fn desktop_start_job(
             | "preview_texture_workspace"
             | "review_texture_edit"
             | "review_texture_build"
+            | "review_texture_export"
             | "assistant_status"
             | "assistant_prompt"
             | "inspect_weapon_workbench"
             | "review_weapon_authoring"
             | "inspect_ped_workbench"
             | "review_ped_authoring"
+            | "browse_game_files"
+            | "search_game_files"
             | "inspect_rpf_archive"
             | "review_rpf_utility"
             | "inspect_vehicle_project"
@@ -547,8 +551,8 @@ async fn select_path(kind: String) -> Result<Option<String>, String> {
             .pick_file()
             .await
             .map(|handle| handle.path().to_path_buf()),
-        "code_source" => rfd::AsyncFileDialog::new().set_title("Open XML or Lua source")
-            .add_filter("XML and Lua source", &["xml", "meta", "lua"]).pick_file().await.map(|h| h.path().to_path_buf()),
+        "code_source" => rfd::AsyncFileDialog::new().set_title("Open XML, JSON or Lua source")
+            .add_filter("XML, JSON and Lua source", &["xml", "meta", "json", "lua"]).pick_file().await.map(|h| h.path().to_path_buf()),
         "metadata" => rfd::AsyncFileDialog::new().set_title("Open META/XML")
             .add_filter("GTA metadata", &["meta", "xml", "ymt"]).pick_file().await.map(|handle| handle.path().to_path_buf()),
         "package_folder" => rfd::AsyncFileDialog::new()
@@ -1167,6 +1171,7 @@ mod tests {
             "apply_texture_edit",
             "apply_texture_history",
             "apply_texture_build",
+            "apply_texture_export",
         ] {
             assert_eq!(
                 validated_texture_authoring_operation(operation).unwrap(),

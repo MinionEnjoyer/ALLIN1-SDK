@@ -3,18 +3,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
-import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from allin1_sdk.paths import gta_root_containing, project_root
-from allin1_sdk.release_paths import no_links, relative_path
+from allin1_sdk.release_paths import no_links, relative_path, unique_paths
+from allin1_sdk.native_assets import NATIVE_XML_IMPORT_SUFFIXES
 from allin1_sdk.rpf_tools import RpfExplorerService
 
 
 ACTIONS = frozenset({
-    "extract_entry", "export_native_workspace", "extract_subtree", "extract_archive",
+    "extract_entry", "extract_selection", "export_native_workspace", "extract_subtree", "extract_archive",
     "compare", "verify_integrity", "defragment_copy",
 })
 COMPARISON_MODES = frozenset({"metadata", "logical", "exact"})
@@ -32,7 +34,7 @@ def _file(value: object, label: str, suffix: str | None = None) -> Path:
     authored = Path(value).expanduser()
     if authored.is_symlink():
         raise ValueError(f"{label} cannot be a symbolic link")
-    path = no_links(authored.resolve(strict=True))
+    path = no_links(authored).resolve(strict=True)
     if not path.is_file() or suffix and path.suffix.casefold() != suffix:
         raise ValueError(f"{label} must be a {suffix or 'regular'} file")
     return path
@@ -44,7 +46,7 @@ def _directory(value: object, label: str) -> Path:
     authored = Path(value).expanduser()
     if authored.is_symlink():
         raise ValueError(f"{label} cannot be a symbolic link")
-    path = no_links(authored.resolve(strict=True))
+    path = no_links(authored).resolve(strict=True)
     if not path.is_dir():
         raise ValueError(f"{label} must be a directory")
     return path
@@ -57,7 +59,7 @@ def _destination(value: object, *, action: str, gta_path: Path) -> tuple[Path, t
     if not authored.name or authored.is_symlink():
         raise ValueError("RPF utility destination is invalid")
     relative_path(authored.name)
-    parent = no_links(authored.parent.resolve(strict=True))
+    parent = no_links(authored.parent).resolve(strict=True)
     if not parent.is_dir():
         raise ValueError("RPF utility destination parent must be a directory")
     destination = no_links(parent / authored.name)
@@ -111,14 +113,26 @@ def _context(payload: dict[str, Any]) -> tuple[RpfExplorerService, Any, dict[str
         entry = index.entry(entry_id)
         if action == "extract_entry" and entry.kind == "directory":
             raise ValueError("A directory must be exported as a subtree")
-        if action == "export_native_workspace" and Path(entry.name).suffix.casefold() not in {".ydr", ".ydd", ".yft", ".ytd"}:
-            raise ValueError("Editable native export requires a YDR, YDD, YFT, or YTD entry")
+        if action == "export_native_workspace" and Path(entry.name).suffix.casefold() not in NATIVE_XML_IMPORT_SUFFIXES:
+            raise ValueError("Editable native export requires a supported native XML resource")
         if action == "extract_subtree" and entry.kind != "directory":
             raise ValueError("Subtree export requires a directory entry")
         normalized["entry"] = {
             "id": entry.id, "archive_path": entry.archive_path,
             "path": entry.path, "kind": entry.kind, "size": entry.size,
         }
+    if action == "extract_selection":
+        ids = payload.get("entry_ids")
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 128 or any(not isinstance(item, str) or len(item) > 2048 for item in ids) or len(set(ids)) != len(ids):
+            raise ValueError("Select 1–128 distinct exact RPF file identities")
+        selected = [index.entry(item) for item in ids]
+        if any(item.kind == "directory" for item in selected) or sum(item.size for item in selected) > 512 * 1024**2:
+            raise ValueError("Selection extraction accepts files up to 512 MiB total; export directories as subtrees")
+        layers = {layer: number for number, layer in enumerate(sorted({item.archive_path for item in selected}))}
+        rows = [{"id": item.id, "archive_path": item.archive_path, "path": item.path, "size": item.size,
+                 "output": f"layer-{layers[item.archive_path]:03d}/{relative_path(item.path).as_posix()}"} for item in selected]
+        unique_paths([item["output"] for item in rows])
+        normalized["selection"] = rows
     if action == "compare":
         other = _file(payload.get("compare_archive"), "Comparison RPF", ".rpf")
         if other == archive:
@@ -139,6 +153,7 @@ def _review_value(payload: dict[str, Any]) -> tuple[RpfExplorerService, Any, dic
     service, index, normalized = _context(payload)
     labels = {
         "extract_entry": "Extract exact member",
+        "extract_selection": "Extract selected exact members",
         "export_native_workspace": "Export editable native workspace",
         "extract_subtree": "Export selected subtree",
         "extract_archive": "Export complete archive tree",
@@ -167,6 +182,17 @@ def review(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _public_evidence(value: Any, staging: Path, parent: Path) -> Any:
+    """Rebase generated receipt paths, never resource contents or source paths."""
+    if isinstance(value, dict):
+        return {key: _public_evidence(item, staging, parent) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_public_evidence(item, staging, parent) for item in value]
+    if isinstance(value, str) and value.startswith(str(staging) + os.sep):
+        return str(parent / Path(value).relative_to(staging))
+    return value
+
+
 def apply(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("RPF utility apply payload must be an object")
@@ -179,12 +205,34 @@ def apply(payload: dict[str, Any]) -> dict[str, Any]:
     if current["review_sha256"] != digest:
         raise ValueError("RPF utility source or output changed after review")
     action = current["action"]
-    destination = Path(current["destination"])
-    outputs = (destination, *(Path(item) for item in current["companion_outputs"]))
+    public_destination = Path(current["destination"])
+    public_outputs = (public_destination, *(Path(item) for item in current["companion_outputs"]))
+    temporary_output = tempfile.TemporaryDirectory(prefix="allin1-rpf-utility-", dir=public_destination.parent)
+    staging_root = Path(temporary_output.name)
+    destination = staging_root / public_destination.name
+    published: list[Path] = []
     try:
         if action == "extract_entry":
             output = service.extract(index, index.entry(current["entry"]["id"]), destination)
             evidence: object = {"file": str(output), "sha256": _sha256(output), "bytes": output.stat().st_size}
+        elif action == "extract_selection":
+            with tempfile.TemporaryDirectory(prefix="allin1-selection-", dir=destination.parent) as temporary:
+                staging = Path(temporary) / "selection"
+                staging.mkdir()
+                records = []
+                for row in current["selection"]:
+                    target = staging / row["output"]
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    service.extract(index, index.entry(row["id"]), target)
+                    records.append({**row, "sha256": _sha256(target), "extracted_size": target.stat().st_size})
+                manifest = staging / ".allin1-selection.json"
+                manifest.write_text(json.dumps({"schema_version": 1, "archive": current["archive"], "archive_sha256": current["archive_sha256"], "entries": records}, indent=2), encoding="utf-8")
+                if _sha256(Path(current["archive"])) != current["archive_sha256"]:
+                    raise ValueError("Source archive changed during selection extraction")
+                _destination(str(destination), action=action, gta_path=Path(current["gta_path"]))
+                staging.rename(destination)
+            manifest = destination / ".allin1-selection.json"
+            evidence = {"directory": str(destination), "manifest": str(manifest), "manifest_sha256": _sha256(manifest), "entries": records}
         elif action == "export_native_workspace":
             output = service.export_native_workspace(
                 index, index.entry(current["entry"]["id"]), destination,
@@ -225,10 +273,13 @@ def apply(payload: dict[str, Any]) -> dict[str, Any]:
                 "report": str(report_path), "report_sha256": _sha256(report_path),
             }
         else:
-            report_path = Path(current["companion_outputs"][0])
+            report_path = staging_root / Path(current["companion_outputs"][0]).name
             output, written_report, report = service.defragment_verified_copy(
                 index, destination, report_path,
             )
+            if isinstance(report.get("output"), dict):
+                report["output"]["path"] = str(public_destination)
+                written_report.write_text(json.dumps(report, indent=2), encoding="utf-8")
             evidence = {
                 "archive": str(output), "archive_sha256": _sha256(output),
                 "report": str(written_report), "report_sha256": _sha256(written_report),
@@ -238,20 +289,34 @@ def apply(payload: dict[str, Any]) -> dict[str, Any]:
             raise RuntimeError("RPF source changed while producing the reviewed output")
         if action == "compare" and _sha256(Path(current["compare_archive"])) != current["compare_archive_sha256"]:
             raise RuntimeError("Comparison RPF changed while producing the reviewed output")
-    except Exception:
-        for created in reversed(outputs):
-            if created.is_symlink():
-                created.unlink(missing_ok=True)
-            elif created.is_dir():
-                no_links(created)
-                shutil.rmtree(created)
-            elif created.exists():
-                no_links(created).unlink()
+        _destination(str(public_destination), action=action, gta_path=Path(current["gta_path"]))
+        for target in public_outputs:
+            source = no_links(staging_root / target.name)
+            no_links(target)
+            if target.exists():
+                raise FileExistsError(f"RPF utility destination appeared during publication: {target}")
+            if os.name == "nt" or source.is_dir():
+                # Windows rename refuses any existing destination and supports non-NTFS disks.
+                source.rename(target)
+            else:
+                # Atomic create-if-absent; never replace a file arriving after the check.
+                os.link(source, target)
+            published.append(target)
+        evidence = _public_evidence(evidence, staging_root, public_destination.parent)
+    except Exception as exc:
+        if published:
+            # Do not remove public paths: another process may already have edited them.
+            raise RuntimeError(
+                "RPF utility publication was incomplete. Retained outputs (not rolled back): "
+                + ", ".join(str(item) for item in published) + f". Cause: {exc}"
+            ) from exc
         raise
+    finally:
+        temporary_output.cleanup()
     return {
         "kind": "rpf_utility_result", "operation": "apply_rpf_utility",
         "action": action, "label": current["label"], "archive": current["archive"],
-        "archive_sha256": current["archive_sha256"], "destination": str(destination),
+        "archive_sha256": current["archive_sha256"], "destination": str(public_destination),
         "review_sha256": digest, "evidence": evidence,
         "output_write_performed": True, "source_write_performed": False,
         "game_write_performed": False,

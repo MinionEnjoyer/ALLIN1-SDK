@@ -255,7 +255,7 @@ def review(payload: dict) -> dict[str, Any]:
         # truncated subset of its records or dependencies.
         from allin1_sdk.desktop_protocol import _bounded
         if _bounded(result) != result:
-            raise ValueError("Weapon evidence exceeds desktop review limits; use the Tkinter workbench for this operation")
+            raise ValueError("Weapon evidence exceeds desktop review limits; narrow the selected package or operation before reviewing again")
     result.update({"kind": "weapon_authoring_review", "review_only": True, "game_write_performed": False})
     result["review_sha256"] = _digest(result)
     return result

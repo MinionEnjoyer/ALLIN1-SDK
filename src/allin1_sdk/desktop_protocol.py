@@ -37,6 +37,7 @@ from allin1_sdk.agent_api import (
 PROTOCOL_VERSION = "1.0.0"
 SUPPORTED_VERSIONS = (PROTOCOL_VERSION,)
 OPERATIONS = frozenset({
+    "browse_game_files", "search_game_files",
     "inspect_ped_ymt",
     "inspect_ped_workbench", "review_ped_authoring", "apply_ped_authoring",
     "list_rpf_transactions", "inspect_rpf_transaction", "review_rpf_transaction", "apply_rpf_transaction",
@@ -52,7 +53,7 @@ OPERATIONS = frozenset({
     "inspect_texture_workspace", "review_texture_workspace",
     "create_texture_workspace", "preview_texture_workspace",
     "review_texture_edit", "apply_texture_edit", "apply_texture_history",
-    "review_texture_build", "apply_texture_build",
+    "review_texture_build", "apply_texture_build", "review_texture_export", "apply_texture_export",
     "assistant_status", "assistant_prompt", "configure_assistant",
     "inspect_weapon_workbench", "review_weapon_authoring", "apply_weapon_authoring",
     "inspect_rpf_archive", "review_rpf_utility", "apply_rpf_utility",
@@ -79,6 +80,7 @@ OPERATIONS = frozenset({
     "start_job", "cancel_job", "job_event", "result", "error", "shutdown",
 })
 CLIENT_OPERATIONS = frozenset({
+    "browse_game_files", "search_game_files",
     "inspect_ped_ymt",
     "inspect_ped_workbench", "review_ped_authoring", "apply_ped_authoring",
     "list_rpf_transactions", "inspect_rpf_transaction", "review_rpf_transaction", "apply_rpf_transaction",
@@ -94,7 +96,7 @@ CLIENT_OPERATIONS = frozenset({
     "inspect_texture_workspace", "review_texture_workspace",
     "create_texture_workspace", "preview_texture_workspace",
     "review_texture_edit", "apply_texture_edit", "apply_texture_history",
-    "review_texture_build", "apply_texture_build",
+    "review_texture_build", "apply_texture_build", "review_texture_export", "apply_texture_export",
     "assistant_status", "assistant_prompt", "configure_assistant",
     "inspect_weapon_workbench", "review_weapon_authoring", "apply_weapon_authoring",
     "inspect_rpf_archive", "review_rpf_utility", "apply_rpf_utility",
@@ -121,6 +123,7 @@ CLIENT_OPERATIONS = frozenset({
     "start_job", "cancel_job", "shutdown",
 })
 JOB_OPERATIONS = frozenset({
+    "browse_game_files", "search_game_files",
     "inspect_ped_ymt",
     "inspect_ped_workbench", "review_ped_authoring",
     "list_rpf_transactions", "inspect_rpf_transaction", "review_rpf_transaction",
@@ -132,7 +135,7 @@ JOB_OPERATIONS = frozenset({
     "review_model_material_workspace", "review_model_material_edit",
     "review_model_material_build",
     "inspect_texture_workspace", "review_texture_workspace",
-    "preview_texture_workspace", "review_texture_edit", "review_texture_build",
+    "preview_texture_workspace", "review_texture_edit", "review_texture_build", "review_texture_export",
     "assistant_status", "assistant_prompt",
     "inspect_weapon_workbench", "review_weapon_authoring",
     "inspect_rpf_archive", "review_rpf_utility", "inspect_vehicle_project",
@@ -254,6 +257,7 @@ def _validate_command_payload(payload: object) -> tuple[str, list[str]]:
 
 def _operation_risk(operation: str, payload: object) -> str:
     if operation in {
+        "browse_game_files", "search_game_files",
         "list_rpf_transactions", "inspect_rpf_transaction", "review_rpf_transaction",
         "inspect_rpf_change_set", "review_rpf_change_set",
         "inspect_authoring_workspace", "review_workspace_action",
@@ -263,7 +267,7 @@ def _operation_risk(operation: str, payload: object) -> str:
         "review_model_material_workspace", "review_model_material_edit",
         "review_model_material_build",
         "inspect_texture_workspace", "review_texture_workspace",
-        "preview_texture_workspace", "review_texture_edit", "review_texture_build",
+        "preview_texture_workspace", "review_texture_edit", "review_texture_build", "review_texture_export",
         "assistant_status", "assistant_prompt",
         "inspect_weapon_workbench", "review_weapon_authoring",
         "inspect_ped_ymt",
@@ -1760,8 +1764,16 @@ def _texture_edit_context(
     if state != expected_state:
         raise ProtocolError("Texture workspace changed after it was loaded.", risk=risk)
     action = payload.get("action")
-    if action not in {"replace", "add", "remove"}:
-        raise ProtocolError("texture action must be replace, add, or remove", risk=risk)
+    if action == "batch":
+        from allin1_sdk.texture_batch import context
+        try:
+            _texture_workspace_snapshot(workspace)
+            normalized, review = context(workspace, payload)
+            return workspace, normalized, review
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ProtocolError(str(exc), risk=risk) from exc
+    if action not in {"replace", "add", "remove", "rename", "convert"}:
+        raise ProtocolError("texture action must be replace, add, remove, rename, or convert", risk=risk)
     texture_name = payload.get("texture_name")
     if not isinstance(texture_name, str):
         raise ProtocolError("texture edit requires a texture name", risk=risk)
@@ -1781,8 +1793,19 @@ def _texture_edit_context(
             source_inspection = inspect_texture_source(raw_source)
         if action == "add" and matches:
             raise ValueError(f"YTD texture already exists: {normalized_name}")
-        if action in {"replace", "remove"} and len(matches) != 1:
+        if action in {"replace", "remove", "rename", "convert"} and len(matches) != 1:
             raise ValueError(f"YTD texture was not found uniquely: {normalized_name}")
+        renamed = None
+        conversion = None
+        if action == "convert":
+            from allin1_sdk.texture_conversion import conversion_metadata
+            if matches[0].warnings:
+                raise ValueError("Resolve texture dependency warnings before conversion")
+            conversion = conversion_metadata(matches[0].width, matches[0].height, payload.get("output_format"), payload.get("mip_levels"))
+        if action == "rename":
+            renamed = workspace.validate_texture_name(payload.get("new_name"))
+            if renamed == matches[0].name or any(item.name.casefold() == renamed.casefold() and item is not matches[0] for item in catalog.textures):
+                raise ValueError("Choose a changed, unique texture name")
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ProtocolError(str(exc), risk=risk) from exc
     existing = matches[0] if matches else None
@@ -1790,7 +1813,7 @@ def _texture_edit_context(
     changes = [{
         "field": "texture",
         "before": existing.name if existing is not None else "(absent)",
-        "after": "(removed)" if action == "remove" else normalized_name,
+        "after": "(removed)" if action == "remove" else renamed or normalized_name,
     }]
     if source_data is not None:
         changes.extend([
@@ -1805,8 +1828,15 @@ def _texture_edit_context(
                 "after": str(source_data["format"]),
             },
         ])
+    if conversion is not None:
+        changes.extend([
+            {"field": "format", "before": existing.format, "after": conversion.format},
+            {"field": "mip_levels", "before": str(existing.mip_levels), "after": str(conversion.mip_levels)},
+        ])
     normalized = {
         "action": action, "texture_name": normalized_name,
+        **({"output_format": payload["output_format"], "mip_levels": conversion.mip_levels} if conversion is not None else {}),
+        **({"new_name": renamed} if renamed is not None else {}),
         **({"source_image": str(source_inspection.source)} if source_inspection else {}),
     }
     review = {
@@ -1817,6 +1847,10 @@ def _texture_edit_context(
         "warning": (
             "Removing a texture may leave external model bindings unresolved."
             if action == "remove" else
+            "Renaming changes the dictionary key only; update external model/material references separately. Image bytes and dependency filenames are unchanged."
+            if action == "rename" else
+            "Mips are regenerated from the top level using box filtering; compression is lossy and DXT1 drops alpha. Normal vectors and color-space metadata are not reconstructed. Undo retains the original DDS."
+            if action == "convert" else
             "Raster inputs are converted to uncompressed RGBA DDS with one mip level."
             if source_inspection and source_inspection.converted_to_dds else None
         ),
@@ -1849,10 +1883,21 @@ def _apply_texture_edit(payload: object) -> tuple[str, dict[str, Any]]:
         raise ProtocolError("The texture workspace or source changed after review.", risk=risk)
     try:
         action = normalized["action"]
+        if action == "batch":
+            from allin1_sdk.texture_batch import apply as apply_batch
+            history = apply_batch(workspace, normalized["operations"])
+            result = _texture_workspace_snapshot(workspace)
+            result.update({"operation": "apply_texture_edit", "action": "batch", "batch_count": len(normalized["operations"]),
+                           "batch_history": str(history), "review_sha256": review_sha, "read_only": False, "workspace_write_performed": True})
+            return risk, dict(_bounded(result))
         if action == "replace":
             edit = workspace.replace(normalized["texture_name"], normalized["source_image"])
         elif action == "add":
             edit = workspace.add(normalized["texture_name"], normalized["source_image"])
+        elif action == "rename":
+            edit = workspace.rename(normalized["texture_name"], normalized["new_name"])
+        elif action == "convert":
+            edit = workspace.convert(normalized["texture_name"], normalized["output_format"], normalized["mip_levels"])
         else:
             edit = workspace.remove(normalized["texture_name"])
         result = _texture_workspace_snapshot(workspace)
@@ -2016,6 +2061,9 @@ def _apply_texture_build(payload: object) -> tuple[str, dict[str, Any]]:
             and validation.get("reparsed") is True
             and validation.get("semantic_xml_match") is True
             and isinstance(validation.get("dependency_count"), int)
+            and validation.get("texture_payloads_match") is True
+            and type(validation.get("texture_payload_count")) is int
+            and validation["texture_payload_count"] == len(workspace.catalog().textures)
             and not isinstance(validation.get("dependency_count"), bool)
             and validation["dependency_count"] >= 0
         )
@@ -5006,6 +5054,9 @@ def dispatch_operation(
         return _preview_texture_workspace(payload)
     if operation == "review_texture_edit":
         return _review_texture_edit(payload)
+    if operation in {"review_texture_export", "apply_texture_export"}:
+        from allin1_sdk.texture_export_desktop import run
+        return run(operation, payload)
     if operation == "apply_texture_edit":
         return _apply_texture_edit(payload)
     if operation == "apply_texture_history":
@@ -5048,6 +5099,16 @@ def dispatch_operation(
             raise ProtocolError(str(exc), risk=risk) from exc
     if operation == "assistant_prompt":
         return _assistant_prompt(payload)
+    if operation in {"browse_game_files", "search_game_files"}:
+        from allin1_sdk import archive_browser
+
+        try:
+            if not isinstance(payload, dict):
+                raise ValueError("Archive browser payload must be an object")
+            handler = archive_browser.browse if operation == "browse_game_files" else archive_browser.search
+            return "read_only", dict(_bounded(handler(payload)))
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ProtocolError(str(exc), risk="read_only") from exc
     if operation == "inspect_rpf_archive":
         return _inspect_rpf_archive(payload)
     if operation in {"review_rpf_utility", "apply_rpf_utility"}:
@@ -5448,6 +5509,7 @@ class DesktopProtocolService:
                     risk="read_only", terminal=True,
                 )]
             if operation in {
+                "browse_game_files", "search_game_files",
                 "execute", "inspect_package", "preview_asset",
                 "render_vehicle_model", "inspect_recipe",
                 "inspect_model_materials", "inspect_model_material_workspace",
@@ -5466,7 +5528,7 @@ class DesktopProtocolService:
                 "inspect_texture_workspace", "review_texture_workspace",
                 "create_texture_workspace", "preview_texture_workspace",
                 "review_texture_edit", "apply_texture_edit", "apply_texture_history",
-                "review_texture_build", "apply_texture_build",
+                "review_texture_build", "apply_texture_build", "review_texture_export", "apply_texture_export",
                 "inspect_rpf_archive", "review_rpf_utility", "apply_rpf_utility",
                 "inspect_vehicle_project",
                 "inspect_vehicle_authoring_workspace",

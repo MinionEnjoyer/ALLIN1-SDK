@@ -1,0 +1,13 @@
+.native-relationships { border: 1px solid var(--border); padding: 12px; margin: 12px 0; font-size: .78rem; }
+.native-relationships > summary { cursor: pointer; font-weight: 600; }
+.relationship-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+.relationship-layout { display: grid; grid-template-columns: minmax(160px, .7fr) minmax(220px, 1.5fr) minmax(180px, 1fr); gap: 10px; }
+.relationship-records, .relationship-detail { max-height: 440px; overflow: auto; overscroll-behavior: contain; }
+.relationship-records button { display: block; width: 100%; text-align: left; color: var(--text); background: var(--surface); border: 1px solid var(--border); padding: 8px; cursor: pointer; }
+.relationship-records button.selected { border-color: var(--brand-600); background: var(--accent-soft); }
+.relationship-records small, .relationship-detail small { display: block; color: var(--muted); margin-top: 4px; }
+.relationship-layout svg { width: 100%; max-height: 440px; background: #111b16; border: 1px solid var(--border); }
+.relationship-layout svg g { cursor: pointer; }
+.relationship-detail pre { max-height: 170px; }
+@media (max-width: 1000px) { .relationship-layout { grid-template-columns: 1fr 1.5fr; } .relationship-detail { grid-column: 1 / -1; } }
+@media (max-width: 650px) { .relationship-layout { grid-template-columns: 1fr; } }

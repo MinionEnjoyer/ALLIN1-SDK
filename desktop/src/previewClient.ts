@@ -7,6 +7,11 @@ import { rpfChangePreviewSession, rpfChangePreviewReview } from "./rpfChangePrev
 import { rpfTransactionPreviewSession, rpfTransactionPreviewReview } from "./rpfTransactionPreview";
 import { helpPreviewTopics } from "./helpPreview";
 import packageInfo from "../package.json";
+import nativeRelationshipFixture from "./nativeRelationshipFixture.json";
+import nativeCollisionFixture from "./nativeCollisionFixture.json";
+import nativeRelRelationshipFixture from "./nativeRelRelationshipFixture.json";
+import nativeAnimationFixture from "./nativeAnimationFixture.json";
+import nativeAnimationModelFixture from "./nativeAnimationModelFixture.json";
 
 const previewGraphDocument = {
   schema_version: 1, operation: "rpf_package_graph", root_id: "root",
@@ -649,7 +654,7 @@ function vehiclePreviewFixture(entryPath: string): AssetPreviewResult {
   };
 }
 
-export function createPreviewClient(mode: string): DesktopClient {
+export function createPreviewClient(mode: string, nativeDemo: string | null = null): DesktopClient {
   const transactionSession = (receipt = false) => {
     const session = rpfTransactionPreviewSession(receipt);
     if (mode === "transactions-live") {
@@ -1367,6 +1372,12 @@ export function createPreviewClient(mode: string): DesktopClient {
       return envelope({ result: materialAuthoringSession(operation) });
     },
     textureAuthoringAction: async (operation, payload) => {
+      if (operation === "apply_texture_export") {
+        return envelope({ result: { kind: "texture_export_result", destination: String(payload.destination),
+          texture_count: payload.mode === "all" ? textures.length : (payload.texture_names as string[]).length,
+          receipt: `${String(payload.destination)}/allin1-texture-export.json`, receipt_sha256: "e".repeat(64),
+          workspace_write_performed: false, game_write_performed: false, output_write_performed: true } });
+      }
       if (operation === "create_texture_workspace") {
         textureRevision = 0;
         textureCanUndo = false;
@@ -1376,10 +1387,22 @@ export function createPreviewClient(mode: string): DesktopClient {
         previousTextures = structuredClone(textures);
         const action = String(payload.action);
         const name = String(payload.texture_name);
+        if (action === "batch") {
+          if (payload.batch_action === "import") throw new Error("Image-folder import requires the desktop service, not browser fixtures");
+          const names = payload.texture_names as string[];
+          textures = payload.batch_action === "remove" ? textures.filter(item => !names.includes(item.name))
+            : textures.map(item => names.includes(item.name) ? { ...item, format: payload.output_format === "RGBA8" ? "D3DFMT_A8R8G8B8" : `D3DFMT_${String(payload.output_format)}`, mip_levels: payload.mip_levels === "full" ? Math.floor(Math.log2(Math.max(item.width, item.height))) + 1 : Number(payload.mip_levels) } : item);
+          textureRevision++; textureCanUndo = true;
+          return envelope({ result: { ...textureSession(operation), action: "batch", batch_count: names.length, review_sha256: payload.review_sha256 } });
+        }
         if (action === "remove") {
           textures = textures.filter((item) => item.name.toLocaleLowerCase() !== name.toLocaleLowerCase());
         } else if (action === "add") {
           textures.push({ name, file_name: `${name}.dds`, width: 2048, height: 1024, mip_levels: 1, format: "D3DFMT_A8B8G8R8", usage: "Diffuse", size: 8_388_736, sha256: "b".repeat(64), warnings: [] });
+        } else if (action === "rename") {
+          textures = textures.map(item => item.name === name ? { ...item, name: String(payload.new_name) } : item);
+        } else if (action === "convert") {
+          textures = textures.map(item => item.name === name ? { ...item, format: payload.output_format === "RGBA8" ? "D3DFMT_A8R8G8B8" : `D3DFMT_${String(payload.output_format)}`, mip_levels: Number(payload.mip_levels) } : item);
         } else {
           textures = textures.map((item) => item.name.toLocaleLowerCase() === name.toLocaleLowerCase()
             ? { ...item, width: 2048, height: 1024, mip_levels: 1, format: "D3DFMT_A8B8G8R8", size: 8_388_736, sha256: "b".repeat(64) }
@@ -1406,7 +1429,7 @@ export function createPreviewClient(mode: string): DesktopClient {
         state_sha256: textureStateSha(),
         review_sha256: String(payload.review_sha256),
         output: { path: destination, size: 8_314_880, sha256: "c".repeat(64) },
-        validation: { reparsed: true, xml_sha256: "d".repeat(64), edited_semantic_xml_sha256: "e".repeat(64), reparsed_semantic_xml_sha256: "e".repeat(64), semantic_xml_match: true, dependency_count: textures.length },
+        validation: { reparsed: true, xml_sha256: "d".repeat(64), edited_semantic_xml_sha256: "e".repeat(64), reparsed_semantic_xml_sha256: "e".repeat(64), semantic_xml_match: true, dependency_count: textures.length, texture_payloads_match: true, texture_payload_count: textures.length },
         validation_report: `${destination}.allin1.json`,
         validation_report_sha256: "f".repeat(64),
         output_write_performed: true,
@@ -1417,8 +1440,25 @@ export function createPreviewClient(mode: string): DesktopClient {
     },
     startJob: async (operation, payload, revision, onEvent) => {
       const jobId = "preview-job";
+      if (payload.module === "native") {
+        const suffix = nativeDemo === "ybn" ? ".ybn" : nativeDemo === "rel" ? ".rel" : nativeDemo === "ycd" ? ".ycd" : ".ymap";
+        const fixtureName = `relationship-fixture${suffix}`;
+        const fixturePath = `C:/SDK/preview/${fixtureName}`;
+        const animationDocument = payload.document as Record<string, unknown> | undefined;
+        const fixtureSelection = !animationDocument || (animationDocument.animation === nativeAnimationFixture.selected && Object.keys(animationDocument).every(key=>key==="animation"));
+        if (operation === "inspect_authoring_workspace" && (payload.workspace || payload.source === fixturePath) && fixtureSelection) {
+          onEvent({ ...envelope({ result: { kind: "workspace_session", module: "native", schema_version: 1, read_only: true,
+            game_write_performed: false, state_sha256: "a".repeat(64), source: fixturePath, workspace: null, name: fixtureName,
+            edition: "Legacy", gta_path: null, xml_chunks: [], xml_editable: false, preview_chunks: [], dependencies: [],
+            warnings: [`Browser demonstration: generated ${suffix.slice(1).toUpperCase()} ${suffix === ".ybn" ? "collision" : suffix === ".ycd" ? "animation and weighted model" : "relationship"} fixture only. No local files were opened. Native inspection and authoring require the desktop SDK.`],
+            ...(suffix === ".ybn" ? { collision: nativeCollisionFixture } : suffix === ".ycd" ? { animation: nativeAnimationFixture, animation_model:nativeAnimationModelFixture } : { relationships: suffix === ".rel" ? nativeRelRelationshipFixture : nativeRelationshipFixture }) } }), job_id: jobId });
+        } else {
+          onEvent({ ...envelope({ message: "Actual native inspection, export and build require the desktop SDK. Open native workspace to explore the read-only relationship demonstration." }), operation: "error", job_id: jobId });
+        }
+        return { job_id: jobId, accepted: { ...envelope({ revision }), job_id: jobId, terminal: false } };
+      }
       if (payload.module === "code") {
-        onEvent({ ...envelope({ revision, message: "XML/Lua parsing and file editing require the desktop SDK service; this browser-only preview cannot validate or save source." }), operation: "error", job_id: jobId });
+        onEvent({ ...envelope({ revision, message: "XML/JSON/Lua parsing and file editing require the desktop SDK service; this browser-only preview cannot validate or save source." }), operation: "error", job_id: jobId });
         return { job_id: jobId, accepted: { ...envelope({ revision }), job_id: jobId, terminal: false } };
       }
       const result = ((operation === "inspect_authoring_workspace" || operation === "review_workspace_action") && payload.module === "graph") ? graphWorkspacePreview(operation, payload)
@@ -1568,10 +1608,18 @@ export function createPreviewClient(mode: string): DesktopClient {
             }
         : operation === "review_texture_edit"
           ? (() => {
-              const action = String(payload.action) as "replace" | "add" | "remove";
+              if (payload.action === "batch") {
+                if (payload.batch_action === "import") return { kind: "texture_edit_review", ready: false, warning: "Folder inspection requires the desktop service" };
+                const selected = textures.filter(item => (payload.texture_names as string[]).includes(item.name));
+                return { kind: "texture_edit_review", action: "batch", batch_action: payload.batch_action, workspace: textureWorkspace, state_sha256: textureStateSha(),
+                  ready: true, review_sha256: "b".repeat(64), warning: "Fixture batch only. Conversion is lossy; removing textures can break external bindings.",
+                  operations: selected.map(item => ({ action: payload.batch_action, texture_name: item.name })),
+                  changes: selected.map(item => ({ field: item.name, before: item.format, after: payload.batch_action === "remove" ? "(removed)" : `${String(payload.output_format)} / ${payload.mip_levels === "full" ? Math.floor(Math.log2(Math.max(item.width, item.height))) + 1 : String(payload.mip_levels)} mips` })) };
+              }
+              const action = String(payload.action) as "replace" | "add" | "remove" | "rename" | "convert";
               const name = String(payload.texture_name);
               const existing = textures.find((item) => item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-              const source = action === "remove" ? null : {
+              const source = action === "remove" || action === "rename" || action === "convert" ? null : {
                 source: String(payload.source_image), size: 2_480_112, sha256: "8".repeat(64),
                 width: 2048, height: 1024, mip_levels: 1, format: "D3DFMT_A8B8G8R8", converted_to_dds: true,
               };
@@ -1580,16 +1628,28 @@ export function createPreviewClient(mode: string): DesktopClient {
                 revision: textureRevision, state_sha256: textureStateSha(), action, texture_name: name,
                 source,
                 changes: [
-                  { field: "texture", before: existing?.name ?? "(absent)", after: action === "remove" ? "(removed)" : name },
+                  { field: "texture", before: existing?.name ?? "(absent)", after: action === "remove" ? "(removed)" : action === "rename" ? String(payload.new_name) : name },
+                  ...(action === "convert" ? [
+                    { field: "format", before: existing?.format ?? "", after: payload.output_format === "RGBA8" ? "D3DFMT_A8R8G8B8" : `D3DFMT_${String(payload.output_format)}` },
+                    { field: "mip_levels", before: String(existing?.mip_levels), after: String(payload.mip_levels) },
+                  ] : []),
                   ...(source ? [
                     { field: "dimensions", before: existing ? `${existing.width}×${existing.height}` : "(absent)", after: `${source.width}×${source.height}` },
                     { field: "format", before: existing?.format ?? "(absent)", after: source.format },
                   ] : []),
                 ],
-                warning: action === "remove" ? "Removing a texture may leave external model bindings unresolved." : "Raster inputs are converted to uncompressed RGBA DDS with one mip level.",
+                warning: action === "convert" ? "Mips are regenerated. Compression is lossy and DXT1 drops alpha." : action === "rename" ? "Update external model/material references separately." : action === "remove" ? "Removing a texture may leave external model bindings unresolved." : "Raster inputs are converted to uncompressed RGBA DDS with one mip level.",
                 ready: true, review_sha256: "9".repeat(64), review_only: true,
                 workspace_write_performed: false, package_write_performed: false, game_write_performed: false,
               };
+            })()
+        : operation === "review_texture_export"
+          ? (() => {
+              const selected = payload.mode === "all" ? textures : textures.filter(t => (payload.texture_names as string[]).includes(t.name));
+              return { kind: "texture_export_review", ready: true, review_sha256: "e".repeat(64),
+                destination: String(payload.destination), texture_count: selected.length, source_bytes: selected.reduce((sum, t) => sum + (t.size ?? 0), 0),
+                format: String(payload.format), entries_preview: selected.map(t => ({ texture: t.name, file: `${t.name}.${String(payload.format)}` })),
+                preview_truncated: false, warning: "Preview fixture only. DDS preserves original bytes; PNG exports the top mip." };
             })()
         : operation === "review_texture_build"
           ? {

@@ -1,4 +1,4 @@
-"""Real XML/Lua parsing and disposable, revision-bound source saves."""
+"""Real XML/JSON/Lua parsing and disposable, revision-bound source saves."""
 import codecs
 import hashlib
 import os
@@ -26,6 +26,7 @@ def authorize(payload):
 
 
 @pytest.mark.parametrize("suffix,before,after", [("xml", "<root/>\n", "<root><value>2</value></root>\n"),
+    ("json", '{"value": 1}\n', '{"value": 2}\n'),
     ("meta", "<CData value='1'/>\n", "<CData value='2'/>\n"),
     ("lua", "return { value = 1 }\n", "local value <const> = 2\nreturn { value = value }\n")])
 @pytest.mark.parametrize("bom", [False, True])
@@ -120,7 +121,7 @@ def test_checking_unsaved_draft_does_not_change_disk_or_baseline_identity(tmp_pa
     assert source.read_bytes() == b"return 1"
 
 
-@pytest.mark.parametrize("language", ["xml", "lua"])
+@pytest.mark.parametrize("language", ["xml", "json", "lua"])
 def test_new_document_protocol_happy_path(tmp_path, language):
     context = {"module": "code", "document": {"language": language}}
     risk, session = dispatch_operation("inspect_authoring_workspace", context)
@@ -240,3 +241,43 @@ def test_unsupported_language_fails_before_creating_files(tmp_path, language):
 def test_xml_encoding_whitespace_cannot_override_utf8():
     result = code.validate('<?xml version="1.0" encoding = "ISO-8859-1"?><root>é</root>', "xml")
     assert not result["valid"] and "UTF-8" in result["diagnostics"][0]["message"]
+
+
+@pytest.mark.parametrize("text,valid", [
+    ('{"enabled": true, "items": [null, 1, "é"]}', True),
+    ('[1, 2, 3]', True), ('false', True), ('1e9999', True),
+    ('{"x": 1,}', False), ('// comment\n{}', False), ('NaN', False),
+    ('Infinity', False), ('-Infinity', False), ('{"x": 1, "x": 2}', False),
+    ('{} {}', False), ('', False),
+    pytest.param('[' * 129 + '0' + ']' * 129, False, id="nesting-limit"),
+    pytest.param('[' * 128 + '0' + ']' * 128, True, id="nesting-boundary"),
+    pytest.param('"' + '[' * 500 + '"', True, id="brackets-in-string"),
+    pytest.param('1' * 5000, True, id="large-integer-text"),
+])
+def test_json_syntax_is_strict_and_bounded(text, valid):
+    result = code.validate(text, "json")
+    assert result["valid"] is valid
+    assert "no JSON Schema" in result["scope"]
+    if not valid:
+        assert result["diagnostics"][0]["line"] >= 1
+
+
+def test_json_repair_reports_location_and_preserves_exact_numeric_source(tmp_path):
+    source = tmp_path / "config.json"
+    source.write_bytes(b'{\n  "broken":\n}')
+    session = workspace.inspect({"module": "code", "source": str(source)})
+    assert session["language"] == "json"
+    assert session["validation"]["diagnostics"][0]["line"] == 3
+    with pytest.raises(ValueError, match="Syntax check failed"):
+        workspace.review(request(source, '{"bad": NaN}'))
+    after = '{ "large": 123456789012345678901234567890, "exponent": 1e9999 }\n'
+    workspace.apply(authorize(request(source, after)))
+    assert source.read_bytes() == after.encode()
+
+
+def test_json_wrong_copy_extension_is_rejected(tmp_path):
+    source = tmp_path / "config.json"
+    source.write_bytes(b'{}')
+    with pytest.raises(ValueError, match="extension must match"):
+        workspace.review(request(source, '{}', action="save_copy", destination=tmp_path / "copy.xml"))
+    assert not (tmp_path / "copy.xml").exists()

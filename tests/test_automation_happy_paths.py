@@ -160,6 +160,11 @@ def test_approvals_stale_reviews_and_game_boundaries(transport, tmp_path):
 def test_catalog_matches_real_modules_and_commands():
     catalog = automation.authoring_catalog()
     assert {module["module"] for module in catalog["modules"]} == automation.workspace.MODULES
+    modules = {module["module"]: module for module in catalog["modules"]}
+    assert modules["optimization"]["actions"] == ["export", "recover"]
+    assert "export_validation" in modules["native"]["actions"]
+    for module in modules.values():
+        assert set(module["input_choices"]) <= automation.workspace._INSPECT_FIELDS
     commands = {item["name"]: item for item in command_catalog()}
     for operation in catalog["operations"].values():
         assert commands[operation["cli"]]["risk"] == operation["risk"]

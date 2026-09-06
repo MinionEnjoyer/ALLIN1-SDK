@@ -6,6 +6,8 @@ from pathlib import Path
 from allin1_sdk.workspace_desktop import _inventory, digest, file_hash, path
 
 OUTPUTS = {
+    "diagnostic_trail": ["diagnostic-trail.json"],
+    "asset_validation": ["asset-validation.json"],
     "meta_diff": ["meta-diff.md", "meta-diff.json"],
     "meta_roundtrip": ["meta-roundtrip.json"],
     "vehicle_data": ["vehicles.json", "vehicles.csv", "unresolved.csv", "vehicles.xlsx", "vehicle-data-report.md"],
@@ -18,7 +20,17 @@ def _report(payload):
     if task not in OUTPUTS:
         raise ValueError("Choose a supported data tool")
     source = path(payload.get("source"))
-    if task == "dlc_inventory":
+    if task == "diagnostic_trail":
+        from allin1_sdk.diagnostic_trail import inspect as inspect_trail
+        document = report = inspect_trail(payload)
+        fingerprint = document["state_sha256"]
+    elif task == "asset_validation":
+        from allin1_sdk.package_validation import inspect as inspect_package
+        settings=payload.get("settings",{})
+        if not isinstance(settings,dict) or set(settings)-{"rig_bindings"}: raise ValueError("Unsupported asset validation context settings")
+        document = report = inspect_package(str(source), comparison=payload.get("comparison"), edition=payload.get("edition"), gta_path=payload.get("gta_path"),rig_bindings=settings.get("rig_bindings"))
+        fingerprint = document["report_sha256"]
+    elif task == "dlc_inventory":
         from allin1_sdk.dlc_inventory import DlcInventory
         if not source.is_dir():
             raise ValueError("Choose a GTA folder for DLC inventory")
@@ -67,8 +79,9 @@ def _report(payload):
 
 def inspect(payload):
     source, _, document, fingerprint = _report(payload)
+    from allin1_sdk.diagnostic_bundle import outputs
     return {"source": str(source), "task": payload["task"], "document": document,
-            "state_sha256": fingerprint, "outputs": OUTPUTS[payload["task"]]}
+            "state_sha256": fingerprint, "outputs": outputs(document) if payload["task"]=="diagnostic_trail" else OUTPUTS[payload["task"]]}
 
 
 def review(payload):
@@ -77,6 +90,9 @@ def review(payload):
     result = inspect(payload)
     if result["state_sha256"] != payload.get("expected_state_sha256"):
         raise ValueError("Data input changed; inspect again before exporting")
+    if payload["task"]=="diagnostic_trail":
+        from allin1_sdk.diagnostic_bundle import require_review
+        require_review(result["document"],payload)
     destination = path(payload.get("destination"), new=True, writable=True)
     source = Path(result["source"])
     if source.is_dir() and destination.is_relative_to(source):
@@ -88,12 +104,20 @@ def apply(payload):
     source, report, document, fingerprint = _report(payload)
     if fingerprint != payload.get("expected_state_sha256"):
         raise ValueError("Data input changed before export")
+    if payload["task"]=="diagnostic_trail":
+        from allin1_sdk.diagnostic_bundle import require_review
+        require_review(document,payload)
     destination = path(payload.get("destination"), new=True, writable=True)
     task = payload["task"]
     # Domain writers run in a private directory; publish only complete reports.
     with tempfile.TemporaryDirectory(prefix=".allin1-data-", dir=destination.parent) as temporary:
         staged = Path(temporary)
-        if task == "vehicle_data":
+        if task == "diagnostic_trail":
+            from allin1_sdk.diagnostic_bundle import write
+            write(staged,document)
+        elif task == "asset_validation":
+            (staged / "asset-validation.json").write_text(json.dumps(document, indent=2), encoding="utf-8")
+        elif task == "vehicle_data":
             report.write_bundle(staged)
         elif task == "dlc_inventory":
             report.write(staged / "dlc-inventory.md")
@@ -103,7 +127,8 @@ def apply(payload):
         else:
             (staged / "meta-roundtrip.json").write_text(json.dumps(document, indent=2), encoding="utf-8")
         inventory = _inventory(staged)
-        if set(inventory) != set(OUTPUTS[task]):
+        from allin1_sdk.diagnostic_bundle import outputs
+        if set(inventory) != set(outputs(document) if task=="diagnostic_trail" else OUTPUTS[task]):
             raise ValueError("Generated data report does not match its declared outputs")
         # Exclusive directory creation prevents replacing an existing report tree.
         path(str(destination), new=True, writable=True).mkdir()

@@ -10,3 +10,9 @@ import pytest
 def test_real_map_graph_flow_and_archive_binary_lifecycle_in_disposable_roots():
     script = Path(__file__).resolve().parents[1] / "scripts" / "smoke_offline_authoring.py"
     runpy.run_path(str(script))["main"]()
+
+
+@pytest.mark.skipif(os.environ.get("ALLIN1_NATIVE_RPF_TEST") != "1", reason="Requires the actual built RpfPatcher/CodeWalker native dependency")
+def test_real_native_workspace_export_edit_build_and_replacement_handoff():
+    script = Path(__file__).resolve().parents[1] / "scripts" / "smoke_native_workspace.py"
+    runpy.run_path(str(script))["main"]()

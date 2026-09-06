@@ -19,6 +19,7 @@
 //   RpfPatcher.exe apply-entry-changes <gta_path> <rpf_path> <manifest_tsv> <payload_root>
 //   RpfPatcher.exe asset-from-xml <input_xml> <output_asset> <asset_folder> [legacy|gen9] [source_asset] [gta_path]
 //   RpfPatcher.exe asset-xml-batch <manifest_tsv> [legacy|gen9] [gta_path]
+//   RpfPatcher.exe rel-relationships <input_xml> — read-only typed REL graph to stdout
 //   RpfPatcher.exe audit-seats  <gta_path> <output_json> [output_cs]
 //   RpfPatcher.exe install-euphoria <gta_path> <payload_folder> [--allow-enhanced]
 //   RpfPatcher.exe verify-euphoria  <gta_path> <payload_folder>
@@ -80,6 +81,8 @@ namespace RpfPatcher
                     "  RpfPatcher.exe extract-virtual-entries <gta_path> <rpf_path> <manifest_tsv> <output_root>\n" +
                     "  RpfPatcher.exe asset-xml    <input_asset> <output_xml> <asset_folder> [legacy|gen9] [gta_path]\n" +
                     "  RpfPatcher.exe asset-xml-batch <manifest_tsv> [legacy|gen9] [gta_path]\n" +
+                    "  RpfPatcher.exe rel-relationships <input_xml>\n" +
+                    "  RpfPatcher.exe animation-samples <input_xml> [selection_key]\n" +
                     "  RpfPatcher.exe asset-from-xml <input_xml> <output_asset> <asset_folder> [legacy|gen9] [source_asset] [gta_path]\n" +
                     "  RpfPatcher.exe audit-seats  <gta_path> <output_json> [output_cs]\n" +
                     "  RpfPatcher.exe build-ytd    <dds_folder> <output_ytd> [legacy|gen9]\n" +
@@ -145,6 +148,10 @@ namespace RpfPatcher
                 return ExtractVirtualEntries(args);
             if (command == "asset-xml")
                 return ExportAssetXml(args);
+            if (command == "rel-relationships")
+                return RelRelationships.Run(args);
+            if (command == "animation-samples")
+                return AnimationSamples.Run(args);
             if (command == "asset-xml-batch")
                 return ExportAssetXmlBatch(args);
             if (command == "asset-from-xml")

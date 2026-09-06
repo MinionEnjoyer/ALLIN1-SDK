@@ -19,14 +19,14 @@ class HelpTopic:
 
 HELP_TOPICS: tuple[HelpTopic, ...] = (
     HelpTopic(
-        "code-editor", "Authoring", "XML and Lua source editing",
+        "code-editor", "Authoring", "XML, JSON and Lua source editing",
         "Edit text source with syntax checks, a save diff and retained backups.",
-        """Open Data Tools → XML & Lua editor. Choose a UTF-8 .xml, .meta or .lua file, or start a new document. Line numbers, highlighting, search/replace and undo/redo operate on your draft.
+        """Open Data Tools → XML, JSON & Lua editor. Choose a UTF-8 .xml, .meta, .json or .lua file, or start a new document. Line numbers, highlighting, search/replace and undo/redo operate on your draft.
 
 Check syntax, then Review save. The exact draft and current disk revision are bound to the review; check the confirmation box to apply. Previous bytes are kept in an adjacent .allin1-backup file. Save a copy creates a new file without replacing an existing destination. Game-directory inputs are read-only and must be copied outside GTA.
 
-Malformed files can be repaired, but syntax errors block saving. XML checks well-formedness with DTDs/entities disabled. Lua checks Lua 5.4 syntax only, never executes scripts, and does not certify game APIs or FiveM-specific syntax. Compiled resources, mixed newlines and non-UTF-8 inputs are unsupported. The editor accepts at most 64 KiB and 2,000 lines. Unsaved drafts block navigation until saved or explicitly discarded.""",
-        ("xml", "lua", "meta", "source", "editor", "syntax", "backup", "diff"),
+Malformed files can be repaired, but syntax errors block saving. JSON checks strict syntax and rejects duplicate object keys; it does not validate JSON Schema or game schemas. XML checks well-formedness with DTDs/entities disabled. Lua checks Lua 5.4 syntax only, never executes scripts, and does not certify game APIs or FiveM-specific syntax. Compiled resources, mixed newlines and non-UTF-8 inputs are unsupported. The editor accepts at most 64 KiB and 2,000 lines. Unsaved drafts block navigation until saved or explicitly discarded.""",
+        ("xml", "json", "lua", "meta", "source", "editor", "syntax", "backup", "diff"),
     ),
     HelpTopic(
         "getting-started", "Start here", "Getting started",

@@ -1,0 +1,9 @@
+.asset-validation { margin: 12px 0; border: 1px solid var(--border); border-radius: 8px; }
+.asset-validation > summary { padding: 12px; cursor: pointer; font-weight: 600; }
+.asset-validation-body { max-height: 58vh; overflow: auto; padding: 0 16px 16px; overscroll-behavior: contain; }
+.asset-validation-body section { border-top: 1px solid var(--border); padding: 8px 0; }
+.asset-validation-body h4 { margin: 4px 0; }
+.asset-validation-body li, .asset-validation-hash { overflow-wrap: anywhere; }
+.asset-validation-body table { width: 100%; text-align: left; }
+.asset-validation-body th, .asset-validation-body td { padding: 6px; }
+.asset-validation-hash { color: var(--muted); font-size: .85em; }

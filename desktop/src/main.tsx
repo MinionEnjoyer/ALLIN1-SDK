@@ -7,7 +7,7 @@ const previewMode = import.meta.env.DEV ? new URLSearchParams(window.location.se
 
 async function mount() {
   const client = import.meta.env.DEV && previewMode
-    ? (await import("./previewClient")).createPreviewClient(previewMode) : undefined;
+    ? (await import("./previewClient")).createPreviewClient(previewMode, new URLSearchParams(window.location.search).get("native-demo")) : undefined;
   createRoot(document.getElementById("root")!).render(<StrictMode><App client={client} /></StrictMode>);
 }
 void mount();

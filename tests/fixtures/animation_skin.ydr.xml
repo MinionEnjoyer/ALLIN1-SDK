@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SDK-owned synthetic weighted triangle; palette deliberately differs from bone order. -->
+<Drawable>
+  <Name>allin1_animation_skin</Name>
+  <BoundingSphereCenter x="0" y="0" z="0.5"/><BoundingSphereRadius value="2"/>
+  <BoundingBoxMin x="0" y="0" z="0"/><BoundingBoxMax x="1" y="1" z="1"/>
+  <LodDistHigh value="100"/><FlagsHigh value="1"/>
+  <ShaderGroup><Shaders><Item><Name>ped</Name><FileName>ped.sps</FileName><RenderBucket value="0"/>
+    <Parameters><Item name="DiffuseSampler" type="Texture"><Name>fixture_diffuse</Name></Item></Parameters>
+  </Item></Shaders></ShaderGroup>
+  <Skeleton><Bones>
+    <Item><Name>root</Name><Tag value="0"/><Index value="0"/><ParentIndex value="-1"/><SiblingIndex value="-1"/><Flags>RotX, RotY, RotZ, TransX, TransY, TransZ</Flags>
+      <Translation x="0" y="0" z="0"/><Rotation x="0" y="0" z="0" w="1"/><Scale x="1" y="1" z="1"/><TransformUnk x="0" y="0" z="0" w="0"/>
+    </Item>
+    <Item><Name>tip</Name><Tag value="42"/><Index value="1"/><ParentIndex value="0"/><SiblingIndex value="-1"/><Flags>RotX, RotY, RotZ</Flags>
+      <Translation x="0" y="0" z="1"/><Rotation x="0" y="0" z="0" w="1"/><Scale x="1" y="1" z="1"/><TransformUnk x="0" y="0" z="0" w="0"/>
+    </Item>
+  </Bones></Skeleton>
+  <DrawableModelsHigh><Item><RenderMask value="255"/><Flags value="0"/><HasSkin value="1"/><BoneIndex value="0"/>
+    <Geometries><Item><ShaderIndex value="0"/><BoneIDs>1, 0</BoneIDs>
+      <BoundingBoxMin x="0" y="0" z="0" w="0"/><BoundingBoxMax x="1" y="1" z="1" w="0"/>
+      <VertexBuffer><Flags value="0"/><Layout type="GTAV1"><Position/><BlendWeights/><BlendIndices/><Normal/><TexCoord0/></Layout><Data>
+        0 0 0  255 0 0 0    1 0 0 0  0 0 1  0 0
+        1 0 1  255 0 0 0    0 0 0 0  0 0 1  1 0
+        0 1 1  128 127 0 0  0 1 0 0  0 0 1  0 1
+      </Data></VertexBuffer>
+      <IndexBuffer><Data>0 1 2</Data></IndexBuffer>
+    </Item></Geometries>
+  </Item></DrawableModelsHigh>
+</Drawable>

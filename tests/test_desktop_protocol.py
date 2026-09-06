@@ -2260,6 +2260,7 @@ def test_texture_workspace_creation_and_build_require_reviewed_new_destinations(
             "validation": {
                 "reparsed": True, "semantic_xml_match": True,
                 "dependency_count": 1,
+                "texture_payloads_match": True, "texture_payload_count": 1,
             },
         }), encoding="utf-8")
         return destination, report

@@ -1,0 +1,11 @@
+.native-collision { border: 1px solid var(--border); padding: 10px; margin: 10px 0; }
+.native-collision summary { cursor: pointer; font-weight: 600; }
+.native-collision-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.native-collision-controls label { display: flex; align-items: center; gap: 5px; }
+.native-collision-controls input[type=range] { width: 110px; }
+.native-collision-layout { display: grid; grid-template-columns: minmax(150px, 220px) minmax(0, 1fr); gap: 12px; margin-top: 12px; }
+.native-collision-layout aside { overflow: auto; min-width: 0; max-height: 390px; overscroll-behavior: contain; overflow-wrap: anywhere; }
+.native-collision-layout aside label { display: block; min-width: 0; }
+.native-collision-layout select { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
+.native-collision-layout svg { width: 100%; max-height: 500px; background: var(--surface); border: 1px solid var(--border); }
+@media (max-width: 850px) { .native-collision-layout { grid-template-columns: 1fr; } .native-collision-layout aside { max-height: 180px; } }

@@ -24,6 +24,10 @@ import QuickImportPublish from "./QuickImportPublish";
 import VehicleIdentityEditor from "./VehicleIdentityEditor";
 import RecipeConversionPanel from "./RecipeConversionPanel";
 import type { Gxt2ArchiveRequest } from "./Gxt2Workspace";
+import type { NativeRequest } from "./NativeWorkspace";
+import { isNativeResource } from "./nativeFormats";
+import WorkspaceToolPanel from "./WorkspaceToolPanel";
+import FormatCapabilities from "./FormatCapabilities";
 import type { RpfChangeRequest } from "./RpfChangeSetWorkspace";
 import { formatBytes, tokenizeCommandLine } from "./tokenize";
 import type {
@@ -86,6 +90,8 @@ const RpfArchiveUtilities = deferWorkspace(() => import("./RpfArchiveUtilities")
 const RpfTransactionWorkspace = deferWorkspace(() => import("./RpfTransactionWorkspace"));
 const Gxt2Workspace = deferWorkspace(() => import("./Gxt2Workspace"));
 const RpfChangeSetWorkspace = deferWorkspace(() => import("./RpfChangeSetWorkspace"));
+const ArchiveBrowser = deferWorkspace(() => import("./ArchiveBrowser"));
+const NativeWorkspace = deferWorkspace(() => import("./NativeWorkspace"));
 
 const EMPTY_CATALOG: DesktopCatalog = {
   commands: [],
@@ -96,7 +102,7 @@ const EMPTY_CATALOG: DesktopCatalog = {
 };
 
 const WORKSPACE_COPY: Record<WorkspaceId, { title: string; description: string; phase: number }> = {
-  data_tools: { title: "Data Tools", description: "Edit XML/Lua source, compare metadata and compile data reports.", phase: 5 },
+  data_tools: { title: "Data Tools", description: "Edit XML/JSON/Lua source, compare metadata and compile data reports.", phase: 5 },
   linker: {
     title: "Package Linker",
     description: "Inspect package ownership, integration links, and safety diagnostics.",
@@ -604,36 +610,6 @@ function PackageReceiptsWorkspace({
   );
 }
 
-function EmptyWorkspace({ workspace }: { workspace: WorkspaceId }) {
-  const copy = WORKSPACE_COPY[workspace];
-  const rows = workspace === "workbench"
-    ? ["Vehicle definitions", "Weapon definitions", "Ped definitions", "Map projects"]
-    : ["Python service", "Typed desktop contract", "React workspace"];
-  return (
-    <section className="workspace-section placeholder-workspace" aria-labelledby={`${workspace}-title`}>
-      <div className="workspace-heading">
-        <div>
-          <span className="eyebrow">Migration phase {copy.phase}</span>
-          <h2 id={`${workspace}-title`}>{copy.title}</h2>
-          <p>{copy.description}</p>
-        </div>
-      </div>
-      <div className="migration-board" aria-label={`${copy.title} migration status`}>
-        <div className="migration-board-header"><strong>Surface readiness</strong><span>Phase {copy.phase}</span></div>
-        <div className="migration-rows">
-          {rows.map((row, index) => (
-            <div className="migration-row" key={row}>
-              <WorkspaceIcon workspace={workspace} />
-              <div><strong>{row}</strong><small>{workspace === "workbench" ? "Existing Python domain service is mapped" : index < 2 ? "Available and preserved" : "Desktop view scheduled in this migration phase"}</small></div>
-              <span className={workspace === "workbench" || index < 2 ? "state-ready" : "state-queued"}>{workspace === "workbench" || index < 2 ? "Mapped" : "Queued"}</span>
-            </div>
-          ))}
-        </div>
-        <div className="boundary-note"><strong>Current access</strong><span>This capability remains available in the Tkinter desktop while the React surface is completed. Validation and write policy stay in Python.</span></div>
-      </div>
-    </section>
-  );
-}
 
 type WorkbenchCategory = "vehicles" | "weapons" | "peds" | "maps" | "runtime" | "render";
 
@@ -2000,12 +1976,7 @@ function ContentWorkbench({
       </div>
 
       {(category === "weapons" || category === "peds" || category === "maps" || category === "runtime" || category === "render") && navigationNotice && <div className="error-banner" role="alert">{navigationNotice}</div>}
-      {category === "peds" ? <PedWorkbench client={client} onDirtyChange={onDirtyChange} initialSource={source || ""} onHelp={onHelp} /> : category === "weapons" ? <WeaponWorkbench client={client} onDirtyChange={onDirtyChange} initialSource={source || ""} /> : category === "maps" ? <MapWorkbench client={client} onDirtyChange={onDirtyChange} /> : category === "runtime" ? <RuntimeWorkbench client={client} onDirtyChange={onDirtyChange} /> : category === "render" ? <RenderWorkbench client={client} onDirtyChange={onDirtyChange} /> : category !== "vehicles" ? <div className="workbench-fallback-card">
-        <span className="eyebrow">Migration boundary</span>
-        <h3>{categories.find((item) => item.id === category)?.label} Workbench</h3>
-        <p>This authoring workspace remains available in the Tkinter fallback while its mutation and rollback session is separated from widget code.</p>
-        <div className="recipe-safety-note"><strong>No imitation editor</strong><span>The React shell will expose this only after it can call the same Python validation, history, and package services.</span></div>
-      </div> : <>
+      {category === "peds" ? <PedWorkbench client={client} onDirtyChange={onDirtyChange} initialSource={source || ""} onHelp={onHelp} /> : category === "weapons" ? <WeaponWorkbench client={client} onDirtyChange={onDirtyChange} initialSource={source || ""} /> : category === "maps" ? <MapWorkbench client={client} onDirtyChange={onDirtyChange} /> : category === "runtime" ? <RuntimeWorkbench client={client} onDirtyChange={onDirtyChange} /> : category === "render" ? <RenderWorkbench client={client} onDirtyChange={onDirtyChange} /> : <>
         <div className="source-strip" aria-live="polite"><span className={`activity-dot ${busy || previewBusy || authoringBusy ? "busy" : activeResult ? "ready" : ""}`} /><strong>{sourceState}</strong><span className="source-path" title={authoringSession?.workspace || source || "No source selected"}>{authoringSession?.workspace || source || "No source selected"}</span></div>
         {gtaPath && <div className="workbench-context-strip"><strong>Decoder context</strong><span title={gtaPath}>{gtaPath}</span></div>}
         {error && <div className="error-banner" role="alert">{error}</div>}
@@ -3189,6 +3160,7 @@ function RpfInspector({
   onJob,
   onOpenGameText,
   onOpenBinary,
+  onOpenNative,
   onStageMember,
   onUtilityGuardChange,
 }: {
@@ -3205,6 +3177,7 @@ function RpfInspector({
   onCancel: () => void;
   onJob: (jobId: string | null) => void;
   onOpenBinary: (request: Omit<Gxt2ArchiveRequest, "requestId">) => void;
+  onOpenNative: (request: Omit<Gxt2ArchiveRequest, "requestId">) => void;
   onOpenGameText: (request: Omit<Gxt2ArchiveRequest, "requestId">) => void;
   onStageMember: (request: Omit<RpfChangeRequest, "requestId">) => void;
   onUtilityGuardChange: (guarded: boolean) => void;
@@ -3412,6 +3385,8 @@ function RpfInspector({
             </div>}
             {result && selectedEntry.kind !== "directory" && <button className="quiet-button" disabled={busy || previewBusy || selectedEntry.size < 1 || selectedEntry.size > 128 * 1024 * 1024}
               onClick={() => onOpenBinary({ archive: result.source, entry_id: selectedEntry.id, gta_path: result.gta_path })}>Open in binary editor</button>}
+            {result && selectedEntry && selectedEntry.kind !== "directory" && isNativeResource(selectedEntry.name) && <button className="quiet-button" disabled={busy || previewBusy || selectedEntry.size > 128 * 1024 * 1024}
+              onClick={() => onOpenNative({ archive: result.source, entry_id: selectedEntry.id, gta_path: result.gta_path })}>Open native editor</button>}
             {previewBusy && <div className="preview-progress"><span className="activity-dot busy" /><strong>Reading exact entry</strong><p>The sidecar is re-indexing and extracting through RpfPatcher.</p></div>}
             {selectedEntry.kind === "directory" && <div className="pane-empty preview-empty"><strong>Directory metadata</strong><p>Directories are navigational records and are never extracted as preview assets.</p></div>}
             {preview?.display_kind === "image" && preview.artifact && previewArtifactSource && <figure className="image-preview rpf-image-preview"><div><img src={previewArtifactSource} alt={`Read-only preview of ${selectedEntry.path}`} /></div><figcaption><span>Normalized preview</span><span>{formatBytes(preview.artifact.size)} · SHA-256 {preview.artifact.sha256.slice(0, 12)}…</span></figcaption></figure>}
@@ -3644,7 +3619,8 @@ export default function App({ client = tauriClient }: { client?: DesktopClient }
   const [quickImportDirty, setQuickImportDirty] = useState(false);
   const [quickImportNavigationNotice, setQuickImportNavigationNotice] = useState("");
   const [vehicleAuthoringDirty, setVehicleAuthoringDirty] = useState(false);
-  const [rpfMode, setRpfMode] = useState<"archive" | "text" | "binary" | "graph" | "program" | "changes" | "transactions">("archive");
+  const [rpfMode, setRpfMode] = useState<"browser" | "native" | "archive" | "text" | "binary" | "graph" | "program" | "changes" | "transactions" | "formats">("archive");
+  const [referenceRequest, setReferenceRequest] = useState<{ query: string; gta_path: string; requestId: number } | null>(null);
   const [graphLaunchSource, setGraphLaunchSource] = useState("");
   const [programLaunchSource, setProgramLaunchSource] = useState("");
   const [nodeLaunchFocus, setNodeLaunchFocus] = useState({ id: "", serial: 0, module: "graph" });
@@ -3655,6 +3631,10 @@ export default function App({ client = tauriClient }: { client?: DesktopClient }
   const [gxtArchiveRequest, setGxtArchiveRequest] = useState<Gxt2ArchiveRequest | null>(null);
   const [gxtGuarded, setGxtGuarded] = useState(false);
   const [binaryGuarded, setBinaryGuarded] = useState(false);
+  const [nativeGuarded, setNativeGuarded] = useState(false);
+  const [browserGuarded, setBrowserGuarded] = useState(false);
+  const [nativeRequest, setNativeRequest] = useState<NativeRequest | null>(null);
+  const [nativePlanRequest, setNativePlanRequest] = useState<{ source: string; requestId: number } | null>(null);
   const [binaryArchiveRequest, setBinaryArchiveRequest] = useState<Gxt2ArchiveRequest | null>(null);
   const [graphGuarded, setGraphGuarded] = useState(false);
   const [programGuarded, setProgramGuarded] = useState(false);
@@ -3667,7 +3647,7 @@ export default function App({ client = tauriClient }: { client?: DesktopClient }
   const [recipeConverting, setRecipeConverting] = useState(false);
   const [recipeNavigationNotice, setRecipeNavigationNotice] = useState("");
   useEffect(() => { if (!recipeGuarded) setRecipeNavigationNotice(""); }, [recipeGuarded]);
-  const rpfGuarded = gxtGuarded || binaryGuarded || graphGuarded || programGuarded || changeGuarded || transactionGuarded || utilityGuarded;
+  const rpfGuarded = browserGuarded || nativeGuarded || gxtGuarded || binaryGuarded || graphGuarded || programGuarded || changeGuarded || transactionGuarded || utilityGuarded;
   const [gxtNavigationNotice, setGxtNavigationNotice] = useState("");
   useEffect(() => { if (workspace !== "rpf") { setGxtArchiveRequest(null); setBinaryArchiveRequest(null); setChangeRequest(null); } }, [workspace]);
   const [vehicleAuthoringNavigationNotice, setVehicleAuthoringNavigationNotice] = useState("");
@@ -4518,21 +4498,46 @@ export default function App({ client = tauriClient }: { client?: DesktopClient }
             }}
             onCancel={cancelActive}
           />}
-          {workspace === "rpf" && <div className="workspace-section rpf-tools-shell"><div className="rpf-workspace-tabs" role="tablist" aria-label="RPF tools">
+          {workspace === "rpf" && <div className="workspace-section rpf-tools-shell workspace-tool-layout"><WorkspaceToolPanel title="RPF tools" storageKey="allin1.sdk.rpf-tools-panel.v1">
+            <button className="quiet-button" role="tab" aria-selected={rpfMode === "formats"} disabled={rpfGuarded || Boolean(activeJob)} onClick={() => setRpfMode("formats")}>Format capabilities</button>
+            <button className="quiet-button" role="tab" aria-selected={rpfMode === "native"} disabled={rpfGuarded || Boolean(activeJob)} onClick={() => setRpfMode("native")}>Native resources & audio</button>
+            <button className="quiet-button" role="tab" aria-selected={rpfMode === "browser"} disabled={rpfGuarded || Boolean(activeJob)} onClick={() => setRpfMode("browser")}>Game browser</button>
             <button className="quiet-button" role="tab" aria-selected={rpfMode === "archive"} disabled={rpfGuarded || Boolean(activeJob)} onClick={() => setRpfMode("archive")}>Archive inspection</button>
-            <button className="quiet-button" role="tab" aria-selected={rpfMode === "text"} disabled={graphGuarded || programGuarded || binaryGuarded || changeGuarded || transactionGuarded || Boolean(activeJob)} onClick={() => setRpfMode("text")}>GXT2 game text</button>
-            <button className="quiet-button" role="tab" aria-selected={rpfMode === "changes"} disabled={graphGuarded || programGuarded || binaryGuarded || gxtGuarded || transactionGuarded || Boolean(activeJob)} onClick={() => setRpfMode("changes")}>Change sets</button>
-            <button className="quiet-button" role="tab" aria-selected={rpfMode === "transactions"} disabled={graphGuarded || programGuarded || binaryGuarded || gxtGuarded || changeGuarded || Boolean(activeJob)} onClick={() => setRpfMode("transactions")}>Execute & restore</button>
-            <button className="quiet-button" role="tab" aria-selected={rpfMode === "binary"} disabled={graphGuarded || programGuarded || gxtGuarded || changeGuarded || transactionGuarded || Boolean(activeJob)} onClick={() => setRpfMode("binary")}>Binary editor</button>
-            <button className="quiet-button" role="tab" aria-selected={rpfMode === "graph"} disabled={programGuarded || binaryGuarded || gxtGuarded || changeGuarded || transactionGuarded || Boolean(activeJob)} onClick={() => setRpfMode("graph")}>Package layout</button>
-            <button className="quiet-button" role="tab" aria-selected={rpfMode === "program"} disabled={graphGuarded || binaryGuarded || gxtGuarded || changeGuarded || transactionGuarded || Boolean(activeJob)} onClick={() => setRpfMode("program")}>Build flow</button>
-          </div>{gxtNavigationNotice && <p role="alert" className="error-banner">{gxtNavigationNotice}</p>}
+            <button className="quiet-button" role="tab" aria-selected={rpfMode === "text"} disabled={browserGuarded || nativeGuarded || graphGuarded || programGuarded || binaryGuarded || changeGuarded || transactionGuarded || Boolean(activeJob)} onClick={() => setRpfMode("text")}>GXT2 game text</button>
+            <button className="quiet-button" role="tab" aria-selected={rpfMode === "changes"} disabled={browserGuarded || nativeGuarded || graphGuarded || programGuarded || binaryGuarded || gxtGuarded || transactionGuarded || Boolean(activeJob)} onClick={() => setRpfMode("changes")}>Change sets</button>
+            <button className="quiet-button" role="tab" aria-selected={rpfMode === "transactions"} disabled={browserGuarded || nativeGuarded || graphGuarded || programGuarded || binaryGuarded || gxtGuarded || changeGuarded || Boolean(activeJob)} onClick={() => setRpfMode("transactions")}>Execute & restore</button>
+            <button className="quiet-button" role="tab" aria-selected={rpfMode === "binary"} disabled={browserGuarded || nativeGuarded || graphGuarded || programGuarded || gxtGuarded || changeGuarded || transactionGuarded || Boolean(activeJob)} onClick={() => setRpfMode("binary")}>Binary editor</button>
+            <button className="quiet-button" role="tab" aria-selected={rpfMode === "graph"} disabled={browserGuarded || nativeGuarded || programGuarded || binaryGuarded || gxtGuarded || changeGuarded || transactionGuarded || Boolean(activeJob)} onClick={() => setRpfMode("graph")}>Package layout</button>
+            <button className="quiet-button" role="tab" aria-selected={rpfMode === "program"} disabled={browserGuarded || nativeGuarded || graphGuarded || binaryGuarded || gxtGuarded || changeGuarded || transactionGuarded || Boolean(activeJob)} onClick={() => setRpfMode("program")}>Build flow</button>
+          </WorkspaceToolPanel><div className="workspace-tool-content">{gxtNavigationNotice && <p role="alert" className="error-banner">{gxtNavigationNotice}</p>}
+          {rpfMode === "formats" && <FormatCapabilities />}
           <div hidden={rpfMode !== "graph"}><GraphWorkbench client={client} module="graph" initialSource={graphLaunchSource} initialFocus={nodeLaunchFocus.module === "graph" ? nodeLaunchFocus.id : ""} initialFocusSerial={nodeLaunchFocus.serial} onGuardChange={setGraphGuarded} onOpenAsset={source => { if (rpfGuarded) return; setModelMaterialSource(source); navigate("models"); }} onOpenVehicle={(source, model) => { if (rpfGuarded) return; setGraphVehicleRequest({ source, model }); setVehicleProjectSource(source); setVehicleProjectCategory("vehicles"); navigate("workbench"); void inspectVehicleProject(source, vehicleProjectGamePath); }} /></div>
           <div hidden={rpfMode !== "program"}><GraphWorkbench client={client} module="program" initialSource={programLaunchSource} initialFocus={nodeLaunchFocus.module === "program" ? nodeLaunchFocus.id : ""} initialFocusSerial={nodeLaunchFocus.serial} onGuardChange={setProgramGuarded} /></div>
+          <div hidden={rpfMode !== "browser"}><ArchiveBrowser client={client} referenceRequest={referenceRequest} onJob={setActiveJob} onGuardChange={setBrowserGuarded} onOpen={(entry, gtaPath) => {
+            if (rpfGuarded) return;
+            if (isNativeResource(entry.name)) {
+              setNativeRequest(previous => ({ ...(entry.archive ? { archive: entry.archive, entry_id: entry.entry_id || undefined } : { source: entry.source }), gta_path: gtaPath || undefined, edition: entry.edition, requestId: (previous?.requestId ?? 0) + 1 }));
+              setRpfMode("native");
+            } else if (entry.archive && entry.entry_id) {
+              const request = { archive: entry.archive, entry_id: entry.entry_id, gta_path: gtaPath };
+              if (/\.gxt2$/i.test(entry.name)) {
+                setGxtArchiveRequest(previous => ({ ...request, requestId: (previous?.requestId ?? 0) + 1 }));
+                setRpfMode("text");
+              } else {
+                setBinaryArchiveRequest(previous => ({ ...request, requestId: (previous?.requestId ?? 0) + 1 }));
+                setRpfMode("binary");
+              }
+            } else { setModelMaterialSource(entry.source); navigate("models"); }
+          }} onStage={(entry, gtaPath) => {
+            if (rpfGuarded || activeJob || !entry.archive || !entry.member_path || entry.archive_path === undefined) return;
+            setChangeRequest(previous => ({archive: entry.archive!, archive_path: entry.archive_path!, entry: entry.member_path!, kind: entry.kind, gta_path: gtaPath || undefined, requestId: (previous?.requestId ?? 0) + 1}));
+            setRpfMode("changes");
+          }} /></div>
+          <div hidden={rpfMode !== "native"}><NativeWorkspace client={client} onSearchReference={(query, game) => { if (rpfGuarded || activeJob) return; setReferenceRequest(previous => ({ query, gta_path: game, requestId: (previous?.requestId ?? 0) + 1 })); setRpfMode("browser"); }} onGuardChange={setNativeGuarded} request={nativeRequest} onOpenPlan={source => { if (rpfGuarded) return; setNativePlanRequest(previous => ({ source, requestId: (previous?.requestId ?? 0) + 1 })); setRpfMode("transactions"); }} active={workspace === "rpf" && rpfMode === "native"} /></div>
           <div hidden={rpfMode !== "binary"}><BinaryWorkspace client={client} onGuardChange={setBinaryGuarded} archiveRequest={binaryArchiveRequest} /></div>
           <div hidden={rpfMode !== "text"}><Gxt2Workspace client={client} onGuardChange={setGxtGuarded} archiveRequest={gxtArchiveRequest} /></div>
-          <div hidden={rpfMode !== "changes"}><RpfChangeSetWorkspace client={client} indexed={rpfResult} onGuardChange={setChangeGuarded} targetRequest={changeRequest} /></div>
-          <div hidden={rpfMode !== "transactions"}><RpfTransactionWorkspace client={client} onGuardChange={setTransactionGuarded} onArchiveChanged={() => setRpfResult(null)} /></div>
+          <div hidden={rpfMode !== "changes"}><RpfChangeSetWorkspace client={client} indexed={rpfResult} onGuardChange={setChangeGuarded} targetRequest={changeRequest} onOpenPlan={source => { if (rpfGuarded || activeJob) return; setNativePlanRequest(previous => ({ source, requestId: (previous?.requestId ?? 0) + 1 })); setRpfMode("transactions"); }} /></div>
+          <div hidden={rpfMode !== "transactions"}><RpfTransactionWorkspace client={client} planRequest={nativePlanRequest} onGuardChange={setTransactionGuarded} onArchiveChanged={() => setRpfResult(null)} /></div>
           <div hidden={rpfMode !== "archive"}><RpfInspector
             client={client}
             result={rpfResult}
@@ -4559,6 +4564,11 @@ export default function App({ client = tauriClient }: { client?: DesktopClient }
               setBinaryArchiveRequest(previous => ({ ...request, requestId: (previous?.requestId ?? 0) + 1 }));
               setRpfMode("binary");
             }}
+            onOpenNative={request => {
+              if (rpfGuarded || activeJob) return;
+              setNativeRequest(previous => ({ ...request, requestId: (previous?.requestId ?? 0) + 1 }));
+              setRpfMode("native");
+            }}
             onOpenGameText={(request) => {
               if (rpfGuarded || activeJob) return;
               setGxtArchiveRequest(previous => ({ ...request, requestId: (previous?.requestId ?? 0) + 1 }));
@@ -4570,7 +4580,7 @@ export default function App({ client = tauriClient }: { client?: DesktopClient }
               setRpfMode("changes");
             }}
             onUtilityGuardChange={setUtilityGuarded}
-          /></div></div>}
+          /></div></div></div>}
           {workspace === "models" && modelsNavigationNotice && <p className="action-notice" role="status">{modelsNavigationNotice}</p>}
           {workspace === "models" && <ModelsWorkspace client={client} initialSource={modelMaterialSource} onGuardChange={setModelsGuarded} />}
           {workspace === "help" && <HelpCenter topics={catalog.help_topics} initialTopic={helpTopic} />}

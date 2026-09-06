@@ -1,6 +1,8 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatBytes } from "./tokenize";
+import TextureExportPanel from "./TextureExportPanel";
+import TextureBatchPanel from "./TextureBatchPanel";
 import type {
   DesktopClient,
   Envelope,
@@ -43,15 +45,20 @@ function texturePreviewSource(preview: TextureWorkspacePreview | null): string |
   return artifact.path.startsWith("/") ? artifact.path : convertFileSrc(artifact.path);
 }
 
-export default function TextureDictionaryWorkspace({ client, initialSource = "", onGuardChange }: { client: DesktopClient; initialSource?: string; onGuardChange?: (guarded: boolean) => void }) {
+export default function TextureDictionaryWorkspace({ client, initialSource = "", initialWorkspace = "", initialGamePath = "", onGuardChange }: { client: DesktopClient; initialSource?: string; initialWorkspace?: string; initialGamePath?: string; onGuardChange?: (guarded: boolean) => void }) {
   const [source, setSource] = useState(initialSource.toLocaleLowerCase().endsWith(".ytd") ? initialSource : "");
-  const [gtaPath, setGtaPath] = useState("");
+  const [gtaPath, setGtaPath] = useState(initialGamePath);
   const [edition, setEdition] = useState("Enhanced");
   const [session, setSession] = useState<TextureWorkspaceSession | null>(null);
   const [selectedName, setSelectedName] = useState("");
   const [query, setQuery] = useState("");
   const [preview, setPreview] = useState<TextureWorkspacePreview | null>(null);
   const [newName, setNewName] = useState("");
+  const [renameName, setRenameName] = useState("");
+  const [exportGuarded, setExportGuarded] = useState(false);
+  const [batchGuarded, setBatchGuarded] = useState(false);
+  const [outputFormat, setOutputFormat] = useState("");
+  const [mipCount, setMipCount] = useState("full");
   const [reviewState, setReviewState] = useState<ReviewState | null>(null);
   const [buildResult, setBuildResult] = useState<TextureBuildResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -65,7 +72,8 @@ export default function TextureDictionaryWorkspace({ client, initialSource = "",
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const previewSequence = useRef(0);
-  const guarded = busy || Boolean(reviewState) || Boolean(newName.trim());
+  const secondaryGuarded = exportGuarded || batchGuarded;
+  const guarded = busy || Boolean(reviewState) || Boolean(newName.trim()) || Boolean(renameName) || secondaryGuarded || !!outputFormat;
   useEffect(() => { onGuardChange?.(guarded); }, [guarded, onGuardChange]);
 
   useEffect(() => {
@@ -85,6 +93,8 @@ export default function TextureDictionaryWorkspace({ client, initialSource = "",
   const previewSource = texturePreviewSource(preview);
 
   const loadSession = (loaded: TextureWorkspaceSession) => {
+    setOutputFormat(""); setMipCount("full");
+    setRenameName("");
     setSession(loaded);
     setSource(loaded.source);
     setEdition(loaded.edition);
@@ -178,6 +188,20 @@ export default function TextureDictionaryWorkspace({ client, initialSource = "",
     );
   };
 
+  useEffect(() => {
+    if (!initialWorkspace) return;
+    if (guarded) { setError("Save or discard the texture draft before opening another workspace."); return; }
+    setGtaPath(initialGamePath);
+    void runJob<TextureWorkspaceSession>(
+      "inspect_texture_workspace", { workspace: initialWorkspace }, `texture-handoff|${initialWorkspace}`,
+      loaded => {
+        if (loaded.workspace.replace(/\\/g, "/").toLocaleLowerCase() !== initialWorkspace.replace(/\\/g, "/").toLocaleLowerCase()) throw new Error("Texture handoff returned a different workspace");
+        loadSession(loaded);
+        setNotice("Opened the exported dictionary copy. Archive provenance is retained for reviewed replacement planning.");
+      },
+    );
+  }, [initialWorkspace, initialGamePath]);
+
   const reviewWorkspace = async () => {
     if (!source.trim() || session) return;
     const parent = await client.selectPath("texture_workspace_parent");
@@ -189,7 +213,7 @@ export default function TextureDictionaryWorkspace({ client, initialSource = "",
     );
   };
 
-  const reviewEdit = async (action: "replace" | "add" | "remove", texture: TextureRecord | null = selected) => {
+  const reviewEdit = async (action: "replace" | "add" | "remove" | "rename" | "convert", texture: TextureRecord | null = selected) => {
     if (!session || (action !== "add" && !texture)) return;
     const textureName = action === "add" ? newName.trim() : texture!.name;
     if (!textureName) {
@@ -197,7 +221,7 @@ export default function TextureDictionaryWorkspace({ client, initialSource = "",
       return;
     }
     let sourceImage: string | null = null;
-    if (action !== "remove") {
+    if (action === "replace" || action === "add") {
       sourceImage = await client.selectPath("texture_source");
       if (!sourceImage) return;
     }
@@ -206,6 +230,8 @@ export default function TextureDictionaryWorkspace({ client, initialSource = "",
       expected_state_sha256: session.state_sha256,
       action,
       texture_name: textureName,
+      ...(action === "rename" ? { new_name: renameName.trim() } : {}),
+      ...(action === "convert" ? { output_format: outputFormat, mip_levels: mipCount === "full" ? Math.floor(Math.log2(Math.max(texture!.width, texture!.height))) + 1 : Number(mipCount) } : {}),
       ...(sourceImage ? { source_image: sourceImage } : {}),
     };
     await runJob<TextureEditReview>(
@@ -277,14 +303,14 @@ export default function TextureDictionaryWorkspace({ client, initialSource = "",
         <div><span className="eyebrow">Native asset workbench</span><h2 id="texture-workspace-title">Texture Dictionary</h2><p>Inspect, replace, add, and remove YTD textures in a revisioned copy with bounded previews.</p></div>
         <div className="heading-actions">
           {busy && activeJob && <button className="quiet-button" onClick={() => void cancel()}>Cancel</button>}
-          <button className="quiet-button" disabled={guarded} onClick={() => void openWorkspace()}>Open workspace</button>
-          <button className="primary-button" disabled={guarded} onClick={() => void chooseYtd()}>Open YTD</button>
+          <button className="quiet-button" disabled={guarded || !!initialWorkspace} onClick={() => void openWorkspace()}>Open workspace</button>
+          <button className="primary-button" disabled={guarded || !!initialWorkspace} onClick={() => void chooseYtd()}>Open YTD</button>
         </div>
       </div>
       <div className="model-material-source texture-source-strip">
-        <label><span>{session ? "Immutable source snapshot" : "Texture dictionary"}</span><input value={source} readOnly={Boolean(session)} onChange={(event) => { setSource(event.target.value); setSession(null); }} placeholder="Select a loose .ytd asset" /></label>
-        <label><span>Edition</span><select value={edition} disabled={Boolean(session)} onChange={(event) => setEdition(event.target.value)}><option>Enhanced</option><option>Legacy</option></select></label>
-        <button className="quiet-button" disabled={busy || Boolean(session)} onClick={() => void chooseGame()} title={gtaPath || "Optional GTA V path"}>{gtaPath ? "Game selected" : "Select game"}</button>
+        <label><span>{session ? "Immutable source snapshot" : "Texture dictionary"}</span><input value={source} readOnly={Boolean(session) || !!initialWorkspace} onChange={(event) => { setSource(event.target.value); setSession(null); }} placeholder="Select a loose .ytd asset" /></label>
+        <label><span>Edition</span><select value={edition} disabled={Boolean(session) || !!initialWorkspace} onChange={(event) => setEdition(event.target.value)}><option>Enhanced</option><option>Legacy</option></select></label>
+        <button className="quiet-button" disabled={busy || Boolean(session) || !!initialWorkspace} onClick={() => void chooseGame()} title={gtaPath || "Optional GTA V path"}>{gtaPath ? "Game selected" : "Select game"}</button>
         {session
           ? <><button className="quiet-button" disabled={guarded || !session.can_undo} onClick={requestUndo}>Undo edit</button><button className="primary-button" disabled={guarded} onClick={() => void reviewBuild()}>Build YTD</button></>
           : <button className="primary-button" disabled={busy || !source.trim()} onClick={() => void reviewWorkspace()}>{busy ? "Reviewing…" : "Create editable copy"}</button>}
@@ -297,16 +323,18 @@ export default function TextureDictionaryWorkspace({ client, initialSource = "",
         <span className="source-path" title={session.state_sha256}>{session.state_sha256.slice(0, 12)} · guarded copy</span>
       </div>}
       {buildResult && <TextureBuildReceipt result={buildResult} />}
+      {session && <TextureExportPanel client={client} session={session} gtaPath={gtaPath} locked={busy || batchGuarded || !!reviewState || !!newName.trim() || !!renameName || !!outputFormat} onGuardChange={setExportGuarded} />}
+      {session && <TextureBatchPanel client={client} session={session} locked={busy || exportGuarded || !!reviewState || !!newName.trim() || !!renameName || !!outputFormat} onGuardChange={setBatchGuarded} onChanged={loaded => { loadSession(loaded); setNotice(`Texture batch committed at revision ${loaded.revision}. Undo restores the entire batch.`); }} />}
       <div className={`texture-grid${session ? " has-result" : ""}`}>
         <section className="model-material-pane texture-inventory-pane">
           <header><span className="pane-kicker">Dictionary</span><strong>Texture inventory</strong><small>{session?.texture_count ?? 0}</small></header>
           <label className="model-pane-filter"><span aria-hidden="true">⌕</span><input value={query} disabled={!session} onChange={(event) => setQuery(event.target.value)} placeholder="Filter name, format, or usage" aria-label="Filter textures" /></label>
           {session ? <>
             <div className="model-pane-list texture-list" role="listbox" aria-label="Textures">
-              {textures.map((item) => <button key={item.name} className={item.name === selected?.name ? "selected" : ""} role="option" aria-selected={item.name === selected?.name} onClick={() => setSelectedName(item.name)}><span><strong>{item.name}</strong><small>{item.width} × {item.height} · {item.format.replace("D3DFMT_", "")}</small></span><span className="row-type">{item.mip_levels} mip</span></button>)}
+              {textures.map((item) => <button key={item.name} className={item.name === selected?.name ? "selected" : ""} role="option" aria-selected={item.name === selected?.name} disabled={busy || secondaryGuarded || !!reviewState || !!outputFormat || !!renameName} onClick={() => setSelectedName(item.name)}><span><strong>{item.name}</strong><small>{item.width} × {item.height} · {item.format.replace("D3DFMT_", "")}</small></span><span className="row-type">{item.mip_levels} mip</span></button>)}
               {!textures.length && <div className="texture-no-results">No textures match this filter.</div>}
             </div>
-            <div className="texture-add-form">{newName && <button className="quiet-button" disabled={busy || !!reviewState} onClick={() => setNewName("")}>Reset texture draft</button>}<label><span>New texture name</span><input value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="comet6_badge" /></label><button className="quiet-button" disabled={busy || !newName.trim()} onClick={() => void reviewEdit("add", null)}>Choose image and review</button></div>
+            <div className="texture-add-form">{newName && <button className="quiet-button" disabled={busy || secondaryGuarded || !!reviewState || !!outputFormat} onClick={() => setNewName("")}>Reset texture draft</button>}<label><span>New texture name</span><input value={newName} disabled={busy || secondaryGuarded || !!reviewState || !!outputFormat || !!renameName} onChange={(event) => setNewName(event.target.value)} placeholder="comet6_badge" /></label><button className="quiet-button" disabled={busy || secondaryGuarded || !!reviewState || !!outputFormat || !!renameName || !newName.trim()} onClick={() => void reviewEdit("add", null)}>Choose image and review</button></div>
           </> : <div className="model-material-empty"><strong>No editable dictionary</strong><p>Open an existing workspace, or select a loose YTD and create a guarded copy.</p></div>}
         </section>
         <section className="model-material-pane texture-preview-pane">
@@ -316,13 +344,24 @@ export default function TextureDictionaryWorkspace({ client, initialSource = "",
               {previewSource ? <img src={previewSource} alt={`Preview of ${selected.name}`} /> : <div className="texture-preview-empty"><strong>Preview unavailable</strong><span>{preview?.warning ?? "Rendering bounded texture preview…"}</span></div>}
             </div>
             <div className="texture-evidence">
+              <details className="texture-export-panel">
+                <summary>Format & mip levels</summary>
+                <p>Regenerate mips from the top level using box filtering. Compression is lossy; DXT1 drops alpha. Normal vectors and color-space metadata are not reconstructed.</p>
+                <div className="texture-export-controls">
+                  <label>Output format<select aria-label="Converted texture format" value={outputFormat} disabled={busy || secondaryGuarded || !!reviewState || !!newName || !!renameName} onChange={event => setOutputFormat(event.target.value)}><option value="">Choose format</option><option value="RGBA8">RGBA8 — uncompressed</option><option value="DXT1">DXT1 — opaque</option><option value="DXT3">DXT3 — explicit alpha</option><option value="DXT5">DXT5 — interpolated alpha</option></select></label>
+                  <label>Mip levels<select aria-label="Converted texture mip levels" value={mipCount} disabled={!outputFormat || busy || secondaryGuarded || !!reviewState} onChange={event => setMipCount(event.target.value)}><option value="full">Full chain</option>{Array.from({ length: Math.floor(Math.log2(Math.max(selected.width, selected.height))) + 1 }, (_, i) => <option key={i} value={String(i + 1)}>{i + 1}{i === 0 ? " — top only" : ""}</option>)}</select></label>
+                  <button className="quiet-button" disabled={!outputFormat || busy || secondaryGuarded || !!reviewState} onClick={() => void reviewEdit("convert")}>Review format & mips</button>
+                  {!!outputFormat && <button className="quiet-button" disabled={busy || !!reviewState} onClick={() => { setOutputFormat(""); setMipCount("full"); }}>Discard conversion</button>}
+                </div>
+              </details>
               <dl>
                 <div><dt>Format</dt><dd>{selected.format}</dd></div><div><dt>Usage</dt><dd>{selected.usage || "Unspecified"}</dd></div>
                 <div><dt>Mip levels</dt><dd>{selected.mip_levels}</dd></div><div><dt>DDS size</dt><dd>{selected.size === null ? "Missing" : formatBytes(selected.size)}</dd></div>
                 <div><dt>Dependency</dt><dd>{selected.file_name}</dd></div><div><dt>SHA-256</dt><dd title={selected.sha256 ?? ""}>{selected.sha256?.slice(0, 12) ?? "Unavailable"}</dd></div>
               </dl>
               {selected.warnings.map((warning) => <div className="texture-warning" key={warning}>{warning}</div>)}
-              <div className="texture-actions"><button className="quiet-button" disabled={busy} onClick={() => void reviewEdit("replace")}>Replace image</button><button className="danger-button" disabled={busy} onClick={() => void reviewEdit("remove")}>Remove texture</button></div>
+              <div className="texture-actions"><button className="quiet-button" disabled={busy || secondaryGuarded || !!reviewState || !!outputFormat || !!renameName} onClick={() => void reviewEdit("replace")}>Replace image</button><button className="danger-button" disabled={busy || secondaryGuarded || !!reviewState || !!outputFormat || !!renameName} onClick={() => void reviewEdit("remove")}>Remove texture</button></div>
+              <div className="texture-add-form"><label><span>Rename selected texture</span><input aria-label="Rename selected texture" value={renameName} disabled={busy || secondaryGuarded || !!reviewState || !!outputFormat || !!newName} onChange={event => setRenameName(event.target.value)} placeholder={selected.name} /></label><button className="quiet-button" disabled={busy || secondaryGuarded || !!reviewState || !!outputFormat || !renameName.trim() || renameName.trim() === selected.name} onClick={() => void reviewEdit("rename")}>Review texture rename</button>{renameName && <button className="quiet-button" disabled={busy || secondaryGuarded || !!reviewState || !!outputFormat} onClick={() => setRenameName("")}>Discard texture rename</button>}</div>
             </div>
           </> : <div className="model-material-empty"><strong>No texture selected</strong><p>Select a dictionary texture to render its bounded preview and inspect its native evidence.</p></div>}
         </section>
@@ -334,7 +373,7 @@ export default function TextureDictionaryWorkspace({ client, initialSource = "",
 
 function TextureBuildReceipt({ result }: { result: TextureBuildResult }) {
   const name = result.output.path.split(/[\\/]/).at(-1) ?? result.output.path;
-  return <section className="model-build-receipt texture-build-receipt" aria-label="Verified texture build receipt"><div className="model-build-status" aria-hidden="true">✓</div><div className="model-build-summary"><span className="pane-kicker">Verified native YTD</span><strong>{name}</strong><small>{formatBytes(result.output.size)} · {result.output.sha256.slice(0, 12)} · revision {result.revision}</small></div><dl><div><dt>Reparsed</dt><dd>{result.validation.reparsed ? "Yes" : "No"}</dd></div><div><dt>Semantic XML</dt><dd>{result.validation.semantic_xml_match ? "Matched" : "Changed"}</dd></div><div><dt>Dependencies</dt><dd>{result.validation.dependency_count}</dd></div></dl><div className="model-build-actions"><span title={result.validation_report}>{result.validation_report.split(/[\\/]/).at(-1)}</span></div></section>;
+  return <section className="model-build-receipt texture-build-receipt" aria-label="Verified texture build receipt"><div className="model-build-status" aria-hidden="true">✓</div><div className="model-build-summary"><span className="pane-kicker">Verified native YTD</span><strong>{name}</strong><small>{formatBytes(result.output.size)} · {result.output.sha256.slice(0, 12)} · revision {result.revision}</small></div><dl><div><dt>Reparsed</dt><dd>{result.validation.reparsed ? "Yes" : "No"}</dd></div><div><dt>Semantic XML</dt><dd>{result.validation.semantic_xml_match ? "Matched" : "Changed"}</dd></div><div><dt>Dependencies</dt><dd>{result.validation.dependency_count}</dd></div><div><dt>Texture payloads</dt><dd>{result.validation.texture_payloads_match ? `${result.validation.texture_payload_count} verified` : "Not verified"}</dd></div></dl><div className="model-build-actions"><span title={result.validation_report}>{result.validation_report.split(/[\\/]/).at(-1)}</span></div></section>;
 }
 
 function TextureConfirmation({ state, busy, onCancel, onConfirm }: { state: ReviewState; busy: boolean; onCancel: () => void; onConfirm: () => void }) {

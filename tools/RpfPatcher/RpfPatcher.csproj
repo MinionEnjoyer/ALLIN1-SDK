@@ -9,7 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\CodeWalker\CodeWalker.Core\CodeWalker.Core.csproj" />
+    <ProjectReference Include="..\CodeWalker\CodeWalker.Core\CodeWalker.Core.csproj" AdditionalProperties="DirectoryBuildTargetsPath=$(MSBuildThisFileDirectory)CodeWalkerTextureFix.targets" />
   </ItemGroup>
 
 </Project>

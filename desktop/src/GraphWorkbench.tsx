@@ -147,6 +147,10 @@ export default function GraphWorkbench({ client, module, onGuardChange, onOpenAs
     {module === "program" && <label>Program template<select disabled={work.locked || dirty} value={template} onChange={e => setTemplate(e.target.value)}>{Object.entries(templates).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></label>}
     <div className="source-strip"><strong>{dirty ? "Unsaved node draft" : title}</strong><span className="source-path">{session?.workspace || "No saved document"}</span></div>
     <AuthoringFeedback work={work} />
+    {(work.review?.value.build || work.lastResult?.provenance) ? <details><summary>RPF construction identity</summary>
+      <p>Exact SDK/helper identity and sealed source/readback receipt. Package publication and in-game acceptance are separate.</p>
+      <pre style={{maxHeight:280,overflow:"auto"}}>{JSON.stringify(work.review?.value.build || work.lastResult?.provenance,null,2)}</pre>
+    </details> : null}
     {work.lastResult?.preview_summary !== undefined && <details open><summary>Preview bundle results — failures remain failures</summary><pre>{JSON.stringify(work.lastResult.preview_summary, null, 2)}</pre></details>}
     {session?.issues.length ? <div className="graph-issues" role="status"><strong>Readiness findings</strong><ul>{session.issues.map((issue, i) => <li key={i}>{issue}</li>)}</ul></div> : null}
     <div className="graph-organization">

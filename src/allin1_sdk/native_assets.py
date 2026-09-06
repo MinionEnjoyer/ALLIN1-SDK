@@ -201,6 +201,7 @@ class NativeCollisionScene:
     material_count: int
     owner_count: int
     skipped_polygon_count: int = 0
+    rendered_primitive_counts: tuple[tuple[str, int], ...] = ()
 
     @property
     def vertex_count(self) -> int:
@@ -2667,6 +2668,15 @@ def _safe_codewalker_xml(xml: Path) -> etree._ElementTree:
 def _semantic_xml_sha256(xml: Path) -> str:
     """Hash parsed XML while ignoring serialization-only indentation."""
     tree = _safe_codewalker_xml(xml)
+    if tree.getroot().tag == "TextureDictionary":
+        # Dictionary item order and exported DDS filenames are storage details;
+        # game-visible names/metadata and image content are verified separately.
+        root = tree.getroot()
+        for item in root.findall("Item"):
+            filename = item.find("FileName")
+            if filename is not None:
+                item.remove(filename)
+        root[:] = sorted(root, key=lambda item: (_child_text(item, "Name"), item.tag))
     for node in tree.iter():
         if node.text is not None and not node.text.strip():
             node.text = None
@@ -2676,6 +2686,41 @@ def _semantic_xml_sha256(xml: Path) -> str:
         tree, method="c14n", exclusive=False, with_comments=False,
     )
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _validate_ytd_payloads(xml: Path, assets: Path, rebuilt_xml: Path, rebuilt_assets: Path) -> int:
+    """Reparse alone cannot prove that DDS pixel/mip data survived compilation."""
+    from allin1_sdk.release_paths import contained
+    from allin1_sdk.texture_workspace import inspect_dds
+
+    def inventory(document, folder):
+        items = {}
+        for item in _safe_codewalker_xml(document).getroot().findall("Item"):
+            name, filename = _child_text(item, "Name"), _child_text(item, "FileName")
+            if not name or name in items or not filename:
+                raise RuntimeError("YTD payload validation found a missing/duplicate texture identity")
+            path = contained(folder, filename.replace("\\", "/"))
+            if not path.is_file():
+                raise RuntimeError(f"YTD payload validation is missing the DDS for {name}")
+            metadata = inspect_dds(path)
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                header = stream.read(128)
+                if header[84:88] == b"DX10":
+                    stream.read(20)
+                size = 0
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    size += len(block)
+                    digest.update(block)
+            if size == 0:
+                raise RuntimeError(f"YTD payload validation found an empty DDS for {name}")
+            items[name] = (metadata, size, digest.hexdigest())
+        return items
+
+    expected, actual = inventory(xml, assets), inventory(rebuilt_xml, rebuilt_assets)
+    if expected != actual:
+        raise RuntimeError("Rebuilt YTD texture names, metadata, or encoded pixel/mip payloads changed")
+    return len(expected)
 
 
 def _awc_preview_from_xml(
@@ -2947,6 +2992,7 @@ def _collision_scene_from_xml(
 ) -> tuple[NativeCollisionScene | None, dict[str, Any], str | None]:
     """Decode bounded YBN triangle and primitive diagnostics."""
     try:
+        from allin1_sdk import collision_primitives as shapes
         root = _safe_codewalker_xml(xml).getroot()
         geometries: list[_ModelGeometry] = []
         polygon_counts: dict[str, int] = {}
@@ -2954,6 +3000,17 @@ def _collision_scene_from_xml(
         total_vertices = 0
         total_render_triangles = 0
         owner_count = 0
+        rendered_counts: dict[str, int] = {}
+        def generated(kind, points, faces, owner, material=None):
+            nonlocal total_render_triangles
+            if not faces:
+                return
+            total_render_triangles += len(faces)
+            if total_render_triangles > MAX_MODEL_TRIANGLES:
+                raise ValueError("Collision preview exceeds the guarded triangle limit")
+            rendered_counts[kind] = rendered_counts.get(kind, 0) + 1
+            geometries.append(_ModelGeometry(shapes.transform(points, owner), tuple(faces), _local_name(owner),
+                component=f"{kind} {'surface' if kind == 'Box' else 'tessellation'}", material_index=material))
         for vertices_element in root.xpath(".//*[local-name()='Vertices']"):
             owner = vertices_element.getparent()
             if owner is None:
@@ -2967,53 +3024,82 @@ def _collision_scene_from_xml(
                 continue
             owner_count += 1
             triangles: list[tuple[int, int, int]] = []
-            box_triangles: list[tuple[int, int, int]] = []
+            triangles_by_material: dict[int, list[tuple[int, int, int]]] = {}
             for polygon in polygons:
                 if not isinstance(polygon.tag, str):
                     continue
                 kind = _local_name(polygon)
                 polygon_counts[kind] = polygon_counts.get(kind, 0) + 1
                 if kind == "Triangle":
-                    triangles.append(tuple(
+                    triangle = tuple(
                         _collision_index(polygon, attribute, len(vertices))
                         for attribute in ("v1", "v2", "v3")
-                    ))
+                    )
+                    triangles.append(triangle)
+                    triangles_by_material.setdefault(int(polygon.get("m", "0")), []).append(triangle)
                 elif kind == "Box":
                     box = tuple(
                         _collision_index(polygon, attribute, len(vertices))
                         for attribute in ("v1", "v2", "v3", "v4")
                     )
-                    # Four YBN box control vertices describe one oriented primitive.
-                    # A tetrahedral diagnostic hull exposes its placement without
-                    # claiming to be the exact physics-engine surface tessellation.
-                    box_triangles.extend((
-                        (box[0], box[1], box[2]), (box[0], box[1], box[3]),
-                        (box[0], box[2], box[3]), (box[1], box[2], box[3]),
-                    ))
-                elif kind not in {"Sphere", "Capsule", "Cylinder"}:
+                    points, faces = shapes.control_box([vertices[index] for index in box])
+                    generated(kind, points, faces, owner, int(polygon.get("m", "0")))
+                elif kind in {"Sphere", "Capsule", "Cylinder"}:
+                    attributes = ("v",) if kind == "Sphere" else ("v1", "v2")
+                    anchors = [vertices[_collision_index(polygon, attribute, len(vertices))] for attribute in attributes]
+                    points, faces = shapes.curved(anchors[0], anchors[-1], float(polygon.get("radius", "nan")), capsule=kind == "Capsule", sphere=kind == "Sphere")
+                    generated(kind, points, faces, owner, int(polygon.get("m", "0")))
+                else:
                     skipped_polygons += 1
             total_vertices += len(vertices)
-            total_render_triangles += len(triangles) + len(box_triangles)
+            total_render_triangles += len(triangles)
             if total_vertices > MAX_MODEL_VERTICES:
                 raise ValueError("Collision preview exceeds the guarded vertex limit")
             if total_render_triangles > MAX_MODEL_TRIANGLES:
                 raise ValueError("Collision preview exceeds the guarded triangle limit")
             owner_name = _local_name(owner)
             if triangles:
+                rendered_counts["Triangle"] = rendered_counts.get("Triangle", 0) + len(triangles)
+                world_vertices = shapes.transform(vertices, owner)
+                for material, faces in triangles_by_material.items():
+                    geometries.append(_ModelGeometry(world_vertices, tuple(faces), owner_name,
+                        component="Triangle mesh", material_index=material))
+            if not triangles and not any(_local_name(polygon) in {"Box", "Sphere", "Capsule", "Cylinder"} for polygon in polygons if isinstance(polygon.tag, str)):
                 geometries.append(_ModelGeometry(
-                    vertices, tuple(triangles), owner_name,
-                    component="Triangle mesh",
-                ))
-            if box_triangles:
-                geometries.append(_ModelGeometry(
-                    vertices, tuple(box_triangles), owner_name,
-                    component="Box diagnostic hull",
-                ))
-            if not triangles and not box_triangles:
-                geometries.append(_ModelGeometry(
-                    vertices, (), owner_name,
+                    shapes.transform(vertices, owner), (), owner_name,
                     component="Unrendered primitive anchors",
                 ))
+        for owner in root.xpath(".//*[@type]"):
+            kind = owner.get("type")
+            if kind not in {"Sphere", "Box", "Capsule", "Cylinder", "Disc"} or _local_name(owner) not in {"Bounds", "Item"}:
+                continue
+            polygon_counts[kind] = polygon_counts.get(kind, 0) + 1
+            owner_count += 1
+            center = _vector_attributes(owner.find("./SphereCenter"))
+            radius = float(owner.find("./SphereRadius").get("value", "0")) if owner.find("./SphereRadius") is not None else 0.0
+            low, high = _vector_attributes(owner.find("./BoxMin")), _vector_attributes(owner.find("./BoxMax"))
+            margin = float(owner.find("./Margin").get("value", "0")) if owner.find("./Margin") is not None else 0.0
+            if not all(math.isfinite(value) for value in (*low, *high, radius, margin)) or radius < 0 or margin < 0:
+                raise ValueError("Collision bound dimensions must be finite and non-negative")
+            if kind == "Box":
+                extent = shapes.sub(high, low)
+                if any(value < 0 for value in extent):
+                    raise ValueError("Collision box bounds are reversed")
+                points, faces = shapes.box(low, [(extent[0], 0, 0), (0, extent[1], 0), (0, 0, extent[2])])
+            elif kind == "Sphere":
+                points, faces = shapes.curved(center, center, radius, sphere=True)
+            else:
+                if kind == "Capsule":
+                    if radius < margin:
+                        raise ValueError("Collision capsule radius is smaller than its margin")
+                    offset, radius = (0, radius-margin, 0), margin
+                elif kind == "Disc":
+                    offset = (margin, 0, 0)
+                else:
+                    extent = shapes.sub(high, low)
+                    offset, radius = (0, abs(extent[1])*.5, 0), abs(extent[0])*.5
+                points, faces = shapes.curved(shapes.sub(center, offset), shapes.add(center, offset), radius, capsule=kind == "Capsule")
+            generated(kind, points, faces, owner, int(owner.find("./MaterialIndex").get("value", "0")) if owner.find("./MaterialIndex") is not None else None)
         material_count = len(root.xpath(
             ".//*[local-name()='Materials']/*[local-name()='Item']"
         ))
@@ -3026,6 +3112,7 @@ def _collision_scene_from_xml(
                 f"{kind}: {count}" for kind, count in sorted(polygon_counts.items())
             ) or "none",
             "collision_primitive_counts": dict(sorted(polygon_counts.items())),
+            "collision_rendered_primitive_counts": dict(sorted(rendered_counts.items())),
         }
         if skipped_polygons:
             metadata["collision_skipped_polygons"] = skipped_polygons
@@ -3039,6 +3126,7 @@ def _collision_scene_from_xml(
             material_count=material_count,
             owner_count=owner_count,
             skipped_polygon_count=skipped_polygons,
+            rendered_primitive_counts=tuple(sorted(rendered_counts.items())),
         )
         return scene, metadata, None
     except (OSError, ValueError, etree.XMLSyntaxError, OverflowError) as exc:
@@ -4371,6 +4459,14 @@ class NativeAssetInspector:
         ):
             raise ValueError(f"Native workspace output already exists: {destination}")
         destination.parent.mkdir(parents=True, exist_ok=True)
+        from allin1_sdk import artifact_identity
+        from allin1_sdk.artifact_contract import digest, inventory as validate_inventory
+
+        # Bind every workspace byte (including original and dependency payloads)
+        # and the actual helper selected by this inspector, not a version label.
+        build = artifact_identity.current(resource_root=self.project_root)
+        inputs = {item["path"]: item["sha256"] for item in self._workspace_files(root)}
+        validate_inventory(inputs)
         with tempfile.TemporaryDirectory(
             prefix="allin1-native-build-", dir=destination.parent,
         ) as temporary:
@@ -4405,6 +4501,11 @@ class NativeAssetInspector:
             edited_semantic_hash = _semantic_xml_sha256(xml)
             validation_semantic_hash = _semantic_xml_sha256(validation_xml)
             semantic_match = edited_semantic_hash == validation_semantic_hash
+            texture_payload_count = None
+            if expected_suffix == ".ytd":
+                if not semantic_match:
+                    raise RuntimeError("Rebuilt YTD texture metadata changed")
+                texture_payload_count = _validate_ytd_payloads(xml, assets, validation_xml, validation_assets)
             if expected_suffix == ".awc" and not semantic_match:
                 raise RuntimeError(
                     "Rebuilt AWC reparsed but its structured stream definition changed"
@@ -4427,10 +4528,24 @@ class NativeAssetInspector:
                     "reparsed_semantic_xml_sha256": validation_semantic_hash,
                     "semantic_xml_match": semantic_match,
                     "dependency_count": len(self._workspace_files(validation_assets)),
+                    **({"texture_payloads_match": True, "texture_payload_count": texture_payload_count} if texture_payload_count is not None else {}),
                 },
             }
+            result["artifact"] = artifact_identity.manifest(
+                build, inputs, {destination.name: result["output"]["sha256"]},
+                edition=edition, reports=[digest(result["validation"])],
+                changes={"operation": result["operation"],
+                         "original_sha256": normalized_source_sha256,
+                         "edited_xml_sha256": result["edited_xml_sha256"]},
+            )
             temporary_report = stage_root / "build-report.json"
             _write_json_atomic(temporary_report, result)
+            if temporary_report.stat().st_size > 4 * 1024**2:
+                raise ValueError("Native build receipt exceeds the 4 MiB provenance limit")
+            if inputs != {item["path"]: item["sha256"] for item in self._workspace_files(root)}:
+                raise ValueError("Native workspace changed during build; no output published")
+            if artifact_identity.current(resource_root=self.project_root) != build:
+                raise ValueError("SDK or helper changed during native build; no output published")
             published: list[Path] = []
             try:
                 # Keep both publications inside the destination filesystem. On the

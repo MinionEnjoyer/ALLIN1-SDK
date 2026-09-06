@@ -554,9 +554,10 @@ class VehicleViewportRenderer:
         warnings = list(report.warnings)
         if scene is None and not warnings:
             warnings.append("No reusable collision geometry was decoded from the YBN.")
-        exact_triangles = int(primitive_counts.get("Triangle", 0))
-        diagnostic_boxes = int(primitive_counts.get("Box", 0))
-        overlay_polygon_count = exact_triangles + diagnostic_boxes
+        rendered_counts = dict(getattr(scene, "rendered_primitive_counts", ())) if scene is not None else {}
+        if not rendered_counts:
+            rendered_counts = {kind: primitive_counts.get(kind, 0) for kind in ("Box", "Triangle")}
+        overlay_polygon_count = sum(rendered_counts.values())
         public = {
             "path": content.path,
             "name": Path(content.path).name,
@@ -581,10 +582,12 @@ class VehicleViewportRenderer:
                 {
                     "kind": kind,
                     "count": count,
-                    "overlay": kind in {"Box", "Triangle"},
+                    "overlay": rendered_counts.get(kind, 0) > 0,
                     "fidelity": (
                         "exact mesh" if kind == "Triangle"
+                        else "box surface" if kind == "Box" and getattr(scene, "rendered_primitive_counts", ())
                         else "diagnostic hull" if kind == "Box"
+                        else "tessellated surface" if rendered_counts.get(kind, 0) > 0
                         else "count only"
                     ),
                 }

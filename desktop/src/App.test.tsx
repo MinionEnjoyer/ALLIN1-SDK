@@ -705,6 +705,30 @@ describe("ALLIN1 desktop shell", () => {
     expect(screen.getByText(/GTA V was not modified/)).toBeInTheDocument();
   }, 12_000);
 
+  it("routes the indexed nested YTD into the native editor with its exact archive and decoder", async () => {
+    const client = createPreviewClient("rpf"), user = userEvent.setup();
+    const original = client.startJob.bind(client);
+    client.startJob = vi.fn(async (operation, payload, revision, onEvent) => {
+      if (operation !== "inspect_authoring_workspace" || payload.module !== "native") return original(operation, payload, revision, onEvent);
+      const message: Envelope = { protocol_version: "1.0.0", request_id: "native", job_id: "native", operation: "result", sequence: 1, risk: "read_only", terminal: true, payload: { result: {
+        kind: "workspace_session", module: "native", schema_version: 1, state_sha256: "a".repeat(64), read_only: true, game_write_performed: false,
+        source: String(payload.archive), workspace: null, name: "vehshare.ytd", edition: "Enhanced", gta_path: payload.gta_path,
+        xml_chunks: [], xml_editable: false, dependencies: [], warnings: [], metadata: {},
+        archive_binding: { outer_archive: payload.archive, entry_id: payload.entry_id, outer_archive_sha256: "b".repeat(64) },
+      } } };
+      onEvent(message); return { job_id: "native", accepted: message };
+    });
+    render(<App client={client} />);
+    await screen.findByRole("heading", { name: "RPF Archives" });
+    await user.click(screen.getByRole("button", { name: "Open archive" }));
+    await user.click(await screen.findByRole("button", { name: /textures\/vehshare.ytd/ }));
+    const nativeButton = await screen.findByRole("button", { name: "Open native editor" });
+    await waitFor(() => expect(nativeButton).toBeEnabled());
+    await user.click(nativeButton);
+    expect(client.startJob).toHaveBeenCalledWith("inspect_authoring_workspace", expect.objectContaining({ module: "native", archive: "C:\\Games\\Grand Theft Auto V Enhanced\\mods\\update\\update.rpf", entry_id: "x64/data.rpf::textures/vehshare.ytd", gta_path: "C:\\Games\\Grand Theft Auto V Enhanced" }), expect.any(String), expect.any(Function));
+    expect(await screen.findByRole("button", { name: "Review native workspace export" })).toBeEnabled();
+  });
+
   it("indexes recursive RPF entries and previews one exact member", async () => {
     const client = mockClient();
     const user = userEvent.setup();

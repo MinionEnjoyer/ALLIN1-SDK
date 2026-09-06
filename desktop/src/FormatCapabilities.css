@@ -1,0 +1,13 @@
+.format-capabilities { min-width: 0; }
+.format-capabilities > p { color: var(--text-muted); font-size: .8rem; }
+.format-capability-controls { display: flex; flex-wrap: wrap; gap: 12px; }
+.format-capability-controls label { display: flex; flex-direction: column; gap: 5px; font-size: .8rem; }
+.format-capability-controls input { min-width: 240px; }
+.format-capability-scroll { overflow: auto; max-height: max(240px, calc(100dvh - 390px)); overscroll-behavior: contain; border: 1px solid var(--border); }
+.format-capability-scroll table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: .78rem; }
+.format-capability-scroll th, .format-capability-scroll td { text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); padding: 10px; }
+.format-capability-scroll thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; }
+.format-capability-scroll th small { display: block; min-width: 100px; font-weight: normal; margin-top: 6px; }
+.format-capability-scroll p { margin: 0 0 8px; }
+.format-capability-scroll code { overflow-wrap: anywhere; }
+.format-capability-scroll summary { cursor: pointer; }

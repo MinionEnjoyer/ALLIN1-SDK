@@ -1,0 +1,9 @@
+.texture-export-panel { margin: 12px 0; border: 1px solid var(--border); border-radius: 4px; padding: 10px; min-width: 0; font-size: .76rem; line-height: 1.5; }
+.texture-export-panel summary { cursor: pointer; font-weight: 600; }
+.texture-export-panel p { color: var(--muted); overflow-wrap: anywhere; }
+.texture-export-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.texture-export-controls label { display: grid; gap: 5px; }
+.texture-export-controls input, .texture-export-controls select { min-height: 32px; border: 1px solid var(--border); background: var(--surface); color: var(--text); padding: 5px; font: inherit; }
+.texture-export-selection { max-height: 190px; overflow-y: auto; overscroll-behavior: contain; margin: 10px 0; }
+.texture-export-selection label { display: flex; gap: 8px; padding: 4px; }
+.texture-export-confirmation .confirmation-dialog { padding: 18px; overflow-wrap: anywhere; }

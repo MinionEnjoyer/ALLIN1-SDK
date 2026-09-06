@@ -251,8 +251,9 @@ def test_vehicle_viewport_resolves_material_bindings_against_linked_ytd(
     assert scene.atlas_calls[0]["material"] == "vehicle_paint1"
 
 
+@pytest.mark.parametrize("curved_surfaces", [False, True])
 def test_vehicle_viewport_overlays_package_owned_collision_scene(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, curved_surfaces,
 ):
     package = tmp_path / "package"
     package.mkdir()
@@ -270,6 +271,9 @@ def test_vehicle_viewport_overlays_package_owned_collision_scene(
         },
     )
     inspections: list[str] = []
+
+    if curved_surfaces:
+        collision_scene.rendered_primitive_counts = collision_scene.primitive_counts
 
     class _FixtureInspector:
         def __init__(self, _project_root, _gta_path) -> None:
@@ -308,12 +312,12 @@ def test_vehicle_viewport_overlays_package_owned_collision_scene(
     assert first["camera"]["collision_visible"] is True
     assert second["camera"]["collision_visible"] is False
     assert first["collision_dictionary"]["primitive_counts"] == [
-        {"kind": "Box", "count": 1, "overlay": True, "fidelity": "diagnostic hull"},
-        {"kind": "Capsule", "count": 2, "overlay": False, "fidelity": "count only"},
+        {"kind": "Box", "count": 1, "overlay": True, "fidelity": "box surface" if curved_surfaces else "diagnostic hull"},
+        {"kind": "Capsule", "count": 2, "overlay": curved_surfaces, "fidelity": "tessellated surface" if curved_surfaces else "count only"},
         {"kind": "Triangle", "count": 6, "overlay": True, "fidelity": "exact mesh"},
     ]
-    assert first["collision_dictionary"]["overlay_polygon_count"] == 7
-    assert first["collision_dictionary"]["unrendered_polygon_count"] == 2
+    assert first["collision_dictionary"]["overlay_polygon_count"] == (9 if curved_surfaces else 7)
+    assert first["collision_dictionary"]["unrendered_polygon_count"] == (0 if curved_surfaces else 2)
     assert second["collision_dictionary"]["cache_hit"] is True
     assert model_scene.calls[0]["collision_scene"] is collision_scene
     assert model_scene.calls[0]["collision_visible"] is True

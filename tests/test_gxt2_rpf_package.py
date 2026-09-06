@@ -25,6 +25,9 @@ def pack(path, rows):
 
 @pytest.fixture(params=["::global.gxt2", "american.rpf::global.gxt2"])
 def workspace(tmp_path, monkeypatch, request):
+    from allin1_sdk import artifact_identity
+    from test_artifact_identity import build
+    monkeypatch.setattr(artifact_identity, "current", build)
     target = request.param
     source = tmp_path / "source.rpf"
     original = Gxt2Workspace.encode(({"hash": 256, "text": "Original — 日本語"},))
@@ -80,6 +83,33 @@ def pending(context, destination):
     return {**payload, "review_sha256": reviewed["review_sha256"], "authoring_confirmed": True}, reviewed
 
 
+@pytest.mark.parametrize("when", ["after_review", "during_build"])
+def test_rpf_construction_rejects_execution_identity_drift(workspace, tmp_path, monkeypatch, when):
+    from allin1_sdk import artifact_identity
+    from allin1_sdk.artifact_contract import seal
+    from test_artifact_identity import build
+    context, original, _ = workspace
+    before = original.read_bytes()
+    payload, _ = pending(context, tmp_path / "build")
+    def changed():
+        value = build(); value.pop("build_fingerprint")
+        value["executable_sha256"] = "e" * 64
+        return seal(value, "build_fingerprint")
+    if when == "after_review":
+        monkeypatch.setattr(artifact_identity, "current", changed)
+    else:
+        original_build = Gxt2Workspace.build
+        def mutate(*args, **kwargs):
+            result = original_build(*args, **kwargs)
+            monkeypatch.setattr(artifact_identity, "current", changed)
+            return result
+        monkeypatch.setattr(Gxt2Workspace, "build", mutate)
+    with pytest.raises(ValueError, match="changed|Stale"):
+        desktop.apply(payload)
+    assert original.read_bytes() == before and not Path(payload["destination"]).exists()
+    assert not list(tmp_path.glob(".allin1-rpf-package-*"))
+
+
 def test_package_replaces_only_bound_dictionary_and_publishes_verified_artifacts(workspace, tmp_path):
     context, archive, _ = workspace
     before = archive.read_bytes()
@@ -97,6 +127,8 @@ def test_package_replaces_only_bound_dictionary_and_publishes_verified_artifacts
     assert archive.read_bytes() == before
     report = json.loads(Path(result["report"]).read_text(encoding="utf-8"))
     assert report["source_unchanged"] and report["status"] == "verified" and not report["installable_allin1_package"]
+    assert report["build"] == reviewed["rpf_package"]["build"]
+    assert result["build_fingerprint"] == report["build"]["build_fingerprint"]
     assert result["sha256"] == package._hash(built)
     assert result["report_sha256"] == package._hash(result["report"])
     assert sum(row["changed"] for row in report["verification"]) == 1

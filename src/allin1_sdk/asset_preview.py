@@ -6,6 +6,7 @@ import hashlib
 import io
 import os
 import tempfile
+import wave
 from pathlib import Path
 from typing import Any
 
@@ -55,10 +56,41 @@ class PreviewArtifactStore:
             raise ValueError("Preview artifact root must be a directory")
 
     def write_png(self, data: bytes) -> dict[str, Any]:
+        return self._write(data, "png", "image/png")
+
+    def write_wav(self, data: bytes, *, channel: int | None = None) -> dict[str, Any]:
+        """Normalize bounded PCM frames; never serve arbitrary workspace bytes."""
+        if not data or len(data) > MAX_ARTIFACT_BYTES:
+            raise ValueError("Audio preview exceeds the 20 MiB limit")
+        with wave.open(io.BytesIO(data), "rb") as original:
+            channels, width, rate, frames = original.getnchannels(), original.getsampwidth(), original.getframerate(), original.getnframes()
+            if original.getcomptype() != "NONE" or not 1 <= channels <= 32 or width not in (1, 2, 3, 4) or not 1 <= rate <= 384000:
+                raise ValueError("Audio preview requires supported PCM WAV samples")
+            if channel is not None and (type(channel) is not int or not 0 <= channel < channels):
+                raise ValueError("Choose an existing audio channel")
+            expected = frames * channels * width
+            if not 0 < expected <= MAX_ARTIFACT_BYTES:
+                raise ValueError("Audio frames exceed the bounded preview limit")
+            pcm = original.readframes(frames)
+            if len(pcm) != expected:
+                raise ValueError("Audio samples are truncated")
+        if channel is not None:
+            pcm = b"".join(pcm[i + channel * width:i + (channel + 1) * width] for i in range(0, len(pcm), channels * width))
+        output = io.BytesIO()
+        with wave.open(output, "wb") as normalized:
+            normalized.setnchannels(1 if channel is not None else channels)
+            normalized.setsampwidth(width)
+            normalized.setframerate(rate)
+            normalized.writeframes(pcm)
+        result = self._write(output.getvalue(), "wav", "audio/wav")
+        result.update(channels=channels, selected_channel=channel, sample_rate=rate, sample_width=width, frames=frames, duration_seconds=frames / rate)
+        return result
+
+    def _write(self, data: bytes, extension: str, media_type: str) -> dict[str, Any]:
         if not data or len(data) > MAX_ARTIFACT_BYTES:
             raise ValueError("Rendered preview exceeds the artifact size limit")
         digest = _sha256(data)
-        destination = self.root / f"{digest}.png"
+        destination = self.root / f"{digest}.{extension}"
         if destination.exists() and destination.is_symlink():
             raise ValueError("Preview artifact destination cannot be a symbolic link")
         handle, temporary_name = tempfile.mkstemp(
@@ -81,14 +113,14 @@ class PreviewArtifactStore:
             "path": str(destination),
             "sha256": digest,
             "size": len(data),
-            "media_type": "image/png",
+            "media_type": media_type,
         }
 
     def _prune(self, *, keep: Path) -> None:
         files = sorted(
             (
-                item for item in self.root.glob("*.png")
-                if item.is_file() and not item.is_symlink()
+                item for item in self.root.iterdir()
+                if item.suffix in {".png", ".wav"} and item.is_file() and not item.is_symlink()
             ),
             key=lambda item: item.stat().st_mtime,
             reverse=True,

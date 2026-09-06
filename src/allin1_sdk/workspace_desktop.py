@@ -18,7 +18,7 @@ from allin1_sdk.paths import gta_root_containing, project_root
 from allin1_sdk.release_paths import no_links, relative_path, strict_json, tree_files
 
 SCHEMA = 1
-MODULES = {"binary", "maps", "graph", "program", "runtime", "render", "recipe", "vehicle_identity", "data_tools", "code"}
+MODULES = {"binary", "maps", "graph", "program", "runtime", "render", "recipe", "vehicle_identity", "data_tools", "code", "native", "optimization"}
 _LOCKS: dict[str, threading.RLock] = {}
 
 
@@ -337,12 +337,20 @@ def _map_apply(payload):
     return {"session": inspect({"module": "maps", "descriptor": str(target)})}
 
 
-_INSPECT_FIELDS = {"module", "source", "workspace", "descriptor", "offset", "length", "gta_path", "detect_installed", "graph", "template", "source_file", "archive", "entry_id", "toolchain", "blender_executable", "render", "texture_dictionary", "settings", "camera", "edition", "model", "task", "comparison", "document"}
+_INSPECT_FIELDS = {"module", "source", "workspace", "descriptor", "offset", "length", "gta_path", "detect_installed", "graph", "template", "source_file", "archive", "entry_id", "toolchain", "blender_executable", "render", "texture_dictionary", "settings", "camera", "edition", "model", "task", "comparison", "document", "crash_event"}
 _REVIEW_FIELDS = {"module", "source", "workspace", "descriptor", "action", "destination", "expected_state_sha256",
-                  "offset", "expected_hex", "replacement_hex", "document", "edition", "gta_path", "archive", "entry_id", "toolchain", "settings", "targets", "configuration_files", "build_id", "create_archives", "render_id", "node_id", "model", "new_model", "new_handling", "expected_revision", "task", "comparison"}
+                  "offset", "expected_hex", "replacement_hex", "document", "edition", "gta_path", "archive", "entry_id", "toolchain", "settings", "targets", "configuration_files", "build_id", "create_archives", "render_id", "node_id", "model", "new_model", "new_handling", "expected_revision", "task", "comparison", "crash_event"}
+_INSPECT_FIELDS |= {"preview_region", "expected_state_sha256"}
+_REVIEW_FIELDS |= {"privacy_review_sha256"}
 
 
 def _adapter(module, operation):
+    if module == "optimization":
+        from allin1_sdk import optimization_package
+        return {"inspect": optimization_package.inspect, "review": optimization_package.review, "apply": optimization_package.apply}[operation]
+    if module == "native":
+        from allin1_sdk import native_workspace_desktop
+        return {"inspect": native_workspace_desktop.inspect, "review": native_workspace_desktop.review, "apply": native_workspace_desktop.apply}[operation]
     if module == "code":
         from allin1_sdk import code_desktop
         return {"inspect": code_desktop.inspect, "review": code_desktop.review, "apply": code_desktop.apply}[operation]

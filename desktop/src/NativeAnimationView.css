@@ -1,0 +1,20 @@
+.native-animation { border: 1px solid var(--border); padding: 12px; margin: 12px 0; }
+.native-animation summary { font-weight: 600; cursor: pointer; }
+.animation-controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.animation-controls label { min-width: 0; }
+.animation-controls select { max-width: 100%; }
+.animation-seek { display: flex; align-items: center; gap: 12px; margin: 12px 0; }
+.animation-seek input { flex: 1; min-width: 0; }
+.animation-layout { display: grid; grid-template-columns: minmax(160px, 240px) minmax(0, 1fr); gap: 12px; margin-top: 12px; }
+.animation-layout aside { max-height: 330px; overflow: auto; overscroll-behavior: contain; min-width: 0; overflow-wrap: anywhere; }
+.animation-layout label { display: block; min-width: 0; }
+.animation-layout select { width: 100%; min-width: 0; box-sizing: border-box; }
+.animation-layout svg { width: 100%; align-self: start; border: 1px solid var(--border); background: var(--surface); }
+.animation-layout dl { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.animation-layout dd { margin: 0; font-family: monospace; }
+@media (max-width: 850px) { .animation-layout { grid-template-columns: 1fr; } .animation-layout aside { max-height: 180px; } }
+.animation-model { margin: 14px 0; padding: 12px; border: 1px solid var(--border); border-radius: 5px; min-width: 0; }
+.animation-model canvas { display: block; width: 100%; height: auto; max-height: 540px; object-fit: contain; background: #131d23; }
+.animation-model canvas[hidden] { display: none; }
+.animation-model-source { overflow-wrap: anywhere; font-size: .75rem; }
+.animation-model-body { max-height: min(680px, max(280px, calc(100dvh - 240px))); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 0 8px 0 0; }

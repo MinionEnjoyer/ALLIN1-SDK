@@ -5,11 +5,13 @@ import { EditorView } from "@codemirror/view";
 import { HighlightStyle, StreamLanguage, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 import { xml } from "@codemirror/lang-xml";
+import { json } from "@codemirror/lang-json";
 import { lua } from "@codemirror/legacy-modes/mode/lua";
 import { openSearchPanel } from "@codemirror/search";
+import "./code-editor.css";
 
 export default function CodeEditor({ value, language, lineEnding, locked, onChange }: {
-  value: string; language: "xml" | "lua"; lineEnding: "LF" | "CRLF"; locked: boolean; onChange: (text: string) => void;
+  value: string; language: "xml" | "json" | "lua"; lineEnding: "LF" | "CRLF"; locked: boolean; onChange: (text: string) => void;
 }) {
   const host = useRef<HTMLDivElement>(null), editor = useRef<EditorView | null>(null);
   const editable = useRef(new Compartment()), change = useRef(onChange), current = useRef(value);
@@ -17,7 +19,7 @@ export default function CodeEditor({ value, language, lineEnding, locked, onChan
   useEffect(() => {
     if (!host.current) return;
     const view = new EditorView({ parent: host.current, doc: current.current, extensions: [
-      basicSetup, language === "xml" ? xml() : StreamLanguage.define(lua),
+      basicSetup, language === "xml" ? xml() : language === "json" ? json() : StreamLanguage.define(lua),
       syntaxHighlighting(HighlightStyle.define([
         { tag: tags.comment, color: "var(--muted)" },
         { tag: [tags.keyword, tags.tagName], color: "var(--code-keyword)" },

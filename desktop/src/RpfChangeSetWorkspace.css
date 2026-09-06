@@ -8,5 +8,4 @@
 .rpf-change-review-list li { padding: 8px 0; border-bottom: 1px solid var(--border); }
 .rpf-change-review-list code, .rpf-change-review-list small { display: block; margin-top: 5px; }
 .rpf-change-workspace .gxt-rpf-package > .gxt-actions { margin-top: 14px; }
-.rpf-workspace-tabs { flex-wrap: wrap; }
 .rpf-history-heading h3 { margin: 0 auto 0 0; }

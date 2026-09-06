@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from PIL import Image, UnidentifiedImageError
+from allin1_sdk.release_paths import no_links
 
 
 MAX_TEXTURE_XML_BYTES = 256 * 1024 * 1024
@@ -230,11 +231,11 @@ class TextureDictionaryWorkspace:
     """List and mutate textures while retaining a local undo history."""
 
     def __init__(self, workspace: str | Path) -> None:
-        authored = Path(workspace).expanduser()
+        authored = no_links(Path(workspace).expanduser())
         if authored.is_symlink():
             raise ValueError("YTD workspace cannot be a symbolic link")
         self.root = authored.resolve()
-        manifest_path = self.root / "native-workspace.json"
+        manifest_path = no_links(self.root / "native-workspace.json")
         if not self.root.is_dir() or not manifest_path.is_file() or manifest_path.is_symlink():
             raise ValueError("YTD workspace or its native manifest is missing or unsafe")
         try:
@@ -248,7 +249,7 @@ class TextureDictionaryWorkspace:
         if not isinstance(xml_meta, dict):
             raise ValueError("YTD workspace has no XML metadata")
         self.xml = self._member(xml_meta.get("path"), "XML")
-        self.assets = (self.root / "edit" / "assets").resolve()
+        self.assets = no_links(self.root / "edit" / "assets").resolve()
         if not self.xml.is_file() or self.xml.is_symlink():
             raise ValueError("YTD workspace XML is missing or unsafe")
         if not self.assets.is_dir() or self.assets.is_symlink():
@@ -426,6 +427,45 @@ class TextureDictionaryWorkspace:
         texture = next(item for item in catalog.textures if item.name.casefold() == normalized.casefold())
         return TextureEditResult("add", texture, history, catalog)
 
+    def rename(self, texture_name: str, new_name: str) -> TextureEditResult:
+        normalized = self._safe_texture_name(new_name)
+        tree, items = self._tree()
+        item = self._find(items, texture_name)
+        if self._text(item, "Name") == normalized:
+            raise ValueError("The texture already has this name")
+        if any(other is not item and self._text(other, "Name").casefold() == normalized.casefold() for other in items):
+            raise ValueError(f"YTD texture already exists: {normalized}")
+        # FileName stays stable: only the game-facing dictionary key changes.
+        # No image bytes or external model/material references are rewritten.
+        history = self._history("rename", texture_name, None)
+        item.find("Name").text = normalized
+        try:
+            self._write_tree(tree)
+            catalog = self.catalog()
+        except Exception:
+            self.xml.write_bytes((history / "workspace.xml").read_bytes())
+            raise
+        texture = next(record for record in catalog.textures if record.name == normalized)
+        return TextureEditResult("rename", texture, history, catalog)
+
+    def convert(self, texture_name: str, output_format: str, mip_levels: int) -> TextureEditResult:
+        from allin1_sdk.texture_conversion import convert_dds
+        initial_state = self.state_sha256()
+        tree, items = self._tree()
+        item = self._find(items, texture_name)
+        destination = self._asset_member(self._text(item, "FileName"))
+        with tempfile.TemporaryDirectory(prefix=".allin1-convert-", dir=self.assets) as temporary:
+            staged = Path(temporary) / "converted.dds"
+            metadata = convert_dds(destination, staged, output_format, mip_levels)
+            if self.state_sha256() != initial_state:
+                raise ValueError("Texture workspace changed during conversion")
+            history = self._history("convert", texture_name, destination)
+            self._update_item(item, metadata)
+            self._commit_tree_and_dependency(tree, staged, destination, history)
+        catalog = self.catalog()
+        texture = next(t for t in catalog.textures if t.name.casefold() == texture_name.casefold())
+        return TextureEditResult("convert", texture, history, catalog)
+
     def remove(self, texture_name: str) -> TextureEditResult:
         tree, items = self._tree()
         item = self._find(items, texture_name)
@@ -474,6 +514,9 @@ class TextureDictionaryWorkspace:
             record = json.loads((selected / "edit.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"Invalid YTD edit history: {exc}") from exc
+        if isinstance(record, dict) and record.get("operation") == "ytd_texture_batch":
+            from allin1_sdk.texture_batch import restore
+            return restore(self, selected, record)
         if not isinstance(record, dict) or record.get("operation") != "ytd_texture_edit":
             raise ValueError("Unsupported YTD edit history record")
         texture_name = str(record.get("texture", ""))
@@ -617,7 +660,7 @@ class TextureDictionaryWorkspace:
         relative = PurePosixPath(value.replace("\\", "/"))
         if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
             raise ValueError(f"YTD workspace {label} path is unsafe")
-        resolved = self.root.joinpath(*relative.parts).resolve()
+        resolved = no_links(self.root.joinpath(*relative.parts)).resolve()
         if not resolved.is_relative_to(self.root):
             raise ValueError(f"YTD workspace {label} path escapes its root")
         return resolved
@@ -629,7 +672,7 @@ class TextureDictionaryWorkspace:
             or any(part in {"", ".", ".."} for part in relative.parts)
         ):
             raise ValueError(f"YTD dependency path is unsafe: {value}")
-        resolved = self.assets.joinpath(*relative.parts).resolve()
+        resolved = no_links(self.assets.joinpath(*relative.parts)).resolve()
         if not resolved.is_relative_to(self.assets):
             raise ValueError(f"YTD dependency path escapes its asset folder: {value}")
         return resolved
@@ -681,6 +724,8 @@ class TextureDictionaryWorkspace:
 
     @staticmethod
     def _safe_texture_name(value: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError("Texture name must be text")
         name = value.strip()
         if (
             not name or len(name) > 120 or name in {".", ".."}

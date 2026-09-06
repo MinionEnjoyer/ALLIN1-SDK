@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "modules": [
+    {"module": "archive-browser", "test_file": "src/ArchiveBrowser.test.tsx", "test_title": "preserves exact nested identity and edition for preview and editor handoff"},
+    {"module": "native-resources", "test_file": "src/NativeWorkspace.test.tsx", "test_title": "guards drafts and requires the digest-bound review plus confirmation before save"},
     {"module": "xml-editor", "test_file": "src/OfflineAuthoring.integration.test.tsx", "test_title": "XML editor React happy path validates real source, reviews a diff and saves with a recovery backup"},
     {"module": "lua-editor", "test_file": "src/OfflineAuthoring.integration.test.tsx", "test_title": "Lua editor React happy path creates syntax-checked source and exports a copy without execution"},
     {"module": "data-tools", "test_file": "src/OfflineAuthoring.integration.test.tsx", "test_title": "data tools React happy path compares real metadata and exports reviewed reports"},

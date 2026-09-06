@@ -27,7 +27,7 @@
     ],
     "security": {
       "capabilities": ["desktop-main"],
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; object-src 'none'; frame-src 'none'; worker-src 'none'; child-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'",
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; object-src 'none'; frame-src 'none'; worker-src 'none'; child-src 'none'; media-src asset: http://asset.localhost; base-uri 'none'; form-action 'none'",
       "assetProtocol": {
         "enable": true,
         "scope": ["$APPCACHE/allin1-previews/**/*"]

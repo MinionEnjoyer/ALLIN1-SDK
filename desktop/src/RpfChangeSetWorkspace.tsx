@@ -3,7 +3,7 @@ import type { DesktopClient, Envelope, RpfArchiveResult } from "./types";
 import "./Gxt2Workspace.css";
 import "./RpfChangeSetWorkspace.css";
 
-export interface RpfChangeRequest { archive: string; archive_path: string; entry: string; kind: string; requestId: number }
+export interface RpfChangeRequest { archive: string; archive_path: string; entry: string; kind: string; gta_path?: string; requestId: number }
 export interface RpfChange { id: string; action: string; archive_path: string; entry: string; new_entry?: string; payload?: {path: string; size: number; sha256: string} }
 export interface RpfChangeSession {
   kind: "rpf_change_set_session"; change_set: string; state_sha256: string;
@@ -75,15 +75,20 @@ function validReview(v: RpfChangeReview, p: Record<string,unknown>, session: Rpf
   return same(v.after,expected);
 }
 
-export default function RpfChangeSetWorkspace({client,indexed,onGuardChange,targetRequest}: {
+export default function RpfChangeSetWorkspace({client,indexed,onGuardChange,targetRequest,onOpenPlan}: {
   client: DesktopClient; indexed: RpfArchiveResult | null; onGuardChange: (guarded:boolean)=>void; targetRequest: RpfChangeRequest | null;
+  onOpenPlan?: (path: string) => void;
 }) {
   const [session,setSession] = useState<RpfChangeSession|null>(null), [selected,setSelected] = useState("");
   const [kind,setKind] = useState("replace"), [layer,setLayer] = useState(""), [entry,setEntry] = useState(""), [newEntry,setNewEntry] = useState(""), [payloadPath,setPayloadPath] = useState("");
   const [game,setGame] = useState(""), [authorized,setAuthorized] = useState("");
+  const [capturedArchive, setCapturedArchive] = useState<{source: string; gta_path?: string} | null>(null);
+  const archiveContext = capturedArchive || indexed;
+  const decoderContext = game || (archiveContext && (!session || pathKey(archiveContext.source) === pathKey(session.archive.path)) ? archiveContext.gta_path : "");
   const [phase,setPhase] = useState<"idle"|"choosing"|"reading"|"writing">("idle");
   const [review,setReview] = useState<{value:RpfChangeReview;payload:Record<string,unknown>}|null>(null);
   const [confirmed,setConfirmed] = useState(false), [error,setError] = useState(""), [notice,setNotice] = useState("");
+  const [compiledPlan,setCompiledPlan] = useState<string | null>(null);
   const generation = useRef(0), job = useRef(""), inFlight = useRef(false), heading = useRef<HTMLHeadingElement>(null);
   const workspaceHeading = useRef<HTMLHeadingElement>(null), hadReview = useRef(false);
   const dirty = !!(entry || layer || newEntry || payloadPath), busy = phase !== "idle", locked = busy || !!review;
@@ -95,7 +100,8 @@ export default function RpfChangeSetWorkspace({client,indexed,onGuardChange,targ
   const reset = () => {setEntry("");setLayer("");setNewEntry("");setPayloadPath("");};
   const load = (s:RpfChangeSession, preserveDraft=false) => {
     if(!validSession(s)) throw new Error("Invalid change-set evidence; no workspace was replaced.");
-    if(s.change_set !== session?.change_set) {setAuthorized("");setGame("");}
+    setCompiledPlan(null);
+    if(s.change_set !== session?.change_set) {setAuthorized("");setGame("");if(!preserveDraft)setCapturedArchive(null);}
     setSession(s); setSelected(s.actions.find(row=>row.id===selected)?.id ?? s.actions[0]?.id ?? ""); if(!preserveDraft)reset();
   };
   useEffect(()=>{
@@ -103,6 +109,7 @@ export default function RpfChangeSetWorkspace({client,indexed,onGuardChange,targ
     if(locked || dirty) {setError("Finish or reset the current change before choosing another target.");return;}
     if(session && pathKey(session.archive.path)!==pathKey(targetRequest.archive)) {setError("This change set belongs to another archive. Open or create the matching change set first.");return;}
     setLayer(targetRequest.archive_path);setEntry(targetRequest.entry);setKind(targetRequest.kind==="directory"?"rmdir":"replace");
+    setCapturedArchive({source: targetRequest.archive, gta_path: targetRequest.gta_path || (indexed && pathKey(indexed.source) === pathKey(targetRequest.archive) ? indexed.gta_path : undefined)});
     // Only an explicit captured archive selection changes this draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[targetRequest]);
@@ -129,14 +136,14 @@ export default function RpfChangeSetWorkspace({client,indexed,onGuardChange,targ
     else {if(path){if(what==="payload")setPayloadPath(path);if(what==="game")setGame(path);if(what==="scope")setAuthorized(path);}inFlight.current=false;setPhase("idle");}
   });
   const prepare = (action:string,fields:Record<string,unknown>={})=>void start(async version=>{
-    let p:Record<string,unknown> = action==="create"?{action,archive:indexed?.source,gta_path:indexed?.gta_path}:
+    let p:Record<string,unknown> = action==="create"?{action,archive:archiveContext?.source,gta_path:archiveContext?.gta_path}:
       {action,change_set:session?.change_set,expected_sha256:session?.state_sha256,...fields};
     if(action==="create" || action==="compile"){
       setPhase("choosing");const destination=await client.selectRpfPlanDestination(action==="create"?"rpf-changes.json":"rpf-plan.json");
       if(generation.current!==version)return;
       if(!destination){inFlight.current=false;setPhase("idle");return;}
       p={...p,destination};
-      if(action==="compile")p={...p,...(game || indexed?.gta_path ? {gta_path:game || indexed?.gta_path}:{}),...(authorized?{authorized_root:authorized}:{})};
+      if(action==="compile")p={...p,...(decoderContext ? {gta_path:decoderContext}:{}),...(authorized?{authorized_root:authorized}:{})};
     }
     if(action==="stage")p.change={action:kind,archive_path:layer.replaceAll("\\","/"),entry:entry.replaceAll("\\","/"),...(["add","replace"].includes(kind)?{payload:payloadPath}:{}),...(kind==="rename"?{new_entry:newEntry.replaceAll("\\","/")}:{})};
     await read("review_rpf_change_set",p,result=>{const value=result as RpfChangeReview;if(!validReview(value,p,session))throw Error("Review does not match this change set and target. Nothing was authorized.");setReview({value,payload:p});setConfirmed(false);},version);
@@ -154,14 +161,16 @@ export default function RpfChangeSetWorkspace({client,indexed,onGuardChange,targ
           || pathKey(s.change_set)!==pathKey(v.action==="create"?v.destination:v.change_set)
           || (v.action==="compile" ? s.state_sha256!==v.state_sha256 || result.plan_status!==v.plan?.status : s.state_sha256!==result.output_sha256)) throw Error("Saved evidence could not be verified. Refresh before retrying.");
       load(s,v.action==="create" && dirty);setNotice(`${operations[v.action]} completed.\n${result.output}\nSHA-256: ${result.output_sha256}\n${v.action==="compile"?`Plan status: ${result.plan_status}. Archive execution and rollback remain separate operations.`:"Only the change-set document was saved. No archive was modified."}`);
+      if(v.action==="compile")setCompiledPlan(String(result.output));
     }finally{if(generation.current===version){inFlight.current=false;setPhase("idle");setReview(null);setConfirmed(false);}}});
   };
   return <section className="gxt-workspace rpf-change-workspace" aria-labelledby="rpf-change-title">
     <div className="gxt-title"><div><span className="pane-kicker">Archive authoring</span><h2 id="rpf-change-title" ref={workspaceHeading} tabIndex={-1}>RPF change sets</h2><p>Stage file and directory changes, then compile one verified plan. Archives stay unchanged.</p></div>
-      <div className="gxt-actions"><button className="quiet-button" disabled={locked || dirty} onClick={()=>choose("open")}>Open change set</button><button className="primary-button" disabled={!indexed || locked || (dirty && !!session)} onClick={()=>prepare("create")}>Create change set</button></div></div>
+      <div className="gxt-actions"><button className="quiet-button" disabled={locked || dirty} onClick={()=>choose("open")}>Open change set</button><button className="primary-button" disabled={!archiveContext || locked || (dirty && !!session)} onClick={()=>prepare("create")}>Create change set</button></div></div>
     {error && <p role="alert" className="error-banner">{error}</p>}{notice && <p role="status" className="gxt-notice">{notice}</p>}
+    {compiledPlan && onOpenPlan && <div className="gxt-actions"><code>{compiledPlan}</code><button className="quiet-button" disabled={locked || dirty} onClick={()=>onOpenPlan(compiledPlan)}>Open compiled plan in Execute & restore</button><small>Execution requires a fresh review and confirmation.</small></div>}
     {phase==="reading" && <div className="gxt-actions"><span role="status">Reading source and change-set evidence…</span><button className="quiet-button" onClick={cancel}>Cancel review</button></div>}
-    <div className="gxt-source"><strong>{session?`${session.actions.length} staged action${session.actions.length===1?"":"s"} · ${session.archive.edition}`:"No change set open"}</strong><code>{session?.change_set || "Create a change set from Archive inspection, or open an existing .json change set."}</code><code>Archive: {session?.archive.path || indexed?.source || "Select an archive in Archive inspection"}</code></div>
+    <div className="gxt-source"><strong>{session?`${session.actions.length} staged action${session.actions.length===1?"":"s"} · ${session.archive.edition}`:"No change set open"}</strong><code>{session?.change_set || "Create a change set from the captured browser/inspector archive, or open an existing .json change set."}</code><code>Archive: {session?.archive.path || archiveContext?.source || "Select an archive in Archive inspection"}</code></div>
     <div className="gxt-panels rpf-change-panels">
       <section className="gxt-pane" aria-label="Staged RPF actions"><header><span className="pane-kicker">Ordered changes</span><h3>Staged actions</h3></header>
         <div className="gxt-rows">{session?.actions.map((row,i)=><button key={row.id} disabled={locked || dirty} aria-pressed={selected===row.id} className={selected===row.id?"selected":""} onClick={()=>setSelected(row.id)}><span>{i+1}. {actions[row.action]}</span><code>{row.archive_path?`${row.archive_path}::`:"::"}{row.entry}</code></button>)}{!session?.actions.length && <p className="gxt-empty">No changes staged. Choose an exact member or enter a new path.</p>}</div>
@@ -184,7 +193,7 @@ export default function RpfChangeSetWorkspace({client,indexed,onGuardChange,targ
       </div></aside>
     </div>
     {session && <section className="gxt-rpf-package" aria-label="Compile RPF plan"><span className="pane-kicker">Verified handoff</span><h3>Compile an atomic plan</h3><p>Re-index the original archive and verify payloads, target ownership and tree conflicts. Export creates a new JSON plan, never an archive write.</p>
-      <div className="gxt-copy"><button className="quiet-button" disabled={locked || dirty} onClick={()=>choose("game")}>Choose GTA context</button><code>{game || indexed?.gta_path || "Auto-detect matching GTA installation"}</code></div>
+      <div className="gxt-copy"><button className="quiet-button" disabled={locked || dirty} onClick={()=>choose("game")}>Choose GTA context</button><code>{decoderContext || "Auto-detect matching GTA installation"}</code></div>
       <div className="gxt-copy"><button className="quiet-button" disabled={locked || dirty} onClick={()=>choose("scope")}>Choose plan workspace folder</button><code>{authorized || "No external execution scope authorized"}</code>{authorized && <button className="quiet-button" disabled={locked || dirty} onClick={()=>setAuthorized("")}>Clear scope</button>}</div>
       <p className="gxt-note">For external archives, explicitly select the folder directly containing the RPF to authorize that scope in the plan. Without it, a blocked plan can still be exported for inspection. This screen cannot execute it.</p>
       <div className="gxt-actions"><button className="primary-button" disabled={locked || dirty || !session.actions.length} onClick={()=>prepare("compile")}>Review compiled plan</button></div>

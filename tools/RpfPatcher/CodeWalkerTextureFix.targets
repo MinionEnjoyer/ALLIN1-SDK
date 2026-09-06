@@ -1,0 +1,49 @@
+<Project>
+  <!-- SDK-owned build overlay: leave the pinned upstream checkout unchanged. -->
+  <UsingTask TaskName="Allin1TextureMipSources" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <SourceRoot ParameterType="System.String" Required="true" />
+      <OutputRoot ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System" />
+      <Using Namespace="System.IO" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        string ReplaceOnce(string text, string before, string after) {
+            int index = text.IndexOf(before, StringComparison.Ordinal);
+            if (index < 0 || text.IndexOf(before, index + before.Length, StringComparison.Ordinal) >= 0)
+                throw new InvalidOperationException("Pinned CodeWalker source changed; review the SDK geometry/texture overlay before rebuilding.");
+            return text.Substring(0, index) + after + text.Substring(index + before.Length);
+        }
+        void WriteChanged(string path, string text) {
+            if (!File.Exists(path) || File.ReadAllText(path) != text) File.WriteAllText(path, text);
+        }
+        Directory.CreateDirectory(OutputRoot);
+        var dds = File.ReadAllText(Path.Combine(SourceRoot, "GameFiles", "Utils", "DDSIO.cs")).Replace("\r\n", "\n");
+        dds = ReplaceOnce(dds, "images[i].width = img.Width / div;", "images[i].width = Math.Max(1, img.Width / div);");
+        dds = ReplaceOnce(dds, "images[i].height = img.Height / div;", "images[i].height = Math.Max(1, img.Height / div);");
+        WriteChanged(Path.Combine(OutputRoot, "DDSIO.cs"), dds);
+        var texture = File.ReadAllText(Path.Combine(SourceRoot, "GameFiles", "Resources", "Texture.cs")).Replace("\r\n", "\n");
+        texture = ReplaceOnce(texture, "var width = Width / div;", "var width = Math.Max(1, Width / div);");
+        texture = ReplaceOnce(texture, "var height = Height / div;", "var height = Math.Max(1, Height / div);");
+        texture = ReplaceOnce(texture,
+            "int length = Stride * Height;\n                for (int i = 0; i < Levels; i++)\n                {\n                    fullLength += length;\n                    length /= 4;\n                }",
+            "var dxgiFormat = DDSIO.GetDXGIFormat((TextureFormat)format);\n                for (int i = 0; i < Levels; i++)\n                {\n                    DDSIO.DXTex.ComputePitch(dxgiFormat, Math.Max(1, Width >> i), Math.Max(1, Height >> i), out var rowPitch, out var slicePitch, 0);\n                    fullLength = checked(fullLength + slicePitch);\n                }");
+        WriteChanged(Path.Combine(OutputRoot, "Texture.cs"), texture);
+        var bounds = File.ReadAllText(Path.Combine(SourceRoot, "GameFiles", "Resources", "Bounds.cs")).Replace("\r\n", "\n");
+        bounds = ReplaceOnce(bounds, "Quantum = (BoxMax - BoxMin) * 0.5f / 32767.0f;",
+            "// SDK: signed vertex coordinates are relative to GeometryCenter, not the AABB midpoint.\n            var extent = (BoxMax - BoxMin).Abs() * 0.5f;\n            if (Vertices != null) foreach (var vertex in Vertices) extent = Vector3.Max(extent, vertex.Abs());\n            if (VerticesShrunk != null) foreach (var vertex in VerticesShrunk) extent = Vector3.Max(extent, vertex.Abs());\n            Quantum = Vector3.Max(extent, new Vector3(1e-9f)) / 32767.0f;");
+        WriteChanged(Path.Combine(OutputRoot, "Bounds.cs"), bounds);
+      ]]></Code>
+    </Task>
+  </UsingTask>
+  <Target Name="Allin1CorrectTextureMipLayout" BeforeTargets="CoreCompile" Condition="'$(MSBuildProjectName)' == 'CodeWalker.Core'">
+    <PropertyGroup><Allin1MipRoot>$(IntermediateOutputPath)allin1-texture-mips</Allin1MipRoot></PropertyGroup>
+    <Allin1TextureMipSources SourceRoot="$(MSBuildProjectDirectory)" OutputRoot="$(Allin1MipRoot)" />
+    <ItemGroup>
+      <Compile Remove="GameFiles\Utils\DDSIO.cs;GameFiles\Resources\Texture.cs;GameFiles\Resources\Bounds.cs" />
+      <Compile Include="$(Allin1MipRoot)/DDSIO.cs;$(Allin1MipRoot)/Texture.cs;$(Allin1MipRoot)/Bounds.cs" />
+      <FileWrites Include="$(Allin1MipRoot)/DDSIO.cs;$(Allin1MipRoot)/Texture.cs;$(Allin1MipRoot)/Bounds.cs" />
+    </ItemGroup>
+  </Target>
+</Project>

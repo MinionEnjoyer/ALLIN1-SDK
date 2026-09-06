@@ -49,7 +49,15 @@ def verify_export(package_path, original_archive, patcher, game_context, launche
         service._run_rpf_command = run
         service.install(manifest)
         assert read() == payload and read(True) == unrelated_original
-        assert service._read_receipt(manifest.mod_id)["schema_version"] == manifest.schema_version
+        installed_receipt = service._read_receipt(manifest.mod_id)
+        assert installed_receipt["schema_version"] == manifest.schema_version
+        from allin1.sdk_provenance import read as read_provenance
+        authored = read_provenance(manifest, "Enhanced")
+        assert authored is not None, "SDK publication is missing its build manifest"
+        lineage = installed_receipt["sdk_provenance"]
+        assert lineage["artifact_id"] == authored["artifact"]["artifact_id"]
+        assert lineage["build_fingerprint"] == authored["artifact"]["build"]["build_fingerprint"]
+        assert lineage["rpf_members"][0]["sha256"] == hashlib.sha256(read()).hexdigest()
         service.set_enabled(manifest.mod_id, False)
         assert read() == original and read(True) == unrelated_original
         service.set_enabled(manifest.mod_id, True)

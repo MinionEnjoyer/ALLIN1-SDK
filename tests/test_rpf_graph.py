@@ -125,7 +125,9 @@ def test_graph_build_binds_report_and_discards_output_on_graph_drift(tmp_path):
             archive = Path(output)
             archive.write_bytes(b"RPF7-built")
             report = archive.with_name(f"{archive.name}.validation.json")
-            report.write_text(json.dumps({"status": "verified"}), encoding="utf-8")
+            from test_artifact_identity import build
+            from allin1_sdk.artifact_contract import seal
+            report.write_text(json.dumps(seal({"status": "verified", "build": build()}, "report_sha256")), encoding="utf-8")
             return archive, report
 
     archive, report_path = RpfPackageGraph.build(
@@ -138,6 +140,8 @@ def test_graph_build_binds_report_and_discards_output_on_graph_drift(tmp_path):
     assert report["materialized_source_ephemeral"] is True
     assert report["graph"]["path"] == str(graph)
     assert report["graph"]["sha256"] == hashlib.sha256(graph.read_bytes()).hexdigest()
+    from allin1_sdk.artifact_contract import verify_seal
+    verify_seal(report, "report_sha256")
 
     class DriftingBuilder(FakeBuilder):
         def build(self, loose, output):
@@ -246,7 +250,9 @@ def test_imported_graph_emits_inert_canonical_origin_change_plan(tmp_path):
             desired.parent.mkdir(parents=True, exist_ok=True)
             desired.write_bytes(b"RPF7-desired")
             report = desired.with_name(f"{desired.name}.validation.json")
-            report.write_text('{"status":"verified"}', encoding="utf-8")
+            from test_artifact_identity import build
+            from allin1_sdk.artifact_contract import seal
+            report.write_text(json.dumps(seal({"status": "verified", "build": build()}, "report_sha256")), encoding="utf-8")
             return desired, report
 
     class PlanningService:
@@ -407,7 +413,9 @@ def test_rpf_graph_cli_covers_create_mutate_inspect_materialize_and_build(
             archive = Path(output)
             archive.write_bytes(b"RPF7")
             report = archive.with_name(f"{archive.name}.validation.json")
-            report.write_text('{"status":"verified"}', encoding="utf-8")
+            from test_artifact_identity import build
+            from allin1_sdk.artifact_contract import seal
+            report.write_text(json.dumps(seal({"status": "verified", "build": build()}, "report_sha256")), encoding="utf-8")
             return archive, report
 
     monkeypatch.setattr("allin1_sdk.cli.RpfArchiveBuilder", FakeBuilder)

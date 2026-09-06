@@ -21,6 +21,8 @@ async function setup(member = false) {
     const publication = rpfPublicationPreview({ ...payload, root_member: member });
     return { kind: "gxt2_rpf_published", archive: payload.destination, sha256: "7".repeat(64), archive_size: 528000,
       package_id: publication.metadata.id, edition: "enhanced", target: publication.metadata.target,
+      artifact_id: publication.artifact_id, build_fingerprint: publication.build_fingerprint, build_mode: publication.build_mode,
+      input_build_fingerprint: publication.input_build_fingerprint,
       payload_sha256: publication.payload_sha256, publication_mode: publication.publication_mode, manifest_schema_version: publication.manifest_schema_version,
       entry: publication.entry, original_sha256: publication.original_sha256, members: publication.members, review_sha256: payload.review_sha256,
       file_write_performed: true, game_write_performed: false, install_performed: false, upload_performed: false };
@@ -43,6 +45,9 @@ it("reviews the exact whole-archive target and confirms a validated ZIP export",
   expect(screen.getByRole("button", { name: "Export ALLIN1 ZIP" })).toBeDisabled();
   expect(screen.getByText(/Installing this ZIP can replace unrelated edits/)).toBeInTheDocument();
   expect(screen.getByText("payload/text-fixture.rpf")).toBeInTheDocument();
+  expect(screen.getByText("sdk-artifact.json")).toBeInTheDocument();
+  await user.click(screen.getByText("Publication build identity"));
+  expect(screen.getByText("f".repeat(64))).toBeVisible();
   await user.click(screen.getByRole("checkbox", { name: /whole-archive replacement/ }));
   await user.click(screen.getByRole("button", { name: "Export ALLIN1 ZIP" }));
   expect(await screen.findByRole("status")).toHaveTextContent("ALLIN1 ZIP exported and validated");
@@ -133,7 +138,7 @@ it("exports only the selected outer-archive dictionary with compatibility and or
   expect(screen.getByText("payload/replacement.gxt2")).toBeInTheDocument();
   expect(screen.queryByText("payload/text-fixture.rpf")).not.toBeInTheDocument();
   expect(screen.getByText("Required original SHA-256")).toBeInTheDocument();
-  expect(screen.getByText("2,190 bytes")).toBeInTheDocument();
+  expect(screen.getByText("4,590 bytes")).toBeInTheDocument();
   await user.click(screen.getByRole("checkbox", { name: /exact-member patch/ }));
   await user.click(screen.getByRole("button", { name: "Export ALLIN1 ZIP" }));
   expect(await screen.findByRole("status")).toHaveTextContent("Exact member: global.gxt2");
@@ -172,7 +177,7 @@ it("requires a fresh confirmation when switching export scope and preserves it a
   expect(screen.getByRole("checkbox")).not.toBeChecked();
 });
 
-it.each(["entry", "original_sha256", "manifest_schema_version", "publication_mode"] as const)("rejects mismatched member review %s", async field => {
+it.each(["entry", "original_sha256", "manifest_schema_version", "publication_mode", "artifact_id", "build_fingerprint", "build_mode", "input_build_fingerprint"] as const)("rejects mismatched member review %s", async field => {
   const { user, client, apply } = await setup(true);
   await user.selectOptions(screen.getByLabelText("Export scope"), "member");
   const original = client.startJob.bind(client);
@@ -185,4 +190,13 @@ it.each(["entry", "original_sha256", "manifest_schema_version", "publication_mod
   await user.click(screen.getByRole("button", { name: "Review ALLIN1 ZIP" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Unexpected GXT2 review");
   expect(apply).not.toHaveBeenCalled();
+});
+
+it.each(["artifact_id", "build_fingerprint", "build_mode", "input_build_fingerprint"])("rejects changed publication outcome %s", async field => {
+  const { user, apply, result } = await setup();
+  apply.mockImplementation(async payload => response({ ...result(payload), [field]: "changed" }));
+  await review(user);
+  await user.click(screen.getByRole("checkbox"));
+  await user.click(screen.getByRole("button", { name: "Export ALLIN1 ZIP" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("ALLIN1 ZIP outcome could not be verified");
 });

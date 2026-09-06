@@ -2,7 +2,11 @@
 using System;
 using System.IO;
 using System.Reflection;
+using System.Linq;
+using System.Collections.Generic;
+using System.Text.Json;
 using CodeWalker.GameFiles;
+using CodeWalker.Utils;
 
 class ExactEntryTests
 {
@@ -48,6 +52,10 @@ class ExactEntryTests
 
     static void Main()
     {
+        CheckTextureMipRoundTrips();
+        CheckCollisionQuantization();
+        CheckRelRelationships();
+        checks += AnimationSampleTests.Run();
         var probe = Path.Combine(Path.GetTempPath(), "allin1-open-header-" + Guid.NewGuid().ToString("N") + ".rpf");
         try
         {
@@ -141,5 +149,81 @@ class ExactEntryTests
         Folder(archive.Root, "child.rpf");
         Reject<InvalidOperationException>(() => Find("FindExactFileEntry", archive, "child.rpf"));
         Console.WriteLine($"Exact native member resolution: {checks} checks passed (no game required).");
+    }
+
+    static void CheckCollisionQuantization()
+    {
+        var geometry = new BoundBVH {
+            BoxMin = new SharpDX.Vector3(-1, -1, -1), BoxMax = new SharpDX.Vector3(1, 2.5f, 1),
+            Vertices = new[] { new SharpDX.Vector3(0, 2, 0), new SharpDX.Vector3(-3, 0, 0) },
+            VerticesShrunk = new[] { new SharpDX.Vector3(0, 0, -4) }
+        };
+        geometry.CalculateQuantum();
+        foreach (var vertex in geometry.Vertices.Concat(geometry.VerticesShrunk))
+        {
+            var restored = new BoundVertex_s(vertex / geometry.Quantum).Vector * geometry.Quantum;
+            if ((restored - vertex).Length() > 0.0002f) throw new Exception("Collision vertex clamped outside off-centre quantization range");
+            checks++;
+        }
+        geometry.Vertices = new[] { SharpDX.Vector3.Zero };
+        geometry.VerticesShrunk = null;
+        geometry.BoxMin = geometry.BoxMax = SharpDX.Vector3.Zero;
+        geometry.CalculateQuantum();
+        if (!(geometry.Quantum.X > 0 && geometry.Quantum.Y > 0 && geometry.Quantum.Z > 0)) throw new Exception("Degenerate collision bounds have zero quantum");
+        checks++;
+    }
+
+    static void CheckRelRelationships()
+    {
+        const string xml = "<Dat54><Version value=\"1\"/><ContainerPaths><Item>audio/demo.awc</Item></ContainerPaths><Items>"
+            + "<Item type=\"LoopingSound\"><Name>demo_a</Name><Header><Flags value=\"32768\"/><Category>demo_b</Category></Header><ChildSound>demo_b</ChildSound></Item>"
+            + "<Item type=\"LoopingSound\"><Name>demo_b</Name><Header><Flags value=\"0\"/></Header><ChildSound>demo_external</ChildSound></Item>"
+            + "</Items></Dat54>";
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(RpfPatcher.RelRelationships.Analyze(xml)));
+        var graph = doc.RootElement;
+        var edges = graph.GetProperty("edges").EnumerateArray().ToArray();
+        if (!edges.Any(edge => edge.GetProperty("label").GetString() == "sound" && edge.GetProperty("resolution").GetString() == "local"))
+            throw new Exception("REL binary reload must populate typed child-sound links");
+        checks++;
+        if (!edges.Any(edge => edge.GetProperty("label").GetString() == "category" && edge.GetProperty("resolution").GetString() == "external: unresolved"))
+            throw new Exception("Matching hashes from different REL families must not be linked locally");
+        checks++;
+        if (!graph.GetProperty("nodes").EnumerateArray().Any(node => node.GetProperty("kind").GetString() == "container path" && node.GetProperty("search").GetString() == "demo.awc"))
+            throw new Exception("REL container catalog must remain searchable without inventing record bindings");
+        checks++;
+        Reject<System.Xml.XmlException>(() => RpfPatcher.RelRelationships.Analyze("<!DOCTYPE Dat54 [<!ENTITY x 'a'>]><Dat54>&x;</Dat54>"));
+        Reject<InvalidDataException>(() => RpfPatcher.RelRelationships.Analyze("<Dat999><Items/></Dat999>"));
+    }
+
+    static void CheckTextureMipRoundTrips()
+    {
+        bool previous = RpfManager.IsGen9;
+        try
+        {
+            foreach (bool gen9 in new[] { false, true })
+            foreach (var format in new[] { TextureFormat.D3DFMT_A8R8G8B8, TextureFormat.D3DFMT_DXT1, TextureFormat.D3DFMT_DXT3, TextureFormat.D3DFMT_DXT5 })
+            {
+                RpfManager.IsGen9 = gen9;
+                int length = format == TextureFormat.D3DFMT_A8R8G8B8 ? 684 : format == TextureFormat.D3DFMT_DXT1 ? 104 : 208;
+                byte[] pixels = Enumerable.Range(0, length).Select(i => (byte)(i % 251)).ToArray();
+                var texture = new Texture { Name = "mip_fixture", NameHash = JenkHash.GenHash("mip_fixture"),
+                    Width = 16, Height = 8, Depth = 1, Levels = 5, Format = format,
+                    Data = new TextureData { FullData = pixels } };
+                texture.Stride = texture.CalculateStride();
+                if (texture.CalcDataSize() != length) throw new Exception("Incorrect full mip-chain size: " + format);
+                var dictionary = new TextureDictionary();
+                dictionary.BuildFromTextureList(new List<Texture> { texture });
+                byte[] encoded = new YtdFile { TextureDict = dictionary }.Save();
+                var loaded = new YtdFile();
+                loaded.Load(encoded);
+                var reparsed = loaded.TextureDict.Textures.data_items[0];
+                if (!reparsed.Data.FullData.SequenceEqual(pixels)) throw new Exception("Native texture mip payload changed: " + format);
+                var dds = DDSIO.GetTexture(DDSIO.GetDDSFile(reparsed));
+                if (dds.Levels != 5 || dds.Width != 16 || dds.Height != 8 || !dds.Data.FullData.SequenceEqual(pixels))
+                    throw new Exception("DDS mip payload changed: " + format);
+                checks++;
+            }
+        }
+        finally { RpfManager.IsGen9 = previous; }
     }
 }

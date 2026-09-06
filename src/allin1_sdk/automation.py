@@ -19,8 +19,10 @@ WORKFLOWS = {
     "program": ("Build flow", ["graph", "template", "workspace"], ["create", "save", "plan", "run"]),
     "binary": ("Binary editor", ["source", "workspace", "archive", "entry_id", "gta_path"], ["create", "patch", "undo", "build"]),
     "maps": ("Map workbench", ["descriptor", "source"], ["create", "save", "build"]),
-    "code": ("XML and Lua editors", ["source", "document"], ["save", "save_copy"]),
-    "data_tools": ("Data tools", ["source", "comparison", "task"], ["export"]),
+    "code": ("XML, JSON and Lua editors", ["source", "document"], ["save", "save_copy"]),
+    "native": ("Native resources and audio", ["source", "workspace", "archive", "entry_id", "gta_path", "edition"], ["export", "save_xml", "export_dependency", "export_validation", "build", "plan_replacement"]),
+    "data_tools": ("Data tools and asset/build diagnostics", ["source", "comparison", "document", "task", "settings", "edition", "gta_path", "crash_event"], ["export"]),
+    "optimization": ("Reversible package optimization", ["source", "workspace", "comparison", "settings", "edition", "gta_path", "preview_region"], ["export", "recover"]),
     "recipe": ("Package recipes", ["source", "edition"], ["managed", "batches", "created", "compile"]),
     "vehicle_identity": ("Vehicle identity", ["workspace", "model"], ["migrate"]),
     "runtime": ("Story controller", ["toolchain"], ["build"]),
@@ -28,8 +30,10 @@ WORKFLOWS = {
 }
 
 WORKBENCH_ROUTES = {
+    "native-resources": {"module": "native"},
+    "archive-browser": {"desktop_operations": ["browse_game_files", "search_game_files"], "note": "Read-only typed browser jobs preserve exact archive member identities; reviewed outputs use archive utilities."},
     "xml-editor": {"module": "code"}, "lua-editor": {"module": "code"},
-    "data-tools": {"module": "data_tools"}, "map-workbench": {"module": "maps"},
+    "data-tools": {"module": "data_tools", "additional_module": "optimization"}, "map-workbench": {"module": "maps"},
     "story-runtime": {"module": "runtime"}, "render-studio": {"module": "render"},
     "rpf-binary": {"module": "binary"}, "rpf-package-layout": {"module": "graph"},
     "rpf-build-flow": {"module": "program"}, "package-recipes": {"module": "recipe"},

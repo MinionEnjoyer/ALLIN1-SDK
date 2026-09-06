@@ -15,6 +15,8 @@ from typing import Any
 
 from allin1_sdk.processes import run_hidden
 from allin1_sdk.rpf_tools import RpfExplorerService, _content_fingerprint
+from allin1_sdk import artifact_identity
+from allin1_sdk.artifact_contract import seal
 
 
 RPF_BUILD_REPORT_SCHEMA = 2
@@ -286,6 +288,7 @@ class RpfArchiveBuilder:
             raise FileExistsError(f"RPF validation report already exists: {report_path}")
         output.parent.mkdir(parents=True, exist_ok=True)
         before = self._snapshot(source)
+        build = artifact_identity.current(resource_root=self.service.project_root)
         required_bytes = before.byte_count * 2 + _COPY_MARGIN_BYTES
         if shutil.disk_usage(output.parent).free < required_bytes:
             raise ValueError("Not enough free disk space for staged RPF creation and validation")
@@ -351,6 +354,7 @@ class RpfArchiveBuilder:
                 "schema_version": RPF_BUILD_REPORT_SCHEMA,
                 "operation": "rpf_archive_build",
                 "status": "verified",
+                "build": build,
                 "created_utc": datetime.now(timezone.utc).isoformat(),
                 "source": str(source),
                 "output": str(output),
@@ -394,10 +398,21 @@ class RpfArchiveBuilder:
                     "stock_game_files_modified": False,
                 },
             }
+            # Keep the complete, existing 25,000-file source inventory; do not
+            # truncate it to the smaller install-envelope input limit. This
+            # sealed construction receipt is an input to package publication,
+            # not an installable sdk-artifact.json masquerading as a package.
+            report = seal(report, "report_sha256")
             stage_report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-            stage_archive.replace(output)
+            if before != self._snapshot(source):
+                raise RuntimeError("RPF source changed during readback; output was discarded")
+            if artifact_identity.current(resource_root=self.service.project_root) != build:
+                raise RuntimeError("SDK or helper changed during RPF creation; output was discarded")
+            # Hard-link publication is exclusive on supported filesystems on
+            # both Windows and POSIX. Never replace a post-preflight competitor.
+            os.link(stage_archive, output)
             try:
-                stage_report.replace(report_path)
+                os.link(stage_report, report_path)
             except Exception:
                 output.unlink(missing_ok=True)
                 raise

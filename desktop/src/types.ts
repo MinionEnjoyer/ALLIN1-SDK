@@ -6,6 +6,7 @@ export type Risk =
   | "unclassified";
 
 export type Operation =
+  | "browse_game_files" | "search_game_files"
   | "handshake"
   | "catalog"
   | "execute"
@@ -29,6 +30,8 @@ export type Operation =
   | "review_texture_edit"
   | "apply_texture_edit"
   | "apply_texture_history"
+  | "review_texture_export"
+  | "apply_texture_export"
   | "review_texture_build"
   | "apply_texture_build"
   | "assistant_status"
@@ -202,13 +205,13 @@ export interface DesktopClient {
     payload: Record<string, unknown>,
   ): Promise<Envelope>;
   textureAuthoringAction(
-    operation: "create_texture_workspace" | "apply_texture_edit" | "apply_texture_history" | "apply_texture_build",
+    operation: "create_texture_workspace" | "apply_texture_edit" | "apply_texture_history" | "apply_texture_build" | "apply_texture_export",
     payload: Record<string, unknown>,
   ): Promise<Envelope>;
   applyGxt2Action(payload: Record<string, unknown>): Promise<Envelope>;
   selectGxt2BuildDestination(suggestedName: string): Promise<string | null>;
   startJob(
-    operation: "inspect_ped_workbench" | "review_ped_authoring" | "list_rpf_transactions" | "inspect_rpf_transaction" | "review_rpf_transaction" | "inspect_rpf_change_set" | "review_rpf_change_set" | "inspect_authoring_workspace" | "review_workspace_action" | "inspect_gxt2_workspace" | "review_gxt2_action" | "inspect_weapon_workbench" | "review_weapon_authoring" | "execute" | "inspect_package" | "preview_asset" | "inspect_model_materials" | "inspect_model_material_workspace" | "review_model_material_workspace" | "review_model_material_edit" | "review_model_material_build" | "inspect_texture_workspace" | "review_texture_workspace" | "preview_texture_workspace" | "review_texture_edit" | "review_texture_build" | "assistant_status" | "assistant_prompt" | "inspect_rpf_archive" | "review_rpf_utility" | "inspect_vehicle_project" | "inspect_vehicle_authoring_workspace" | "review_vehicle_authoring_workspace" | "review_vehicle_authoring_edit" | "review_vehicle_authoring_appearance" | "inspect_vehicle_authoring_tuning" | "review_vehicle_authoring_tuning" | "review_vehicle_authoring_light_profile" | "review_vehicle_authoring_axles" | "inspect_vehicle_authoring_axle_skeleton" | "review_vehicle_authoring_transmission" | "review_vehicle_authoring_distribution" | "review_vehicle_package_build" | "inspect_recipe" | "inspect_package_receipts" | "review_package_lifecycle" | "inspect_vehicle_quick_import" | "review_vehicle_quick_import" | "review_vehicle_oiv_export" | "review_vehicle_package_publish" | "check_update",
+    operation: "browse_game_files" | "search_game_files" | "inspect_ped_workbench" | "review_ped_authoring" | "list_rpf_transactions" | "inspect_rpf_transaction" | "review_rpf_transaction" | "inspect_rpf_change_set" | "review_rpf_change_set" | "inspect_authoring_workspace" | "review_workspace_action" | "inspect_gxt2_workspace" | "review_gxt2_action" | "inspect_weapon_workbench" | "review_weapon_authoring" | "execute" | "inspect_package" | "preview_asset" | "inspect_model_materials" | "inspect_model_material_workspace" | "review_model_material_workspace" | "review_model_material_edit" | "review_model_material_build" | "inspect_texture_workspace" | "review_texture_workspace" | "preview_texture_workspace" | "review_texture_edit" | "review_texture_build" | "review_texture_export" | "assistant_status" | "assistant_prompt" | "inspect_rpf_archive" | "review_rpf_utility" | "inspect_vehicle_project" | "inspect_vehicle_authoring_workspace" | "review_vehicle_authoring_workspace" | "review_vehicle_authoring_edit" | "review_vehicle_authoring_appearance" | "inspect_vehicle_authoring_tuning" | "review_vehicle_authoring_tuning" | "review_vehicle_authoring_light_profile" | "review_vehicle_authoring_axles" | "inspect_vehicle_authoring_axle_skeleton" | "review_vehicle_authoring_transmission" | "review_vehicle_authoring_distribution" | "review_vehicle_package_build" | "inspect_recipe" | "inspect_package_receipts" | "review_package_lifecycle" | "inspect_vehicle_quick_import" | "review_vehicle_quick_import" | "review_vehicle_oiv_export" | "review_vehicle_package_publish" | "check_update",
     payload: Record<string, unknown>,
     revision: string,
     onEvent: (message: Envelope) => void,
@@ -334,7 +337,7 @@ export interface VehicleViewportCollisionPrimitive extends Record<string, unknow
   kind: string;
   count: number;
   overlay: boolean;
-  fidelity: "exact mesh" | "diagnostic hull" | "count only";
+  fidelity: "exact mesh" | "diagnostic hull" | "box surface" | "tessellated surface" | "count only";
 }
 
 export interface VehicleViewportCollisionDictionary extends Record<string, unknown> {
@@ -665,7 +668,7 @@ export interface TextureEditReview extends Record<string, unknown> {
   workspace: string;
   revision: number;
   state_sha256: string;
-  action: "replace" | "add" | "remove";
+  action: "replace" | "add" | "remove" | "rename" | "convert";
   texture_name: string;
   source: TextureSourceInspection | null;
   changes: ModelMaterialChange[];
@@ -714,6 +717,8 @@ export interface TextureBuildResult extends Record<string, unknown> {
     reparsed_semantic_xml_sha256?: string;
     semantic_xml_match: boolean;
     dependency_count: number;
+    texture_payloads_match: boolean;
+    texture_payload_count: number;
   };
   validation_report: string;
   validation_report_sha256: string;

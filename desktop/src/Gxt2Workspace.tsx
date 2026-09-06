@@ -26,6 +26,8 @@ export interface Gxt2Review {
 export interface RpfPackageMetadata { id: string; name: string; version: string; author: string; target: string }
 export type RpfPublicationMode = "whole_archive" | "member";
 export interface Gxt2RpfPublication {
+  artifact_id: string; build_fingerprint: string; build_mode: string;
+  input_build_fingerprint: string | null;
   source_package: string; metadata: RpfPackageMetadata; edition: string; archive_sha256: string;
   members: { path: string; size: number; sha256: string }[]; total_bytes: number; required_free_bytes: number;
   manifest_text: string; whole_archive_replacement: boolean; install_performed: boolean;
@@ -40,7 +42,7 @@ const memberSchema = (binding: Gxt2ArchiveBinding | null | undefined) => binding
 function validPublication(value: Gxt2RpfPublication | undefined, session: Gxt2Session, source: string, metadata: RpfPackageMetadata, mode: RpfPublicationMode) {
   const archiveName = session.source_binding?.outer_archive.split(/[\\/]/).pop();
   const memberOnly = mode === "member", payloadPath = memberOnly ? "payload/replacement.gxt2" : `payload/${archiveName}`;
-  const expected = ["README.txt", "allin1.rpf-build.json", "mod.toml", payloadPath].sort();
+  const expected = ["README.txt", "allin1.rpf-build.json", "mod.toml", payloadPath, "sdk-artifact.json"].sort();
   return !!value && normalizedPath(value.source_package) === normalizedPath(source)
     && value.publication_mode === mode && value.manifest_schema_version === (memberOnly ? memberSchema(session.source_binding) : 1)
     && (memberOnly ? packageMember(session.source_binding) === value.entry && value.original_sha256 === session.original_sha256
@@ -48,7 +50,10 @@ function validPublication(value: Gxt2RpfPublication | undefined, session: Gxt2Se
     && SHA.test(value.payload_sha256)
     && Object.entries(metadata).every(([key, entry]) => (key === "target" ? normalizedPath(value.metadata?.target) === normalizedPath(entry) : value.metadata?.[key as keyof RpfPackageMetadata] === entry))
     && value.edition === session.source_binding?.edition.toLowerCase() && SHA.test(value.archive_sha256)
-    && Array.isArray(value.members) && value.members.length === 4
+    && SHA.test(value.artifact_id) && SHA.test(value.build_fingerprint)
+    && (value.input_build_fingerprint === null || SHA.test(value.input_build_fingerprint))
+    && ["development_dirty", "development_clean", "frozen_verified_resources"].includes(value.build_mode)
+    && Array.isArray(value.members) && value.members.length === expected.length
     && value.members.every((row, i) => row.path === expected[i] && Number.isSafeInteger(row.size) && row.size > 0 && SHA.test(row.sha256))
     && value.members.find(row => row.path === payloadPath)?.sha256 === value.payload_sha256
     && value.total_bytes === value.members.reduce((sum, row) => sum + row.size, 0)
@@ -58,6 +63,7 @@ function validPublication(value: Gxt2RpfPublication | undefined, session: Gxt2Se
     && value.dlc_registration_performed === false && value.upload_performed === false;
 }
 export interface Gxt2RpfReview {
+  build: { build_fingerprint: string; mode: string };
   archive_name: string; archive_size: number; entry_id: string; entry_size_before: number; entry_size_after: number;
   payload_sha256: string; original_sha256: string; archive_sha256: string; edition: string; index_sha256: string;
   indexed_entries: number; verified_payloads: number; required_free_bytes: number; outputs: string[];
@@ -97,6 +103,7 @@ function validRpfReview(value: Gxt2RpfReview | undefined, session: Gxt2Session) 
     && value.entry_id === binding.entry_id && value.archive_sha256 === binding.outer_archive_sha256
     && value.original_sha256 === session.original_sha256 && value.edition === binding.edition
     && SHA.test(value.payload_sha256) && SHA.test(value.index_sha256)
+    && SHA.test(value.build?.build_fingerprint) && ["development_dirty", "development_clean", "frozen_verified_resources"].includes(value.build?.mode)
     && [value.archive_size, value.entry_size_before, value.entry_size_after, value.indexed_entries,
       value.verified_payloads, value.required_free_bytes].every(n => Number.isSafeInteger(n) && n >= 0)
     && value.verified_payloads > 0 && value.verified_payloads <= value.indexed_entries
@@ -261,6 +268,8 @@ export default function Gxt2Workspace({ client, onGuardChange, archiveRequest }:
               || !SHA.test(String(result.sha256)) || !Number.isSafeInteger(result.archive_size) || Number(result.archive_size) <= 0
               || result.package_id !== expected.metadata.id || result.edition !== expected.edition || result.target !== expected.metadata.target
               || result.payload_sha256 !== expected.payload_sha256 || result.publication_mode !== expected.publication_mode
+              || result.artifact_id !== expected.artifact_id || result.build_fingerprint !== expected.build_fingerprint || result.build_mode !== expected.build_mode
+              || result.input_build_fingerprint !== expected.input_build_fingerprint
               || result.manifest_schema_version !== expected.manifest_schema_version || result.entry !== expected.entry || result.original_sha256 !== expected.original_sha256
               || !Array.isArray(result.members) || result.members.length !== expected.members.length
               || !result.members.every((row, i) => row?.path === expected.members[i].path && row?.size === expected.members[i].size && row?.sha256 === expected.members[i].sha256)
@@ -277,6 +286,7 @@ export default function Gxt2Workspace({ client, onGuardChange, archiveRequest }:
               || relative(result.report) !== `${relative(review.value.destination)}/rpf-package.json`
               || !SHA.test(String(result.sha256 ?? "")) || !SHA.test(String(result.report_sha256 ?? ""))
               || result.payload_sha256 !== expected.payload_sha256 || result.verified_payloads !== expected.verified_payloads
+              || result.build_fingerprint !== expected.build.build_fingerprint || result.build_mode !== expected.build.mode
               || !sameBinding(result.source_binding as Gxt2ArchiveBinding, review.value.source_binding)) {
             throw new Error("RPF package outcome could not be verified; inspect the destination before retrying.");
           }
@@ -376,6 +386,8 @@ export default function Gxt2Workspace({ client, onGuardChange, archiveRequest }:
         <div><dt>Payloads verified</dt><dd>{review.value.rpf_package.verified_payloads.toLocaleString()} · unrelated content must match</dd></div>
         <div><dt>Free space required</dt><dd>{(review.value.rpf_package.required_free_bytes / 1024**2).toFixed(1)} MiB on the output drive</dd></div>
       </dl><h4>Package contents</h4><ul>{review.value.rpf_package.outputs.map(path => <li key={path}><code>{path}</code></li>)}</ul>
+      <details><summary>RPF construction build identity</summary><p><code>{review.value.rpf_package.build.build_fingerprint}</code> · {review.value.rpf_package.build.mode}</p>
+        <p>This exact SDK identity is retained in the build report. Changing SDK or helper bytes invalidates this review.</p></details>
       <p>Build stages a private copy, applies the reviewed replacement, and verifies the archive before publishing. GTA V must remain closed. The original archive is not replaced.</p></div>}
       {review.value.rpf_publication && <div className="gxt-rpf-review"><dl>
         <div><dt>Package</dt><dd>{review.value.rpf_publication.metadata.name} · {review.value.rpf_publication.metadata.version}</dd></div>
@@ -385,6 +397,12 @@ export default function Gxt2Workspace({ client, onGuardChange, archiveRequest }:
         <div><dt>Unpacked ZIP size</dt><dd>{review.value.rpf_publication.total_bytes < 1024**2 ? `${review.value.rpf_publication.total_bytes.toLocaleString()} bytes` : `${(review.value.rpf_publication.total_bytes / 1024**2).toFixed(1)} MiB`}</dd></div>
       </dl>{review.value.rpf_publication.publication_mode === "member" ? <p>Schema {review.value.rpf_publication.manifest_schema_version} · exact {review.value.rpf_publication.manifest_schema_version === 4 ? "nested" : "outer-archive"} replacement only. Older Launchers reject this package. The original dictionary must match the checksum above. Other members are not included; uninstall an existing version before updating. No DLC registration is included.</p>
         : <p>Installing this ZIP can replace unrelated edits in the destination archive. Review ownership and backups in ALLIN1 before installation. No DLC registration is included.</p>}
+      <details><summary>Publication build identity</summary><dl>
+        <div><dt>Artifact ID</dt><dd><code>{review.value.rpf_publication.artifact_id}</code></dd></div>
+        <div><dt>Build fingerprint</dt><dd><code>{review.value.rpf_publication.build_fingerprint}</code></dd></div>
+        <div><dt>Build mode</dt><dd>{review.value.rpf_publication.build_mode}</dd></div>
+        <div><dt>Input RPF build fingerprint</dt><dd><code>{review.value.rpf_publication.input_build_fingerprint ?? "Not recorded by the input build"}</code></dd></div>
+      </dl><p>Publication and input RPF construction are separate build steps. Older input reports may not record the construction SDK. Content hashes are not publisher signatures or in-game proof.</p></details>
       <h4>ZIP contents</h4><ul>{review.value.rpf_publication.members.map(row => <li key={row.path}><code>{row.path}</code> · {row.size.toLocaleString()} bytes</li>)}</ul>
       <details><summary>Generated mod.toml</summary><pre>{review.value.rpf_publication.manifest_text}</pre></details>
       <p>Export rechecks the build hashes and opens the ZIP with the ALLIN1 package validator. No game files are changed and nothing is uploaded.</p></div>}

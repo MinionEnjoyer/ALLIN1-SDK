@@ -1,0 +1,434 @@
+{
+  "schemaVersion": 1,
+  "revision": "2026-09-06.6",
+  "scope": "SDK React source workflows. Not a runtime dependency preflight or universal format compatibility guarantee.",
+  "formats": [
+    {
+      "suffix": ".awc",
+      "label": "Audio wave container",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Stream inventory and exported PCM WAV playback; codec/size limits apply",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace; exported audio dependency handoff",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Matching installation keys may be required. Playback is bounded PCM WAV, not every native codec.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [],
+      "editionEvidence": {
+        "Legacy": "Implemented adapter; edition-specific corpus acceptance pending",
+        "Enhanced": "Implemented adapter; edition-specific corpus acceptance pending"
+      }
+    },
+    {
+      "suffix": ".gfx",
+      "label": "Scaleform movie",
+      "nativeXmlEdit": false,
+      "inspection": "Bounded header/binary inspection",
+      "preview": "No Scaleform rendering",
+      "export": "Exact binary extraction",
+      "editing": "No semantic Scaleform editor; binary workspace only",
+      "rebuild": "No semantic rebuild",
+      "limitations": "Do not treat binary byte editing as verified Scaleform authoring.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [],
+      "editionEvidence": {
+        "Legacy": "Header adapter only; no semantic qualification",
+        "Enhanced": "Header adapter only; no semantic qualification"
+      }
+    },
+    {
+      "suffix": ".gxt2",
+      "label": "Game text dictionary",
+      "nativeXmlEdit": false,
+      "inspection": "Parsed label hashes and text",
+      "preview": "Searchable label/text table",
+      "export": "Verified new GXT2 and reviewed archive package",
+      "editing": "Add, edit, remove and undo labels",
+      "rebuild": "Dedicated GXT2 codec and parse validation",
+      "limitations": "Not routed through the generic native XML editor.",
+      "implementation": "src/allin1_sdk/gxt2_workspace.py",
+      "evidence": [
+        "tests/test_gxt2_workspace.py",
+        "tests/test_gxt2_desktop.py"
+      ],
+      "editionEvidence": {
+        "Legacy": "Codec/workflow tests; retail and in-game acceptance pending",
+        "Enhanced": "Codec/workflow tests; retail and in-game acceptance pending"
+      }
+    },
+    {
+      "suffix": ".pso",
+      "label": "PSO metadata",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+        "preview": "Clip/animation inventory and sampled local-channel curves with play/pause, scrub, rate and loop controls",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Payload/schema variants differ; the extension alone does not establish editable support.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [],
+      "editionEvidence": {
+        "Legacy": "Implemented adapter; edition-specific corpus acceptance pending",
+        "Enhanced": "Implemented adapter; edition-specific corpus acceptance pending"
+      }
+    },
+    {
+      "suffix": ".rel",
+      "label": "Audio relationship metadata",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Typed audio relationship graph, local hash links, unresolved external references and container catalog",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Decoder-supported fields only; XML is normalized in memory and lossy normalization is rejected. Cross-file hashes and sound-to-AWC bindings are not resolved. Dat54, Dat22 and Dat151 fixture coverage; other families and retail variants need qualification.",
+      "implementation": "tools/RpfPatcher/RelRelationships.cs",
+      "evidence": [
+        "tests/test_rel_relationships.py",
+        "desktop/src/NativeRelationships.test.tsx",
+        "tools/RpfPatcher.Tests/Program.cs"
+      ],
+      "editionEvidence": {
+        "Legacy": "Generated Dat54 fixture inspect/export/edit/graph-refresh/build/reparse passed in this edition context; not retail or in-game acceptance",
+        "Enhanced": "Generated Dat54 fixture inspect/export/edit/graph-refresh/build/reparse passed in this edition context; not retail or in-game acceptance"
+      }
+    },
+    {
+      "suffix": ".rpf",
+      "label": "RAGE package archive",
+      "nativeXmlEdit": false,
+      "inspection": "Recursive exact-member index and bounded global filename search",
+      "preview": "Member-specific preview and editor handoffs",
+      "export": "Member/selection/tree extraction, comparison, integrity and verified compact copy",
+      "editing": "Reviewed change sets and transaction execution/recovery",
+      "rebuild": "Validated archive build; explicit scope and game-write confirmation",
+      "limitations": "Matching installation/keys required for encrypted archives. Large/encrypted corpus and installed lifecycle qualification pending.",
+      "implementation": "src/allin1_sdk/rpf_tools.py",
+      "evidence": [
+        "tests/test_rpf_utility_desktop.py",
+        "tests/test_rpf_transaction_desktop.py"
+      ],
+      "editionEvidence": {
+        "Legacy": "Generated native utility fixtures tested; encrypted retail acceptance pending",
+        "Enhanced": "Generated native utility fixtures tested; encrypted retail acceptance pending"
+      }
+    },
+    {
+      "suffix": ".ybn",
+      "label": "Collision bounds",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+        "preview": "Triangle/box surfaces, sphere/capsule/cylinder/disc tessellation, composite transforms and derived face normals; bounded read-only React view",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+        "limitations": "Display tessellation is not an engine contact mesh. Geometry material indices are owner-local. Large meshes are explicitly sampled; full retail corpus and in-game acceptance pending.",
+        "implementation": "src/allin1_sdk/native_assets.py",
+        "evidence": ["tests/test_collision_primitives.py", "desktop/src/NativeCollisionView.test.tsx", "tools/RpfPatcher.Tests/Program.cs"],
+        "editionEvidence": {
+          "Legacy": "Generated native geometry decode/export/rebuild tested within quantization tolerance; retail and game acceptance pending",
+          "Enhanced": "Generated native geometry decode/export/rebuild tested within quantization tolerance; retail and game acceptance pending"
+      }
+    },
+    {
+      "suffix": ".ycd",
+      "label": "Animation dictionary",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Clip/channel timeline and untextured model playback with explicit exported XML drawable/shared-skeleton binding, skinning, optional root motion, LOD and camera controls",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+        "limitations": "One layer at a time; local TRS and optional root motion on a parentless tag-0 root, including nonzero ordinary channel flags. Expression remapping, automatic skeleton inference, cloth and fragment physics children are not implemented. XML bind transforms are reconstructed. Three retail locomotion clips passed pose/canvas-command tests per edition; pixel, broader codec, inverse-bind and game playback qualification remain pending.",
+        "implementation": "src/allin1_sdk/native_workspace_desktop.py",
+        "evidence": ["tests/test_animation_samples.py", "tests/test_animation_model.py", "desktop/src/animationPose.test.ts", "desktop/src/AnimationModelViewport.test.tsx", "desktop/src/NativeAnimationView.test.tsx", "desktop/src/RetailAnimation.integration.test.tsx", "tools/RpfPatcher.Tests/AnimationSampleTests.cs", "scripts/smoke_retail_animation_model.py", "scripts/smoke_retail_animation.py"],
+        "editionEvidence": {
+          "Legacy": "Retail NG x64c/x64v MP male torso/shared rig: High/Medium/Low binding plus run/idle/walk two-layer pose math, scrubbing and canvas-command tests passed; pixel rendering and game acceptance not tested",
+          "Enhanced": "Retail NG x64c/x64v MP male torso/shared rig: High/Medium/Low binding plus run/idle/walk two-layer pose math, scrubbing and canvas-command tests passed; pixel rendering and game acceptance not tested"
+      }
+    },
+    {
+      "suffix": ".ydd",
+      "label": "Drawable dictionary",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Drawable geometry, materials and textures",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Only supported helper variants; full retail corpus and in-game acceptance pending.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [],
+      "editionEvidence": {
+        "Legacy": "Implemented adapter; edition-specific corpus acceptance pending",
+        "Enhanced": "Implemented adapter; edition-specific corpus acceptance pending"
+      }
+    },
+    {
+      "suffix": ".ydr",
+      "label": "Drawable",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Geometry, materials, textures and camera controls",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Only supported helper variants; full retail corpus and in-game acceptance pending.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [
+        "scripts/smoke_native_workspace.py"
+      ],
+      "editionEvidence": {
+        "Legacy": "Generated fixture export/edit/build/reparse tested; not retail or in-game acceptance",
+        "Enhanced": "Generated fixture export/edit/build/reparse tested; not retail or in-game acceptance"
+      }
+    },
+    {
+      "suffix": ".yed",
+      "label": "Expression dictionary",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Structured XML only; no dedicated visual/playback view",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Only supported helper variants; full retail corpus and in-game acceptance pending.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [],
+      "editionEvidence": {
+        "Legacy": "Implemented adapter; edition-specific corpus acceptance pending",
+        "Enhanced": "Implemented adapter; edition-specific corpus acceptance pending"
+      }
+    },
+    {
+      "suffix": ".yfd",
+      "label": "Frame filter dictionary",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Structured XML only; no dedicated visual/playback view",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Only supported helper variants; full retail corpus and in-game acceptance pending.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [],
+      "editionEvidence": {
+        "Legacy": "Implemented adapter; edition-specific corpus acceptance pending",
+        "Enhanced": "Implemented adapter; edition-specific corpus acceptance pending"
+      }
+    },
+    {
+      "suffix": ".yft",
+      "label": "Fragment",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Fragment geometry, materials and textures",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Only supported helper variants; full retail corpus and in-game acceptance pending.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [],
+      "editionEvidence": {
+        "Legacy": "Implemented adapter; edition-specific corpus acceptance pending",
+        "Enhanced": "Implemented adapter; edition-specific corpus acceptance pending"
+      }
+    },
+    {
+      "suffix": ".ymap",
+      "label": "Map placements",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Interactive placement/parent/archetype relationships, XY/XZ/YZ projection and reference-search handoff",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Read-only decoded-document graph: 16 MiB XML, 1000 displayed nodes / 1800 links. Cross-file names/hashes are unresolved candidates. Retail and in-game acceptance pending.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [
+        "tests/test_native_relationships.py",
+        "desktop/src/NativeRelationships.test.tsx",
+        "desktop/src/NativeWorkspace.test.tsx",
+        "desktop/src/ArchiveBrowser.test.tsx"
+      ],
+      "editionEvidence": {
+        "Legacy": "Generated native fixture decode/export and relationship positions/links tested in this edition context; not retail or game acceptance",
+        "Enhanced": "Generated native fixture decode/export and relationship positions/links tested in this edition context; not retail or game acceptance"
+      }
+    },
+    {
+      "suffix": ".ymf",
+      "label": "Map manifest",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Structured XML only; no dedicated visual/playback view",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Only supported helper variants; full retail corpus and in-game acceptance pending.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [],
+      "editionEvidence": {
+        "Legacy": "Implemented adapter; edition-specific corpus acceptance pending",
+        "Enhanced": "Implemented adapter; edition-specific corpus acceptance pending"
+      }
+    },
+    {
+      "suffix": ".ymt",
+      "label": "Metadata resource",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Structured XML only; no dedicated visual/playback view",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Payload/schema variants differ; the extension alone does not establish editable support.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [],
+      "editionEvidence": {
+        "Legacy": "Implemented adapter; edition-specific corpus acceptance pending",
+        "Enhanced": "Implemented adapter; edition-specific corpus acceptance pending"
+      }
+    },
+    {
+      "suffix": ".ynd",
+      "label": "Path nodes",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Interactive path nodes/local links, unresolved external IDs, junction inventory and projection",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Read-only decoded-document graph: 16 MiB XML, 1000 displayed nodes / 1800 links. Cross-file names/hashes are unresolved candidates. Retail and in-game acceptance pending. Junction references are counted, not resolved.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [
+        "tests/test_native_relationships.py",
+        "desktop/src/NativeRelationships.test.tsx",
+        "desktop/src/NativeWorkspace.test.tsx",
+        "desktop/src/ArchiveBrowser.test.tsx"
+      ],
+      "editionEvidence": {
+        "Legacy": "Generated native fixture decode/export and relationship positions/links tested in this edition context; not retail or game acceptance",
+        "Enhanced": "Generated native fixture decode/export and relationship positions/links tested in this edition context; not retail or game acceptance"
+      }
+    },
+    {
+      "suffix": ".ynv",
+      "label": "Navigation mesh",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Interactive polygons, adjacency, portals and points with projection, selection and focus",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Read-only decoded-document graph: 16 MiB XML, 1000 displayed nodes / 1800 links. Cross-file names/hashes are unresolved candidates. Retail and in-game acceptance pending.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [
+        "tests/test_native_relationships.py",
+        "desktop/src/NativeRelationships.test.tsx",
+        "desktop/src/NativeWorkspace.test.tsx",
+        "desktop/src/ArchiveBrowser.test.tsx"
+      ],
+      "editionEvidence": {
+        "Legacy": "Generated native fixture decode/export and relationship positions/links tested in this edition context; not retail or game acceptance",
+        "Enhanced": "Generated native fixture decode/export and relationship positions/links tested in this edition context; not retail or game acceptance"
+      }
+    },
+    {
+      "suffix": ".ypt",
+      "label": "Particle effects",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Structured XML only; no dedicated visual/playback view",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Only supported helper variants; full retail corpus and in-game acceptance pending.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [],
+      "editionEvidence": {
+        "Legacy": "Implemented adapter; edition-specific corpus acceptance pending",
+        "Enhanced": "Implemented adapter; edition-specific corpus acceptance pending"
+      }
+    },
+    {
+      "suffix": ".ytd",
+      "label": "Texture dictionary",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Texture preview, selected/all DDS and PNG export",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "Texture add/replace/remove/rename, format/mip controls; selected batch conversion/removal and folder image import with grouped undo; XML",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Batches are limited to 128 textures and 2 GiB staging/output bounds. Color-space/normal-map-aware mip generation is not implemented.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [
+        "tests/test_texture_conversion.py",
+        "tests/test_texture_batch.py",
+        "tests/test_texture_archive_handoff.py"
+      ],
+      "editionEvidence": {
+        "Legacy": "Generated fixture export/edit/build/reparse tested; not retail or in-game acceptance",
+        "Enhanced": "Generated fixture export/edit/build/reparse tested; not retail or in-game acceptance"
+      }
+    },
+    {
+      "suffix": ".ytyp",
+      "label": "Archetype definitions",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Interactive archetype dependencies and MLO rooms, portals, attached entities and entity-set inventory",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Read-only decoded-document graph: 16 MiB XML, 1000 displayed nodes / 1800 links. Cross-file names/hashes are unresolved candidates. Retail and in-game acceptance pending. MLO coordinates are archetype-local; entity-set activation/room assignment is not resolved.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [
+        "tests/test_native_relationships.py",
+        "desktop/src/NativeRelationships.test.tsx",
+        "desktop/src/NativeWorkspace.test.tsx",
+        "desktop/src/ArchiveBrowser.test.tsx"
+      ],
+      "editionEvidence": {
+        "Legacy": "Generated native fixture decode/export and relationship positions/links tested in this edition context; not retail or game acceptance",
+        "Enhanced": "Generated native fixture decode/export and relationship positions/links tested in this edition context; not retail or game acceptance"
+      }
+    },
+    {
+      "suffix": ".yvr",
+      "label": "Vehicle recording",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Structured XML only; no dedicated visual/playback view",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Only supported helper variants; full retail corpus and in-game acceptance pending.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [],
+      "editionEvidence": {
+        "Legacy": "Implemented adapter; edition-specific corpus acceptance pending",
+        "Enhanced": "Implemented adapter; edition-specific corpus acceptance pending"
+      }
+    },
+    {
+      "suffix": ".ywr",
+      "label": "Waypoint recording",
+      "nativeXmlEdit": true,
+      "inspection": "Bounded header and helper-decoded XML",
+      "preview": "Structured XML only; no dedicated visual/playback view",
+      "export": "Snapshot-backed XML workspace and dependencies",
+      "editing": "XML workspace (large documents use external editor + refresh)",
+      "rebuild": "Helper rebuild and reparse validation; unsupported variants fail closed",
+      "limitations": "Only supported helper variants; full retail corpus and in-game acceptance pending.",
+      "implementation": "src/allin1_sdk/native_assets.py",
+      "evidence": [],
+      "editionEvidence": {
+        "Legacy": "Implemented adapter; edition-specific corpus acceptance pending",
+        "Enhanced": "Implemented adapter; edition-specific corpus acceptance pending"
+      }
+    }
+  ]
+}

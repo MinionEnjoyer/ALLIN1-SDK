@@ -1127,6 +1127,10 @@ class RpfPackageGraph:
             if after["graph_sha256"] != state["graph_sha256"]:
                 raise RuntimeError("RPF graph changed during archive creation")
             report = json.loads(report_path.read_text(encoding="utf-8"))
+            from allin1_sdk.artifact_contract import verify_seal, validate_build, seal
+            verify_seal(report, "report_sha256")
+            validate_build(report.get("build"))
+            report.pop("report_sha256")
             report["source"] = str(state["graph"])
             report["source_kind"] = "rpf_package_graph"
             report["materialized_source_ephemeral"] = True
@@ -1136,7 +1140,7 @@ class RpfPackageGraph:
                 "root_node": state["root_id"],
                 "nodes": len(state["nodes"]),
             }
-            _write_json_atomic(report_path, report)
+            _write_json_atomic(report_path, seal(report, "report_sha256"))
             return archive, report_path
         except Exception:
             archive.unlink(missing_ok=True)

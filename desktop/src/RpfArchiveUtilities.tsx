@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { DesktopClient, Envelope, RpfArchiveResult, RpfEntryRecord } from "./types";
+import { isNativeResource } from "./nativeFormats";
 
-type UtilityAction = "extract_entry" | "export_native_workspace" | "extract_subtree" | "extract_archive" | "compare" | "verify_integrity" | "defragment_copy";
+type UtilityAction = "extract_entry" | "extract_selection" | "export_native_workspace" | "extract_subtree" | "extract_archive" | "compare" | "verify_integrity" | "defragment_copy";
 type Review = Record<string, unknown> & {
   action: UtilityAction; label: string; destination: string; archive: string;
   archive_sha256: string; review_sha256: string; ready: boolean;
@@ -20,11 +21,12 @@ function baseName(path: string): string {
 }
 
 export default function RpfArchiveUtilities({
-  client, result, entry, disabled, onGuardChange,
+  client, result, entry, disabled, onGuardChange, selectedIds = [],
 }: {
   client: DesktopClient;
-  result: RpfArchiveResult;
-  entry: RpfEntryRecord | null;
+  result: Pick<RpfArchiveResult, "source" | "gta_path">;
+  entry: Pick<RpfEntryRecord, "id" | "name" | "kind"> & Partial<RpfEntryRecord> | null;
+  selectedIds?: string[];
   disabled?: boolean;
   onGuardChange?: (guarded: boolean) => void;
 }) {
@@ -37,6 +39,7 @@ export default function RpfArchiveUtilities({
   const generation = useRef(0);
   const completed = useRef("");
   const jobRef = useRef("");
+  const inFlight = useRef(false);
   const guarded = busy || Boolean(review);
   useEffect(() => { onGuardChange?.(guarded); }, [guarded, onGuardChange]);
   useEffect(() => () => {
@@ -45,58 +48,69 @@ export default function RpfArchiveUtilities({
   }, [client]);
 
   const begin = async (action: UtilityAction) => {
-    if (disabled || busy || review) return;
-    setError(""); setNotice("");
-    let compareArchive = "";
-    if (action === "compare") {
-      compareArchive = await client.selectPath("rpf") ?? "";
-      if (!compareArchive) return;
-    }
-    const stem = baseName(result.source);
-    const suggested = action === "extract_entry" ? entry?.name ?? "rpf-member.bin"
-      : action === "export_native_workspace" ? `${(entry?.name ?? "native-asset")}-workspace`
-      : action === "extract_subtree" ? `${(entry?.name ?? "subtree")}-rpf-export`
-        : action === "extract_archive" ? `${stem}-rpf-export`
-          : action === "compare" ? `${stem}-rpf-diff.json`
-            : action === "verify_integrity" ? `${stem}-integrity.json`
-              : `${stem}-defragmented.rpf`;
-    const destination = await client.selectRpfUtilityDestination(action, suggested);
-    if (!destination) return;
-    const payload: Record<string, unknown> = {
-      action, archive: result.source, gta_path: result.gta_path, destination,
-      ...(action === "compare" ? { compare_archive: compareArchive, comparison_mode: mode } : {}),
-      ...(["extract_entry", "export_native_workspace", "extract_subtree"].includes(action) ? { entry_id: entry?.id } : {}),
-    };
+    if (disabled || inFlight.current || busy || review) return;
     const token = `rpf-utility-${++generation.current}`;
+    const current = () => token === `rpf-utility-${generation.current}`;
+    inFlight.current = true;
     completed.current = ""; setBusy(true);
+    setError(""); setNotice("");
     try {
+      let compareArchive = "";
+      if (action === "compare") {
+        compareArchive = await client.selectPath("rpf") ?? "";
+        if (!current() || !compareArchive) { if (current()) { inFlight.current = false; setBusy(false); } return; }
+      }
+      const stem = baseName(result.source);
+      const suggested = action === "extract_entry" ? entry?.name ?? "rpf-member.bin"
+        : action === "extract_selection" ? `${stem}-selection`
+        : action === "export_native_workspace" ? `${(entry?.name ?? "native-asset")}-workspace`
+        : action === "extract_subtree" ? `${(entry?.name ?? "subtree")}-rpf-export`
+          : action === "extract_archive" ? `${stem}-rpf-export`
+            : action === "compare" ? `${stem}-rpf-diff.json`
+              : action === "verify_integrity" ? `${stem}-integrity.json`
+                : `${stem}-defragmented.rpf`;
+      const destination = await client.selectRpfUtilityDestination(action, suggested);
+      if (!current() || !destination) { if (current()) { inFlight.current = false; setBusy(false); } return; }
+      const payload: Record<string, unknown> = {
+        action, archive: result.source, gta_path: result.gta_path, destination,
+        ...(action === "compare" ? { compare_archive: compareArchive, comparison_mode: mode } : {}),
+        ...(["extract_entry", "export_native_workspace", "extract_subtree"].includes(action) ? { entry_id: entry?.id } : {}),
+        ...(action === "extract_selection" ? { entry_ids: selectedIds } : {}),
+      };
       const started = await client.startJob("review_rpf_utility", payload, token, message => {
-        if (!message.terminal || token !== `rpf-utility-${generation.current}`) return;
-        completed.current = token; jobRef.current = ""; setBusy(false); setJob("");
+        if (!message.terminal || !current() || completed.current === token) return;
+        completed.current = token; inFlight.current = false; jobRef.current = ""; setBusy(false); setJob("");
         try {
           const value = resultFrom(message) as Review;
-          if (!value.ready || !/^[0-9a-f]{64}$/.test(value.review_sha256)) throw new Error("RPF utility review evidence is incomplete");
+          const samePath = (a: unknown, b: unknown) => typeof a === "string" && typeof b === "string" && a.replace(/\\/g, "/").toLowerCase() === b.replace(/\\/g, "/").toLowerCase();
+          if (value.kind !== "rpf_utility_review" || value.ready !== true || !/^[0-9a-f]{64}$/.test(value.review_sha256)
+            || !/^[0-9a-f]{64}$/.test(value.archive_sha256) || value.action !== action
+            || !samePath(value.archive, payload.archive) || !samePath(value.destination, destination)
+            || value.source_write_performed !== false || value.game_write_performed !== false || value.output_write_performed !== false) throw new Error("RPF utility review evidence is incomplete or does not match this request");
           setReview({ value, payload });
         } catch (reason) { setError(String(reason).replace(/^Error:\s*/, "")); }
       });
-      if (completed.current !== token && token === `rpf-utility-${generation.current}`) {
+      if (!current()) { await client.cancelJob(started.job_id); }
+      else if (completed.current !== token) {
         jobRef.current = started.job_id;
         setJob(started.job_id);
       }
     } catch (reason) {
-      if (token === `rpf-utility-${generation.current}`) { jobRef.current = ""; setBusy(false); setJob(""); setError(String(reason)); }
+      if (current() && completed.current !== token) { inFlight.current = false; jobRef.current = ""; setBusy(false); setJob(""); setError(String(reason)); }
     }
   };
 
   const cancelJob = async () => {
-    generation.current++; const current = jobRef.current || job; jobRef.current = ""; setJob(""); setBusy(false);
+    generation.current++; inFlight.current = false; const current = jobRef.current || job; jobRef.current = ""; setJob(""); setBusy(false);
     setNotice("RPF utility review cancelled. No output was created.");
     if (current) try { await client.cancelJob(current); } catch (reason) { setError(String(reason)); }
   };
 
   const confirm = async () => {
     const pending = review;
-    if (!pending || busy) return;
+    if (!pending || inFlight.current || busy) return;
+    inFlight.current = true;
+    const token = ++generation.current;
     setBusy(true); setError("");
     try {
       const response = await client.applyRpfUtility({
@@ -104,12 +118,20 @@ export default function RpfArchiveUtilities({
         authoring_confirmed: true,
       });
       const value = resultFrom(response);
+      if (token !== generation.current) return;
+      if (value.kind !== "rpf_utility_result" || value.action !== pending.value.action
+        || value.review_sha256 !== pending.value.review_sha256 || value.archive_sha256 !== pending.value.archive_sha256
+        || value.archive !== pending.value.archive || value.destination !== pending.value.destination
+        || value.output_write_performed !== true || value.source_write_performed !== false || value.game_write_performed !== false) {
+        throw new Error("RPF utility returned an invalid completion receipt. Check the output before retrying.");
+      }
       setReview(null);
       setNotice(`${String(value.label ?? pending.value.label)} completed. Source archive was not changed.`);
     } catch (reason) {
+      if (token !== generation.current) return;
       setReview(null);
       setError(String(reason).replace(/^Error:\s*/, ""));
-    } finally { setBusy(false); }
+    } finally { if (token === generation.current) { inFlight.current = false; setBusy(false); } }
   };
 
   return <section className="rpf-utility-panel" aria-label="RPF archive utilities">
@@ -117,19 +139,21 @@ export default function RpfArchiveUtilities({
       <label><span>Compare as</span><select value={mode} disabled={disabled || guarded} onChange={event => setMode(event.target.value as typeof mode)}><option value="metadata">Metadata</option><option value="logical">Logical content</option><option value="exact">Exact bytes</option></select></label></div>
     <div className="rpf-utility-actions">
       <button className="quiet-button" disabled={disabled || guarded || !entry || entry.kind === "directory"} onClick={() => void begin("extract_entry")}>Extract member</button>
-      <button className="quiet-button" disabled={disabled || guarded || !entry || entry.kind === "directory" || !/\.(ydr|ydd|yft|ytd)$/i.test(entry.name)} onClick={() => void begin("export_native_workspace")}>Editable native copy</button>
+      {selectedIds.length > 0 && <button className="quiet-button" disabled={disabled || guarded} onClick={() => void begin("extract_selection")}>Extract selected ({selectedIds.length})</button>}
+      <button className="quiet-button" disabled={disabled || guarded || !entry || entry.kind === "directory" || !isNativeResource(entry.name)} onClick={() => void begin("export_native_workspace")}>Editable native copy</button>
       <button className="quiet-button" disabled={disabled || guarded || entry?.kind !== "directory"} onClick={() => void begin("extract_subtree")}>Export subtree</button>
       <button className="quiet-button" disabled={disabled || guarded} onClick={() => void begin("extract_archive")}>Export archive tree</button>
       <button className="quiet-button" disabled={disabled || guarded} onClick={() => void begin("compare")}>Compare archive</button>
       <button className="quiet-button" disabled={disabled || guarded} onClick={() => void begin("verify_integrity")}>Verify integrity</button>
       <button className="quiet-button" disabled={disabled || guarded} onClick={() => void begin("defragment_copy")}>Defragment copy</button>
-      {busy && job && <button className="danger-button" onClick={() => void cancelJob()}>Cancel review</button>}
+      {busy && !review && <button className="danger-button" onClick={() => void cancelJob()}>Cancel review</button>}
     </div>
     {error && <p className="error-banner" role="alert">{error}</p>}
     {notice && <p className="action-notice" role="status">{notice}</p>}
     {review && <div className="rpf-utility-review" role="dialog" aria-label="Review RPF utility output">
       <strong>{review.value.label}</strong>
       <dl className="detail-list"><div><dt>Source</dt><dd>{review.value.archive}</dd></div><div><dt>Source SHA-256</dt><dd>{review.value.archive_sha256}</dd></div><div><dt>New output</dt><dd>{review.value.destination}</dd></div><div><dt>Game write</dt><dd>No</dd></div></dl>
+      {Array.isArray(review.value.selection) && <ul>{(review.value.selection as { id: string; output: string }[]).map(row => <li key={row.id}>{row.id} → {row.output}</li>)}</ul>}
       <div className="heading-actions"><button className="quiet-button" disabled={busy} onClick={() => setReview(null)}>Back</button><button className="primary-button" disabled={busy} onClick={() => void confirm()}>{busy ? "Writing…" : "Create reviewed output"}</button></div>
     </div>}
   </section>;

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { DesktopClient, Envelope } from "./types";
 
-export type WorkspaceModule = "binary" | "maps" | "graph" | "program" | "runtime" | "render" | "recipe" | "vehicle_identity" | "data_tools" | "code";
+export type WorkspaceModule = "binary" | "maps" | "graph" | "program" | "runtime" | "render" | "recipe" | "vehicle_identity" | "data_tools" | "code" | "native" | "optimization";
 export type WorkspaceResult = Record<string, unknown> & { kind: string; module: WorkspaceModule; schema_version: number; state_sha256?: string };
 type Request = Record<string, unknown>;
 const SHA = /^[a-f0-9]{64}$/;
@@ -28,6 +28,7 @@ export function useAuthoringWorkspace(client: DesktopClient, module: WorkspaceMo
   const run = async (operation: "inspect_authoring_workspace" | "review_workspace_action", fields: Request) => {
     if (inFlight.current) return;
     inFlight.current = true; setBusy(true); setReading(true); setError(""); setNotice(""); clearReview();
+    if (operation === "inspect_authoring_workspace") setLastResult(null);
     const version = ++generation.current;
     const request: Request = { ...fields, module };
     let finished = false;

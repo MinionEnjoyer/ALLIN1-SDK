@@ -84,8 +84,9 @@ function validReview(value: RpfTransactionReview, request: Record<string, unknow
       : value.action === "execute" ? s.status === "ready" : !!s.verification?.healthy && s.verification.archive_state === "applied" && value.restore_sha256 === session.backup?.sha256);
 }
 
-export default function RpfTransactionWorkspace({ client, onGuardChange, onArchiveChanged }: {
+export default function RpfTransactionWorkspace({ client, onGuardChange, onArchiveChanged, planRequest }: {
   client: DesktopClient; onGuardChange: (value: boolean) => void; onArchiveChanged: (archive: string) => void;
+  planRequest?: { source: string; requestId: number } | null;
 }) {
   const [session, setSession] = useState<RpfTransactionSession | null>(null);
   const [selected, setSelected] = useState(0), [game, setGame] = useState(""), [scope, setScope] = useState("");
@@ -125,6 +126,16 @@ export default function RpfTransactionWorkspace({ client, onGuardChange, onArchi
     if (generation.current !== version) { if (!finished) void client.cancelJob(started.job_id).catch(() => undefined); }
     else if (!finished) job.current = started.job_id;
   };
+  const handledPlan = useRef(0);
+  useEffect(() => {
+    if (!planRequest || handledPlan.current === planRequest.requestId) return;
+    handledPlan.current = planRequest.requestId;
+    if (locked) { setError("Finish the current transaction review before opening another plan."); return; }
+    const source = planRequest.source;
+    void start(version => read("inspect_rpf_transaction", { source }, version, value => {
+      load(value as RpfTransactionSession, source); setScope(""); setGame("");
+    }));
+  }, [planRequest]);
   const choose = (kind: "rpf_plan" | "rpf_receipt" | "gta_folder" | "rpf_authorized_root") => void start(async version => {
     setPhase("choosing"); const path = await client.selectPath(kind);
     if (generation.current !== version) return;

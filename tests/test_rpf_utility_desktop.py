@@ -1,4 +1,6 @@
 import hashlib
+import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +21,8 @@ class FakeIndex:
             return SimpleNamespace(id=value, archive_path="nested.rpf", path="x", name="x", kind="directory", size=0)
         if value == "text-id":
             return SimpleNamespace(id=value, archive_path="", path="x/readme.txt", name="readme.txt", kind="binary", size=4)
+        if value == "nested-id":
+            return SimpleNamespace(id=value, archive_path="child.rpf", path="x/data.ydr", name="data.ydr", kind="resource", size=4)
         raise ValueError("unknown entry")
 
 
@@ -77,6 +81,45 @@ def roots(tmp_path, monkeypatch):
     return game, source, other
 
 
+def test_selection_export_preserves_duplicate_names_in_distinct_layers(roots):
+    import json
+    game, source, _ = roots
+    destination = source.parent / "selection"
+    payload = {"action": "extract_selection", "archive": str(source), "gta_path": str(game), "destination": str(destination), "entry_ids": ["file-id", "nested-id"]}
+    review = desktop.review(payload)
+    assert [row["id"] for row in review["selection"]] == payload["entry_ids"]
+    assert len({row["output"] for row in review["selection"]}) == 2
+    result = desktop.apply({**payload, "review_sha256": review["review_sha256"], "authoring_confirmed": True})
+    manifest = json.loads(Path(result["evidence"]["manifest"]).read_text())
+    assert len(manifest["entries"]) == 2
+    for row in manifest["entries"]:
+        assert (destination / row["output"]).read_bytes() == b"data"
+    assert source.read_bytes() == b"RPF7 source"
+
+
+@pytest.mark.parametrize("selection", [[], ["file-id", "file-id"], ["dir-id"], ["missing"], ["x"] * 129])
+def test_selection_export_rejects_invalid_or_ambiguous_intake(roots, selection):
+    game, source, _ = roots
+    with pytest.raises((ValueError, KeyError)):
+        desktop.review({"action": "extract_selection", "archive": str(source), "gta_path": str(game), "destination": str(source.parent / "output"), "entry_ids": selection})
+
+
+def test_selection_export_failure_preserves_raced_user_destination(roots, monkeypatch):
+    game, source, _ = roots
+    destination = source.parent / "selection"
+    payload = {"action": "extract_selection", "archive": str(source), "gta_path": str(game), "destination": str(destination), "entry_ids": ["file-id"]}
+    review = desktop.review(payload)
+    def race(self, index, entry, output):
+        destination.mkdir()
+        (destination / "user.txt").write_text("do not delete")
+        output.write_bytes(b"data")
+        return output
+    monkeypatch.setattr(FakeService, "extract", race)
+    with pytest.raises(ValueError, match="already exists"):
+        desktop.apply({**payload, "review_sha256": review["review_sha256"], "authoring_confirmed": True})
+    assert (destination / "user.txt").read_text() == "do not delete"
+
+
 @pytest.mark.parametrize("action,extension", [
     ("extract_entry", ".bin"), ("export_native_workspace", ""), ("extract_subtree", ""),
     ("extract_archive", ""), ("compare", ".json"),
@@ -99,6 +142,70 @@ def test_review_and_apply_every_rpf_utility_happy_path(roots, action, extension)
     assert result["output_write_performed"] is True
     assert result["game_write_performed"] is False
     assert hashlib.sha256(source.read_bytes()).hexdigest() == review["archive_sha256"]
+    assert result["destination"] == str(destination)
+    assert "allin1-rpf-utility-" not in str(result["evidence"])
+    assert destination.exists()
+    assert not list(source.parent.glob("allin1-rpf-utility-*"))
+
+
+@pytest.mark.parametrize("action,method,extension", [
+    ("extract_entry", "extract", ".bin"),
+    ("export_native_workspace", "export_native_workspace", ""),
+    ("extract_subtree", "extract_subtree", ""),
+    ("extract_archive", "extract_subtree", ""),
+    ("compare", "export_diff", ".json"),
+    ("verify_integrity", "verify_archive_integrity", ".json"),
+    ("defragment_copy", "defragment_verified_copy", ".rpf"),
+])
+@pytest.mark.parametrize("fail", [False, True])
+def test_every_utility_preserves_raced_user_destinations(roots, monkeypatch, action, method, extension, fail):
+    game, source, other = roots
+    destination = source.parent / f"raced{extension}"
+    payload = {"action": action, "archive": str(source), "gta_path": str(game),
+               "destination": str(destination), "entry_id": "dir-id" if action == "extract_subtree" else "file-id",
+               "compare_archive": str(other)}
+    review = desktop.review(payload)
+    original = getattr(FakeService, method)
+    def race(*args, **kwargs):
+        destination.mkdir()
+        (destination / "user.txt").write_text("keep my data")
+        if fail:
+            raise RuntimeError("converter failed")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(FakeService, method, race)
+    with pytest.raises((ValueError, RuntimeError), match="already exists|converter failed"):
+        desktop.apply({**payload, "review_sha256": review["review_sha256"], "authoring_confirmed": True})
+    assert (destination / "user.txt").read_text() == "keep my data"
+    assert source.read_bytes() == b"RPF7 source"
+    assert not list(source.parent.glob("allin1-rpf-utility-*"))
+
+
+def test_late_companion_race_keeps_first_output_and_user_file(roots, monkeypatch):
+    game, source, other = roots
+    destination = source.parent / "diff.json"
+    companion = destination.with_suffix(".md")
+    payload = {"action": "compare", "archive": str(source), "gta_path": str(game),
+               "destination": str(destination), "compare_archive": str(other)}
+    review = desktop.review(payload)
+    original_rename, original_link = Path.rename, desktop.os.link
+    def race_rename(self, target):
+        output = original_rename(self, target)
+        if Path(target) == destination:
+            companion.write_text("user report")
+        return output
+    def race_link(self, target):
+        output = original_link(self, target)
+        if Path(target) == destination:
+            companion.write_text("user report")
+        return output
+    monkeypatch.setattr(Path, "rename", race_rename)
+    monkeypatch.setattr(desktop.os, "link", race_link)
+    with pytest.raises(RuntimeError, match="Retained outputs") as error:
+        desktop.apply({**payload, "review_sha256": review["review_sha256"], "authoring_confirmed": True})
+    assert str(destination) in str(error.value)
+    assert destination.is_file()
+    assert companion.read_text() == "user report"
+    assert not list(source.parent.glob("allin1-rpf-utility-*"))
 
 
 def test_rpf_utility_rejects_game_outputs_stale_reviews_and_existing_destinations(roots):
@@ -191,3 +298,58 @@ def test_rpf_utility_rejects_existing_companion_output(roots):
             "action": "compare", "archive": str(source), "gta_path": str(game),
             "destination": str(destination), "compare_archive": str(other),
         })
+
+
+@pytest.mark.skipif(os.environ.get("ALLIN1_NATIVE_RPF_TEST") != "1", reason="Requires actual built RpfPatcher/CodeWalker")
+@pytest.mark.parametrize("edition", ["Legacy", "Enhanced"])
+def test_real_staged_utility_outputs_remain_usable_after_publication(tmp_path, edition):
+    from allin1_sdk.paths import project_root
+    from allin1_sdk.processes import run_hidden
+    from allin1_sdk.texture_workspace import TextureDictionaryWorkspace
+    from test_texture_workspace import _workspace
+    fixture = _workspace(tmp_path)
+    game = tmp_path / "decoder"
+    game.mkdir()
+    (game / ("GTA5.exe" if edition == "Legacy" else "GTA5_Enhanced.exe")).write_bytes(b"MZ-test-decoder-only")
+    payload_dir = tmp_path / "payload"
+    (payload_dir / "textures").mkdir(parents=True)
+    patcher = project_root() / "tools/RpfPatcher/RpfPatcher.exe"
+    def command(*args):
+        result = run_hidden([str(patcher), *map(str, args)], capture_output=True, text=True, timeout=120)
+        assert result.returncode == 0, result.stderr or result.stdout
+    native = payload_dir / "textures/fixture.ytd"
+    command("asset-from-xml", fixture / "edit/vehicle.ytd.xml", native, fixture / "edit/assets", "legacy" if edition == "Legacy" else "gen9")
+    archive = tmp_path / "input.rpf"
+    command("build-dlc", payload_dir, archive)
+    other = tmp_path / "other.rpf"
+    other.write_bytes(archive.read_bytes())
+    original = hashlib.sha256(archive.read_bytes()).hexdigest()
+    for action, name in [
+        ("extract_entry", "copied.ytd"), ("extract_selection", "selected"),
+        ("export_native_workspace", "editable"), ("extract_subtree", "subtree"),
+        ("extract_archive", "tree"), ("compare", "comparison.v1.json"),
+        ("verify_integrity", "integrity.json"), ("defragment_copy", "compact.rpf"),
+    ]:
+        destination = tmp_path / name
+        payload = {"action": action, "archive": str(archive), "gta_path": str(game),
+                   "destination": str(destination), "compare_archive": str(other),
+                   "entry_id": "::textures" if action == "extract_subtree" else "::textures/fixture.ytd",
+                   "entry_ids": ["::textures/fixture.ytd"]}
+        reviewed = desktop.review(payload)
+        result = desktop.apply({**payload, "review_sha256": reviewed["review_sha256"], "authoring_confirmed": True})
+        assert destination.exists()
+        assert "allin1-rpf-utility-" not in str(result["evidence"])
+        if action == "export_native_workspace":
+            workspace = TextureDictionaryWorkspace(destination)
+            assert len(workspace.catalog().textures) == 2
+        if action == "extract_entry":
+            assert destination.read_bytes() == native.read_bytes()
+        if action == "compare":
+            assert destination.with_suffix(".md").is_file()
+        if action == "defragment_copy":
+            report_path = Path(result["evidence"]["report"])
+            report = json.loads(report_path.read_text())
+            assert report["output"]["path"] == str(destination)
+            assert result["evidence"]["report_sha256"] == hashlib.sha256(report_path.read_bytes()).hexdigest()
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == original
+    assert not list(tmp_path.glob("allin1-rpf-utility-*"))

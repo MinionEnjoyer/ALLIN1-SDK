@@ -9,6 +9,7 @@ from allin1_sdk import gxt2_desktop as desktop
 from allin1_sdk.mods import open_mod_package
 from test_gxt2_rpf_package import workspace
 from test_rpf_package_publication import (
+    deterministic_publication_identity,
     prepared as whole_prepared, reviewed,
     test_stale_or_unconfirmed_export_does_not_publish,
     test_failed_export_cleans_staging_without_overwriting_user_files,
@@ -43,13 +44,13 @@ def test_member_zip_contains_only_dictionary_and_exact_original_precondition(pre
     assert result["publication_mode"] == "member" and result["original_sha256"] == publication["original_sha256"]
     assert result["payload_sha256"] == publication["payload_sha256"]
     with zipfile.ZipFile(result["archive"]) as archive:
-        assert archive.namelist() == ["README.txt", "allin1.rpf-build.json", "mod.toml", "payload/replacement.gxt2"]
+        assert archive.namelist() == ["README.txt", "allin1.rpf-build.json", "mod.toml", "payload/replacement.gxt2", "sdk-artifact.json"]
         assert archive.read("payload/replacement.gxt2") == (Path(request["source_package"]) / "payload/replacement.gxt2").read_bytes()
         readme = archive.read("README.txt").decode()
         assert "Older Launchers reject" in readme and "Do not downgrade" in readme
         evidence = json.loads(archive.read("allin1.rpf-build.json"))
         assert not evidence["whole_archive_replacement"] and evidence["manifest_schema_version"] == schema
-        for name in ("README.txt", "mod.toml", "allin1.rpf-build.json"):
+        for name in ("README.txt", "mod.toml", "allin1.rpf-build.json", "sdk-artifact.json"):
             assert str(game) not in archive.read(name).decode() and request["workspace"] not in archive.read(name).decode()
     with open_mod_package(result["archive"]) as manifest:
         assert manifest.schema_version == schema and not manifest.files and len(manifest.rpf_entries) == 1
@@ -60,8 +61,12 @@ def test_member_zip_contains_only_dictionary_and_exact_original_precondition(pre
     if launcher.is_dir():
         monkeypatch.syspath_prepend(str(launcher))
         from allin1.mods import open_mod_package as launcher_open
+        from allin1.sdk_provenance import read
         with launcher_open(result["archive"]) as manifest:
             assert manifest.schema_version == schema and manifest.rpf_entries[0].original_sha256 == entry.original_sha256
+            lineage = read(manifest, "enhanced")
+            assert lineage["artifact"]["artifact_id"] == result["artifact_id"]
+            assert lineage["artifact"]["outputs"]["payload/replacement.gxt2"] == result["payload_sha256"]
     assert original.read_bytes() == before and not list(game.iterdir())
 
 

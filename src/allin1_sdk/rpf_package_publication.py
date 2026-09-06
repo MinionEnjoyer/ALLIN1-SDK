@@ -11,6 +11,8 @@ import zipfile
 from pathlib import Path
 
 from allin1_sdk.gxt2_workspace import Gxt2Workspace
+from allin1_sdk import artifact_identity
+from allin1_sdk.artifact_contract import validate_build
 from allin1_sdk.mods import ModManifest, open_mod_package, MAX_PACKAGE_ARCHIVE_MEMBER_BYTES
 from allin1_sdk.mod_package_contract import _safe_path, split_nested_rpf_entry
 
@@ -95,6 +97,13 @@ def _prepare(root, entries, state, source_package, metadata, destination, *, mod
             or _hash(dictionary) != payload_hash):
         raise ValueError("RPF build evidence does not match this saved workspace and archive; rebuild before exporting")
     reviewed = report.get("review", {})
+    input_build = report.get("build")
+    if input_build is not None:
+        validate_build(input_build)
+        if not isinstance(reviewed, dict) or reviewed.get("build") != input_build:
+            raise ValueError("RPF build identity does not match its reviewed SDK")
+    elif isinstance(reviewed, dict) and reviewed.get("build") is not None:
+        raise ValueError("RPF report lost its reviewed SDK build identity")
     comparisons = report.get("verification")
     if (not isinstance(reviewed, dict) or reviewed.get("archive_name") != archive_name
             or reviewed.get("archive_sha256") != binding["outer_archive_sha256"]
@@ -157,6 +166,7 @@ def _prepare(root, entries, state, source_package, metadata, destination, *, mod
                      "rpf-package.json": _hash(report_path), payload_relative + ".gxt2-validation.json": _hash(validation_path)}
     # Portable export evidence deliberately excludes local workspace and GTA paths.
     evidence = {"schema_version": 1, "operation": "allin1_rpf_publication", "package": settings,
+                "input_build": input_build, "input_build_status": "recorded" if input_build is not None else "not_recorded",
                 "edition": edition, "source_archive": archive_name, "source_archive_sha256": binding["outer_archive_sha256"],
                 "archive_sha256": archive_hash, "edited_entry": binding["entry_id"], "dictionary_sha256": payload_hash,
                 "verified_payloads": len(comparisons), "build_report_sha256": source_hashes["rpf-package.json"],
@@ -174,6 +184,21 @@ def _prepare(root, entries, state, source_package, metadata, destination, *, mod
               "Requires OpenRPF. No DLC pack registration is included; this is a replacement for an existing archive.\n"
               "The SDK export did not install files, upload content, or change GTA. Only distribute content you are permitted to share.\n")
     generated = {"mod.toml": manifest_text.encode("utf-8"), "allin1.rpf-build.json": _json_bytes(evidence), "README.txt": readme.encode("utf-8")}
+    # Bind the executing publisher to its exact verified inputs and shipped
+    # bytes. This is not retroactive identity for the earlier RPF construction.
+    outputs = {name: hashlib.sha256(data).hexdigest() for name, data in generated.items()}
+    outputs[payload_member] = shipped_hash
+    artifact = artifact_identity.manifest(
+        artifact_identity.current(), source_hashes, outputs, edition=edition.title(),
+        reports=[source_hashes["rpf-package.json"], source_hashes[payload_relative + ".gxt2-validation.json"]],
+        changes=evidence,
+    )
+    generated["sdk-artifact.json"] = _json_bytes(artifact)
+    if len(generated["sdk-artifact.json"]) > 4 * 1024**2:
+        raise ValueError("SDK artifact envelope exceeds the Launcher 4 MiB limit")
+    identity = {"artifact_id": artifact["artifact_id"], "build_fingerprint": artifact["build"]["build_fingerprint"],
+                "build_mode": artifact["build"]["mode"],
+                "input_build_fingerprint": input_build["build_fingerprint"] if input_build else None}
     members = [{"path": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()} for name, data in generated.items()]
     members.append({"path": payload_member, "size": shipped_file.stat().st_size, "sha256": shipped_hash})
     members.sort(key=lambda row: row["path"])
@@ -181,7 +206,7 @@ def _prepare(root, entries, state, source_package, metadata, destination, *, mod
     required = total * 2 + 64 * 1024**2
     if check_space and (shutil.disk_usage(destination.parent).free < required or shutil.disk_usage(tempfile.gettempdir()).free < total + 64 * 1024**2):
         raise ValueError("Not enough disk space to publish and re-open the ALLIN1 ZIP")
-    value = {"source_package": str(source), "metadata": settings, "edition": edition, "archive_sha256": archive_hash,
+    value = {"source_package": str(source), "metadata": settings, "edition": edition, "archive_sha256": archive_hash, **identity,
              "source_files": source_hashes, "members": members, "total_bytes": total, "required_free_bytes": required,
              "manifest_text": manifest_text, "publication_mode": mode, "manifest_schema_version": schema,
              "entry": entry, "original_sha256": state["source_sha256"] if member_only else None, "payload_sha256": shipped_hash,
@@ -253,4 +278,6 @@ def build(root, entries, state, destination, reviewed, review_sha256):
             "payload_sha256": reviewed["payload_sha256"], "publication_mode": reviewed["publication_mode"],
             "manifest_schema_version": reviewed["manifest_schema_version"], "entry": reviewed["entry"],
             "original_sha256": reviewed["original_sha256"], "members": reviewed["members"], "review_sha256": review_sha256,
+            "artifact_id": reviewed["artifact_id"], "build_fingerprint": reviewed["build_fingerprint"], "build_mode": reviewed["build_mode"],
+            "input_build_fingerprint": reviewed["input_build_fingerprint"],
             "file_write_performed": True, "game_write_performed": False, "install_performed": False, "upload_performed": False}

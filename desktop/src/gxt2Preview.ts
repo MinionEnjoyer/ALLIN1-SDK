@@ -5,11 +5,14 @@ export function rpfPublicationPreview(payload: Record<string, unknown>): Gxt2Rpf
   const entry = payload.root_member ? "global.gxt2" : "x64/american.rpf!global.gxt2";
   const payloadPath = member ? "payload/replacement.gxt2" : "payload/text-fixture.rpf", payloadHash = (member ? "d" : "9").repeat(64);
   return { source_package: String(payload.source_package), metadata, edition: "enhanced", archive_sha256: "9".repeat(64),
+    artifact_id: "a".repeat(64), build_fingerprint: "f".repeat(64), build_mode: "development_dirty",
+    input_build_fingerprint: null,
     publication_mode: member ? "member" : "whole_archive", manifest_schema_version: schema,
     entry: member ? entry : null, original_sha256: member ? "b".repeat(64) : null, payload_sha256: payloadHash,
     members: [ { path: "README.txt", size: 600, sha256: "1".repeat(64) }, { path: "allin1.rpf-build.json", size: 900, sha256: "2".repeat(64) },
-      { path: "mod.toml", size: 500, sha256: "3".repeat(64) }, { path: payloadPath, size: member ? 190 : 524288, sha256: payloadHash } ],
-    total_bytes: member ? 2190 : 526288, required_free_bytes: 70 * 1024**2, whole_archive_replacement: !member,
+      { path: "mod.toml", size: 500, sha256: "3".repeat(64) }, { path: payloadPath, size: member ? 190 : 524288, sha256: payloadHash },
+      { path: "sdk-artifact.json", size: 2400, sha256: "4".repeat(64) } ],
+    total_bytes: member ? 4590 : 528688, required_free_bytes: 70 * 1024**2, whole_archive_replacement: !member,
     install_performed: false, dlc_registration_performed: false, upload_performed: false,
     manifest_text: `schema_version = ${schema}\nid = "${metadata.id}"\nname = "${metadata.name}"\nversion = "${metadata.version}"\nauthor = "${metadata.author}"\ntype = "rpf"\neditions = ["enhanced"]\ndependencies = ["openrpf"]\ndlc_packs = []\n\n${member ? '[[rpf_entries]]' : '[[files]]'}\nsource = "${payloadPath}"\n${member ? "archive" : "destination"} = "${metadata.target}"\nsha256 = "${payloadHash}"\n${member ? `entry = "${entry}"\noriginal_sha256 = "${"b".repeat(64)}"\n` : ""}` };
 }
@@ -46,6 +49,7 @@ export function gxt2PreviewReview(payload: Record<string, unknown>): Gxt2Review 
     entry_count: session.entry_count, output_sha256: payload.action === "build" ? "d".repeat(64) : null,
     ...(payload.action === "publish_rpf" ? { rpf_publication: rpfPublicationPreview(payload) } : {}),
     ...(payload.action === "package_rpf" && session.source_binding ? { rpf_package: {
+      build: { build_fingerprint: "f".repeat(64), mode: "development_dirty" },
       archive_name: "text-fixture.rpf", archive_size: 524288, entry_id: session.source_binding.entry_id,
       entry_size_before: 160, entry_size_after: 190, payload_sha256: "d".repeat(64), original_sha256: session.original_sha256,
       archive_sha256: session.source_binding.outer_archive_sha256, edition: "Enhanced", index_sha256: "f".repeat(64),

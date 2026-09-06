@@ -8,7 +8,7 @@ import { rpfChangePreviewSession, rpfChangePreviewReview } from "./rpfChangePrev
 import type { Envelope, RpfArchiveResult } from "./types";
 
 const response=(result:unknown):Envelope=>({protocol_version:"1.0.0",request_id:"rpf-test",job_id:"rpf-job",operation:"result",sequence:1,risk:"read_only",terminal:true,payload:{result}});
-function setup(app=false, target: RpfChangeRequest | null=null) {
+function setup(app=false, target: RpfChangeRequest | null=null, indexedOverride?: RpfArchiveResult | null) {
   const client=createPreviewClient("rpf_changes");let current=rpfChangePreviewSession();
   const original=client.startJob.bind(client);
   client.startJob=vi.fn(async(op,payload,revision,event)=>{
@@ -26,13 +26,25 @@ function setup(app=false, target: RpfChangeRequest | null=null) {
       output:payload.destination ?? current.change_set,output_sha256:compile?"d".repeat(64):current.state_sha256,
       session:current,file_write_performed:true,archive_write_performed:false,game_write_performed:false,plan_status:compile?"ready":null});
   };
-  const guard=vi.fn(), user=userEvent.setup();
+  const guard=vi.fn(), onOpenPlan=vi.fn(), user=userEvent.setup();
   if(app)render(<App client={client}/>);
-  else render(<RpfChangeSetWorkspace client={client} indexed={{source:current.archive.path,gta_path:"C:\\Games\\Grand Theft Auto V Enhanced"} as RpfArchiveResult} onGuardChange={guard} targetRequest={target}/>);
-  return {client,apply,saved,user,guard,get current(){return current;}};
+  else render(<RpfChangeSetWorkspace client={client} indexed={indexedOverride === undefined ? {source:current.archive.path,gta_path:"C:\\Games\\Grand Theft Auto V Enhanced"} as RpfArchiveResult : indexedOverride} onGuardChange={guard} targetRequest={target} onOpenPlan={onOpenPlan}/>);
+  return {client,apply,saved,user,guard,onOpenPlan,get current(){return current;}};
 }
 async function open(user:ReturnType<typeof userEvent.setup>) {await user.click(screen.getByRole("button",{name:"Open change set"}));await screen.findByText("2 staged actions · enhanced");}
 async function confirm(user:ReturnType<typeof userEvent.setup>,name:string) {const review=screen.getByRole("region",{name:"RPF change-set review"});await user.click(within(review).getByRole("checkbox"));await user.click(within(review).getByRole("button",{name}));}
+
+it.each([null, { source: "C:/unrelated/archive.rpf", gta_path: "C:/wrong-game" } as RpfArchiveResult])("creates from captured browser identity without relying on a previous inspector index (%j)", async indexed => {
+  const target = {archive:"C:/work/selected.rpf", archive_path:"nested/child.rpf", entry:"textures/body.ytd", kind:"resource", gta_path:"C:/matching-game", requestId:1};
+  const {user,client,apply,saved}=setup(false,target,indexed);apply.mockImplementation(async p=>saved(p));
+  expect(screen.getByRole("button",{name:"Create change set"})).toBeEnabled();
+  await user.click(screen.getByRole("button",{name:"Create change set"}));
+  await screen.findByRole("heading",{name:"Review: Create change set"});
+  expect(client.startJob).toHaveBeenCalledWith("review_rpf_change_set",expect.objectContaining({action:"create",archive:target.archive,gta_path:target.gta_path}),expect.any(String),expect.any(Function));
+  await confirm(user,"Create change set");
+  expect(screen.getByLabelText("Archive layer")).toHaveValue(target.archive_path);
+  expect(screen.getByLabelText("Member path")).toHaveValue(target.entry);
+});
 
 it("opens a saved change set read-only and stages the exact reviewed payload",async()=>{
   const {user,client,apply,saved,guard}=setup();apply.mockImplementation(async p=>saved(p));await open(user);
@@ -49,13 +61,18 @@ it("opens a saved change set read-only and stages the exact reviewed payload",as
 });
 
 it("reviews reordering, removal and compiled-plan export independently",async()=>{
-  const {user,apply,saved}=setup();apply.mockImplementation(async p=>saved(p));await open(user);
+  const {user,apply,saved,onOpenPlan}=setup();apply.mockImplementation(async p=>saved(p));await open(user);
   await user.click(screen.getByRole("button",{name:"Move down"}));await screen.findByRole("heading",{name:"Review: Reorder action"});await confirm(user,"Reorder action");
   await user.click(screen.getByRole("button",{name:"Remove staged"}));await screen.findByRole("heading",{name:"Review: Remove staged action"});
   expect(screen.getByRole("checkbox")).not.toBeChecked();await confirm(user,"Remove staged action");await screen.findByText("1 staged action · enhanced");
   await user.click(screen.getByRole("button",{name:"Review compiled plan"}));await screen.findByRole("heading",{name:"Review: Export compiled plan"});
   expect(screen.getByRole("checkbox")).not.toBeChecked();await confirm(user,"Export compiled plan");
   await screen.findByText(/Plan status: ready/);expect(apply).toHaveBeenCalledTimes(3);
+  await user.click(screen.getByRole("button",{name:"Open compiled plan in Execute & restore"}));
+  expect(onOpenPlan).toHaveBeenCalledWith(apply.mock.calls[2][0].destination);
+  expect(apply).toHaveBeenCalledTimes(3);
+  await user.type(screen.getByLabelText("Member path"),"another.ytd");
+  expect(screen.getByRole("button",{name:"Open compiled plan in Execute & restore"})).toBeDisabled();
 });
 
 it("requires confirmation to create a source-bound new change set",async()=>{
