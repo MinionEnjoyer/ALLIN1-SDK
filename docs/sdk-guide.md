@@ -146,6 +146,80 @@ authority checks still apply. Use the [CLI reference](cli-reference.md) and the
 command's `--help`; a command being listed does not mean it is safe to run on a
 live installation.
 
+### Headless workspaces and agents
+
+`allin1-sdk authoring-catalog` returns the automation route for every desktop
+module. Existing specialist commands remain available. The newer node, code,
+binary, map, recipe, identity, render and controller panels also share one
+headless **inspect → review → apply** contract with the desktop:
+
+```powershell
+allin1-sdk inspect-authoring-workspace --request-file inspect.json
+allin1-sdk review-authoring-action --request-file review.json
+allin1-sdk apply-authoring-action --request-file approved.json --acknowledge-authoring
+```
+
+Each file contains a JSON object. For example, inspecting a saved graph uses
+`{"module":"graph","workspace":"C:/MyProject/package-graph.json"}`.
+To save an edit, the review request contains `module`, `workspace`, `action:"save"`,
+the edited `document`, and `expected_state_sha256` from inspection. After reviewing
+the result, the approved request is the **same request** plus the returned
+`review_sha256`. Approval of a different draft or stale source is rejected.
+Creation/build/export actions also require a new external `destination` where
+specified by the module. Request files are limited to 1 MiB; use them instead of
+shell-escaping large JSON documents.
+
+The Python API uses the same domain services and returns dictionaries:
+
+```python
+from copy import deepcopy
+from allin1_sdk.automation import inspect_authoring, review_authoring, apply_authoring
+
+context = {"module": "graph", "workspace": "C:/MyProject/package-graph.json"}
+session = inspect_authoring(context)
+draft = deepcopy(session["document"])
+# Make the intended edits to the draft, preserving node IDs and source hashes.
+request = {**context, "action": "save", "document": draft,
+           "expected_state_sha256": session["state_sha256"]}
+review = review_authoring(request)
+# Present review to the user. Only after explicit approval:
+receipt = apply_authoring({**request, "review_sha256": review["review_sha256"],
+                          "authoring_confirmed": True})
+```
+
+For agents, start `allin1-sdk agent-api` and send one JSON object per line.
+`{"id":"catalog","action":"catalog"}` discovers commands, parameters, help,
+subcommands and risk classifications. Execution accepts either an `args` array
+or a `parameters` object keyed by the catalog's parameter names, never both:
+
+```json
+{"id":"inspect","action":"execute","command":"inspect-authoring-workspace","parameters":{"request_file":"C:/MyProject/inspect.json"}}
+```
+
+Successful JSON commands expose parsed `result.data` with `data_available:true`;
+the original `output` and `exit_code` remain for compatibility. Truncated or
+prose-only output is not exposed as valid structured data. Check `ok`, exit status
+and the domain findings, not only the presence of JSON. Grouped commands such as
+`assistant` use `args` with the subcommand first. The agent cannot grant itself
+approval; reviewed writes still require the user's acknowledgement. Live-game
+writes remain disabled unless the user explicitly enables that process capability
+and supplies the specialist command's required acknowledgement. Shared authoring
+routes always reject output inside GTA.
+
+Find a node without starting the UI with
+`allin1-sdk query-node-graph GRAPH --query NAME --sort color --limit 50`.
+Results include exact IDs, ancestor IDs, categories, source fingerprint and
+pagination. Add `--module program` for build flows. Use a returned exact ID with
+`open-rpf-graph GRAPH --focus-node ID` or
+`open-rpf-program PROGRAM --focus-node ID` to select and reveal it in the desktop;
+opening a build flow does not execute it. Camera position and search/color filters
+are view preferences, not authoring changes. Saved node coordinates remain part
+of the reviewed document.
+
+Native RPF, Blender and controller builds retain their decoder/toolchain checks;
+headless access does not turn unsupported operations into successful results or
+qualify in-game behavior. `check-sdk-update` checks release metadata only.
+
 F1 opens contextual Help; the topics and article scroll independently. Help data
 and map-detection helpers no longer import Tkinter. Specialist panels load their
 code on demand. A loading failure does not automatically restart the application

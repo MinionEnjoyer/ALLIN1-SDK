@@ -342,6 +342,7 @@ it("package layout React happy path imports a real folder, renames, arranges, sa
   fireEvent.change(screen.getByLabelText("Node name"), { target: { value: "renamed.bin" } });
   expect(screen.getByRole("button", { name: "Open graph" })).toBeDisabled();
   await user.click(screen.getByRole("button", { name: "Apply node to draft" }));
+  await user.click(screen.getByRole("checkbox", { name: "Arrange nodes" }));
   fireEvent.keyDown(screen.getByRole("button", { name: "Select node renamed.bin" }), { key: "ArrowDown" });
   await user.click(screen.getByRole("button", { name: "Add directory" }));
   await user.click(screen.getByRole("button", { name: "Auto layout nodes" }));
@@ -549,6 +550,7 @@ print(_source(Path(sys.argv[2])))`, sdk, files], { cwd: sdk, windowsHide: true, 
   await user.click(screen.getByRole("button", { name: "Open graph vehicle" }));
   expect(openVehicle).toHaveBeenCalledWith(expect.stringContaining("package-source"), "authorcar");
   const retainedSource = openVehicle.mock.calls[0][0];
+  await user.click(screen.getByRole("checkbox", { name: "Arrange nodes" }));
   fireEvent.keyDown(screen.getByRole("button", { name: "Select node authorcar" }), { key: "ArrowRight" });
   expect(screen.getByRole("button", { name: "Open graph vehicle" })).toBeDisabled();
   await user.click(screen.getByRole("button", { name: "Review graph save" })); await confirm(user);

@@ -112,7 +112,7 @@ it("reviews complete clone additions and confirms creation and undo independentl
   const review = await screen.findByRole("region", { name: "Weapon change review" });
   expect(start).toHaveBeenLastCalledWith("review_weapon_authoring", expect.objectContaining({ action: "clone", spec: cloneSpec, expected_revision: 0 }), expect.any(String), expect.any(Function));
   expect(within(review).getByText("Ready to create")).toBeInTheDocument();
-  expect(within(review).getByRole("heading", { name: "Review new weapon bundle" })).toHaveFocus();
+  await waitFor(() => expect(within(review).getByRole("heading", { name: "Review new weapon bundle" })).toHaveFocus());
   expect(within(review).getByRole("region", { name: "Planned additions" })).toHaveTextContent("animation mapping");
   expect(screen.getByLabelText("New weapon identity")).toBeDisabled();
   expect(screen.getByRole("button", { name: "Confirm clone" })).toBeDisabled();

@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { DesktopClient } from "./types";
 import { AuthoringFeedback, useAuthoringWorkspace, type WorkspaceResult } from "./useAuthoringWorkspace";
 import "./OfflineAuthoring.css";
 import "./GraphWorkbench.css";
-import SliderField from "./SliderField";
+import NodeCanvas from "./NodeCanvas";
+import { childOf, nodeColor, organizeNodes, PALETTE, parentOf, searchNodes, sortNodes, type ColorKey, type ColorMode, type LayoutMode, type SortMode } from "./graphView";
 
 interface Node { id: string; type: string; name?: string; x: number; y: number; source?: string; size?: number; sha256?: string; config?: Record<string, string> }
 interface Edge { parent?: string; child?: string; from?: string; to?: string; from_port?: string; to_port?: string }
@@ -12,59 +13,19 @@ interface Document { semantic?: Semantic; schema_version: number; operation: str
 interface Spec { title: string; input_types: string[]; output_type: string | null; required_config: string[]; optional_config: string[] }
 interface Session extends WorkspaceResult { workspace: string | null; document: Document; issues: string[]; node_specs?: Record<string, Spec>; source_node?: Omit<Node, "id" | "x" | "y"> }
 const serial = (value: unknown) => JSON.stringify(value);
-const parentOf = (e: Edge) => e.parent ?? e.from!;
-const childOf = (e: Edge) => e.child ?? e.to!;
 const unique = (nodes: Node[]) => { let id = 1; while (nodes.some(node => node.id === `node_${id}`)) id++; return `node_${id}`; };
 const blankGraph = (): Document => ({ schema_version: 1, operation: "rpf_package_graph", root_id: "root", nodes: [{ id: "root", type: "archive", name: "dlc.rpf", x: 40, y: 40 }], edges: [] });
 const templates = { validate: "Validate only", "loose-export": "Loose authoring tree", "verified-build": "Verified RPF build", "compact-release": "Compact verified release", "origin-change-plan": "Imported-origin plan" };
 
-function NodeCanvas({ document, selected, select, move, locked }: { document: Document; selected: string; select: (id: string) => void; move: (id: string, x: number, y: number) => void; locked: boolean }) {
-  const [zoom, setZoom] = useState(1), [drag, setDrag] = useState<{ id: string; x: number; y: number; startX: number; startY: number } | null>(null);
-  const scroll = useRef<HTMLDivElement>(null), pan = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set()), [showRelations, setShowRelations] = useState(true);
-  const hidden = new Set<string>();
-  for (let i = 0; i < document.nodes.length; i++) for (const edge of document.edges ?? []) if (collapsed.has(parentOf(edge)) || hidden.has(parentOf(edge))) hidden.add(childOf(edge));
-  const positions = [...document.nodes.filter(node => !hidden.has(node.id)), ...(showRelations ? document.semantic?.entities ?? [] : [])].map(node => drag?.id === node.id ? { ...node, x: drag.x, y: drag.y } : node);
-  const edges = [...(document.edges ?? document.links ?? []), ...(showRelations ? document.semantic?.relations.map(r => ({ parent: r.source, child: r.target })) ?? [] : [])];
-  const width = Math.max(850, ...positions.map(n => n.x + 280)), height = Math.max(470, ...positions.map(n => n.y + 140));
-  return <><div className="graph-view-controls"><button className="quiet-button" onClick={() => setZoom(z => Math.max(.4, z - .1))} aria-label="Zoom out graph">−</button>
-    <span>{Math.round(zoom * 100)}%</span><button className="quiet-button" onClick={() => setZoom(z => Math.min(1.8, z + .1))} aria-label="Zoom in graph">+</button>
-    <button className="quiet-button" onClick={() => { setZoom(1); scroll.current?.scrollTo?.({ left: 0, top: 0 }); }}>Reset view</button>
-    <button className="quiet-button" onClick={() => setZoom(Math.max(.1, Math.min(1.8, (scroll.current?.clientWidth || 850) / width, (scroll.current?.clientHeight || 470) / height)))}>Fit graph</button>
-    {document.edges && <><button className="quiet-button" disabled={!document.edges.some(edge => parentOf(edge) === selected)} onClick={() => setCollapsed(old => { const next = new Set(old); if (next.has(selected)) next.delete(selected); else next.add(selected); return next; })}>{collapsed.has(selected) ? "Expand selected branch" : "Collapse selected branch"}</button>
-      <button className="quiet-button" disabled={!collapsed.size} onClick={() => setCollapsed(new Set())}>Expand all branches</button></>}
-    {document.semantic && <label><input type="checkbox" checked={showRelations} onChange={e => setShowRelations(e.target.checked)} />Show vehicle relationships</label>}</div>
-    <details className="viewport-slider-settings"><summary>Graph zoom</summary><SliderField numeric commitValidOnly label="Graph zoom" unit="%" min={10} max={180} hardMin={10} hardMax={180} step={5} value={zoom * 100} resetValue={100}
-      onChange={value => { if (Number.isFinite(value) && value >= 10 && value <= 180) setZoom(value / 100); }} /></details>
-    <div className="graph-canvas-scroll" ref={scroll} onPointerDown={e => {
-      if ((e.target as Element).closest("[data-node]")) return;
-      pan.current = { x: e.clientX, y: e.clientY, left: e.currentTarget.scrollLeft, top: e.currentTarget.scrollTop };
-      e.currentTarget.setPointerCapture?.(e.pointerId);
-    }} onPointerMove={e => { if (pan.current) { e.currentTarget.scrollLeft = pan.current.left - e.clientX + pan.current.x; e.currentTarget.scrollTop = pan.current.top - e.clientY + pan.current.y; } }} onPointerUp={() => { pan.current = null; }}>
-      <svg width={width * zoom} height={height * zoom} viewBox={`0 0 ${width} ${height}`} aria-label="Package node canvas">
-        <defs><marker id={`arrow-${document.operation}`} markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" /></marker></defs>
-        {edges.map((edge, i) => { const parent = positions.find(n => n.id === parentOf(edge)), child = positions.find(n => n.id === childOf(edge));
-          return parent && child && <path key={i} className="graph-edge" d={`M ${parent.x + 220} ${parent.y + 35} C ${parent.x + 260} ${parent.y + 35}, ${child.x - 40} ${child.y + 35}, ${child.x} ${child.y + 35}`} markerEnd={`url(#arrow-${document.operation})`} />; })}
-        {positions.map(node => <g data-node={node.id} key={node.id} role="button" tabIndex={0} aria-label={`Select node ${node.name || node.id}`} aria-pressed={selected === node.id}
-          className={`graph-node ${selected === node.id ? "selected" : ""}`} transform={`translate(${node.x}, ${node.y})`}
-          onClick={() => select(node.id)} onKeyDown={e => {
-            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(node.id); }
-            if (!locked && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) {
-              e.preventDefault(); move(node.id, Math.max(0, node.x + (e.key === "ArrowLeft" ? -10 : e.key === "ArrowRight" ? 10 : 0)), Math.max(0, node.y + (e.key === "ArrowUp" ? -10 : e.key === "ArrowDown" ? 10 : 0)));
-            }
-          }} onPointerDown={e => { if (locked) return; e.stopPropagation(); e.currentTarget.setPointerCapture?.(e.pointerId); select(node.id); setDrag({ id: node.id, x: node.x, y: node.y, startX: e.clientX - node.x * zoom, startY: e.clientY - node.y * zoom }); }}
-          onPointerMove={e => { if (drag?.id === node.id) setDrag({ ...drag, x: Math.max(0, (e.clientX - drag.startX) / zoom), y: Math.max(0, (e.clientY - drag.startY) / zoom) }); }}
-          onPointerUp={() => { if (drag?.id === node.id) { move(node.id, Math.round(drag.x), Math.round(drag.y)); setDrag(null); } }} onPointerCancel={() => setDrag(null)}>
-          <rect width="220" height="70" rx="4" /><text x="14" y="25">{(node.name || node.id).slice(0, 26)}</text><text className="graph-node-kind" x="14" y="49">{node.type.replaceAll("_", " ")}</text>
-        </g>)}
-      </svg>
-    </div><p className="field-hint">Drag nodes to arrange. Drag the background to pan. Focus a node and use arrow keys for precise placement.</p></>;
-}
 
-export default function GraphWorkbench({ client, module, onGuardChange, onOpenAsset, onOpenVehicle, initialSource = "" }: { client: DesktopClient; module: "graph" | "program"; onGuardChange: (guarded: boolean) => void; onOpenAsset?: (source: string) => void; onOpenVehicle?: (source: string, model: string) => void; initialSource?: string }) {
+export default function GraphWorkbench({ client, module, onGuardChange, onOpenAsset, onOpenVehicle, initialSource = "", initialFocus = "", initialFocusSerial = 0 }: { client: DesktopClient; module: "graph" | "program"; onGuardChange: (guarded: boolean) => void; onOpenAsset?: (source: string) => void; onOpenVehicle?: (source: string, model: string) => void; initialSource?: string; initialFocus?: string; initialFocusSerial?: number }) {
   const [session, setSession] = useState<Session | null>(null), [document, setDocument] = useState<Document | null>(null), [selected, setSelected] = useState("");
   const [filename, setFilename] = useState(module === "graph" ? "rpf-graph.json" : "rpf-program.json"), [outputName, setOutputName] = useState(module === "graph" ? "materialized-tree" : "program-report.json");
   const [template, setTemplate] = useState("loose-export"), [game, setGame] = useState(""), [query, setQuery] = useState("");
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>("hierarchy"), [colorMode, setColorMode] = useState<ColorMode>("kind");
+  const [colorFilter, setColorFilter] = useState<ColorKey | "all">("all"), [sortMode, setSortMode] = useState<SortMode>("color");
+  const [canvasOnly, setCanvasOnly] = useState(false), [showRelations, setShowRelations] = useState(true);
+  const [focusRequest, setFocusRequest] = useState<{ id: string; serial: number } | null>(null), focusSerial = useRef(0);
   const [name, setName] = useState(""), [config, setConfig] = useState<Record<string, string>>({});
   const work = useAuthoringWorkspace(client, module, value => {
     const s = value as Session;
@@ -75,7 +36,7 @@ export default function GraphWorkbench({ client, module, onGuardChange, onOpenAs
       const node: Node = { ...s.source_node, id, x: 340, y: 80 + document.nodes.length * 90 };
       setDocument({ ...document, nodes: [...document.nodes, node], edges: [...(document.edges ?? []), { parent, child: id }] }); chooseNode(node); return;
     }
-    setSession(s); setDocument(s.document); chooseNode(s.document.nodes[0]);
+    setSession(s); setDocument(s.document); chooseNode(s.document.nodes[0]); setQuery(""); setColorFilter("all"); setFocusRequest(null);
   });
   const current = document?.nodes.find(n => n.id === selected) ?? document?.semantic?.entities.find(n => n.id === selected);
   const semanticEntity = document?.semantic?.entities.find(n => n.id === selected);
@@ -90,6 +51,37 @@ export default function GraphWorkbench({ client, module, onGuardChange, onOpenAs
   }, [initialSource, dirty, work.locked]);
   function chooseNode(node?: Node) { setSelected(node?.id ?? ""); setName(node?.name ?? ""); setConfig(node?.config ?? {}); }
   const select = (id: string) => { if (!work.locked && !formDirty) chooseNode(document?.nodes.find(n => n.id === id) ?? document?.semantic?.entities.find(n => n.id === id)); };
+  const allNodes = useMemo(() => [...(document?.nodes ?? []), ...(showRelations ? document?.semantic?.entities ?? [] : [])], [document, showRelations]);
+  const allEdges = useMemo(() => [...(document?.edges ?? document?.links ?? []), ...(showRelations ? document?.semantic?.relations.map(r => ({ parent: r.source, child: r.target })) ?? [] : [])], [document, showRelations]);
+  const findings = useMemo(() => document?.semantic?.findings ?? [], [document]);
+  const matches = useMemo(() => searchNodes(allNodes, query), [allNodes, query]);
+  const matchIds = useMemo(() => query.trim() ? new Set(matches.map(n => n.id)) : null, [matches, query]);
+  const listedNodes = useMemo(() => sortNodes(query.trim() ? matches : allNodes, query.trim() ? "name" : sortMode, colorMode, findings)
+    .filter(node => colorFilter === "all" || nodeColor(node, colorMode, findings) === colorFilter), [allNodes, matches, query, sortMode, colorMode, findings, colorFilter]);
+  const colors = useMemo(() => [...new Set(sortNodes(allNodes, "color", colorMode, findings).map(node => nodeColor(node, colorMode, findings)))], [allNodes, colorMode, findings]);
+  const focusNode = (id: string) => {
+    if (work.locked || formDirty) return;
+    select(id); setColorFilter("all"); setFocusRequest({ id, serial: ++focusSerial.current });
+  };
+  const appliedLaunchFocus = useRef("");
+  useEffect(() => {
+    const pathKey = (value: string) => value.replace(/^\\\\\?\\/, "").replaceAll("\\", "/").toLowerCase();
+    if (!initialFocus || !session?.workspace || pathKey(session.workspace) !== pathKey(initialSource) || work.locked || formDirty) return;
+    const key = `${initialSource}:${initialFocusSerial}:${initialFocus}`;
+    if (appliedLaunchFocus.current === key || !allNodes.some(node => node.id === initialFocus)) return;
+    appliedLaunchFocus.current = key;
+    setQuery(""); focusNode(initialFocus);
+  }, [initialFocus, initialFocusSerial, initialSource, session, allNodes, work.locked, formDirty]);
+  useEffect(() => {
+    if (!query.trim() || !matches.length || work.locked || formDirty) return;
+    const timer = window.setTimeout(() => focusNode(matches[0].id), 180);
+    return () => window.clearTimeout(timer);
+  }, [query, matches, work.locked, formDirty]);
+  const nextMatch = (direction: number) => {
+    if (!matches.length) return;
+    const index = matches.findIndex(n => n.id === selected);
+    focusNode(matches[(index + direction + matches.length) % matches.length].id);
+  };
   const open = async () => { const chosen = await work.choose(module === "graph" ? "graph_document" : "program_document"); if (chosen) await work.run("inspect_authoring_workspace", { workspace: chosen }); };
   const create = async () => {
     if (module === "graph") { const doc = blankGraph(); setSession(null); setDocument(doc); chooseNode(doc.nodes[0]); }
@@ -135,10 +127,10 @@ export default function GraphWorkbench({ client, module, onGuardChange, onOpenAs
   };
   const layout = () => {
     if (!document) return;
-    const edges = document.edges ?? document.links ?? [], depths = new Map<string, number>([[document.root_id || document.source_id!, 0]]);
-    for (let i = 0; i < document.nodes.length; i++) for (const e of edges) if (depths.has(parentOf(e)) && !depths.has(childOf(e))) depths.set(childOf(e), depths.get(parentOf(e))! + 1);
-    const rows = new Map<number, number>();
-    setDocument({ ...document, nodes: document.nodes.map(n => { const depth = depths.get(n.id) ?? 0, row = rows.get(depth) ?? 0; rows.set(depth, row + 1); return { ...n, x: 40 + depth * 280, y: 40 + row * 105 }; }) });
+    const placed = new Map(organizeNodes([...document.nodes, ...(document.semantic?.entities || [])], allEdges, layoutMode === "saved" ? "hierarchy" : layoutMode, colorMode, findings).map(n => [n.id, n]));
+    setDocument({ ...document, nodes: document.nodes.map(n => ({ ...n, x: placed.get(n.id)!.x, y: placed.get(n.id)!.y })),
+      ...(document.semantic ? { semantic: { ...document.semantic, entities: document.semantic.entities.map(n => ({ ...n, x: placed.get(n.id)!.x, y: placed.get(n.id)!.y })) } } : {}) });
+    setLayoutMode("saved");
   };
   const review = async (action: string) => {
     let destination: string | undefined;
@@ -149,7 +141,7 @@ export default function GraphWorkbench({ client, module, onGuardChange, onOpenAs
   const title = module === "graph" ? "Package layout" : "Build flow";
   const rootId = document?.root_id || document?.source_id;
   const connected = (document?.edges ?? document?.links ?? []).find(e => childOf(e) === selected);
-  return <section className="offline-workbench" aria-label={title}><div className="offline-toolbar"><div><h3>{title}</h3><p>{module === "graph" ? "Arrange archive contents and bind each file to its source hash." : "Connect typed build steps. Plan outputs separately before executing the reviewed flow."}</p></div>
+  return <section className={`offline-workbench graph-workbench ${canvasOnly ? "graph-canvas-only" : ""}`} aria-label={title}><div className="offline-toolbar"><div><h3>{title}</h3><p>{module === "graph" ? "Explore archive contents, source files, and their relationships." : "Connect typed build steps. Plan outputs separately before executing the reviewed flow."}</p></div>
     <div className="heading-actions"><button className="primary-button" disabled={work.locked || dirty} onClick={() => void open()}>Open {module}</button><button className="quiet-button" disabled={work.locked || dirty} onClick={() => void create()}>New {module}</button>
       {module === "graph" && <><button className="quiet-button" disabled={work.locked || dirty} onClick={() => void folder()}>Graph from folder</button><button className="quiet-button" disabled={work.locked || dirty} onClick={() => void importArchive()}>Import RPF graph</button><button className="quiet-button" disabled={work.locked || dirty} onClick={() => void importPackage(false)}>Import package ZIP</button><button className="quiet-button" disabled={work.locked || dirty} onClick={() => void importPackage(true)}>Import package folder</button></>}</div></div>
     {module === "program" && <label>Program template<select disabled={work.locked || dirty} value={template} onChange={e => setTemplate(e.target.value)}>{Object.entries(templates).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></label>}
@@ -157,17 +149,41 @@ export default function GraphWorkbench({ client, module, onGuardChange, onOpenAs
     <AuthoringFeedback work={work} />
     {work.lastResult?.preview_summary !== undefined && <details open><summary>Preview bundle results — failures remain failures</summary><pre>{JSON.stringify(work.lastResult.preview_summary, null, 2)}</pre></details>}
     {session?.issues.length ? <div className="graph-issues" role="status"><strong>Readiness findings</strong><ul>{session.issues.map((issue, i) => <li key={i}>{issue}</li>)}</ul></div> : null}
-    <div className="offline-panes graph-panes"><section><header><span className="pane-kicker">Structure</span><h4>Nodes {document ? `· ${document.nodes.length}` : ""}</h4></header><div className="offline-pane-body">
-      <label>Find node<input value={query} onChange={e => setQuery(e.target.value)} /></label><div className="graph-node-list">{[...(document?.nodes ?? []), ...(document?.semantic?.entities ?? [])].filter(n => `${n.id} ${n.name || ""} ${n.type}`.toLowerCase().includes(query.toLowerCase())).map(node => <button className="quiet-button" key={node.id} disabled={work.locked || formDirty} aria-pressed={node.id === selected} onClick={() => select(node.id)}>{node.name || node.id}<small>{node.type.replaceAll("_", " ")}</small></button>)}</div>
+    <div className="graph-organization">
+      <label>View layout<select value={layoutMode} onChange={e => setLayoutMode(e.target.value as LayoutMode)}><option value="hierarchy">Hierarchy · grouped branches</option><option value="groups">Color groups · compact grid</option><option value="saved">Saved / manual positions</option></select></label>
+      <label>Color nodes by<select value={colorMode} onChange={e => { setColorMode(e.target.value as ColorMode); setColorFilter("all"); }}><option value="kind">Asset type</option><option value="findings">Reported findings</option><option value="none">No colors</option></select></label>
+      <label>Sort node list<select value={sortMode} onChange={e => setSortMode(e.target.value as SortMode)}><option value="color">Color / category</option><option value="name">Name · A–Z</option><option value="source">Source path</option></select></label>
+      {document?.semantic && <label className="graph-check"><input type="checkbox" checked={showRelations} onChange={e => setShowRelations(e.target.checked)} />Show vehicle relationships</label>}
+      <button className="quiet-button" aria-pressed={canvasOnly} onClick={() => setCanvasOnly(!canvasOnly)}>{canvasOnly ? "Show panels" : "Expand canvas"}</button>
+    </div>
+    <div className="graph-legend" aria-label="Node color filters">
+      <button className="quiet-button" aria-pressed={colorFilter === "all"} onClick={() => setColorFilter("all")}>All categories · {allNodes.length}</button>
+      {colors.map(color => <button className="quiet-button graph-color-chip" style={{ "--node-color": PALETTE[color].color } as CSSProperties} aria-pressed={colorFilter === color}
+        key={color} onClick={() => setColorFilter(colorFilter === color ? "all" : color)}><span aria-hidden="true" />{PALETTE[color].label} · {allNodes.filter(n => nodeColor(n, colorMode, findings) === color).length}</button>)}
+      {colorMode === "findings" && <small>Reported findings only; a neutral node is not proof of validation.</small>}
+    </div>
+    <div className="graph-search-bar">
+      <label>Find node<input value={query} placeholder="Name, type, or source path…" disabled={work.locked || formDirty} onChange={e => { setQuery(e.target.value); setColorFilter("all"); }}
+        onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); nextMatch(e.shiftKey ? -1 : 1); } if (e.key === "Escape") setQuery(""); }} /></label>
+      <output aria-live="polite">{query.trim() ? `${matches.length} match${matches.length === 1 ? "" : "es"}` : `${listedNodes.length} listed nodes`}</output>
+      <button className="quiet-button" disabled={!query.trim() || !matches.length || work.locked || formDirty} onClick={() => nextMatch(-1)}>Previous match</button>
+      <button className="quiet-button" disabled={!query.trim() || !matches.length || work.locked || formDirty} onClick={() => nextMatch(1)}>Next match</button>
+      <button className="quiet-button" disabled={!query} onClick={() => setQuery("")}>Clear search</button>
+    </div>
+    <div className="offline-panes graph-panes"><section className="graph-structure-pane"><header><span className="pane-kicker">Structure</span><h4>Nodes {document ? `· ${allNodes.length}` : ""}</h4></header><div className="offline-pane-body">
+      <div className="graph-node-list">{listedNodes.map(node => { const color = nodeColor(node, colorMode, findings); return <button className="quiet-button" data-color={color} style={{ "--node-color": PALETTE[color].color } as CSSProperties} key={node.id} disabled={work.locked || formDirty} aria-pressed={node.id === selected} onClick={() => focusNode(node.id)} title={node.source || node.id}><span>{node.name || node.id}</span><small>{PALETTE[color].label} · {node.type.replaceAll("_", " ")}</small></button>; })}
+        {!listedNodes.length && <p>No matching nodes. Try a different name or clear the filter.</p>}</div>
       <fieldset disabled={!document || work.locked || formDirty}><h5>Add node</h5>{module === "graph" ? <><button className="quiet-button" onClick={() => add("directory")}>Add directory</button><button className="quiet-button" onClick={() => add("archive")}>Add nested archive</button><button className="quiet-button" disabled={!session?.workspace} onClick={() => void addFile()}>Add source file</button>{!session?.workspace && <p>Save the graph before binding individual files, or start from a folder.</p>}</>
         : Object.entries(session?.node_specs ?? {}).filter(([type]) => type !== "package_source").map(([type, spec]) => <button className="quiet-button" key={type} onClick={() => add(type)}>Add {spec.title}</button>)}</fieldset>
-    </div></section><section><header><span className="pane-kicker">{module === "graph" ? "Containment" : "Execution"}</span><h4>Node canvas</h4></header><div className="offline-pane-body">
-      {!document ? <p>Open a document or start a new {module}.</p> : <><NodeCanvas document={document} selected={selected} select={select} locked={work.locked || formDirty} move={(id, x, y) => modify(id, { x, y })} />
+    </div></section><section className="graph-canvas-pane"><header><span className="pane-kicker">{module === "graph" ? "Containment" : "Execution"}</span><h4>Node canvas</h4></header><div className="offline-pane-body">
+      {!document ? <p>Open a document or start a new {module}.</p> : <><NodeCanvas key={session?.workspace || module} nodes={allNodes} edges={allEdges} containment={document.edges || []} findings={findings} selected={selected} select={select}
+        layout={layoutMode} setLayout={setLayoutMode} colorMode={colorMode} colorFilter={colorFilter} focusRequest={focusRequest} matches={matchIds} locked={work.locked || formDirty} move={(id, x, y) => modify(id, { x, y })} />
+        <details className="graph-document-actions" open={dirty || undefined}><summary>Save layout / authoring</summary><p>Navigation, search and color choices are view-only. Auto layout copies the current organization into the draft; saving still requires review.</p>
         <button className="quiet-button" disabled={work.locked || formDirty} onClick={layout}>Auto layout nodes</button>
         <label>Document filename<input value={filename} disabled={work.locked || !!session?.workspace} onChange={e => setFilename(e.target.value)} maxLength={100} /></label>
         <div className="heading-actions"><button className="primary-button" disabled={work.locked || formDirty || !dirty} onClick={() => void review(session?.workspace ? "save" : "create")}>Review {module} save</button>
-          <button className="quiet-button" disabled={work.locked || !dirty} onClick={() => { if (session?.workspace) { setDocument(session.document); chooseNode(session.document.nodes[0]); } else { setDocument(null); setSession(null); chooseNode(); } }}>Discard node draft</button></div></>}
-    </div></section><section><header><span className="pane-kicker">Inspector</span><h4>{current?.name || current?.id || "Selected node"}</h4></header><div className="offline-pane-body">
+          <button className="quiet-button" disabled={work.locked || !dirty} onClick={() => { if (session?.workspace) { setDocument(session.document); chooseNode(session.document.nodes[0]); } else { setDocument(null); setSession(null); chooseNode(); } }}>Discard node draft</button></div></details></>}
+    </div></section><section className="graph-inspector-pane"><header><span className="pane-kicker">Inspector</span><h4>{current?.name || current?.id || "Selected node"}</h4></header><div className="offline-pane-body">
       {current && <><p>{current.type.replaceAll("_", " ")} · {current.id}</p><fieldset disabled={work.locked || !!semanticEntity}>
         {module === "graph" ? <label>Node name<input value={name} onChange={e => setName(e.target.value)} maxLength={160} /></label> : [...(session?.node_specs?.[current.type]?.required_config ?? []), ...(session?.node_specs?.[current.type]?.optional_config ?? [])].map(key => <label key={key}>{key === "gta_path" ? "Decoder game path" : key === "output" ? "Output path" : key === "report" ? "Report path" : "Artifact label"}<input value={config[key] || ""} onChange={e => setConfig({ ...config, [key]: e.target.value })} /></label>)}
         {formDirty && <><button className="primary-button" onClick={() => modify(selected, module === "graph" ? { name } : { config })}>Apply node to draft</button><button className="quiet-button" onClick={() => chooseNode(current)}>Revert node fields</button></>}

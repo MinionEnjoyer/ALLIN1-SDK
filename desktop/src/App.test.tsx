@@ -377,6 +377,23 @@ function mockClient(): DesktopClient {
 }
 
 describe("ALLIN1 desktop shell", () => {
+  it.each(["graph", "program"] as const)("routes a native %s deep link to the requested node without running a build", async module => {
+    const client = mockClient();
+    client.initialLaunchRequest = vi.fn(async () => ({ workspace: "rpf" as const, category: module, source: "C:/fixture/nodes.json", selection: "wanted", warning: null }));
+    client.startJob = vi.fn(async (operation, payload, _revision, onEvent) => {
+      expect(operation).toBe("inspect_authoring_workspace");
+      expect(payload).toMatchObject({ module, workspace: "C:/fixture/nodes.json" });
+      onEvent(response({ result: { kind: "workspace_session", module, schema_version: 1, read_only: true, game_write_performed: false, workspace: "C:/fixture/nodes.json", state_sha256: "a".repeat(64), issues: [], document: {
+        schema_version: 1, operation: module === "graph" ? "rpf_package_graph" : "rpf_package_program",
+        root_id: "root", nodes: [{ id: "root", type: "archive", name: "root.rpf", x: 0, y: 0 }, { id: "wanted", type: "file", name: "focused.yft", x: 340, y: 0 }], edges: [{ parent: "root", child: "wanted" }],
+      } } }));
+      return { job_id: "inspect-nodes", accepted: response() };
+    });
+    render(<App client={client} />);
+    // First navigation lazy-loads the editor before its inspection and focus effects.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Select node focused.yft" })).toHaveAttribute("aria-pressed", "true"), { timeout: 5000 });
+    expect(client.applyWorkspaceAction).not.toHaveBeenCalled();
+  });
   it.each(catalog.navigation)("honors the advertised $shortcut shortcut for $label", async (route) => {
     const user = userEvent.setup();
     render(<App client={mockClient()} />);

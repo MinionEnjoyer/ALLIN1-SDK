@@ -3646,6 +3646,8 @@ export default function App({ client = tauriClient }: { client?: DesktopClient }
   const [vehicleAuthoringDirty, setVehicleAuthoringDirty] = useState(false);
   const [rpfMode, setRpfMode] = useState<"archive" | "text" | "binary" | "graph" | "program" | "changes" | "transactions">("archive");
   const [graphLaunchSource, setGraphLaunchSource] = useState("");
+  const [programLaunchSource, setProgramLaunchSource] = useState("");
+  const [nodeLaunchFocus, setNodeLaunchFocus] = useState({ id: "", serial: 0, module: "graph" });
   const [changeRequest, setChangeRequest] = useState<RpfChangeRequest | null>(null);
   const [changeGuarded, setChangeGuarded] = useState(false);
   const [transactionGuarded, setTransactionGuarded] = useState(false);
@@ -3759,7 +3761,11 @@ export default function App({ client = tauriClient }: { client?: DesktopClient }
     if (["linker", "assets"].includes(launch.workspace) && launch.source) setPackageSource(launch.source);
     if (launch.workspace === "recipes" && launch.source) setRecipeSource(launch.source);
     if (launch.workspace === "rpf" && launch.source) {
-      if (launch.category === "graph") { setGraphLaunchSource(launch.source); setRpfMode("graph"); }
+      if (launch.category === "graph" || launch.category === "program") {
+        if (launch.category === "graph") setGraphLaunchSource(launch.source); else setProgramLaunchSource(launch.source);
+        setNodeLaunchFocus(previous => ({ id: launch.selection || "", serial: previous.serial + 1, module: launch.category! }));
+        setRpfMode(launch.category);
+      }
       else { setRpfSource(launch.source); setRpfMode("archive"); }
     }
     if (launch.workspace === "models" && launch.source) setModelMaterialSource(launch.source);
@@ -4521,8 +4527,8 @@ export default function App({ client = tauriClient }: { client?: DesktopClient }
             <button className="quiet-button" role="tab" aria-selected={rpfMode === "graph"} disabled={programGuarded || binaryGuarded || gxtGuarded || changeGuarded || transactionGuarded || Boolean(activeJob)} onClick={() => setRpfMode("graph")}>Package layout</button>
             <button className="quiet-button" role="tab" aria-selected={rpfMode === "program"} disabled={graphGuarded || binaryGuarded || gxtGuarded || changeGuarded || transactionGuarded || Boolean(activeJob)} onClick={() => setRpfMode("program")}>Build flow</button>
           </div>{gxtNavigationNotice && <p role="alert" className="error-banner">{gxtNavigationNotice}</p>}
-          <div hidden={rpfMode !== "graph"}><GraphWorkbench client={client} module="graph" initialSource={graphLaunchSource} onGuardChange={setGraphGuarded} onOpenAsset={source => { if (rpfGuarded) return; setModelMaterialSource(source); navigate("models"); }} onOpenVehicle={(source, model) => { if (rpfGuarded) return; setGraphVehicleRequest({ source, model }); setVehicleProjectSource(source); setVehicleProjectCategory("vehicles"); navigate("workbench"); void inspectVehicleProject(source, vehicleProjectGamePath); }} /></div>
-          <div hidden={rpfMode !== "program"}><GraphWorkbench client={client} module="program" onGuardChange={setProgramGuarded} /></div>
+          <div hidden={rpfMode !== "graph"}><GraphWorkbench client={client} module="graph" initialSource={graphLaunchSource} initialFocus={nodeLaunchFocus.module === "graph" ? nodeLaunchFocus.id : ""} initialFocusSerial={nodeLaunchFocus.serial} onGuardChange={setGraphGuarded} onOpenAsset={source => { if (rpfGuarded) return; setModelMaterialSource(source); navigate("models"); }} onOpenVehicle={(source, model) => { if (rpfGuarded) return; setGraphVehicleRequest({ source, model }); setVehicleProjectSource(source); setVehicleProjectCategory("vehicles"); navigate("workbench"); void inspectVehicleProject(source, vehicleProjectGamePath); }} /></div>
+          <div hidden={rpfMode !== "program"}><GraphWorkbench client={client} module="program" initialSource={programLaunchSource} initialFocus={nodeLaunchFocus.module === "program" ? nodeLaunchFocus.id : ""} initialFocusSerial={nodeLaunchFocus.serial} onGuardChange={setProgramGuarded} /></div>
           <div hidden={rpfMode !== "binary"}><BinaryWorkspace client={client} onGuardChange={setBinaryGuarded} archiveRequest={binaryArchiveRequest} /></div>
           <div hidden={rpfMode !== "text"}><Gxt2Workspace client={client} onGuardChange={setGxtGuarded} archiveRequest={gxtArchiveRequest} /></div>
           <div hidden={rpfMode !== "changes"}><RpfChangeSetWorkspace client={client} indexed={rpfResult} onGuardChange={setChangeGuarded} targetRequest={changeRequest} /></div>

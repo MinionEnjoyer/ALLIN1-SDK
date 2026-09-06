@@ -9,6 +9,8 @@ acknowledgement checks.
 from __future__ import annotations
 
 import json
+import math
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any, Iterable
@@ -22,6 +24,13 @@ from allin1_sdk.paths import gta_root_containing, user_data_root
 PROTOCOL_VERSION = "1.0"
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_OUTPUT_CHARS = 1024 * 1024
+_EXECUTION_LOCK = threading.RLock()  # Click's capture streams are process-global.
+_OPTIONAL_REPORT_COMMANDS = frozenset({
+    "inspect-package-graph-relations", "inspect-ped-ymt", "inspect-rpf",
+    "inspect-rpf-change-set", "inspect-rpf-graph", "inspect-rpf-program",
+    "list-gxt2-entries", "list-rpf-transactions", "search-rpf-catalog",
+    "validate-rpf-graph", "verify-rpf-transaction",
+})
 GAME_WRITE_COMMANDS = frozenset({
     "apply-rpf-plan",
     "install-package",
@@ -33,6 +42,8 @@ GAME_WRITE_COMMANDS = frozenset({
     "uninstall-package",
 })
 AUTHORING_COMMANDS = frozenset({
+    "apply-authoring-action",
+    "inspect-authoring-workspace",
     "add-vehicle-tuning-entry",
     "analyze-package-graph",
     "add-ytd-texture",
@@ -164,6 +175,11 @@ AUTHORING_COMMANDS = frozenset({
     "verify-rpf-archive",
 })
 READ_ONLY_COMMANDS = frozenset({
+    "authoring-catalog",
+    "check-sdk-update",
+    "query-node-graph",
+    "open-rpf-program",
+    "review-authoring-action",
     "assistant",
     "compare-telemetry",
     "detect-map-placements",
@@ -323,6 +339,9 @@ def _effective_command_risk(
 ) -> str:
     """Elevate authoring output aimed at a live GTA installation."""
     output_flags = _PATH_SENSITIVE_AXLE_OUTPUTS.get(command)
+    if command in _OPTIONAL_REPORT_COMMANDS and _option_values(arguments, ("--output", "-o")):
+        base_risk = "authoring_write"
+        output_flags = ("--output", "-o")
     positional_index = _PATH_SENSITIVE_POSITIONAL_OUTPUTS.get(command)
     if base_risk != "authoring_write":
         return base_risk
@@ -407,12 +426,17 @@ def _parameter_schema(parameter: click.Parameter) -> dict[str, Any]:
     if isinstance(parameter.type, click.Choice):
         item["choices"] = [str(value) for value in parameter.type.choices]
         item["case_sensitive"] = parameter.type.case_sensitive
-    if isinstance(parameter.type, click.IntRange):
+    if isinstance(parameter.type, (click.IntRange, click.FloatRange)):
         item["minimum"] = parameter.type.min
         item["maximum"] = parameter.type.max
         item["minimum_open"] = parameter.type.min_open
         item["maximum_open"] = parameter.type.max_open
         item["clamp"] = parameter.type.clamp
+    if isinstance(parameter.type, click.Path):
+        item["path"] = {key: getattr(parameter.type, key) for key in ("exists", "file_okay", "dir_okay", "readable", "writable", "resolve_path")}
+    if isinstance(parameter, click.Option):
+        item["primary_flags"] = list(parameter.opts)
+        item["secondary_flags"] = list(parameter.secondary_opts)
     return item
 
 
@@ -427,13 +451,86 @@ def command_catalog() -> list[dict[str, Any]]:
         command = group.get_command(context, name)
         if command is None:
             continue
-        catalog.append({
+        entry = {
             "name": name,
             "description": command.get_short_help_str(),
+            "help": command.help or "",
             "risk": command_risk(name),
             "parameters": [_parameter_schema(item) for item in command.params],
-        })
+        }
+        if name in _OPTIONAL_REPORT_COMMANDS:
+            entry["risk_overrides"] = {"--output": "authoring_write", "output_inside_gta": "game_write"}
+        if isinstance(command, click.Group):
+            child_context = click.Context(command, parent=context, info_name=name)
+            entry["subcommands"] = [{"name": child_name, "help": child.help or "", "parameters": [_parameter_schema(item) for item in child.params]}
+                                    for child_name in command.list_commands(child_context)
+                                    if (child := command.get_command(child_context, child_name)) is not None]
+            entry["parameter_input"] = "Use args with the subcommand name first"
+        else:
+            entry["parameter_input"] = "args array or parameters object, never both"
+        catalog.append(entry)
     return catalog
+
+
+def _parameter_arguments(command: click.Command, values: object) -> list[str]:
+    """Encode named JSON values without a shell or ambiguous option injection."""
+    if isinstance(command, click.Group):
+        raise ValueError("Grouped commands require args beginning with the subcommand; see catalog.subcommands")
+    if not isinstance(values, dict) or any(not isinstance(key, str) for key in values):
+        raise ValueError("parameters must be an object keyed by catalog parameter names")
+    known = {param.name for param in command.params}
+    if set(values) - known:
+        raise ValueError("Unknown parameters: " + ", ".join(sorted(set(values) - known)))
+    options, arguments = [], []
+
+    def scalar(value):
+        if not isinstance(value, (str, int, float, bool)) or isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("Parameter values must be finite scalar values (or arrays for multiple/nargs parameters)")
+        rendered = str(value) if not isinstance(value, bool) else str(value).lower()
+        if "\0" in rendered:
+            raise ValueError("Parameter values must not contain NUL bytes")
+        return rendered
+
+    omitted_argument = False
+    for param in command.params:
+        value = values.get(param.name)
+        if value is None:
+            if isinstance(param, click.Argument):
+                omitted_argument = True
+            continue
+        if isinstance(param, click.Option) and param.is_flag:
+            if type(value) is not bool:
+                raise ValueError(f"{param.name} requires a JSON boolean")
+            if value:
+                options.append(param.opts[0])
+            elif param.secondary_opts:
+                options.append(param.secondary_opts[0])
+            elif param.default is True:
+                raise ValueError(f"{param.name} has no false flag; use the documented command form")
+            continue
+        if isinstance(param, click.Option) and param.count:
+            if type(value) is not int or not 0 <= value <= 16:
+                raise ValueError(f"{param.name} requires a count between 0 and 16")
+            options.extend([param.opts[0]] * value)
+            continue
+        multiple = isinstance(param, click.Option) and param.multiple
+        if multiple and not isinstance(value, list):
+            raise ValueError(f"{param.name} requires an array")
+        rows = value if multiple else [value]
+        for row in rows:
+            if param.nargs != 1:
+                if not isinstance(row, list) or (param.nargs != -1 and len(row) != param.nargs):
+                    raise ValueError(f"{param.name} requires an array of {param.nargs if param.nargs != -1 else 'variable'} values")
+                encoded = [scalar(item) for item in row]
+            else:
+                encoded = [scalar(row)]
+            if isinstance(param, click.Option):
+                options.extend([f"{param.opts[0]}={encoded[0]}", *encoded[1:]])
+            else:
+                if omitted_argument:
+                    raise ValueError("Cannot provide a positional parameter after omitting an earlier one")
+                arguments.extend(encoded)
+    return options + (["--", *arguments] if arguments else [])
 
 
 def _response(request_id: object, *, ok: bool, **values: Any) -> dict[str, Any]:
@@ -510,6 +607,15 @@ def execute_request(
     command = group.get_command(context, command_name)
     if command is None:
         return _response(request_id, ok=False, error=f"unknown command: {command_name}")
+    if "parameters" in request:
+        if "args" in request:
+            return _response(request_id, ok=False, error="Choose args or parameters, not both")
+        try:
+            arguments = _parameter_arguments(command, request["parameters"])
+        except ValueError as exc:
+            return _response(request_id, ok=False, error=str(exc))
+        if len(arguments) > 128:
+            return _response(request_id, ok=False, error="Encoded parameters exceed 128 arguments; use a bounded request file")
     try:
         risk = effective_command_risk(command_name, arguments)
     except UnclassifiedCommandError as exc:
@@ -540,9 +646,10 @@ def execute_request(
         }, audit_path)
         return response
 
-    result = CliRunner().invoke(
-        group, [command_name, *arguments], color=False, prog_name="allin1-sdk",
-    )
+    with _EXECUTION_LOCK:
+        result = CliRunner().invoke(
+            group, [command_name, *arguments], color=False, prog_name="allin1-sdk",
+        )
     output = result.output
     if result.exception and not isinstance(result.exception, SystemExit):
         detail = str(result.exception).strip()
@@ -551,6 +658,14 @@ def execute_request(
     truncated = len(output) > MAX_OUTPUT_CHARS
     if truncated:
         output = output[:MAX_OUTPUT_CHARS]
+    data = None
+    data_available = False
+    if not truncated:
+        try:
+            data = json.loads(output)
+            data_available = True
+        except (ValueError, TypeError):
+            pass
     response = _response(
         request_id, ok=result.exit_code == 0, risk=risk,
         result={
@@ -558,6 +673,8 @@ def execute_request(
             "exit_code": result.exit_code,
             "output": output,
             "output_truncated": truncated,
+            "data": data,
+            "data_available": data_available,
         },
     )
     _audit({

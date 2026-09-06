@@ -480,6 +480,24 @@ def _open_graph_window(
     return process.pid
 
 
+def _open_program_window(program: Path, focus_node: str | None = None) -> int:
+    resolved = program.expanduser().resolve(strict=True)
+    state = RpfPackageProgram.validate(resolved, verify_graph=False)
+    selected = None
+    if focus_node:
+        matches = [node["id"] for node in state["nodes"].values()
+                   if focus_node.casefold() in {node["id"].casefold(), str(node.get("name", "")).casefold()}]
+        if len(matches) != 1:
+            raise ValueError(f"Program focus was not found uniquely: {focus_node}")
+        selected = matches[0]
+    desktop = _frozen_desktop_executable(Path(sys.executable).resolve())
+    command = [str(desktop), "--rpf-program", str(resolved)]
+    if selected:
+        command.extend(("--graph-node", selected))
+    options = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}
+    return subprocess.Popen(command, cwd=PROJECT_ROOT, **options).pid
+
+
 def _open_vehicle_workbench_window(
     source: Path, gta_path: Path | None = None,
 ) -> tuple[int, int]:
@@ -1141,6 +1159,18 @@ def open_rpf_graph(
         "operation": "open_rpf_graph", "graph": str(graph.resolve()),
         "focus_node": focus_node, "pid": pid,
     }, indent=2))
+
+
+@main.command("open-rpf-program")
+@click.argument("program", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--focus-node", help="Select and center one exact build-step id or name.")
+def open_rpf_program(program: Path, focus_node: str | None) -> None:
+    """Open a build-flow document without executing it or changing its outputs."""
+    try:
+        pid = _open_program_window(program, focus_node)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({"operation": "open_rpf_program", "program": str(program.resolve()), "focus_node": focus_node, "pid": pid}))
 
 
 @main.command("open-vehicle-workbench")
@@ -6767,12 +6797,19 @@ def inspect_package_rpfs(source: Path, output_dir: Path, gta_path: Path | None) 
     click.echo(f"Indexed {len(members)} package RPF member(s): {destination}")
 
 
+from allin1_sdk.automation import register_commands as _register_authoring_commands
+from allin1_sdk.node_query import register_command as _register_node_query
+_authoring_commands = (*_register_authoring_commands(main), _register_node_query(main))
+
+
 @main.group("sdk")
 def sdk_compatibility_group() -> None:
     """Compatibility alias for commands previously hosted by the launcher."""
 
 
 for _command in (
+    *_authoring_commands,
+    open_rpf_program,
     list_examples, validate, inspect_product_workspace, open_product_workspace,
     link, import_package,
     audit_folder, oiv_plan,

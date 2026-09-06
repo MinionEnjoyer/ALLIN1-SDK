@@ -34,10 +34,11 @@ fn resolve_source(value: String, cwd: &Path) -> Result<String, String> {
 }
 
 pub fn parse_launch_args(args: &[String], cwd: &Path) -> Option<LaunchRequest> {
-    let routes: [(&str, &str, Option<&str>, Option<&str>); 9] = [
+    let routes: [(&str, &str, Option<&str>, Option<&str>); 10] = [
         ("--addon-manifest", "linker", None, None),
         ("--asset-source", "assets", None, None),
         ("--rpf-archive", "rpf", None, None),
+        ("--rpf-program", "rpf", Some("graph-node"), None),
         (
             "--rpf-graph",
             "rpf",
@@ -89,6 +90,8 @@ pub fn parse_launch_args(args: &[String], cwd: &Path) -> Option<LaunchRequest> {
                     Some("vehicles".to_string())
                 } else if flag == "--rpf-graph" {
                     Some("graph".to_string())
+                } else if flag == "--rpf-program" {
+                    Some("program".to_string())
                 } else if flag == "--map-project" {
                     Some("maps".to_string())
                 } else {
@@ -151,5 +154,18 @@ mod tests {
             assert!(result.warning.is_none());
         }
         assert!(parse_launch_args(&["sdk.exe".into(), "--workspace".into(), "shell".into()], &cwd).is_none());
+    }
+
+    #[test]
+    fn node_documents_keep_focus_and_route_to_the_correct_editor() {
+        let cwd = std::env::current_dir().unwrap();
+        for (flag, category) in [("--rpf-graph", "graph"), ("--rpf-program", "program")] {
+            let args = vec!["sdk.exe".into(), flag.into(), cwd.join("Cargo.toml").to_string_lossy().into_owned(), "--graph-node".into(), "materialize".into()];
+            let request = parse_launch_args(&args, &cwd).unwrap();
+            assert_eq!(request.workspace, "rpf");
+            assert_eq!(request.category.as_deref(), Some(category));
+            assert_eq!(request.selection.as_deref(), Some("materialize"));
+            assert!(request.warning.is_none());
+        }
     }
 }

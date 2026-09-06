@@ -16,6 +16,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk add-ytd-texture` | Add one named texture using DDS or a converted raster image. | workspace, texture_name, image, --acknowledge-edit |
 | `allin1-sdk agent-api` | Serve the structured local AI/developer API over JSONL stdio. | --allow-game-writes |
 | `allin1-sdk analyze-package-graph` | Resolve and persist typed vehicle relationships in a package graph. | graph, --output / -o |
+| `allin1-sdk apply-authoring-action` | Apply a typed authoring request using the desktop's shared validation. | --acknowledge-authoring, --request-file, --request-json |
 | `allin1-sdk apply-rpf-plan` | Apply a ready RPF plan through backup, staging, verification, and receipt. | plan, --gta-path, --workspace-root, --receipt-dir, --acknowledge-write |
 | `allin1-sdk assistant` | Prompt or inspect the optional local-first SDK assistant. |  |
 | `allin1-sdk assistant context` | Show the exact evidence and typed operations supplied to the model. | question, --repository-root, --workspace-root, --manifest, --gta-path, --operation-mode, --source, --symbol, --prioritize, --telemetry, --telemetry-pattern |
@@ -24,6 +25,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk assistant status` | Show the configured provider without starting a model. | --root |
 | `allin1-sdk assistant stop` | Stop the local model server retained by this SDK process. |  |
 | `allin1-sdk audit-folder` | Audit all supported packages in a staging folder. | folder, --output / -o, --draft-dir |
+| `allin1-sdk authoring-catalog` | Discover headless inspect/review/apply workflows, fields and safety gates. |  |
 | `allin1-sdk build-axle-oiv` | Build a verified Legacy OIV or Enhanced OpenRPF fallback archive. | request_json, --identity-store, --output / -o, --acknowledge-edit |
 | `allin1-sdk build-axle-runtime-bundle` | Build ready runtime targets into a new atomic staging directory. | config_json, --target, --skeleton-xml, --story-profile, --game-build, --output-dir / -o, --gta-path, --acknowledge-edit |
 | `allin1-sdk build-binary-workspace` | Build a same-size binary asset and bounded changed-range report. | workspace, --output / -o |
@@ -37,6 +39,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk build-vehicle-package` | Publish a vehicle DLC as a validated, installable ALLIN1 package. | source, --output-dir / -o, --pack-name, --mod-id, --name, --version, --edition, --gta-path |
 | `allin1-sdk canary-rpf-transaction` | Prove real RPF apply/verify/rollback behavior on an isolated archive copy. | archive, --gta-path, --output-dir, --acknowledge-write |
 | `allin1-sdk catalog-rpfs` | Build or incrementally refresh a global loose-RPF search catalog. | source, --gta-path, --output / -o, --refresh |
+| `allin1-sdk check-sdk-update` | Check the official SDK release metadata as JSON; never install an update. |  |
 | `allin1-sdk clone-ped-bundle` | Apply one reviewed, revision-bound complete ped clone plan. | workspace, donor, --ped-name, --set, --expected-revision, --plan-sha256, --acknowledge-edit |
 | `allin1-sdk clone-weapon-animation` | Clone complete native animation mappings without editing clip payloads. | workspace, weapon, --template, --source, --expected-revision, --acknowledge-edit |
 | `allin1-sdk clone-weapon-bundle` | Apply one reviewed, revision-bound complete weapon clone plan. | workspace, donor, --weapon-name, --slot, --ammo-info, --model, --human-name-hash, --stat-name, --ammo-mode, --ammo-name, --expected-revision, --plan-sha256, --acknowledge-edit |
@@ -76,6 +79,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk import-package-graph` | Create or reuse a persistent, provenance-checked package node graph. | source, --workspace-root |
 | `allin1-sdk import-rpf-graph` | Expand an existing recursive RPF into an external visual graph workspace. | archive, --gta-path, --output / -o |
 | `allin1-sdk index-rpf` | Export a structured recursive RPF index. | archive, --gta-path, --output / -o |
+| `allin1-sdk inspect-authoring-workspace` | Inspect a typed authoring request using the desktop's shared validation. | --request-file, --request-json |
 | `allin1-sdk inspect-binary-workspace` | Render a bounded hexdump from an auditable binary workspace. | workspace, --offset, --length |
 | `allin1-sdk inspect-log` | Inspect bounded matching or trailing telemetry lines without editing. | log, --pattern, --max-lines |
 | `allin1-sdk inspect-map-project` | Inventory map-native assets from a folder, archive, or direct RPF. | source, --gta-path |
@@ -129,6 +133,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk open-package-graph` | Open or reuse a complete persistent mod-package node graph. | source, --gta-path |
 | `allin1-sdk open-product-workspace` | Open a validated product workspace in the existing Package Linker UI. | source |
 | `allin1-sdk open-rpf-graph` | Open an RPF package graph in the desktop node editor. | graph, --gta-path, --focus-node |
+| `allin1-sdk open-rpf-program` | Open a build-flow document without executing it or changing its outputs. | program, --focus-node |
 | `allin1-sdk open-vehicle-workbench` | Open a vehicle add-on package in the desktop Workbench's Vehicles tab. | source, --gta-path |
 | `allin1-sdk open-workbench` | Open vehicle, weapon, ped, and map projects in one desktop workspace. | source, --category, --gta-path |
 | `allin1-sdk patch-binary-workspace` | Apply one same-size offset patch and append its hash-chained history. | workspace, --offset, --hex, --expected-hex, --acknowledge-edit |
@@ -156,6 +161,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk preview-axle-tyres` | Preview visual tyres without adding runtime wheel indices. | package_id, config_json, --axle |
 | `allin1-sdk propose-package-settings` | Ask Qwen for a typed advisory package-settings diff; never apply it. | request, --root, --timeout, --startup-timeout, --max-tokens, --no-progress |
 | `allin1-sdk publish-managed-vehicle-package` | Publish a validated vehicle review folder as a deterministic ZIP. | package_root, destination, --gta-path |
+| `allin1-sdk query-node-graph` | Search/sort/page graph nodes and discover exact ids without opening a GUI. | source, --module, --query, --sort, --color-by, --category, --offset, --limit |
 | `allin1-sdk recover-rpf-transaction` | Reconcile an interrupted receipt without committing an archive write. | receipt, --gta-path, --workspace-root |
 | `allin1-sdk redo-vehicle-edit` | Reapply the most recently undone guarded vehicle edit. | workspace, --acknowledge-edit |
 | `allin1-sdk refresh-rpf-graph-sources` | Explicitly accept current size/hash values for changed graph sources. | graph, --acknowledge-edit |
@@ -169,6 +175,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk render-rpf-graph-previews` | Render a hash-bound portable preview bundle for graph asset nodes. | graph, --gta-path, --limit, --output / -o |
 | `allin1-sdk reparent-rpf-graph-node` | Reconnect a graph node to a validated archive or directory parent. | graph, node_id, parent_id, --acknowledge-edit |
 | `allin1-sdk replace-ytd-texture` | Replace one texture using DDS or a converted raster image. | workspace, texture_name, image, --acknowledge-edit |
+| `allin1-sdk review-authoring-action` | Review a typed authoring request using the desktop's shared validation. | --request-file, --request-json |
 | `allin1-sdk rollback-rpf-transaction` | Roll back an applied receipt if the archive is still transaction-owned. | receipt, --gta-path, --workspace-root, --acknowledge-write |
 | `allin1-sdk run-rpf-program` | Execute a ready external-authoring graph with exact failure cleanup. | program, --report, --acknowledge-execution |
 | `allin1-sdk sdk` | Compatibility alias for commands previously hosted by the launcher. |  |
@@ -178,8 +185,10 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk sdk add-rpf-program-node` | Add a typed operation node; the package and game remain unchanged. | program, node_type, --config-json, --x, --y, --acknowledge-edit |
 | `allin1-sdk sdk add-ytd-texture` | Add one named texture using DDS or a converted raster image. | workspace, texture_name, image, --acknowledge-edit |
 | `allin1-sdk sdk analyze-package-graph` | Resolve and persist typed vehicle relationships in a package graph. | graph, --output / -o |
+| `allin1-sdk sdk apply-authoring-action` | Apply a typed authoring request using the desktop's shared validation. | --acknowledge-authoring, --request-file, --request-json |
 | `allin1-sdk sdk apply-rpf-plan` | Apply a ready RPF plan through backup, staging, verification, and receipt. | plan, --gta-path, --workspace-root, --receipt-dir, --acknowledge-write |
 | `allin1-sdk sdk audit-folder` | Audit all supported packages in a staging folder. | folder, --output / -o, --draft-dir |
+| `allin1-sdk sdk authoring-catalog` | Discover headless inspect/review/apply workflows, fields and safety gates. |  |
 | `allin1-sdk sdk build-binary-workspace` | Build a same-size binary asset and bounded changed-range report. | workspace, --output / -o |
 | `allin1-sdk sdk build-gxt2-workspace` | Rebuild and semantically reparse an edited GXT2 text table. | workspace, --output / -o |
 | `allin1-sdk sdk build-native-workspace` | Rebuild and reparse an edited native XML workspace. | workspace, --gta-path, --output / -o |
@@ -188,6 +197,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk sdk build-vehicle-package` | Publish a vehicle DLC as a validated, installable ALLIN1 package. | source, --output-dir / -o, --pack-name, --mod-id, --name, --version, --edition, --gta-path |
 | `allin1-sdk sdk canary-rpf-transaction` | Prove real RPF apply/verify/rollback behavior on an isolated archive copy. | archive, --gta-path, --output-dir, --acknowledge-write |
 | `allin1-sdk sdk catalog-rpfs` | Build or incrementally refresh a global loose-RPF search catalog. | source, --gta-path, --output / -o, --refresh |
+| `allin1-sdk sdk check-sdk-update` | Check the official SDK release metadata as JSON; never install an update. |  |
 | `allin1-sdk sdk clone-ped-bundle` | Apply one reviewed, revision-bound complete ped clone plan. | workspace, donor, --ped-name, --set, --expected-revision, --plan-sha256, --acknowledge-edit |
 | `allin1-sdk sdk clone-weapon-animation` | Clone complete native animation mappings without editing clip payloads. | workspace, weapon, --template, --source, --expected-revision, --acknowledge-edit |
 | `allin1-sdk sdk clone-weapon-bundle` | Apply one reviewed, revision-bound complete weapon clone plan. | workspace, donor, --weapon-name, --slot, --ammo-info, --model, --human-name-hash, --stat-name, --ammo-mode, --ammo-name, --expected-revision, --plan-sha256, --acknowledge-edit |
@@ -219,6 +229,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk sdk import-package-graph` | Create or reuse a persistent, provenance-checked package node graph. | source, --workspace-root |
 | `allin1-sdk sdk import-rpf-graph` | Expand an existing recursive RPF into an external visual graph workspace. | archive, --gta-path, --output / -o |
 | `allin1-sdk sdk index-rpf` | Export a structured recursive RPF index. | archive, --gta-path, --output / -o |
+| `allin1-sdk sdk inspect-authoring-workspace` | Inspect a typed authoring request using the desktop's shared validation. | --request-file, --request-json |
 | `allin1-sdk sdk inspect-binary-workspace` | Render a bounded hexdump from an auditable binary workspace. | workspace, --offset, --length |
 | `allin1-sdk sdk inspect-native-asset` | Inspect one native asset and optionally publish its bounded preview bundle. | source, --edition, --gta-path, --output-dir |
 | `allin1-sdk sdk inspect-package-graph-relations` | Inspect persisted vehicle links and relationship findings. | graph, --output / -o |
@@ -250,6 +261,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk sdk move-rpf-change` | Move one staged action to a one-based review position. | change_set, action_id, position, --acknowledge-edit |
 | `allin1-sdk sdk oiv-plan` | Preview an OIV recipe without executing it. | source, --output / -o, --managed-package, --rpf-batches, --created-rpf-package, --gta-path |
 | `allin1-sdk sdk open-product-workspace` | Open a validated product workspace in the existing Package Linker UI. | source |
+| `allin1-sdk sdk open-rpf-program` | Open a build-flow document without executing it or changing its outputs. | program, --focus-node |
 | `allin1-sdk sdk patch-binary-workspace` | Apply one same-size offset patch and append its hash-chained history. | workspace, --offset, --hex, --expected-hex, --acknowledge-edit |
 | `allin1-sdk sdk plan-ped-clone` | Plan a complete donor-based ped record without changing files. | workspace, donor, --ped-name, --set |
 | `allin1-sdk sdk plan-rpf-add` | Create a checksummed plan to add a root or nested RPF entry. | archive, entry_path, payload, --archive-path, --gta-path, --workspace-root, --output / -o |
@@ -266,6 +278,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk sdk plan-weapon-clone` | Plan a complete donor-based weapon bundle without changing files. | workspace, donor, --weapon-name, --slot, --ammo-info, --model, --human-name-hash, --stat-name, --ammo-mode, --ammo-name |
 | `allin1-sdk sdk position-rpf-graph-node` | Persist one node's visual canvas position. | graph, node_id, x, y, --acknowledge-edit |
 | `allin1-sdk sdk position-rpf-program-node` | Persist one operation node's canvas position. | program, node_id, x, y, --acknowledge-edit |
+| `allin1-sdk sdk query-node-graph` | Search/sort/page graph nodes and discover exact ids without opening a GUI. | source, --module, --query, --sort, --color-by, --category, --offset, --limit |
 | `allin1-sdk sdk recover-rpf-transaction` | Reconcile an interrupted receipt without committing an archive write. | receipt, --gta-path, --workspace-root |
 | `allin1-sdk sdk refresh-rpf-graph-sources` | Explicitly accept current size/hash values for changed graph sources. | graph, --acknowledge-edit |
 | `allin1-sdk sdk remove-gxt2-entry` | Remove one GXT2 record while retaining local undo history. | workspace, label_hash, --acknowledge-edit |
@@ -276,6 +289,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk sdk render-rpf-graph-previews` | Render a hash-bound portable preview bundle for graph asset nodes. | graph, --gta-path, --limit, --output / -o |
 | `allin1-sdk sdk reparent-rpf-graph-node` | Reconnect a graph node to a validated archive or directory parent. | graph, node_id, parent_id, --acknowledge-edit |
 | `allin1-sdk sdk replace-ytd-texture` | Replace one texture using DDS or a converted raster image. | workspace, texture_name, image, --acknowledge-edit |
+| `allin1-sdk sdk review-authoring-action` | Review a typed authoring request using the desktop's shared validation. | --request-file, --request-json |
 | `allin1-sdk sdk rollback-rpf-transaction` | Roll back an applied receipt if the archive is still transaction-owned. | receipt, --gta-path, --workspace-root, --acknowledge-write |
 | `allin1-sdk sdk run-rpf-program` | Execute a ready external-authoring graph with exact failure cleanup. | program, --report, --acknowledge-execution |
 | `allin1-sdk sdk search-rpf-catalog` | Search a global RPF catalog by archive, nested path, or entry name. | catalog, query, --kind, --suffix, --limit, --output / -o |

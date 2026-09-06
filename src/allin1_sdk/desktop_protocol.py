@@ -4884,21 +4884,13 @@ def _prepare_vehicle_quick_import(
 
 
 def _check_update() -> tuple[str, dict[str, Any]]:
-    from allin1_sdk.self_update import fetch_latest_release, update_available
+    from allin1_sdk.automation import check_sdk_update
 
     try:
-        release = fetch_latest_release()
+        result = check_sdk_update()
     except (OSError, KeyError, TypeError, ValueError) as exc:
         raise ProtocolError(str(exc), risk="read_only") from exc
-    return "read_only", {
-        "current_version": __version__,
-        "latest_version": release.version,
-        "update_available": update_available(__version__, release.version),
-        "name": release.name,
-        "page_url": release.page_url,
-        "archive_name": release.archive_name,
-        "archive_size": release.archive_size,
-    }
+    return "read_only", result
 
 
 def dispatch_operation(
