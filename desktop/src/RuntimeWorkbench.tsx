@@ -6,6 +6,7 @@ import "./OfflineAuthoring.css";
 interface Toolchain { mode: string; cmake_path: string; ctest_path: string; visual_studio_path: string }
 interface Settings { enabled: boolean; discovery_interval_ms: number; recovery_interval_ms: number; restore_on_unload: boolean; configuration_directory: string; log_file: string }
 interface Snapshot extends WorkspaceResult {
+  build?: { build_fingerprint: string; mode: string };
   source: string; toolchain: { ready: boolean; selection_fingerprint: string | null; problems: string[]; checks: { key: string; label: string; ready: boolean; detected: string; requirement: string; guidance: string; detail: string }[]; guidance: string[] };
 }
 const defaultTools = (): Toolchain => ({ mode: "auto", cmake_path: "", ctest_path: "", visual_studio_path: "" });
@@ -46,6 +47,10 @@ export default function RuntimeWorkbench({ client, onDirtyChange }: { client: De
     </div></section><section><header><span className="pane-kicker">Evidence</span><h4>Compiler & dependency checks</h4></header><div className="offline-pane-body">
       {!snapshot ? <p>Preflight checks source completeness, CMake/CTest, the x64 C++ toolchain, and a real compile/link probe.</p> : <div className="runtime-checks">{snapshot.toolchain.checks.map(check => <details key={check.key}><summary>{check.ready ? "PASS" : "FAIL"} · {check.label}</summary><p>{check.detected}</p><p>Required: {check.requirement}</p>{check.detail && <pre>{check.detail}</pre>}{check.guidance && <p>{check.guidance}</p>}</details>)}</div>}
       {snapshot?.toolchain.selection_fingerprint && <><h5>Selected toolchain identity</h5><p className="hash-value">{snapshot.toolchain.selection_fingerprint}</p></>}
+      {snapshot?.build && <details><summary>SDK execution identity</summary><div style={{ maxHeight: "12rem", overflow: "auto", overflowWrap: "anywhere" }}>
+        <p className="hash-value">{snapshot.build.build_fingerprint}</p><p>{snapshot.build.mode}</p>
+        <p>Each edition package binds this SDK, controller source, compiler selection and produced files. This is not in-game acceptance.</p>
+      </div></details>}
       {work.lastResult?.runtime_build !== undefined && <details open><summary>Candidate build receipt</summary><pre className="runtime-receipt">{JSON.stringify(work.lastResult.runtime_build, null, 2)}</pre></details>}
     </div></section><section><header><span className="pane-kicker">Candidate</span><h4>Runtime settings & targets</h4></header><div className="offline-pane-body"><fieldset disabled={work.locked}>
       <label className="runtime-checkbox"><input type="checkbox" checked={legacy} onChange={e => setLegacy(e.target.checked)} />Story Legacy</label>
@@ -58,7 +63,7 @@ export default function RuntimeWorkbench({ client, onDirtyChange }: { client: De
       <label>Log file (GTA-relative)<input value={settings.log_file} onChange={e => setSettings({ ...settings, log_file: e.target.value })} /></label>
       <button className="quiet-button" disabled={configurations.length >= 32} onClick={() => void addConfiguration()}>Add axle configuration JSON</button>
       <ul className="runtime-configurations">{configurations.map(file => <li key={file}><span>{file}</span><button className="text-action" onClick={() => setConfigurations(configurations.filter(item => item !== file))}>Remove {file.split(/[\\/]/).pop()}</button></li>)}</ul>
-      <p>No configuration files builds a generic controller. Vehicle-specific JSON can be added to its package later.</p>
+      <p>No configuration files builds a generic controller. Adding JSON after export changes its recorded inventory; rebuild the package to retain exact provenance.</p>
       <label>Build identity<input value={buildId} maxLength={128} onChange={e => setBuildId(e.target.value)} /></label>
       <label>Candidate folder name<input value={folder} maxLength={100} onChange={e => setFolder(e.target.value)} /></label>
       <label className="runtime-checkbox"><input type="checkbox" checked={archives} onChange={e => setArchives(e.target.checked)} />Create distribution archives</label>

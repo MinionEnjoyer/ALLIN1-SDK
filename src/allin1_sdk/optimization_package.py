@@ -25,7 +25,7 @@ MAX_RECEIPT_BYTES = 4*1024**2
 
 def _settings(payload):
     settings = payload.get("settings", {})
-    if not isinstance(settings, dict) or set(settings) - {"textures","rig_bindings"}:
+    if not isinstance(settings, dict) or set(settings) - {"textures","rig_bindings","assembly_bindings"}:
         raise ValueError("Unsupported optimization settings")
     rigs=settings.get("rig_bindings",[])
     if not isinstance(rigs,list) or len(rigs)>128:
@@ -132,6 +132,8 @@ def _receipt(result):
     data=json.dumps(receipt,indent=2,allow_nan=False).encode("utf-8")
     if len(data)>MAX_RECEIPT_BYTES:
         raise ValueError("Optimization receipt exceeds the recovery reader's size bound; narrow the reviewed package/context")
+    from allin1_sdk.optimization_recovery import validate_receipt
+    validate_receipt(receipt, _state)
     return receipt,data
 
 
@@ -146,10 +148,11 @@ def _staged_folder(payload):
     comparison=path(payload["comparison"]) if payload.get("comparison") else None
     comparison_identity=_input_identity(comparison) if comparison else None
     rigs=payload.get("settings",{}).get("rig_bindings",[])
+    assemblies=payload.get("settings",{}).get("assembly_bindings",[])
     before = _inventory(source, limit=1000)
     inspector = NativeAssetInspector(project_root(), game)
     baseline = package_validation.inspect(str(source),comparison=str(comparison) if comparison else None,
-                                          rig_bindings=rigs,edition=edition,gta_path=str(game) if game else None)
+                                          rig_bindings=rigs,assembly_bindings=assemblies,edition=edition,gta_path=str(game) if game else None)
     with tempfile.TemporaryDirectory(prefix="allin1-optimization-") as temporary, ExitStack() as intake:
         work = Path(temporary)
         candidate = work / "candidate"
@@ -268,7 +271,7 @@ def _staged_folder(payload):
             raise ValueError("Optimization changed a protected package file")
         # Baseline and candidate consume the same validator, not separate checks.
         reports = [baseline,package_validation.inspect(str(candidate),comparison=str(comparison) if comparison else None,
-                   rig_bindings=rigs,edition=edition,gta_path=str(game) if game else None)]
+                   rig_bindings=rigs,assembly_bindings=assemblies,edition=edition,gta_path=str(game) if game else None)]
         if comparison and _input_identity(comparison)!=comparison_identity:
             raise ValueError("Comparison context changed during optimization validation")
         if reports[0]["source_identity"]["comparison_sha256"]!=reports[1]["source_identity"]["comparison_sha256"]:
@@ -288,7 +291,8 @@ def _staged_folder(payload):
                   "comparison":str(comparison) if comparison else None,
                   "validation_context":{"comparison_identity_sha256":digest(comparison_identity) if comparison else None,
                       "comparison_kind":comparison_identity["kind"] if comparison else None,
-                      "shared_rig_count":len(rigs),"scope":"Both reports use the same explicitly selected comparison bytes and exact hash-bound rig selections. Context is not installed or modified; stale selections reject export."},
+                      "shared_rig_count":len(rigs),"assembly_pair_count":len(assemblies),
+                      "scope":"Both reports use the same explicitly selected comparison bytes, exact hash-bound rigs and declared assembly pairs. Context is not installed or modified; stale selections reject export. Declared placement is not engine behavior proof."},
                   "artifact_manifest": artifact,
                   "metadata_scope":"sdk-artifact.json is generated provenance metadata, excluded from the payload output inventory to avoid self-reference. Any prior envelope is preserved only in originals.",
                   "before_inventory": before, "after_inventory": after, "choices": choices, "changes": changes,
@@ -347,8 +351,8 @@ def recovery(payload):
     if len(data)>MAX_RECEIPT_BYTES:
         raise ValueError("Optimization receipt exceeds 4 MiB")
     receipt = strict_json(data)
-    if not isinstance(receipt, dict) or receipt.get("schema_version") != 1 or receipt.get("kind") != "optimization_package":
-        raise ValueError("Unsupported optimization receipt")
+    from allin1_sdk.optimization_recovery import validate_receipt
+    validate_receipt(receipt, _state)
     if _inventory(contained(root, "originals"), limit=1000) != receipt.get("before_inventory"):
         raise ValueError("Recovery originals were modified; do not trust this recovery set")
     return root, receipt
@@ -364,6 +368,11 @@ def apply(payload):
         with tempfile.TemporaryDirectory(prefix=".allin1-recovery-", dir=destination.parent) as temporary:
             staged_root = Path(temporary)/"recovered"
             _copy(contained(root, "originals"), staged_root, receipt["before_inventory"])
+            _, current = recovery(payload)
+            if digest(current) != digest(receipt):
+                raise ValueError("Recovery receipt changed during copying")
+            if _inventory(staged_root, limit=1000) != receipt["before_inventory"]:
+                raise ValueError("Recovery staged bytes changed before publication")
             path(str(destination), new=True, writable=True)
             staged_root.rename(destination)
         return {"output": str(destination), "output_sha256": digest(receipt["before_inventory"]), "recovered_inventory_sha256": digest(receipt["before_inventory"])}
@@ -380,7 +389,13 @@ def apply(payload):
             artifact_file = output/"package"/ARTIFACT_FILE
             artifact_file.write_text(json.dumps(result["artifact_manifest"],indent=2,allow_nan=False),encoding="utf-8")
             (output/"optimization.json").write_bytes(receipt_bytes)
+            expected_export = {**{f"originals/{name}":checksum for name,checksum in result["before_inventory"].items()},
+                               **{f"package/{name}":checksum for name,checksum in result["after_inventory"].items()},
+                               f"package/{ARTIFACT_FILE}":file_hash(artifact_file),
+                               "optimization.json":file_hash(output/"optimization.json")}
             _recheck_inputs(result)
+            if _inventory(output, limit=2002, size_limit=4*1024**3+2*MAX_RECEIPT_BYTES) != expected_export:
+                raise ValueError("Optimization staged evidence changed before publication")
             path(str(destination), new=True, writable=True)
             output.rename(destination)
         return {"output": str(destination), "output_sha256": digest(result["after_inventory"]), "receipt": str(destination/"optimization.json"), "recovery_state_sha256": digest(receipt)}

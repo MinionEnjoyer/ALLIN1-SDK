@@ -5,25 +5,17 @@ import hashlib
 from pathlib import Path
 
 from allin1_sdk import story_axle_runtime_builder as runtime
+from allin1_sdk import artifact_identity, runtime_provenance
 from allin1_sdk.axle_prefabs import load_prefab_axle_configuration
 from allin1_sdk.axle_runtime_bundler import VehicleAxleBuildInput
-from allin1_sdk.release_paths import no_links, strict_json, tree_files
+from allin1_sdk.release_paths import no_links, strict_json
 from allin1_sdk.workspace_desktop import path, file_hash, digest
 
 
 def _source_identity(source):
     if not source.is_dir():
         return {}
-    files = {}
-    for name in ("src", "include", "tests", "tools", "schemas", "profiles", "examples"):
-        folder = source / name
-        if folder.is_dir():
-            files.update({f"{name}/{key}": file_hash(value) for key, value in tree_files(folder).items()})
-    for name in ("CMakeLists.txt", "README.md"):
-        item = no_links(source / name)
-        if item.is_file():
-            files[name] = file_hash(item)
-    return files
+    return runtime_provenance.source_identity(source)
 
 
 def _context(payload):
@@ -40,18 +32,19 @@ def _context(payload):
         else:
             choices[key] = None
     source = no_links(runtime._runtime_source_root())
+    build = artifact_identity.current()
     identity = _source_identity(source)
     report = runtime.inspect_native_axle_toolchain(source_root=source, settings=runtime.NativeAxleToolchainSettings(**choices))
     if identity != _source_identity(source):
         raise ValueError("Native runtime sources changed during preflight")
-    fingerprint = digest({"sources": identity, "toolchain": report.selection_fingerprint, "ready": report.ready})
-    return source, report, fingerprint
+    fingerprint = digest({"sources": identity, "toolchain": report.selection_fingerprint, "ready": report.ready, "build": build})
+    return source, report, fingerprint, build
 
 
 def inspect(payload):
-    source, report, fingerprint = _context(payload)
+    source, report, fingerprint, build = _context(payload)
     return {"source": str(source), "state_sha256": fingerprint, "toolchain": json.loads(json.dumps(report.to_dict())),
-            "candidate_only": True, "live_acceptance": "NOT TESTED"}
+            "build": build, "candidate_only": True, "live_acceptance": "NOT TESTED"}
 
 
 def _build_request(payload, report):
@@ -90,7 +83,7 @@ def _build_request(payload, report):
 
 
 def review(payload):
-    source, report, fingerprint = _context(payload)
+    source, report, fingerprint, build = _context(payload)
     if payload.get("expected_state_sha256") != fingerprint:
         raise ValueError("Native source or toolchain changed; run preflight again")
     if not report.ready:
@@ -98,6 +91,7 @@ def review(payload):
     request, inputs = _build_request(payload, report)
     return {"action": "build", "state_sha256": fingerprint, "source": str(source), "destination": str(request.output_directory),
             "selection_fingerprint": report.selection_fingerprint, "targets": list(request.targets),
+            "build": build,
             "configuration_sha256": inputs, "settings": request.settings.to_runtime_json(), "build_id": request.build_id,
             "outputs": [str(request.output_directory)], "candidate_only": True, "live_acceptance": "NOT TESTED",
             "toolchain_identity": {"cmake": str(report.cmake_path), "compiler": str(report.cl_path),
@@ -105,10 +99,10 @@ def review(payload):
 
 
 def apply(payload):
-    source, report, fingerprint = _context(payload)
+    source, report, fingerprint, build = _context(payload)
     if payload["expected_state_sha256"] != fingerprint:
         raise ValueError("Native build identity changed before execution")
     request, _ = _build_request(payload, report)
-    result = runtime.build_story_axle_runtime_candidate(request, source_root=source)
+    result = runtime.build_story_axle_runtime_candidate(request, source_root=source, expected_sdk_build=build)
     return {"output": str(result.root), "output_sha256": file_hash(result.manifest),
             "runtime_build": json.loads(json.dumps(result.to_dict())), "candidate_only": True, "live_acceptance": "NOT TESTED"}

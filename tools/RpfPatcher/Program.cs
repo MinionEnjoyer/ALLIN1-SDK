@@ -2134,7 +2134,9 @@ namespace RpfPatcher
                 var document = new XmlDocument { XmlResolver = null };
                 using (var reader = XmlReader.Create(input, settings))
                     document.Load(reader);
-                byte[] data = schemaSource == null
+                byte[] data = format == MetaFormat.PSO && document.DocumentElement?.Name == "fwClipSetManager"
+                    ? ClipSetPsoCompiler.Build(document, schemaSource as PsoFile)
+                    : schemaSource == null
                     ? XmlMeta.GetData(document, format, assetFolder)
                     : XmlMeta.GetData(document, format, assetFolder, schemaSource);
                 if (data == null || data.Length == 0)

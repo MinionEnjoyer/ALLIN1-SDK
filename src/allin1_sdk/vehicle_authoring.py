@@ -1436,8 +1436,10 @@ class VehicleAuthoringWorkspace:
     def distribution_catalog(
         self, package_id: str, package_name: str, source_pack: str,
     ) -> VehicleCatalog:
+        from allin1_sdk.vehicle_hitches import load_hitches
         entries = tuple(
-            values.catalog_entry(source_pack)
+            replace(values.catalog_entry(source_pack), hitches=load_hitches(self, item.model)
+                    if item.model.casefold() in self.manifest.get("hitch_configurations", {}) else None)
             for item in self.inspect().models
             for values in (self.distribution(item.model),)
             if values.listed
@@ -2489,10 +2491,23 @@ class VehicleAuthoringWorkspace:
             model, new_model=new_model, new_handling=new_handling)
         history = self._new_history(
             model, trees, changes, extra_files=tuple(item["before"] for item in renames),
-            operation="vehicle_identity_migration", renames=tuple(renames),
+            operation="vehicle_identity_migration", renames=tuple(renames), snapshot_manifest=True,
         )
-        previous_manifest = dict(self.manifest)
+        previous_manifest = deepcopy(self.manifest)
         try:
+            if model.casefold() != target_model.casefold():
+                from allin1_sdk.vehicle_hitches import validate_hitches
+                hitches = self.manifest.get("hitch_configurations", {})
+                migrated_hitches = {}
+                for key, profile in hitches.items():
+                    document = validate_hitches(profile, key)
+                    next_key = target_model.casefold() if key == model.casefold() else key
+                    document["vehicle_model"] = next_key
+                    for point in document["points"]:
+                        point["compatible_models"] = [target_model.casefold() if value == model.casefold() else value for value in point["compatible_models"]]
+                    migrated_hitches[next_key] = validate_hitches(document, next_key)
+                if hitches:
+                    self.manifest["hitch_configurations"] = migrated_hitches
             self._commit_trees(trees)
             for rename in renames:
                 self._member(rename["before"]).replace(
@@ -2504,9 +2519,8 @@ class VehicleAuthoringWorkspace:
                 raise RuntimeError("Migrated handling identity did not round-trip")
             if after_project.error_count > before_project.error_count:
                 raise ValueError("Identity migration introduced package validation errors")
-            revision = self._finish_revision(history, after_project)
             self.manifest["models"] = [item.model for item in after_project.models]
-            self._write_manifest()
+            revision = self._finish_revision(history, after_project)
         except Exception:
             self.manifest = previous_manifest
             self._restore_history(history)

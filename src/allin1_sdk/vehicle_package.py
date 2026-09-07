@@ -7,7 +7,7 @@ import json
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -18,6 +18,7 @@ from allin1_sdk.addon_importer import (
     PackageScan,
 )
 from allin1_sdk.mods import ModManifest
+from allin1_sdk import artifact_identity, package_provenance
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 from allin1_sdk.vehicle_project import VehicleProjectResolver
 from allin1_sdk.vehicle_catalog import (
@@ -139,11 +140,13 @@ class VehicleAddonPackageBuilder:
         editions: tuple[str, ...] = ("legacy", "enhanced"),
         catalog: VehicleCatalog | None = None,
     ) -> VehiclePackageResult:
+        source_inputs = package_provenance.snapshot(source)
         review = self.review(
             source, destination, pack_name=pack_name, mod_id=mod_id,
             name=name, version=version, editions=editions, catalog=catalog,
         )
         source_path = review.source
+        build_identity = artifact_identity.current(resource_root=self.project_root)
         scan = AddonPackageInspector().inspect(source_path)
         selected_pack = review.pack_name
         selected_mod_id = review.mod_id
@@ -227,6 +230,10 @@ class VehicleAddonPackageBuilder:
                 json.dumps(report_payload, indent=2) + "\n", encoding="utf-8",
             )
             ModManifest.load(manifest)
+            package_provenance.complete(stage, source, source_inputs, build_identity,
+                {key: value for key, value in review.to_dict().items() if key not in {"source", "destination", "source_evidence"}},
+                edition=selected_editions[0].title() if len(selected_editions) == 1 else None,
+                reports=["vehicle-package-report.json"], resource_root=self.project_root)
             stage.rename(target)
         except Exception:
             shutil.rmtree(stage, ignore_errors=True)
@@ -272,13 +279,23 @@ class VehicleAddonPackageBuilder:
             raw_transmissions = authoring_workspace.manifest.get(
                 "transmission_configurations", {},
             )
+            from allin1_sdk.vehicle_hitches import validate_hitches
+            raw_hitches = authoring_workspace.manifest.get("hitch_configurations", {})
+            if not isinstance(raw_hitches, dict):
+                raise ValueError("Vehicle hitch profiles are invalid")
+            known_models = {item.model.casefold() for item in authoring_workspace.inspect().models}
+            for model, document in raw_hitches.items():
+                if model not in known_models:
+                    raise ValueError("Hitch profile references an unknown vehicle")
+                validate_hitches(document, model)
             if not isinstance(raw_axles, dict) or not isinstance(raw_transmissions, dict):
                 raise ValueError("Vehicle authoring profiles are invalid")
-            if raw_axles or raw_transmissions:
+            if raw_axles or raw_transmissions or raw_hitches:
                 authoring_profiles = {
                     "schema_version": 1,
                     "axle_configurations": raw_axles,
                     "transmission_configurations": raw_transmissions,
+                    "hitch_configurations": raw_hitches,
                 }
             source_path = authoring_workspace.publish_source()
         scan = AddonPackageInspector().inspect(source_path)
@@ -340,6 +357,13 @@ class VehicleAddonPackageBuilder:
             })
         else:
             catalog = VehicleCatalog.from_dict(catalog.to_dict())
+        if authoring_workspace is not None and raw_hitches:
+            # An explicit price/catalog override must not silently drop the
+            # reviewed workspace's runtime connection definitions.
+            catalog = replace(catalog, vehicles=tuple(
+                replace(entry, hitches=validate_hitches(raw_hitches[entry.model], entry.model))
+                if entry.model in raw_hitches else entry for entry in catalog.vehicles
+            ))
         if catalog.catalog_id != selected_mod_id:
             raise ValueError("Vehicle catalog id must match the package id")
         catalog.validate_package_ownership((selected_pack,), allow_traffic=True)

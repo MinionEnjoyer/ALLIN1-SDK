@@ -16,6 +16,7 @@ from allin1_sdk.paths import project_root
 from allin1_sdk.workspace_desktop import _inventory, digest, path
 from allin1_sdk.implementation_identity import identify
 from allin1_sdk import fragment_validation, addon_sdk, package_metadata, material_roles
+from allin1_sdk import assembly_validation
 
 
 def _load_model(file, inspector, temporary, edition):
@@ -37,14 +38,14 @@ def _load_model(file, inspector, temporary, edition):
     return data,assets,animation_model._drawables(data)
 
 
-def inspect(source, *, comparison=None, edition=None, gta_path=None, rig_bindings=None):
+def inspect(source, *, comparison=None, edition=None, gta_path=None, rig_bindings=None, assembly_bindings=None):
     from contextlib import ExitStack
     with ExitStack() as stack:
         root,provenance=stack.enter_context(package_intake.materialize(source,edition=edition,gta_path=gta_path))
         other=None;comparison_provenance=None
         if comparison:
             other,comparison_provenance=stack.enter_context(package_intake.materialize(comparison,edition=edition,gta_path=gta_path))
-        report=_inspect_folder(str(root),comparison=str(other) if other else None,edition=edition,gta_path=gta_path,rig_bindings=rig_bindings)
+        report=_inspect_folder(str(root),comparison=str(other) if other else None,edition=edition,gta_path=gta_path,rig_bindings=rig_bindings,assembly_bindings=assembly_bindings)
         if provenance["archives"] or (comparison_provenance and comparison_provenance["archives"]):
             report["source_kind"]=provenance["source_kind"]
             report["source_sha256"]=provenance["source_sha256"]
@@ -55,7 +56,7 @@ def inspect(source, *, comparison=None, edition=None, gta_path=None, rig_binding
         return report
 
 
-def _inspect_folder(source, *, comparison=None, edition=None, gta_path=None, rig_bindings=None):
+def _inspect_folder(source, *, comparison=None, edition=None, gta_path=None, rig_bindings=None, assembly_bindings=None):
     root = path(source)
     other = path(comparison) if comparison else None
     if not root.is_dir() or (other and not other.is_dir()):
@@ -226,6 +227,7 @@ def _inspect_folder(source, *, comparison=None, edition=None, gta_path=None, rig
                 for child_source,child in material_roles.fragment_owners(data):
                     textures.check_model([child],model_key,key+"/"+child_source,assets)
     attachment_bindings=attachments.resolve()
+    assemblies = assembly_validation.inspect(assembly_bindings, documents, selected_rigs, add)
     if not model_names:
         for category in ("skeleton","skinning","textures","lods"):
             add(category,"not_checked","no_model_context","package","No directly readable model files were supplied.")
@@ -241,11 +243,12 @@ def _inspect_folder(source, *, comparison=None, edition=None, gta_path=None, rig
         raise ValueError("Package fragment evidence exceeds 256 children; select a narrower package")
     if _inventory(root,limit=1000,size_limit=2*1024**3)!=before or (other and _inventory(other,limit=1000,size_limit=2*1024**3)!=comparison_before):
         raise ValueError("Package or comparison changed during validation")
-    implementation=identify([module.__file__ for module in (asset_validation,metadata_validation,texture_dependencies,texture_validation,attachment_validation,animation_model,package_intake,fragment_validation,addon_sdk,package_metadata,material_roles)]+[__file__])
+    implementation=identify([module.__file__ for module in (asset_validation,metadata_validation,texture_dependencies,texture_validation,attachment_validation,animation_model,package_intake,fragment_validation,addon_sdk,package_metadata,material_roles,assembly_validation)]+[__file__])
     report = {"schema_version":1,"ruleset":"package-asset-validation/1","sdk_version":__version__,"read_only":True,
         "source_kind":"package_folder","source_sha256":digest(before),"source_identity":{"files":len(before),"edition":edition,"comparison_sha256":digest(comparison_before) if other else None},
         "validator_sha256":implementation["sha256"],"validator_identity":implementation,
         "drawable_candidates":drawable_candidates,"shared_rigs":shared_rigs,
+        "assembly_evidence":assemblies,"assembly_scope":assembly_validation.SCOPE,
         "metadata_evidence":metadata_evidence,
         "fragment_children":fragments,"fragment_scope":fragment_validation.SCOPE,
         "attachment_bindings":attachment_bindings,"attachment_frame_convention":"Row-major matrices acting on column vectors; parent-composed authored skeleton bind frames, not an inferred child placement or game pose.",

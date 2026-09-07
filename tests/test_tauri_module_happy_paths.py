@@ -14,7 +14,7 @@ def test_every_react_module_has_named_happy_path_evidence():
         "data-tools",
         "xml-editor", "lua-editor",
         "application-shell", "help-center", "package-linker", "asset-viewer",
-        "package-receipts", "quick-import", "vehicle-workbench", "weapon-workbench",
+        "package-receipts", "quick-import", "vehicle-workbench", "vehicle-hitches", "weapon-workbench",
         "ped-workbench", "map-workbench", "story-runtime", "render-studio",
         "models-materials", "texture-dictionaries", "rpf-archive-inspection",
         "rpf-archive-utilities", "rpf-game-text", "rpf-binary", "rpf-change-sets",

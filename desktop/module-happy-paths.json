@@ -13,6 +13,7 @@
     {"module": "package-receipts", "test_file": "src/App.test.tsx", "test_title": "lists receipts and verifies selected ownership through the read-only typed job"},
     {"module": "quick-import", "test_file": "src/QuickImportPublish.test.tsx", "test_title": "reviews prepared files and GBAY metadata and publishes only after confirmation"},
     {"module": "vehicle-workbench", "test_file": "src/OfflineAuthoring.integration.test.tsx", "test_title": "vehicle identity React happy path reviews real references and asset renames, applies, and supports existing undo"},
+    {"module": "vehicle-hitches", "test_file": "src/OfflineAuthoring.integration.test.tsx", "test_title": "vehicle hitches React happy path validates a real draft, saves after confirmation and preserves undo"},
     {"module": "weapon-workbench", "test_file": "src/WeaponWorkbench.test.tsx", "test_title": "routes scope offsets and flags through dirty guards and explicit review, save, and undo"},
     {"module": "ped-workbench", "test_file": "src/PedWorkbench.test.tsx", "test_title": "reviews a copied edit, guards navigation and requires action-time confirmation"},
     {"module": "map-workbench", "test_file": "src/OfflineAuthoring.integration.test.tsx", "test_title": "map React happy path creates, edits topology and slots, saves and reopens real descriptors"},

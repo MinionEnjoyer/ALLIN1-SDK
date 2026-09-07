@@ -7,10 +7,10 @@ ALLIN1 checkout. Do not edit this module by hand.
 from __future__ import annotations
 
 SNAPSHOT_SCHEMA_VERSION = 1
-SOURCE_VERSION = "0.5.5"
+SOURCE_VERSION = "0.6.4"
 SOURCE_FILES = {
     "data/vehicles.toml": "2bac07553ff80174b4cb40a6363cd9beb4fdc60c30158e2470236a0906b045e9",
-    "data/story_vehicles.json": "b68dc5f2392307c2664113bccc888a268241ecc40d09833751ed2e6fa9a7cf67",
+    "data/story_vehicles.json": "70b6b5eb195af7a7f17fdf8086f8abdcde71a007d408619f40ebca834f8ec65a",
 }
 
 OFFICIAL_VEHICLE_MODEL_HASH_PAIRS: tuple[tuple[str, int], ...] = (

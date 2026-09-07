@@ -102,6 +102,7 @@ class VehicleCatalogEntry:
     preview_dictionary: str | None = None
     preview_texture: str | None = None
     traffic: VehicleTrafficPolicy = VehicleTrafficPolicy()
+    hitches: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, data: object, index: int) -> "VehicleCatalogEntry":
@@ -111,7 +112,7 @@ class VehicleCatalogEntry:
         _reject_unknown(data, {
             "model", "name", "manufacturer", "category", "price", "storage",
             "source_pack", "size_tier", "preview_dictionary", "preview_texture",
-            "traffic",
+            "traffic", "hitches",
         }, label)
         model = _required_text(data, "model", label).lower()
         if not _MODEL_PATTERN.fullmatch(model):
@@ -158,7 +159,13 @@ class VehicleCatalogEntry:
         if traffic.enabled and (category not in ROAD_TRAFFIC_CATEGORIES or storage != "garage"):
             raise ValueError(f"{label} cannot opt into ambient traffic because it is not a road vehicle")
         return cls(model, display_name, manufacturer, category, price, storage,
-                   source_pack, size_tier, preview, preview_texture, traffic)
+                   source_pack, size_tier, preview, preview_texture, traffic,
+                   cls._hitches(data.get("hitches"), model))
+
+    @staticmethod
+    def _hitches(value, model):
+        from allin1_sdk.vehicle_hitches import validate_hitches
+        return validate_hitches(value, model) if value is not None else None
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -168,6 +175,8 @@ class VehicleCatalogEntry:
             "source_pack": self.source_pack, "size_tier": self.size_tier,
             "traffic": self.traffic.to_dict(),
         }
+        if self.hitches is not None:
+            result["hitches"] = self._hitches(self.hitches, self.model)
         if self.preview_dictionary:
             result["preview_dictionary"] = self.preview_dictionary
         if self.preview_texture:

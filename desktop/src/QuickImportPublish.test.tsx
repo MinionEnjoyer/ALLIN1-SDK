@@ -58,6 +58,39 @@ it("requires a prepared package and performs no job if the native picker is canc
   expect(guard).toHaveBeenLastCalledWith(false);
 });
 
+it("shows preserved conversion identity and requires its envelope member", async () => {
+  const { client, user } = setup();
+  vi.spyOn(client, "startJob").mockImplementation(async (_op, data, _rev, event) => {
+    const value = fixture(data);
+    value.members.push({ path: "sdk-artifact.json", size: 100, sha256: "a".repeat(64) });
+    event(response({ ...value, artifact_identity: { status: "recorded", artifact_id: "b".repeat(64),
+      build_fingerprint: "d".repeat(64), build_mode: "development_dirty" } }));
+    return { job_id: "identity", accepted: response({}) };
+  });
+  await review(user);
+  expect(screen.getByText("SDK build identity · recorded")).toBeInTheDocument();
+  expect(screen.getByText("d".repeat(64))).toBeInTheDocument();
+  expect(screen.getByText(/not a signature or in-game acceptance/)).toBeInTheDocument();
+});
+
+it("does not invent an SDK origin for older packages", async () => {
+  const { user } = setup();
+  await review(user);
+  expect(screen.getByText(/older package has no recorded SDK build identity/)).toBeInTheDocument();
+});
+
+it("refuses recorded identity when its envelope is missing", async () => {
+  const { client, user, apply } = setup();
+  vi.spyOn(client, "startJob").mockImplementation(async (_op, data, _rev, event) => {
+    event(response({ ...fixture(data), artifact_identity: { status: "recorded", artifact_id: "b".repeat(64),
+      build_fingerprint: "d".repeat(64), build_mode: "development_dirty" } }));
+    return { job_id: "invalid-identity", accepted: response({}) };
+  });
+  await user.click(screen.getByRole("button", { name: "Review ZIP publication" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Unexpected ZIP review evidence");
+  expect(apply).not.toHaveBeenCalled();
+});
+
 it("does not offer publication before package preparation", () => {
   setup("");
   expect(screen.getByRole("button", { name: "Review ZIP publication" })).toBeDisabled();

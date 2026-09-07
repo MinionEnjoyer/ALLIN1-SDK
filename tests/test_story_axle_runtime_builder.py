@@ -743,8 +743,21 @@ def test_candidate_happy_path_stages_both_editions_and_custom_paths(
             "VehicleWorkbenchAxles.Settings.exe"
         )
         assert len(receipt["settings_editor"]["sha256"]) == 64
+        from allin1_sdk.artifact_contract import validate_manifest
+        artifact = validate_manifest(json.loads((root / "sdk-artifact.json").read_bytes()))
+        assert artifact["edition"] == edition
+        assert artifact["outputs"]["VehicleWorkbenchAxles.asi"] == receipt["sha256"]
+        assert artifact["outputs"] == {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                                       for path in root.rglob("*") if path.is_file() and path.name != "sdk-artifact.json"}
+        assert "runtime/CMakeLists.txt" in artifact["inputs"]
+        assert "build-request.json" in artifact["inputs"]
+        from allin1_sdk.mods import ModManifest
+        install = ModManifest.load(root)
+        assert install.editions == (edition.casefold(),)
+        assert all(row.destination.name != "VehicleWorkbenchAxles.Settings.exe" for row in install.files)
     manifest = json.loads(result.manifest.read_text("utf-8"))
     assert manifest["validation"]["native_config_parser"] == "passed"
+    assert manifest["edition_artifact_ids"][TARGET_STORY_LEGACY] != manifest["edition_artifact_ids"][TARGET_STORY_ENHANCED]
     assert manifest["validation"]["supported"] is False
     assert manifest["validation"]["settings_editor_pe_x64"] == "passed"
     assert manifest["toolchain"]["cmake"]["version"] == "3.30.0"

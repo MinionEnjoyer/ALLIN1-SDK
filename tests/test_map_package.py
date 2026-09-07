@@ -6,12 +6,20 @@ from pathlib import Path
 
 import pytest
 
+
 from allin1_sdk.addon_importer import PackageEntry, PackageScan
 from allin1_sdk.map_contract import MapProject
 from allin1_sdk.map_package import MapAddonPackageBuilder
 from allin1_sdk.mods import ModManifest
 
 from test_map_contract import map_payload, no_ipl_map_payload
+
+
+@pytest.fixture(autouse=True)
+def fixture_helper(tmp_path):
+    helper = tmp_path / "tools/RpfPatcher/RpfPatcher.exe"
+    helper.parent.mkdir(parents=True)
+    helper.write_bytes(b"fixture-helper")
 
 
 def _prebuilt_map(root: Path, *, second: bool = False) -> Path:

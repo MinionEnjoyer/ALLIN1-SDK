@@ -16,6 +16,13 @@ from allin1_sdk.vehicle_authoring import (
 )
 
 
+@pytest.fixture(autouse=True)
+def fixture_helper(tmp_path):
+    helper = tmp_path / "tools/RpfPatcher/RpfPatcher.exe"
+    helper.parent.mkdir(parents=True)
+    helper.write_bytes(b"fixture-helper")
+
+
 def _prebuilt_package(root: Path, *, second: bool = False) -> Path:
     source = root / "downloaded-vehicle"
     pack = source / "rs5b10"
@@ -110,7 +117,10 @@ def test_vehicle_package_cli_and_agent_api_use_the_same_guarded_builder(tmp_path
     assert (api_output / "mod.toml").is_file()
 
 
-def test_vehicle_package_preserves_authoring_profiles(tmp_path):
+@pytest.mark.parametrize("override_catalog", [False, True])
+def test_vehicle_package_preserves_authoring_profiles(tmp_path, override_catalog):
+    from allin1_sdk.vehicle_hitches import save_hitches
+    from test_vehicle_hitches import profile
     source = _prebuilt_package(tmp_path)
     (source / "handling.meta").write_text("""<CHandlingDataMgr><HandlingData><Item>
 <handlingName>RS5B10</handlingName><nInitialDriveGears value="6" />
@@ -130,12 +140,17 @@ def test_vehicle_package_preserves_authoring_profiles(tmp_path):
         final_drive_ratio=3.6,
     ))
 
+    explicit_catalog = workspace.distribution_catalog("vehicle.rs5b10", "Test vehicle", "rs5b10") if override_catalog else None
+    save_hitches(workspace, "rs5b10", profile("rs5b10"), workspace.revision)
     result = VehicleAddonPackageBuilder(tmp_path).build(
-        workspace.root, tmp_path / "profile-package",
+        workspace.root, tmp_path / "profile-package", catalog=explicit_catalog,
     )
 
     assert result.profiles is not None
     profiles = json.loads(result.profiles.read_text(encoding="utf-8"))
+    assert profiles["hitch_configurations"]["rs5b10"] == profile("rs5b10")
+    catalog = json.loads(result.catalog.read_text(encoding="utf-8"))
+    assert catalog["vehicles"][0]["hitches"] == profile("rs5b10")
     assert profiles["transmission_configurations"]["rs5b10"][
         "transmission_type"
     ] == "sequential"

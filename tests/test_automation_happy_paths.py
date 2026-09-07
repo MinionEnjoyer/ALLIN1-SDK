@@ -52,6 +52,25 @@ def commit(call, request):
     return result
 
 
+def test_vehicle_hitches_happy_path(transport, tmp_path):
+    from allin1_sdk.vehicle_authoring import VehicleAuthoringWorkspace
+    from allin1_sdk.vehicle_hitches import load_hitches
+    from test_vehicle_authoring import _source
+    from test_vehicle_hitches import profile
+
+    source = _source(tmp_path)
+    original = (source / "stream/authorcar.yft").read_bytes()
+    ws = VehicleAuthoringWorkspace.create(source, tmp_path / "hitch-workspace")
+    context = {"module": "vehicle_hitches", "workspace": str(ws.root), "model": "authorcar"}
+    state = transport("inspect", context)
+    result = commit(transport, {**context, "action": "configure", "document": profile(),
+        "expected_revision": state["revision"], "expected_state_sha256": state["state_sha256"]})
+    assert result["vehicle_session"]["revision"] == 1
+    assert load_hitches(VehicleAuthoringWorkspace(ws.root), "authorcar") == profile()
+    assert (source / "stream/authorcar.yft").read_bytes() == original
+    assert transport("inspect", context)["document"] == profile()
+
+
 def test_graph_and_build_flow_complete_happy_path(transport, tmp_path):
     source = tmp_path / "Source tree with spaces"; source.mkdir()
     (source / "car.yft").write_bytes(b"fixture bytes, no native decode requested")

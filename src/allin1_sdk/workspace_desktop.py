@@ -18,7 +18,7 @@ from allin1_sdk.paths import gta_root_containing, project_root
 from allin1_sdk.release_paths import no_links, relative_path, strict_json, tree_files
 
 SCHEMA = 1
-MODULES = {"binary", "maps", "graph", "program", "runtime", "render", "recipe", "vehicle_identity", "data_tools", "code", "native", "optimization"}
+MODULES = {"binary", "maps", "graph", "program", "runtime", "render", "recipe", "vehicle_identity", "vehicle_hitches", "data_tools", "code", "native", "optimization"}
 _LOCKS: dict[str, threading.RLock] = {}
 
 
@@ -357,6 +357,9 @@ def _adapter(module, operation):
     if module == "data_tools":
         from allin1_sdk import data_tools_desktop
         return {"inspect": data_tools_desktop.inspect, "review": data_tools_desktop.review, "apply": data_tools_desktop.apply}[operation]
+    if module == "vehicle_hitches":
+        from allin1_sdk import vehicle_hitches_desktop
+        return {"inspect": vehicle_hitches_desktop.inspect, "review": vehicle_hitches_desktop.review, "apply": vehicle_hitches_desktop.apply}[operation]
     if module == "vehicle_identity":
         from allin1_sdk import vehicle_identity_desktop
         return {"inspect": vehicle_identity_desktop.inspect, "review": vehicle_identity_desktop.review, "apply": vehicle_identity_desktop.apply}[operation]

@@ -5,7 +5,7 @@ import AssetValidationReport, {type AssetReport} from "./AssetValidationReport";
 
 const report = ():AssetReport => ({schema_version:1, ruleset:"asset-validation/1", sdk_version:"test", read_only:true,
   source_sha256:"a".repeat(64), validator_sha256:"b".repeat(64), report_sha256:"c".repeat(64), static_status:"incomplete", runtime_status:"not_tested", scope:"Primary drawable XML only.",
-  checks:["skeleton","attachments","skinning","textures","lods","metadata"].map(category=>({category,status:category==="attachments"?"not_checked":"pass", finding_count:0,truncated:false,findings:[]})),
+  checks:["skeleton","attachments","skinning","textures","lods","metadata"].map(category=>({category,status:category==="attachments"?"not_checked":"pass", finding_count:category==="attachments"?1:0,truncated:false,findings:category==="attachments"?[{code:"context_missing",status:"not_checked",location:"fixture",message:"Attachment context missing."}]:[]})),
   lod_metrics:[{drawable:0,lod:"High",vertices:3,triangles:1,complete:true}]});
 
 it("shows separate native metadata hashes without promoting decoding to validation",async()=>{
@@ -60,6 +60,27 @@ it("rejects missing categories and a forged runtime-pass claim",()=>{
   expect(screen.getByRole("alert")).toHaveTextContent("invalid");
   view.rerender(<AssetValidationReport report={{...report(),runtime_status:"passed"}}/>);
   expect(screen.getByRole("alert")).toHaveTextContent("invalid");
+});
+
+it.each(["overall","understated","overstated","count","truncated","code","null","readonly"])("rejects contradictory %s evidence without offering export",fault=>{
+  const value=report();
+  if(fault==="overall")value.static_status="pass";
+  if(fault==="understated")value.checks[1].status="pass";
+  if(fault==="overstated")value.checks[0].status="fail";
+  if(fault==="count")value.checks[1].finding_count=0;
+  if(fault==="truncated")value.checks[1].truncated=true;
+  if(fault==="code")value.checks[1].findings[0].code="C:/private";
+  if(fault==="null")value.checks[0]=null as never;
+  if(fault==="readonly")value.read_only="yes" as never;
+  render(<AssetValidationReport report={value} onExport={vi.fn()}/>);
+  expect(screen.getByRole("alert")).toHaveTextContent("invalid");
+  expect(screen.queryByRole("button",{name:"Review asset report export"})).not.toBeInTheDocument();
+});
+it("retains the reported worst severity when truncated findings omit a failure",()=>{
+  const value=report();value.checks[1].status="fail";value.checks[1].finding_count=45;value.checks[1].truncated=true;value.static_status="fail";
+  render(<AssetValidationReport report={value}/>);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByText("Asset validation report · static fail")).toBeInTheDocument();
 });
 
 it("labels validated texture storage as a subtotal with explicit residency exclusions",()=>{

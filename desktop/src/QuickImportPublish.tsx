@@ -8,6 +8,7 @@ export interface PublishReview {
   source_package: string; destination: string; package_id: string; name: string; version: string;
   edition: "legacy" | "enhanced"; total_bytes: number; traffic_opt_in: boolean;
   members: { path: string; size: number; sha256: string }[];
+  artifact_identity?: { status: "not_recorded" } | { status: "recorded"; artifact_id: string; build_fingerprint: string; build_mode: string };
   vehicles: { model: string; name: string; price: number }[];
   review_sha256: string; review_only: boolean; game_write_performed: boolean; file_write_performed: boolean;
 }
@@ -56,7 +57,11 @@ export default function QuickImportPublish({ client, sourcePackage, gtaPath, dis
           if (value.kind !== "vehicle_package_publish_review" || !["legacy", "enhanced"].includes(value.edition)
               || !SHA.test(value.review_sha256) || typeof value.source_package !== "string" || !value.source_package
               || typeof value.destination !== "string" || !value.destination || typeof value.package_id !== "string"
-              || !Array.isArray(value.members) || value.members.length !== 5
+              || !Array.isArray(value.members) || value.members.length !== (value.artifact_identity?.status === "recorded" ? 6 : 5)
+              || (value.artifact_identity !== undefined && value.artifact_identity.status !== "not_recorded" &&
+                (value.artifact_identity.status !== "recorded" || !SHA.test(value.artifact_identity.artifact_id) ||
+                 !SHA.test(value.artifact_identity.build_fingerprint) || !["development_dirty", "development_clean", "frozen_verified_resources"].includes(value.artifact_identity.build_mode)))
+              || value.members.some(row => row.path === "sdk-artifact.json") !== (value.artifact_identity?.status === "recorded")
               || !value.members.every(row => typeof row?.path === "string" && SHA.test(row.sha256) && Number.isSafeInteger(row.size) && row.size >= 0)
               || !Array.isArray(value.vehicles) || !value.vehicles.length || !value.vehicles.every(row => typeof row?.model === "string" && typeof row.name === "string" && Number.isFinite(row.price))
               || !Number.isSafeInteger(value.total_bytes) || value.total_bytes <= 0 || typeof value.traffic_opt_in !== "boolean"
@@ -109,6 +114,13 @@ export default function QuickImportPublish({ client, sourcePackage, gtaPath, dis
         <dt>Included</dt><dd>DLC, GBAY vehicle catalog, ALLIN1 content manifest and preparation evidence · {formatBytes(review.value.total_bytes)}</dd>
         <dt>Traffic preference</dt><dd>{review.value.traffic_opt_in ? "Opt-in included; controlled by the user at installation" : "Not enabled"}</dd>
       </dl>
+      <details className="publish-members"><summary>SDK build identity · {review.value.artifact_identity?.status === "recorded" ? "recorded" : "not recorded"}</summary>
+        {review.value.artifact_identity?.status === "recorded" ? <div style={{ display: "block", maxHeight: "12rem", overflow: "auto", overflowWrap: "anywhere" }}>
+          <p>Conversion build: <code>{review.value.artifact_identity.build_fingerprint}</code></p>
+          <p>Artifact: <code>{review.value.artifact_identity.artifact_id}</code></p>
+          <p>{review.value.artifact_identity.build_mode} · Preserved during ZIP publication. Content identity is not a signature or in-game acceptance.</p>
+        </div> : <p>This older package has no recorded SDK build identity. Re-prepare it with this SDK to establish conversion provenance.</p>}
+      </details>
       <table className="publish-table"><caption>Included GBAY listings</caption><thead><tr><th>Vehicle</th><th>Model</th><th>Price</th></tr></thead><tbody>{review.value.vehicles.map(row => <tr key={row.model}><td>{row.name}</td><td>{row.model}</td><td>{row.price.toLocaleString("en-US")}</td></tr>)}</tbody></table>
       <details className="publish-members"><summary>{review.value.members.length} verified archive files</summary>{review.value.members.map(row => <div key={row.path}><strong>{row.path}</strong><span>{formatBytes(row.size)}</span><code>{row.sha256}</code></div>)}</details>
       <p className="oiv-note">Only the prepared files are included—not unsaved drafts or extra folder contents. Files are checked again before writing. Publication cannot be cancelled once it starts.</p>

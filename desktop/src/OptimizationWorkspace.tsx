@@ -5,6 +5,8 @@ import AssetValidationReport,{type AssetReport} from "./AssetValidationReport";
 import OptimizationPixelPreview,{type PixelEvidence} from "./OptimizationPixelPreview";
 import OptimizationCostEvidence,{validateOptimizationCosts,type OptimizationCost} from "./OptimizationCostEvidence";
 import SharedRigBindings,{type DrawableCandidate,type RigBinding} from "./SharedRigBindings";
+import AssemblyBindings,{type AssemblyBinding} from "./AssemblyBindings";
+import {consistentStaticReport} from "./assetReportConsistency";
 
 type Target={dictionary:string;texture:string;format:string;mips:number;role:string;material_usage?:{roles:string[];color_conversion_blocked:boolean;scope:string}};
 function validatedChoices(value:unknown):Target[] {
@@ -17,17 +19,18 @@ function validatedChoices(value:unknown):Target[] {
   return value;
 }
 type Change=OptimizationCost & {dictionary:string;texture:string;preview_before:string;preview_after:string;preview_region?:PixelEvidence;quality_scope:string;quality:{maximum_absolute_error_rgba:number[]}};
-export type OptimizationContext={source:string;comparison:string;edition:string;game:string;rigBindings:RigBinding[]};
+export type OptimizationContext={source:string;comparison:string;edition:string;game:string;rigBindings:RigBinding[];assemblyBindings?:AssemblyBinding[]};
 export default function OptimizationWorkspace({client,onGuardChange,initialContext}:{client:DesktopClient;onGuardChange:(value:boolean)=>void;initialContext?:OptimizationContext}) {
   const [source,setSource]=useState(initialContext?.source??""),[edition,setEdition]=useState(initialContext?.edition??""),[game,setGame]=useState(initialContext?.game??"");
   const [comparison,setComparison]=useState(initialContext?.comparison??""),[rigBindings,setRigBindings]=useState<RigBinding[]>(initialContext?.rigBindings??[]),[rigCandidates,setRigCandidates]=useState<DrawableCandidate[]>([]);
+  const [assemblies,setAssemblies]=useState<AssemblyBinding[]>(initialContext?.assemblyBindings??[]);
   const [session,setSession]=useState<WorkspaceResult|null>(null),[choices,setChoices]=useState<Target[]>([]);
   const [queue,setQueue]=useState<Target[]>([]),[selected,setSelected]=useState("0"),[format,setFormat]=useState("DXT5"),[mips,setMips]=useState(1),[role,setRole]=useState("unknown"),[dirty,setDirty]=useState(false);
-  const work=useAuthoringWorkspace(client,"optimization",value=>{const nextChoices=validatedChoices(value.choices??[]);validateOptimizationCosts(value.changes??[]);setSession(value);setChoices(nextChoices);setRigCandidates((value.before_report as {drawable_candidates?:DrawableCandidate[]}|undefined)?.drawable_candidates??[]);setDirty(false);});
+  const work=useAuthoringWorkspace(client,"optimization",value=>{if(!value.workspace&&(!consistentStaticReport(value.before_report)||!consistentStaticReport(value.after_report)))throw new Error("Invalid before/after validation evidence; inspect with a matching SDK.");const nextChoices=validatedChoices(value.choices??[]);validateOptimizationCosts(value.changes??[]);setSession(value);setChoices(nextChoices);setRigCandidates((value.before_report as {drawable_candidates?:DrawableCandidate[]}|undefined)?.drawable_candidates??[]);setDirty(false);});
   useEffect(()=>onGuardChange(work.locked||dirty),[work.locked,dirty,onGuardChange]);
-  const request={source,comparison:comparison||undefined,edition:edition||undefined,gta_path:game||undefined,settings:{textures:queue,rig_bindings:rigBindings}};
+  const request={source,comparison:comparison||undefined,edition:edition||undefined,gta_path:game||undefined,settings:{textures:queue,rig_bindings:rigBindings,...(assemblies.length?{assembly_bindings:assemblies}:{})}};
   const changed=()=>{setSession(null);setDirty(true);};
-  const resetRigs=()=>{setRigBindings([]);setRigCandidates([]);};
+  const resetRigs=()=>{setRigBindings([]);setRigCandidates([]);setAssemblies([]);};
   const pick=async(kind:"package_folder"|"rpf"="package_folder")=>{const value=await work.choose(kind);if(value){setSource(value);setChoices([]);setQueue([]);setSelected("0");setRole("unknown");resetRigs();setSession(null);setDirty(false);}};
   const add=()=>{const choice=choices[Number(selected)];if(!choice||choice.material_usage?.color_conversion_blocked)return;setQueue([...queue.filter(item=>item.dictionary!==choice.dictionary||item.texture!==choice.texture),{dictionary:choice.dictionary,texture:choice.texture,format,mips,role}]);changed();};
   const exportPackage=async()=>{const parent=await work.choose("authoring_parent");if(parent&&session)void work.run("review_workspace_action",{...request,action:"export",destination:`${parent}/optimized-package`,expected_state_sha256:session.state_sha256});};
@@ -56,7 +59,9 @@ export default function OptimizationWorkspace({client,onGuardChange,initialConte
       <button onClick={async()=>{const value=await work.choose("rpf");if(value){setComparison(value);resetRigs();changed();}}}>Choose optimization comparison RPF</button>
       {comparison&&<><p>{comparison}</p><button onClick={()=>{setComparison("");resetRigs();changed();}}>Clear optimization comparison</button></>}
       <p>Both reports use these same selected dependencies and metadata. They are not modified, included in the optimized payload, or treated as installed load-order proof.</p>
-    </fieldset><SharedRigBindings candidates={rigCandidates} bindings={rigBindings} locked={work.locked} inspectionAction={queue.length?"Preview optimization candidates":"Inspect optimization inputs"} onChange={value=>{setRigBindings(value);changed();}}/></div></details>
+    </fieldset><SharedRigBindings candidates={rigCandidates} bindings={rigBindings} locked={work.locked} inspectionAction={queue.length?"Preview optimization candidates":"Inspect optimization inputs"} onChange={value=>{setRigBindings(value);changed();}}/>
+      <AssemblyBindings candidates={rigCandidates} bindings={assemblies} locked={work.locked} inspectionAction={queue.length?"Preview optimization candidates":"Inspect optimization inputs"} onChange={value=>{setAssemblies(value);changed();}}/>
+    </div></details>
     {!!choices.length&&<details className="asset-validation" open><summary>Texture candidate options · {queue.length} queued</summary><div className="asset-validation-body">
       <fieldset disabled={work.locked}><legend>Explicit candidate selection</legend>
         <label>Package texture<select value={selected} onChange={e=>{setSelected(e.target.value);setRole("unknown");}}>{choices.map((item,index)=><option key={index} value={index}>{item.dictionary} · {item.texture}</option>)}</select></label>

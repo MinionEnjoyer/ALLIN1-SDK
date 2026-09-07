@@ -39,6 +39,8 @@ from allin1_sdk.axle_runtime_bundler import (
 )
 from allin1_sdk.paths import gta_root_containing, project_root
 from allin1_sdk.processes import run_hidden
+from allin1_sdk import artifact_identity, runtime_provenance
+from allin1_sdk.artifact_contract import digest as content_digest
 
 
 STORY_TARGETS = (TARGET_STORY_LEGACY, TARGET_STORY_ENHANCED)
@@ -2014,11 +2016,22 @@ def build_story_axle_runtime_candidate(
     *,
     source_root: Path | None = None,
     progress: ProgressCallback | None = None,
+    expected_sdk_build: dict | None = None,
 ) -> StoryAxleRuntimeBuildResult:
     """Compile, validate, and atomically stage native Story controller candidates."""
 
     planned = request.validate()
     source = (source_root or _runtime_source_root()).expanduser().resolve(strict=False)
+    build_identity = artifact_identity.current()
+    if expected_sdk_build is not None and expected_sdk_build != build_identity:
+        raise StoryAxleRuntimeBuildError("SDK build changed after runtime review")
+    source_inputs = runtime_provenance.source_identity(source)
+    request_inputs = {"targets": list(planned.targets), "settings": planned.settings.to_runtime_json(),
+        "build_id": planned.build_id, "configurations": [
+            {"configuration": item.configuration.to_dict(),
+             "steering_bones": [{field: getattr(bone, field, None) for field in ("name", "position", "rotation", "scale")}
+                                for bone in item.steering_evidence_bones]}
+            for item in planned.configurations]}
     # The desktop workbench passes the exact report it displayed. CLI callers
     # without one perform one preflight here, then use that same selection for
     # every command below; no command performs an independent PATH lookup.
@@ -2271,6 +2284,14 @@ def build_story_axle_runtime_candidate(
 
         archives: list[Path] = []
         archive_hashes: dict[str, str] = {}
+        artifact_ids = {}
+        inputs = {**source_inputs, "build-request.json": content_digest(request_inputs),
+                  "toolchain.json": content_digest({"selection_fingerprint": toolchain.selection_fingerprint,
+                      "component_identities": dict(toolchain.component_identities)})}
+        for target in planned.targets:
+            edition = _TARGET_LABELS[target]
+            artifact = runtime_provenance.write_edition(publish / edition, build_identity, inputs, edition, runtime_version)
+            artifact_ids[target] = artifact["artifact_id"]
         if planned.create_archives:
             callback("Creating controller archives with deterministic ZIP metadata")
             for target in planned.targets:
@@ -2319,6 +2340,8 @@ def build_story_axle_runtime_candidate(
         _write_json(manifest, {
             "schema_version": 1,
             "operation": "build_story_axle_runtime",
+            "build": build_identity,
+            "edition_artifact_ids": artifact_ids,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "build_id": planned.build_id,
             "runtime_version": runtime_version,
@@ -2390,6 +2413,20 @@ def build_story_axle_runtime_candidate(
                 selected = Path(selected_path).resolve(strict=False)
                 forbidden_roots.append(selected if selected.is_dir() else selected.parent)
         _assert_no_local_path_leaks(publish, tuple(forbidden_roots))
+        verified_editions = {}
+        for target in planned.targets:
+            edition = _TARGET_LABELS[target]
+            verified_editions[edition] = runtime_provenance.verify_edition(publish / edition, artifact_ids[target])
+            if planned.create_archives:
+                runtime_provenance.verify_archive(publish / f"VehicleWorkbenchAxles-{edition}-{runtime_version}.zip", verified_editions[edition])
+        if planned.create_archives and len(planned.targets) > 1:
+            runtime_provenance.verify_archive(combined, {
+                f"{edition}/{name}": checksum for edition, files in verified_editions.items() for name, checksum in files.items()})
+        if any(_sha256(archive) != archive_hashes[archive.name] for archive in archives):
+            raise StoryAxleRuntimeBuildError("Runtime archive bytes changed after checksum generation")
+        if runtime_provenance.source_identity(source) != source_inputs or artifact_identity.current() != build_identity:
+            raise StoryAxleRuntimeBuildError("SDK/helper or native runtime sources changed during build")
+        _verify_preflight_selection(toolchain, source_root=source)
         if output.exists() or output.is_symlink():
             raise FileExistsError(f"Output appeared while the build was running: {output}")
         # Windows rename is a no-clobber operation. The preflight above also

@@ -21,7 +21,7 @@ def sha(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def run(game: Path, edition: str):
+def run(game: Path, edition: str, *, asset_report: bool = False):
     game = game.resolve(strict=True)
     archive = game / "x64v.rpf"
     before = sha(archive)
@@ -49,6 +49,12 @@ def run(game: Path, edition: str):
                 inspector.export_workspace(source, destination, edition=edition)
                 xml[kind] = destination / "edit" / f"{source.name}.xml"
                 print(json.dumps({"phase": "export", "kind": kind, "entry": entry.id, "source_sha256": sha(source), "xml_bytes": xml[kind].stat().st_size}), flush=True)
+            if asset_report:
+                if __package__:
+                    from .retail_asset_report import qualify
+                else:
+                    from retail_asset_report import qualify
+                print(json.dumps(qualify(xml["model"], xml["skeleton"], edition)), flush=True)
             initial = animation_model.inspect(str(xml["model"]))
             if initial["selected"] is None:
                 initial = animation_model.inspect(str(xml["model"]), drawable="0")
@@ -79,5 +85,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--game", type=Path, required=True)
     parser.add_argument("--edition", choices=["Legacy", "Enhanced"], required=True)
+    parser.add_argument("--asset-report", action="store_true", help="Also qualify the real package/shared-rig report through React")
     args = parser.parse_args()
-    raise SystemExit(run(args.game, args.edition))
+    raise SystemExit(run(args.game, args.edition, asset_report=args.asset_report))

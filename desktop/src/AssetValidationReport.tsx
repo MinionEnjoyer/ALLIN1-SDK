@@ -1,4 +1,6 @@
 import "./AssetValidationReport.css";
+import {consistentAssetChecks} from "./assetReportConsistency";
+import AssemblyEvidence,{validAssemblyEvidence,type AssemblyRow} from "./AssemblyEvidence";
 import FragmentEvidence, {validFragmentChildren,type FragmentChild} from "./FragmentEvidence";
 import MetadataEvidence,{validMetadataEvidence,type MetadataSource} from "./MetadataEvidence";
 import TextureDependencyEvidence,{validTextureResolutions,validTextureParents,type TextureResolution,type TextureParent} from "./TextureDependencyEvidence";
@@ -10,6 +12,7 @@ export type AssetReport = {schema_version:number; ruleset:string; sdk_version:st
     findings:{code:string; status:Status; location:string; message:string}[]}[];
   files?:{path:string; sha256:string; coverage:string}[];
   metadata_evidence?:MetadataSource[];
+  assembly_evidence?:AssemblyRow[];assembly_scope?:string;
   fragment_children?:FragmentChild[];fragment_scope?:string;
   texture_resolutions?:TextureResolution[];texture_parent_relationships?:TextureParent[];
   shared_rigs?:{model?:string;drawable:number;rig?:string;rig_drawable?:number;model_sha256?:string;rig_sha256?:string;selected_skeleton_xml_sha256?:string;scope?:string}[];
@@ -20,16 +23,15 @@ export type AssetReport = {schema_version:number; ruleset:string; sdk_version:st
   attachment_bindings?:{weapon:string; component:string; bone:string; bone_index:number; bone_tag:number; parent_source:string; child_source:string; local_matrix:number[][]; skeleton_matrix:number[][]}[];
   archive_provenance?:{package:{archives:{path:string;sha256:string;status:string;reason?:string}[];members:{path:string;container:string;entry_id:string;sha256:string;content_sha256?:string;content_hash_mode?:string}[]}};
   lod_metrics:{source?:string; drawable:number; lod:string; vertices:number; triangles:number; complete:boolean}[]};
-const categories = ["skeleton","attachments","skinning","textures","lods","metadata"];
 const labels:Record<string,string> = {skeleton:"Skeleton ambiguity & transforms",attachments:"Attachment placement",skinning:"Skin weights & palettes",textures:"Texture dependencies",lods:"LOD effectiveness",metadata:"Metadata collisions"};
 export default function AssetValidationReport({report, stale=false, locked=false, onExport}:{report:AssetReport; stale?:boolean; locked?:boolean; onExport?:()=>void}) {
   const sha=(value:unknown)=>typeof value==="string"&&/^[a-f0-9]{64}$/.test(value);
   const count=(value:unknown)=>typeof value==="number"&&Number.isSafeInteger(value)&&value>=0;
-  const status=(value:unknown)=>typeof value==="string"&&["pass","warning","fail","not_checked"].includes(value);
   const matrix=(value:unknown)=>Array.isArray(value)&&value.length===4&&value.every(row=>Array.isArray(row)&&row.length===4&&row.every(v=>typeof v==="number"&&Number.isFinite(v)&&Math.abs(v)<=1e12));
   const provenance=report?.archive_provenance?.package;
   const validDistance=(row:NonNullable<AssetReport["lod_distances"]>[number])=>row&&count(row.drawable)&&typeof row.lod==="string"&&typeof row.field==="string"&&typeof row.status==="string"&&typeof row.models_present==="boolean"&&(row.distance===null||(typeof row.distance==="number"&&Number.isFinite(row.distance)));
-  if (!report || report.schema_version!==1 || !report.read_only || report.runtime_status!=="not_tested"
+  if (!report || report.schema_version!==1 || report.read_only!==true || report.runtime_status!=="not_tested"
+    || (report.assembly_evidence!==undefined&&(!validAssemblyEvidence(report.assembly_evidence)||typeof report.assembly_scope!=="string"))
     || (report.fragment_children!==undefined&&(!validFragmentChildren(report.fragment_children)||typeof report.fragment_scope!=="string"))
     || (report.texture_resolutions!==undefined&&!validTextureResolutions(report.texture_resolutions))
     || (report.metadata_evidence!==undefined&&!validMetadataEvidence(report.metadata_evidence))
@@ -38,12 +40,7 @@ export default function AssetValidationReport({report, stale=false, locked=false
     || (report.lod_distances!==undefined && (!Array.isArray(report.lod_distances)||report.lod_distances.length>2000||report.lod_distances.some(row=>!validDistance(row))))
     || !sha(report.source_sha256) || !sha(report.validator_sha256) || !sha(report.report_sha256)
     || typeof report.scope!=="string" || typeof report.ruleset!=="string" || typeof report.sdk_version!=="string"
-    || !["pass","warning","fail","incomplete"].includes(report.static_status) || !Array.isArray(report.checks) || report.checks.length!==6
-    || !categories.every(category=>report.checks.filter(check=>check.category===category).length===1)
-    || report.checks.some(check=>!status(check.status)
-      || !Array.isArray(check.findings) || check.findings.length>40 || !count(check.finding_count) || check.finding_count<check.findings.length
-      || check.truncated!==(check.finding_count>check.findings.length)
-      || check.findings.some(f=>!f || !status(f.status) || typeof f.message!=="string" || typeof f.location!=="string"))
+    || !consistentAssetChecks(report.checks,report.static_status)
     || !Array.isArray(report.lod_metrics) || report.lod_metrics.length>512
     || report.lod_metrics.some(row=>!row || !count(row.drawable) || !count(row.vertices) || !count(row.triangles) || typeof row.lod!=="string" || typeof row.complete!=="boolean" || (row.source!==undefined && typeof row.source!=="string"))
     || (report.files!==undefined && (!Array.isArray(report.files) || report.files.length>1000 || report.files.some(file=>!file || typeof file.path!=="string" || !sha(file.sha256) || typeof file.coverage!=="string")))
@@ -68,6 +65,7 @@ export default function AssetValidationReport({report, stale=false, locked=false
       </tbody></table>}
       {report.files && <details><summary>Per-file validation coverage · {report.files.length} files</summary><ul>{report.files.map((file,i)=><li key={i}><strong>{file.path}</strong> · {file.coverage.replaceAll("_"," ")}<br/>SHA-256 {file.sha256}</li>)}</ul></details>}
       {!!report.fragment_children?.length&&<FragmentEvidence children={report.fragment_children} scope={report.fragment_scope!}/>}
+      {!!report.assembly_evidence?.length&&<AssemblyEvidence rows={report.assembly_evidence} scope={report.assembly_scope!}/>}
       {!!report.metadata_evidence?.length&&<MetadataEvidence sources={report.metadata_evidence}/>}
       {(!!report.texture_resolutions?.length||!!report.texture_parent_relationships?.length)&&<TextureDependencyEvidence resolutions={report.texture_resolutions??[]} parents={report.texture_parent_relationships??[]}/>}
       {!!report.lod_distances?.length&&<details><summary>Authored LOD distance evidence</summary><p>These are file values, not measured engine transition distances. Runtime multipliers, flags and visual acceptance remain separate.</p><table><caption>Authored LOD values and populated geometry</caption><thead><tr><th>Source / drawable / LOD</th><th>Field</th><th>Distance</th><th>Geometry</th></tr></thead><tbody>{report.lod_distances.map((row,i)=><tr key={i}><td>{row.source} · {row.drawable} / {row.lod}</td><td>{row.field}</td><td>{row.distance??row.status}</td><td>{row.models_present?"Populated":"Absent"}</td></tr>)}</tbody></table></details>}

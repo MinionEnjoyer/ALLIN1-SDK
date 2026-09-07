@@ -31,7 +31,7 @@ def test_review_does_not_write_and_real_zip_retains_the_gbay_catalog(context):
     review = desktop.review(context)
     assert review["file_write_performed"] is False
     assert not Path(context["destination"]).exists()
-    assert len(review["members"]) == 5
+    assert len(review["members"]) == 6
     assert review["vehicles"][0]["model"] == "lunga"
     assert not review["traffic_opt_in"]
     result = desktop.apply({**context, "review_sha256": review["review_sha256"], "authoring_confirmed": True})

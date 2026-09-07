@@ -150,6 +150,10 @@ class _ModelGeometry:
     texcoords: tuple[tuple[float, float], ...] = ()
     texture_parameters: tuple[tuple[str, str], ...] = ()
 
+    # Authored UV channels, indexed by TexCoord semantic (empty = absent).
+    # Keep texcoords as the backwards-compatible UV0 view.
+    texcoord_sets: tuple[tuple[tuple[float, float], ...], ...] = ()
+
 
 @dataclass(frozen=True)
 class _UvAtlasTriangle:
@@ -915,6 +919,32 @@ def _model_texcoord_offset(layout: etree._Element | None) -> int | None:
     return None
 
 
+def _model_texcoord_offsets(layout):
+    offsets = {}
+    offset = 0
+    if layout is None:
+        return offsets
+    for semantic in layout:
+        if not isinstance(semantic.tag, str):
+            continue
+        folded = _local_name(semantic).casefold()
+        if folded.startswith('texcoord'):
+            suffix = folded[len('texcoord'):]
+            channel = int(suffix) if suffix.isdigit() else 0
+            if channel > 7:
+                raise ValueError('Model UV channel exceeds supported limit')
+            offsets[channel] = offset
+            width = 2
+        elif folded.startswith(('position', 'normal', 'binormal')):
+            width = 3
+        elif folded.startswith(('colour', 'color', 'blendweights', 'blendindices', 'tangent')):
+            width = 4
+        else:
+            return {}
+        offset += width
+    return offsets
+
+
 def _model_lod(vertex_buffer: etree._Element) -> str:
     parent = vertex_buffer.getparent()
     while parent is not None:
@@ -1146,6 +1176,7 @@ def _transform_model_geometry(
         material_name=geometry.material_name, texture_names=geometry.texture_names,
         texcoords=geometry.texcoords,
         texture_parameters=geometry.texture_parameters,
+        texcoord_sets=geometry.texcoord_sets,
     )
 
 
@@ -1405,11 +1436,14 @@ def _model_geometry_material(
 def _read_model_geometry(
     vertex_buffer: etree._Element, *, ordinal: int = 0,
     materials: tuple[NativeModelMaterial, ...] = (),
+    defer_uv_validation: bool = False,
 ) -> _ModelGeometry | None:
     layout = vertex_buffer.find("./Layout")
     data = vertex_buffer.find("./Data")
     offset = _model_position_offset(layout)
     texcoord_offset = _model_texcoord_offset(layout)
+    uv_offsets = _model_texcoord_offsets(layout)
+    uv_sets = {channel: [] for channel in uv_offsets}
     if data is None or not data.text or offset is None:
         return None
     vertices: list[tuple[float, float, float]] = []
@@ -1434,13 +1468,27 @@ def _read_model_geometry(
                 uv = tuple(float(value) for value in fields[texcoord_offset:texcoord_offset + 2])
             except ValueError as exc:
                 raise ValueError("A model UV contains a non-numeric value") from exc
-            if not all(math.isfinite(value) for value in uv):
+            if not defer_uv_validation and not all(math.isfinite(value) for value in uv):
                 raise ValueError("A model UV contains a non-finite value")
             texcoords.append((uv[0], uv[1]))
+        for channel, uv_offset in uv_offsets.items():
+            if len(fields) < uv_offset + 2:
+                raise ValueError('A model vertex row is shorter than its UV layout')
+            uv = tuple(float(value) for value in fields[uv_offset:uv_offset + 2])
+            if not all(math.isfinite(value) for value in uv):
+                # Unused dirt/snow UVs can contain NaNs in shipped models.
+                # Mark that channel absent; never invent livery coordinates.
+                # UV0 retains the existing strict validation above. Consumers
+                # must reject an absent channel if a visible sampler needs it.
+                uv_sets[channel] = None
+            elif uv_sets[channel] is not None:
+                uv_sets[channel].append(uv)
         if len(vertices) > MAX_MODEL_VERTICES:
             raise ValueError("Model preview exceeds the guarded vertex limit")
     if not vertices:
         return None
+    if defer_uv_validation and uv_sets.get(0) is None:
+        texcoords = []
 
     geometry = vertex_buffer.getparent()
     material = _model_geometry_material(vertex_buffer, materials)
@@ -1451,6 +1499,8 @@ def _read_model_geometry(
         "material_name": material.name if material is not None else "",
         "texture_names": material.texture_names if material is not None else (),
         "texcoords": tuple(texcoords),
+        "texcoord_sets": tuple(tuple(uv_sets.get(channel) or ())
+                               for channel in range(max(uv_sets, default=-1) + 1)),
         "texture_parameters": (
             material.texture_parameters if material is not None else ()
         ),
@@ -2820,7 +2870,7 @@ def _awc_preview_from_xml(
 
 
 def _model_scene_from_xml(
-    xml: Path, name: str,
+    xml: Path, name: str, *, defer_uv_validation: bool = False,
 ) -> tuple[NativeModelScene | None, dict[str, Any], str | None]:
     """Decode a bounded reusable model scene from structured native XML."""
     try:
@@ -2841,6 +2891,7 @@ def _model_scene_from_xml(
         ):
             geometry = _read_model_geometry(
                 vertex_buffer, ordinal=ordinal, materials=materials,
+                defer_uv_validation=defer_uv_validation,
             )
             if geometry is None:
                 skipped_layouts += 1
@@ -2908,7 +2959,7 @@ def _model_scene_from_xml(
 
 
 def load_native_model_scene(
-    xml: str | Path, *, name: str | None = None,
+    xml: str | Path, *, name: str | None = None, defer_uv_validation: bool = False,
 ) -> tuple[NativeModelScene | None, dict[str, Any], str | None]:
     """Load a guarded CodeWalker model XML document for SDK workbenches.
 
@@ -2917,9 +2968,14 @@ def load_native_model_scene(
     needs the exact same bounded parser and scene semantics, so expose one
     narrow read-only entry point rather than letting each workbench grow a
     subtly different XML decoder.
+
+    When defer_uv_validation is true, non-finite UV channels are returned absent.
+    The consumer MUST validate required channels after LOD/material selection.
+    No replacement coordinates are invented; the default remains strict.
     """
     source = Path(xml).expanduser().resolve()
-    return _model_scene_from_xml(source, name or source.name)
+    return _model_scene_from_xml(source, name or source.name,
+                                defer_uv_validation=defer_uv_validation)
 
 
 def _model_preview_from_xml(

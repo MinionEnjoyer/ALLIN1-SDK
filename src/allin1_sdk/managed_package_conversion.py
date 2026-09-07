@@ -14,6 +14,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from allin1_sdk import artifact_identity
+from allin1_sdk.artifact_contract import validate_manifest, digest
+from allin1_sdk.release_paths import strict_json, tree_files
 from allin1_sdk.addon_importer import (
     AddonPackageInspector,
     MAX_DIRECT_RPF_BYTES,
@@ -470,6 +473,7 @@ class ManagedVehiclePackageConverter:
     def export(
         self, plan: ManagedVehiclePackagePlan, destination: str | Path,
     ) -> ManagedVehiclePackageResult:
+        build = artifact_identity.current(resource_root=self.project_root)
         output = Path(destination).expanduser().resolve(strict=False)
         if output.exists() or output.is_symlink():
             raise ValueError(f"Managed package destination already exists: {output}")
@@ -563,6 +567,24 @@ class ManagedVehiclePackageConverter:
                 "catalog_sha256": catalog_sha256,
                 "traffic_opt_in": plan.traffic_opt_in,
             }
+            outputs = {name: _sha256_file(file) for name, file in tree_files(staging).items()}
+            # This identifies conversion/publication, not the origin of the
+            # third-party asset or independent in-game validation.
+            artifact = artifact_identity.manifest(
+                build, {"selected/dlc.rpf": plan.source_member_sha256,
+                        "conversion-plan.json": digest(plan.review_dict())},
+                outputs, edition=plan.edition.title(),
+                reports=[outputs["allin1.review.json"]],
+                changes={"operation": "managed_vehicle_package_conversion",
+                         "dlc_rpf_unchanged": True, "catalog_generated": True,
+                         "game_acceptance": "not_tested"},
+            )
+            envelope = (json.dumps(artifact, sort_keys=True, indent=2) + "\n").encode("utf-8")
+            if len(envelope) > 4 * 1024**2:
+                raise ValueError("SDK artifact envelope exceeds the Launcher 4 MiB limit")
+            (staging / "sdk-artifact.json").write_bytes(envelope)
+            if artifact_identity.current(resource_root=self.project_root) != build:
+                raise ValueError("SDK/helper identity changed during managed conversion")
             staging.replace(output)
         except Exception:
             if staging.exists():
@@ -643,6 +665,18 @@ class ManagedVehiclePackageConverter:
                 "Review evidence does not match the validated manifest and payload"
             )
         member_paths.add(Path("allin1.review.json"))
+        artifact_path = source / "sdk-artifact.json"
+        _safe_publication_path(artifact_path)
+        artifact = None
+        if artifact_path.exists():
+            if not artifact_path.is_file() or artifact_path.stat().st_size > 4 * 1024**2:
+                raise ValueError("Invalid or oversized SDK artifact envelope")
+            artifact = validate_manifest(strict_json(artifact_path.read_bytes()))
+            if artifact["edition"] != manifest.editions[0].title():
+                raise ValueError("SDK artifact edition differs from the managed package")
+            if set(artifact["outputs"]) != {path.as_posix() for path in member_paths}:
+                raise ValueError("SDK artifact does not cover the exact managed publication inventory")
+            member_paths.add(Path("sdk-artifact.json"))
         ordered = tuple(sorted(
             (path.as_posix() for path in member_paths), key=str.casefold,
         ))
@@ -658,6 +692,8 @@ class ManagedVehiclePackageConverter:
             if size > limit:
                 raise ValueError(f"Publish member exceeds size limit: {member}")
             members.append({"path": member, "size": size, "sha256": _sha256_file(path)})
+            if artifact is not None and member != "sdk-artifact.json" and artifact["outputs"][member] != members[-1]["sha256"]:
+                raise ValueError(f"SDK artifact payload changed: {member}")
         manifest.validate_payload()
         catalog_file = next(item for item in manifest.files if item.destination.suffix.casefold() == ".json")
         catalog = VehicleCatalog.load(source / Path(*catalog_file.source.parts))
@@ -669,7 +705,10 @@ class ManagedVehiclePackageConverter:
                 "dlc_pack": manifest.dlc_packs[0], "members": members,
                 "total_bytes": sum(row["size"] for row in members),
                 "vehicles": [row.to_dict() for row in catalog.vehicles],
-                "traffic_opt_in": any(row.traffic.enabled for row in catalog.vehicles)}
+                "traffic_opt_in": any(row.traffic.enabled for row in catalog.vehicles),
+                "artifact_identity": ({"status": "recorded", "artifact_id": artifact["artifact_id"],
+                    "build_fingerprint": artifact["build"]["build_fingerprint"], "build_mode": artifact["build"]["mode"]}
+                    if artifact is not None else {"status": "not_recorded"})}
 
 
     def publish(
@@ -760,6 +799,8 @@ class ManagedVehiclePackageConverter:
                 }
             archive_size = temporary.stat().st_size
             archive_sha256 = _sha256_file(temporary)
+            if self.review_publication(source) != publication:
+                raise ValueError("Prepared package changed during publication")
             # Reserve this exact filename so concurrent output cannot be replaced.
             try:
                 claim = os.open(output, os.O_CREAT | os.O_EXCL | os.O_WRONLY)

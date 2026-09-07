@@ -72,6 +72,9 @@ def _prepared(tmp_path: Path, *, edition: str = "legacy") -> Path:
     project = tmp_path / f"project-{edition}"
     game = tmp_path / f"game-{edition}"
     project.mkdir()
+    helper = project / "tools/RpfPatcher/RpfPatcher.exe"
+    helper.parent.mkdir(parents=True)
+    helper.write_bytes(b"fixture-helper")
     game.mkdir()
     converter = ManagedVehiclePackageConverter(project, game)
     return converter.export(plan, tmp_path / f"prepared-{edition}").package_root

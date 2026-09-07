@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { DesktopClient, Envelope } from "./types";
 
-export type WorkspaceModule = "binary" | "maps" | "graph" | "program" | "runtime" | "render" | "recipe" | "vehicle_identity" | "data_tools" | "code" | "native" | "optimization";
+export type WorkspaceModule = "binary" | "maps" | "graph" | "program" | "runtime" | "render" | "recipe" | "vehicle_identity" | "vehicle_hitches" | "data_tools" | "code" | "native" | "optimization";
 export type WorkspaceResult = Record<string, unknown> & { kind: string; module: WorkspaceModule; schema_version: number; state_sha256?: string };
 type Request = Record<string, unknown>;
 const SHA = /^[a-f0-9]{64}$/;

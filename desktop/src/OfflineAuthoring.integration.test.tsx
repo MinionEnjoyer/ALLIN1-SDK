@@ -4,7 +4,8 @@ import { resolve, join, basename } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import BinaryWorkspace from "./BinaryWorkspace";
 import NativeWorkspace from "./NativeWorkspace";
@@ -17,6 +18,7 @@ import RuntimeWorkbench from "./RuntimeWorkbench";
 import RenderWorkbench from "./RenderWorkbench";
 import RecipeConversionPanel from "./RecipeConversionPanel";
 import VehicleIdentityEditor from "./VehicleIdentityEditor";
+import VehicleHitchEditor from "./VehicleHitchEditor";
 import { EditorView } from "@codemirror/view";
 import { createPreviewClient } from "./previewClient";
 import type { Envelope, JobStart } from "./types";
@@ -495,11 +497,28 @@ print(package_fixture(Path(sys.argv[1])/'package'))`,files],{cwd:sdk,encoding:"u
   await user.click(screen.getByText("WEAPON_TEST → COMPONENT_TEST · tip"));
   expect(screen.getByRole("table",{name:"Authored skeleton anchor matrix · tip"})).toHaveTextContent("1.00000");
   expect(screen.getByLabelText("Attachment placement")).toHaveTextContent("in-game assembly have not been proved");
+  await user.click(screen.getByText("Declared attachment placement · 0 pairs"));
+  const parent = screen.getByLabelText("Assembly parent"), child = screen.getByLabelText("Assembly child");
+  await user.selectOptions(parent, within(parent).getByRole("option", {name:"package:body.ydr.xml · drawable 0"}));
+  await user.selectOptions(child, within(child).getByRole("option", {name:"package:clip.ydr.xml · drawable 0"}));
+  await user.type(screen.getByLabelText("Parent anchor bone"), "tip");
+  fireEvent.change(screen.getByLabelText("Local offset X"), {target:{value:"2"}});
+  await user.click(screen.getByRole("button", {name:"Add declared assembly pair"}));
+  expect(screen.getByRole("button", {name:"Review report export"})).toBeDisabled();
+  expect(screen.getByRole("button", {name:"XML, JSON & Lua editor"})).toBeDisabled();
+  await user.click(screen.getByText("Declared attachment placement · 1 pairs"));
+  await user.click(screen.getByRole("button", {name:"Inspect data"}));
+  await user.click(await screen.findByText("Declared assembly evidence · 1 pairs"));
+  await user.click(screen.getByText("Pair 1 · checked"));
+  expect(screen.getByRole("table", {name:"Declared child-to-parent matrix · pair 1"})).toHaveTextContent("2.00000");
   await user.click(screen.getByRole("button",{name:"Review asset report export"}));
   await confirm(user);
   const report=JSON.parse(readFileSync(join(files,"asset-validation-report/asset-validation.json"),"utf8"));
   expect(report.attachment_bindings[0]).toMatchObject({parent_source:"body.ydr.xml",child_source:"clip.ydr.xml",bone_tag:42});
   expect(report.attachment_bindings[0].skeleton_matrix[2][3]).toBe(1);
+  expect(report.assembly_evidence[0].child_to_parent_matrix[0][3]).toBe(2);
+  expect(report.assembly_evidence[0].child_to_parent_matrix[2][3]).toBe(1);
+  expect(report.assembly_evidence[0].relative_anchor_error).toBe(0);
   expect(report.runtime_status).toBe("not_tested");
 },30000);
 
@@ -582,6 +601,11 @@ print(json.dumps(shared_request(Path(sys.argv[1]))))`,files],{cwd:sdk,encoding:"
   await user.selectOptions(screen.getByLabelText("Model drawable"),JSON.stringify([binding.model,binding.drawable,binding.model_sha256]));
   await user.selectOptions(screen.getByLabelText("Shared skeleton drawable"),JSON.stringify([binding.rig,binding.rig_drawable,binding.rig_sha256]));
   await user.click(screen.getByRole("button",{name:"Use selected shared rig"}));
+  await user.click(screen.getByText("Declared attachment placement · 0 pairs"));
+  await user.selectOptions(screen.getByLabelText("Assembly parent"),JSON.stringify([binding.model,binding.drawable,binding.model_sha256]));
+  await user.selectOptions(screen.getByLabelText("Assembly child"),JSON.stringify([binding.rig,binding.rig_drawable,binding.rig_sha256]));
+  await user.type(screen.getByLabelText("Parent anchor bone"),"tip");
+  await user.click(screen.getByRole("button",{name:"Add declared assembly pair"}));
   await user.click(screen.getByRole("button",{name:"Inspect data"}));
   await user.click(await screen.findByRole("button",{name:"Optimize with this validation context"}));
   expect(screen.getByText(/Validation context copied from the asset report/)).toBeInTheDocument();
@@ -590,6 +614,8 @@ print(json.dumps(shared_request(Path(sys.argv[1]))))`,files],{cwd:sdk,encoding:"
   expect(screen.getByText(input.comparison)).toBeInTheDocument();
   await user.click(screen.getByText("Explicit shared-rig context · 1 selected"));
   expect(screen.getByRole("button",{name:"Remove shared rig 1"})).toBeInTheDocument();
+  await user.click(screen.getByText("Declared attachment placement · 1 pairs"));
+  expect(screen.getByRole("button",{name:"Remove assembly pair 1"})).toBeInTheDocument();
   await user.click(screen.getByRole("button",{name:"Inspect optimization inputs"}));
   await user.selectOptions(await screen.findByLabelText("Declared material role"),"color");
   fireEvent.change(screen.getByLabelText("Candidate mip count"),{target:{value:"5"}});
@@ -600,8 +626,10 @@ print(json.dumps(shared_request(Path(sys.argv[1]))))`,files],{cwd:sdk,encoding:"
   expect(receipt.validation_context.shared_rig_count).toBe(1);
   for(const name of ["before_report","after_report"]){
     expect(receipt[name].shared_rigs[0]).toMatchObject(binding);
+    expect(receipt[name].assembly_evidence[0]).toMatchObject({parent:binding.model,child:binding.rig,parent_bone:"tip",child_bone:"",status:"checked"});
     expect(receipt[name].texture_resolutions.some((row:{dictionary:string})=>row.dictionary==="comparison:shared.ytd.xml")).toBe(true);
   }
+  expect(receipt.before_report.assembly_evidence).toEqual(receipt.after_report.assembly_evidence);
   expect(existsSync(join(files,"optimized-package/package/shared.ydr.xml"))).toBe(false);
 },60000);
 
@@ -962,6 +990,21 @@ it.runIf(process.env.ALLIN1_NATIVE_RUNTIME_TEST === "1")("Story runtime React ha
   ]);
   expect(existsSync(data.manifest)).toBe(true);
   expect(data.output).toBe(join(files, "story-runtime-candidate"));
+  const buildReport = JSON.parse(readFileSync(data.manifest, "utf8"));
+  expect(buildReport.build.build_fingerprint).toMatch(/^[a-f0-9]{64}$/);
+  expect(screen.getByText("SDK execution identity")).toBeInTheDocument();
+  for (const edition of ["Legacy", "Enhanced"]) {
+    const artifact = JSON.parse(readFileSync(join(data.output, edition, "sdk-artifact.json"), "utf8"));
+    expect(artifact.build).toEqual(buildReport.build);
+    expect(artifact.edition).toBe(edition);
+    expect(artifact.artifact_id).toBe(buildReport.edition_artifact_ids[`story-${edition.toLowerCase()}`]);
+    for (const [name, digest] of Object.entries(artifact.outputs)) {
+      expect(createHash("sha256").update(readFileSync(join(data.output, edition, name))).digest("hex")).toBe(digest);
+    }
+    const publication = JSON.parse(readFileSync(join(data.output, edition, "sdk-publication.json"), "utf8"));
+    expect(publication.installable_allin1_package).toBe(true);
+    expect(existsSync(join(data.output, edition, "mod.toml"))).toBe(true);
+  }
   await waitFor(() => expect(guard).toHaveBeenLastCalledWith(false));
 }, 240000);
 
@@ -1169,6 +1212,35 @@ it.skipIf(process.env.ALLIN1_NATIVE_RPF_TEST !== "1")("recipe React happy path b
   expect(readFileSync(paths.rpf)).toEqual(original);
   expect(readFileSync(join(source, "content", "data.xml"), "utf8")).toContain("owned source");
 }, 90000);
+
+it("vehicle hitches React happy path validates a real draft, saves after confirmation and preserves undo", async () => {
+  const { files, client, user, invoke, python, sdk } = fixture(), guard = vi.fn(), saved = vi.fn();
+  const setup = spawnSync(python, ["-c", `import sys
+from pathlib import Path
+sys.path.insert(0,str(Path(sys.argv[1])/'tests'))
+from test_vehicle_authoring import _source
+from allin1_sdk.vehicle_authoring import VehicleAuthoringWorkspace
+root=Path(sys.argv[2])
+print(VehicleAuthoringWorkspace.create(_source(root),root/'Hitch copy').root)`, sdk, files], { encoding: "utf8", cwd: sdk, windowsHide: true });
+  expect(setup.status, setup.stderr).toBe(0);
+  const workspace = setup.stdout.trim();
+  const session = invoke("inspect_vehicle_authoring_workspace", { workspace, model: "authorcar" }).payload.result as import("./types").VehicleAuthoringSession;
+  render(<StrictMode><VehicleHitchEditor client={client} session={session} disabled={false} onGuardChange={guard} onSaved={saved} /></StrictMode>);
+  await user.click(await screen.findByRole("button", { name: "Add rear hitch" }));
+  expect(guard).toHaveBeenLastCalledWith(true);
+  await user.click(screen.getByRole("button", { name: "Review hitches" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("compatible trailer");
+  fireEvent.change(screen.getByLabelText("rear compatible trailers"), { target: { value: "trailers, trailers2" } });
+  await user.click(screen.getByRole("button", { name: "Review hitches" }));
+  expect(screen.getByRole("button", { name: "Apply reviewed change" })).toBeDisabled();
+  expect(JSON.parse(readFileSync(join(workspace, "vehicle-authoring.json"), "utf8")).hitch_configurations).toBeUndefined();
+  await confirm(user);
+  await waitFor(() => expect(saved).toHaveBeenCalledWith(expect.objectContaining({ revision: 1, selected_model: "authorcar" })));
+  expect(JSON.parse(readFileSync(join(workspace, "vehicle-authoring.json"), "utf8")).hitch_configurations.authorcar.points[0].compatible_models).toEqual(["trailers", "trailers2"]);
+  expect(readFileSync(join(files, "vehicle-source", "stream", "authorcar.yft"), "utf8")).toBe("fragment");
+  expect(invoke("apply_vehicle_authoring_history", { workspace, direction: "undo", expected_revision: 1, authoring_confirmed: true }).operation).toBe("result");
+  expect(JSON.parse(readFileSync(join(workspace, "vehicle-authoring.json"), "utf8")).hitch_configurations).toBeUndefined();
+}, 30000);
 
 it("vehicle identity React happy path reviews real references and asset renames, applies, and supports existing undo", async () => {
   const { files, client, user, invoke, python, sdk } = fixture(), guard = vi.fn(), saved = vi.fn();

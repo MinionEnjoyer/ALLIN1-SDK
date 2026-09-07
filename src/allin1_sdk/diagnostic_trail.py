@@ -209,8 +209,25 @@ def inspect(payload):
         "source_identities":{"artifact_sha256":artifact_sha,"receipt_sha256":receipt_sha,"session_sha256":session_sha,"crash_event_sha256":crash_sha,"session_crash_events_sha256":session_crash_sha},
         "files":files,"rpf_members":rpf_members,"findings":findings,"session_id":session["session_id"] if session else None,
         "crash_evidence":crash,"crash_cause":"not_established","scope":"Locally supplied content identities and observations, not publisher signatures or a causal crash verdict."}
-    if payload.get("settings"):
+    settings = payload.get("settings")
+    if settings:
+        if not isinstance(settings, dict):
+            raise ValueError("Diagnostic settings must be an object")
+        settings = dict(settings)
+        selected_report = settings.pop("asset_report", None)
+        if selected_report is not None:
+            from allin1_sdk.diagnostic_asset_evidence import summarize, selected_report as extract_report
+            selected, selected_sha = _read(selected_report)
+            evidence = result["asset_validation"] = summarize(extract_report(selected), artifact, selected_sha)
+            result["source_identities"]["asset_report_file_sha256"] = selected_sha
+            if evidence["status"] == "recorded":
+                add("verified", "asset_report_link", "The selected artifact records this exact static report; source/input versus candidate/output scope is separate.", report_sha256=evidence["report_sha256"], source_relation=evidence["source_relation"])
+                if evidence["static_status"] == "fail":
+                    add("indicated", "static_asset_findings", "The recorded report contains static failures. This is not proof the installed candidate has those failures or that they caused a crash.", source_relation=evidence["source_relation"])
+            else:
+                add("unresolved", "asset_report_unlinked", "The selected static report is not recorded by this artifact. Its findings cannot be attributed to this build.")
+    if settings:
         from allin1_sdk.diagnostic_bundle import inspect as inspect_bundle
-        result["log_bundle"]=inspect_bundle(payload["settings"],game)
+        result["log_bundle"]=inspect_bundle(settings,game)
     result["state_sha256"]=digest(result)
     return result

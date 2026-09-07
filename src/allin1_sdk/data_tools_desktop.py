@@ -27,8 +27,8 @@ def _report(payload):
     elif task == "asset_validation":
         from allin1_sdk.package_validation import inspect as inspect_package
         settings=payload.get("settings",{})
-        if not isinstance(settings,dict) or set(settings)-{"rig_bindings"}: raise ValueError("Unsupported asset validation context settings")
-        document = report = inspect_package(str(source), comparison=payload.get("comparison"), edition=payload.get("edition"), gta_path=payload.get("gta_path"),rig_bindings=settings.get("rig_bindings"))
+        if not isinstance(settings,dict) or set(settings)-{"rig_bindings","assembly_bindings"}: raise ValueError("Unsupported asset validation context settings")
+        document = report = inspect_package(str(source), comparison=payload.get("comparison"), edition=payload.get("edition"), gta_path=payload.get("gta_path"),rig_bindings=settings.get("rig_bindings"),assembly_bindings=settings.get("assembly_bindings"))
         fingerprint = document["report_sha256"]
     elif task == "dlc_inventory":
         from allin1_sdk.dlc_inventory import DlcInventory

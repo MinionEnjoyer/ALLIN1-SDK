@@ -110,6 +110,9 @@ def _service(tmp_path: Path):
     project = tmp_path / "sdk"
     game = tmp_path / "game"
     project.mkdir()
+    helper = project / "tools/RpfPatcher/RpfPatcher.exe"
+    helper.parent.mkdir(parents=True)
+    helper.write_bytes(b"fixture-helper")
     game.mkdir()
     return source, VehicleQuickImportService(
         project, game, inspector=_Inspector(_scan(source)),
@@ -181,6 +184,9 @@ def test_direct_rpf_quick_import_infers_registered_pack_and_streams_export(
     service = VehicleQuickImportService(
         project, game, inspector=_Inspector(scan),
     )
+    helper = project / "tools/RpfPatcher/RpfPatcher.exe"
+    helper.parent.mkdir(parents=True)
+    helper.write_bytes(b"fixture-helper")
 
     inspection = service.inspect(source)
     assert inspection.available_editions == ("enhanced",)

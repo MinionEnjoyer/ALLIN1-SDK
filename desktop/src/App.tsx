@@ -15,6 +15,7 @@ import { deferWorkspace } from "./deferWorkspace";
 import { VehicleAxleEditor } from "./VehicleAxleEditor";
 import { VehicleOutputEditor, type VehiclePackageDraft } from "./VehicleOutputEditor";
 import { VehicleTransmissionEditor } from "./VehicleTransmissionEditor";
+import VehicleHitchEditor from "./VehicleHitchEditor";
 import VehicleViewport from "./VehicleViewport";
 import SliderField from "./SliderField";
 import { handlingSlider } from "./handlingSliders";
@@ -934,7 +935,8 @@ function ContentWorkbench({
   const [packageReview, setPackageReview] = useState<VehiclePackageBuildReview | null>(null);
   const [packageResult, setPackageResult] = useState<VehiclePackageBuildResult | null>(null);
   const [identityGuarded, setIdentityGuarded] = useState(false);
-  const [authoringMode, setAuthoringMode] = useState<"evidence" | "edit" | "appearance" | "axles" | "transmission" | "output" | "identity">("evidence");
+  const [hitchGuarded, setHitchGuarded] = useState(false);
+  const [authoringMode, setAuthoringMode] = useState<"evidence" | "edit" | "appearance" | "axles" | "transmission" | "output" | "identity" | "hitches">("evidence");
   const [authoringBusy, setAuthoringBusy] = useState(false);
   const [authoringError, setAuthoringError] = useState("");
   const [authoringNotice, setAuthoringNotice] = useState("");
@@ -983,7 +985,7 @@ function ContentWorkbench({
   const distributionDirty = Boolean(distributionDraft)
     && JSON.stringify(distributionDraft) !== JSON.stringify(distributionBaseline);
   const otherAuthoringDirty = fieldAuthoringDirty || appearanceDirty || tuningEntryDirty || tuningKitDirty || lightProfileDirty || axleDirty || transmissionDirty || distributionDirty;
-  const authoringDirty = otherAuthoringDirty || identityGuarded;
+  const authoringDirty = otherAuthoringDirty || identityGuarded || hitchGuarded;
   const filteredModels = useMemo(() => {
     const needle = modelQuery.trim().toLocaleLowerCase();
     return models.filter((model) => !needle || `${model.model} ${model.display_name} ${model.make_name} ${model.vehicle_class}`.toLocaleLowerCase().includes(needle));
@@ -1097,7 +1099,7 @@ function ContentWorkbench({
   const adoptAuthoringSession = (
     session: VehicleAuthoringSession,
     notice: string,
-    mode: "edit" | "appearance" | "axles" | "transmission" | "output" | "identity" = "edit",
+    mode: "edit" | "appearance" | "axles" | "transmission" | "output" | "identity" | "hitches" = "edit",
   ) => {
     const changedVehicle = authoringSession?.workspace !== session.workspace
       || authoringSession?.selected_model !== session.selected_model;
@@ -1827,7 +1829,7 @@ function ContentWorkbench({
       if (response.operation === "error") throw new Error(messageText(response));
       const loaded = response.payload.result as VehicleAuthoringSession | undefined;
       if (!loaded) throw new Error(`Vehicle authoring ${direction} did not return a session.`);
-      adoptAuthoringSession(loaded, `${direction === "undo" ? "Undo" : "Redo"} completed as revision ${loaded.revision}.`, authoringMode === "appearance" ? "appearance" : authoringMode === "axles" ? "axles" : authoringMode === "transmission" ? "transmission" : authoringMode === "output" ? "output" : "edit");
+      adoptAuthoringSession(loaded, `${direction === "undo" ? "Undo" : "Redo"} completed as revision ${loaded.revision}.`, authoringMode === "hitches" ? "hitches" : authoringMode === "appearance" ? "appearance" : authoringMode === "axles" ? "axles" : authoringMode === "transmission" ? "transmission" : authoringMode === "output" ? "output" : "edit");
     } catch (reason) {
       setAuthoringError(String(reason));
     } finally {
@@ -2016,9 +2018,9 @@ function ContentWorkbench({
 
           <aside className="pane vehicle-evidence-pane" aria-label="Vehicle evidence">
             <div className="pane-header"><div><span className="pane-kicker">{authoringMode === "edit" && authoringSession ? "Authoring fields" : authoringMode === "appearance" && authoringSession ? "Vehicle variation" : authoringMode === "axles" && authoringSession ? "Axle topology" : authoringMode === "transmission" && authoringSession ? "Transmission profile" : authoringMode === "output" && authoringSession ? "Distribution and output" : "Inspector"}</span><h3>{authoringMode !== "evidence" && authoringSession ? authoringSession.selected_model : selectedAsset?.path.split("/").at(-1) || selectedModel?.model || "Vehicle evidence"}</h3></div>{selectedModel && <StatusPill valid={selectedModel.complete}>{authoringSession ? `rev ${authoringSession.revision}` : selectedModel.complete ? "linked" : "review"}</StatusPill>}</div>
-            {authoringSession && <div className="vehicle-inspector-tabs" role="tablist" aria-label="Vehicle inspector mode"><button type="button" disabled={identityGuarded} role="tab" aria-selected={authoringMode === "evidence"} className={authoringMode === "evidence" ? "active" : ""} onClick={() => setAuthoringMode("evidence")}>Evidence</button><button type="button" disabled={identityGuarded} role="tab" aria-selected={authoringMode === "edit"} className={authoringMode === "edit" ? "active" : ""} onClick={() => setAuthoringMode("edit")}>Core fields</button><button type="button" disabled={identityGuarded} role="tab" aria-selected={authoringMode === "appearance"} className={authoringMode === "appearance" ? "active" : ""} onClick={() => setAuthoringMode("appearance")}>Appearance</button><button type="button" disabled={identityGuarded} role="tab" aria-selected={authoringMode === "axles"} className={authoringMode === "axles" ? "active" : ""} onClick={() => setAuthoringMode("axles")}>Axles</button><button type="button" disabled={identityGuarded} role="tab" aria-selected={authoringMode === "transmission"} className={authoringMode === "transmission" ? "active" : ""} onClick={() => setAuthoringMode("transmission")}>Transmission</button><button type="button" disabled={identityGuarded} role="tab" aria-selected={authoringMode === "output"} className={authoringMode === "output" ? "active" : ""} onClick={() => setAuthoringMode("output")}>Output</button><button type="button" role="tab" aria-selected={authoringMode === "identity"} disabled={otherAuthoringDirty || authoringBusy} onClick={() => setAuthoringMode("identity")}>Identity</button></div>}
+            {authoringSession && <div className="vehicle-inspector-tabs" role="tablist" aria-label="Vehicle inspector mode"><button type="button" disabled={identityGuarded || hitchGuarded} role="tab" aria-selected={authoringMode === "evidence"} className={authoringMode === "evidence" ? "active" : ""} onClick={() => setAuthoringMode("evidence")}>Evidence</button><button type="button" disabled={identityGuarded || hitchGuarded} role="tab" aria-selected={authoringMode === "edit"} className={authoringMode === "edit" ? "active" : ""} onClick={() => setAuthoringMode("edit")}>Core fields</button><button type="button" disabled={identityGuarded || hitchGuarded} role="tab" aria-selected={authoringMode === "appearance"} className={authoringMode === "appearance" ? "active" : ""} onClick={() => setAuthoringMode("appearance")}>Appearance</button><button type="button" disabled={identityGuarded || hitchGuarded} role="tab" aria-selected={authoringMode === "axles"} className={authoringMode === "axles" ? "active" : ""} onClick={() => setAuthoringMode("axles")}>Axles</button><button type="button" disabled={identityGuarded || hitchGuarded} role="tab" aria-selected={authoringMode === "transmission"} className={authoringMode === "transmission" ? "active" : ""} onClick={() => setAuthoringMode("transmission")}>Transmission</button><button type="button" disabled={identityGuarded || hitchGuarded} role="tab" aria-selected={authoringMode === "output"} className={authoringMode === "output" ? "active" : ""} onClick={() => setAuthoringMode("output")}>Output</button><button type="button" role="tab" aria-selected={authoringMode === "identity"} disabled={otherAuthoringDirty || authoringBusy || hitchGuarded} onClick={() => setAuthoringMode("identity")}>Identity</button><button type="button" role="tab" aria-selected={authoringMode === "hitches"} disabled={otherAuthoringDirty || authoringBusy || identityGuarded} onClick={() => setAuthoringMode("hitches")}>Hitches</button></div>}
             {authoringSession && <div hidden={authoringMode !== "identity"} className="vehicle-authoring-editor"><VehicleIdentityEditor key={`${authoringSession.workspace}:${authoringSession.selected_model}:${authoringSession.revision}`} client={client} session={authoringSession} disabled={authoringBusy || otherAuthoringDirty || !!pendingCreate || !!pendingEdit} onGuardChange={setIdentityGuarded} onSaved={value => adoptAuthoringSession(value, "Vehicle identity and linked assets migrated. Undo is available in workspace history.", "identity")} /></div>}
-            {authoringMode === "identity" && authoringSession ? null : authoringMode === "edit" && authoringSession ? <div className="vehicle-authoring-editor" aria-live="polite">
+            {authoringMode === "hitches" && authoringSession ? <div className="vehicle-authoring-editor"><VehicleHitchEditor key={`${authoringSession.workspace}:${authoringSession.selected_model}:${authoringSession.revision}`} client={client} session={authoringSession} disabled={authoringBusy || otherAuthoringDirty || identityGuarded} onGuardChange={setHitchGuarded} onSaved={value => adoptAuthoringSession(value, "Hitch profile saved; package export includes the GBAY configuration.", "hitches")} /></div> : authoringMode === "identity" && authoringSession ? null : authoringMode === "edit" && authoringSession ? <div className="vehicle-authoring-editor" aria-live="polite">
               <div className="vehicle-authoring-intro"><strong>Copied workspace</strong><span>Values are validated by the Python authoring service before anything is saved.</span></div>
               {VEHICLE_AUTHORING_FIELDS.map((group) => <fieldset key={group.title}><legend>{group.title}</legend>{group.fields.map(([field, label]) => {
                 const range = handlingSlider(field);

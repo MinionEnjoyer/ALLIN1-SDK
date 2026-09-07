@@ -25,11 +25,13 @@ WORKFLOWS = {
     "optimization": ("Reversible package optimization", ["source", "workspace", "comparison", "settings", "edition", "gta_path", "preview_region"], ["export", "recover"]),
     "recipe": ("Package recipes", ["source", "edition"], ["managed", "batches", "created", "compile"]),
     "vehicle_identity": ("Vehicle identity", ["workspace", "model"], ["migrate"]),
+    "vehicle_hitches": ("Vehicle hitches", ["workspace", "model"], ["configure"]),
     "runtime": ("Story controller", ["toolchain"], ["build"]),
     "render": ("Render studio", ["source", "gta_path", "blender_executable", "settings", "camera", "render"], ["export"]),
 }
 
 WORKBENCH_ROUTES = {
+    "vehicle-hitches": {"module": "vehicle_hitches"},
     "native-resources": {"module": "native"},
     "archive-browser": {"desktop_operations": ["browse_game_files", "search_game_files"], "note": "Read-only typed browser jobs preserve exact archive member identities; reviewed outputs use archive utilities."},
     "xml-editor": {"module": "code"}, "lua-editor": {"module": "code"},

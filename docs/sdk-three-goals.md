@@ -4,6 +4,253 @@ User-directed priorities after pausing the broad React parity expansion.
 These goals are not complete. Existing work is retained; new editor features
 are justified by their contribution to these three outcomes.
 
+## Offline hardening follow-through (September 7)
+
+The user approved recovery integrity, consistent React report validation and an
+offline end-to-end regression. All three bounded tasks are now implemented.
+
+Recovery now validates the existing receipt state identity, sealed SDK artifact,
+input/output inventories, edition, change-report identity, both sealed static
+reports, source-inventory relationships, validator identity and common comparison
+context before accepting the saved originals. Malformed or contradictory evidence
+cannot become trusted just by reopening the recovery package. Hashes still provide
+internal content consistency, not authenticity against someone who rewrites and
+reseals all evidence. No new signature or receipt schema is introduced.
+
+Recovery deliberately does not require the current source tree or optimized
+candidate: an intact receipt and exact saved originals suffice after the candidate
+is damaged, moved or deleted. If a receipt is rejected, preserve the originals and
+receipt for investigation; do not discard the backup or regenerate a receipt merely
+to bypass the check. No automatic repair of contradictory evidence is attempted.
+
+Immediately before publication, optimization rehashes the complete staged export,
+including originals, candidate, artifact and receipt, rejecting changed or extra
+files. Recovery rechecks its receipt/originals after copying and verifies the staged
+recovered inventory. Outputs remain new destinations, not replacements of user
+folders. Injected low-space and interrupted-copy failures leave no published partial
+destination and clean up owned staging. These tests model handled errors, not sudden
+power loss, disk firmware guarantees or a forcibly terminated process.
+
+React now enforces the same category-severity/count rules as diagnostic report
+ingestion: complete categories, bounded counts/codes, correct truncation, no
+understated shown findings, exact aggregate status and literal read-only/runtime
+claims. Truncated findings may omit the worst finding, so their reported maximum
+is preserved rather than incorrectly downgraded. The Data Tools and optimization
+screens reject inconsistent reports before adopting an exportable session. Backend
+content-seal checks remain authoritative; React performs structural consistency.
+
+The new source-level offline pipeline uses the real SDK review/apply boundary and
+Launcher install/uninstall service against temporary test-owned installations for
+Legacy and Enhanced (non-executable marker files only). It exercises declared
+rotation, before/after optimization, artifact linkage, selected optimization-report
+ingestion, stale diagnostic export, corrupt report rejection, installed-byte drift,
+redacted export, restoration of pre-install bytes and exact original recovery. Its
+deterministic build identity is a fixture, not release-build evidence. No runtime
+session or causal crash diagnosis is inferred from these checks.
+
+Final focused verification: **154 Python passed, 8 gated skipped; 58 React passed;
+TypeScript project checks and Git whitespace checks passed.** This supersedes the
+preceding continuation's focused counts, not the historical full-suite/frozen
+results. No game launch, retail/archive scan, preview interruption, native/frozen
+rebuild, real installation, commit or push occurred. Unrelated concurrent edits were
+preserved. The broader three-goal objective and live acceptance remain unfinished.
+
+## Offline-only continuation during preview generation (September 7)
+
+The user directed further work that does not require a game launch while preview
+generation is running. This resumes offline implementation despite the historical
+runtime-choice blocker below; it does not authorize an installation or live test.
+Concurrent vehicle-hitch and ClipSet edits were preserved. No game/archive scan,
+native helper rebuild, frozen-shell rebuild, preview-process interruption, commit,
+push, installation or GTA launch was performed during this continuation.
+
+Declared pairwise attachment placement now accepts optional unit XYZW rotation
+offsets. Legacy declarations retain identity rotation without changing their
+authored shape. Nonfinite, malformed or nonunit quaternions fail rather than being
+silently normalized. The column-vector composition is parent anchor × local rigid
+offset (translation × rotation) × inverse(child anchor); translation remains in
+parent-anchor axes. React uses a nested collapsible rotation section. Before/after
+optimization and exported evidence retain the same declaration; changing rotation
+invalidates the reviewed export. This is static bind-frame evidence, not proof of
+engine attachment, animation or fragment physics semantics.
+
+The diagnostic workflow now accepts a selected `asset-validation.json` or an
+exported `optimization.json` (its candidate/after report). Sealed report hashes
+must be recorded by the selected artifact before the report is linked. Matching
+source inventories distinguish baseline inputs, candidate outputs, identical
+inventories or an unestablished relationship. An unrelated report stays explicitly
+unlinked. Importing the nested report does not certify the surrounding optimization
+receipt or recovery files. Hashes are content links, not publisher signatures.
+
+The collapsed diagnostic evidence panel carries bounded category statuses/counts
+and finding codes; private paths and free-text findings are omitted. Contradictory
+counts, category severities, report seals or runtime claims fail validation. Static
+failures never establish crash cause. Exact selected-file bytes participate in
+review identity; report changes invalidate export. Existing selected-log redaction
+and privacy review work alongside this evidence without mutating the request.
+
+Verification: **124 Python tests passed, 8 gated tests skipped; 35 React tests
+passed; TypeScript project checks passed.** Tests include analytic rotation
+composition, invalid rotations, before/after preservation, stale rotation export,
+actual fixture optimization export → candidate report selection → artifact link,
+malformed reports, truncation, redacted diagnostic export, stale selected-file
+review and React selection/clear invalidation. These are fixture/component checks,
+not new frozen/native or live-game acceptance. Earlier full-suite and frozen
+candidate results predate these changes. The complete three-goal objective remains
+unfinished; no engine-specific unknown has been promoted to a pass.
+
+## Current acceptance snapshot (resumed September 7)
+
+The user has resumed these three goals. The historical pause and scope-frozen
+handoff below no longer prevent remaining implementation. Earlier progression
+checkboxes describe their original checkpoints, not a current feature inventory.
+
+- Goal 1: bounded package/dependency, shared-rig, skinning, fragment-reference,
+  material, metadata and authored-LOD checks exist. Explicit pairwise bind-frame
+  placement now checks exact declared parent/child anchors; engine conventions,
+  fragment physics placement and independent runtime acceptance remain open.
+- Goal 2: the supported reversible color-texture workflow is statically complete.
+  This does not certify rendered appearance, residency or animation in game.
+- Goal 3: native/RPF/optimization producers and Launcher diagnostics already
+  connect. Managed Quick Import conversion and native Story controller candidates
+  now carry the shared artifact envelope, as do map/vehicle project packages.
+  Refreshed frozen offline acceptance now passes. Live-game acceptance remains
+  open; nonmanaged Legacy OIV exports explicitly omit ALLIN1 receipts and cannot
+  claim a traced managed installation. Not all goals are complete.
+
+### Resumed managed/runtime provenance
+
+Managed conversion captures the actual SDK/helper build and hashes the selected
+RPF, conversion plan, generated catalog, manifests and review evidence. Its ZIP
+publisher preserves that origin rather than relabeling a repack with the current
+SDK. Present invalid envelopes block publication. Older absent envelopes remain
+explicitly `not_recorded`; extra private folder notes are not silently published.
+React shows recorded/missing provenance in a collapsed, scrolling identity panel.
+
+Story candidates now bind the SDK/helper, controller-source inventory, configuration
+request, compiler selection, validation receipt and exact edition outputs. Each
+edition retains its own artifact; the combined ZIP is not one installable package.
+Final readback checks staged bytes and all edition/combined ZIP members, then
+rechecks source, SDK/helper and compiler identities before exclusive publication.
+Supported layouts include a Launcher manifest. The standalone settings editor is
+retained in the export but is not installed by that manifest. Custom layouts
+outside the existing destination policy remain manual candidates, with the reason
+recorded in `sdk-publication.json`; no Launcher allowlist was broadened.
+
+Verification: 141 focused backend regressions passed; 12 React ZIP publication
+tests and production React compilation passed. Two real React/Python runtime
+tests passed, including both actual MSVC-built edition binaries, native CTest,
+artifact/file hash comparisons and an intentionally missing dependency. The real
+compiler run preceded the final ZIP readback hardening, which has separate staged
+payload/ZIP tamper and source/SDK/toolchain drift regression coverage. Launcher
+contract tests accept the generated envelopes and reject changed install bytes.
+These are source/test-candidate results, not a frozen release or live-game proof.
+No game files were changed; unrelated ClipSet PSO work was preserved.
+
+### Resumed project packages and declared assembly
+
+Map and vehicle project builders now ship `sdk-inputs.json` with the full bounded
+source inventory and portable request. `sdk-artifact.json` binds the executing
+SDK/helper, complete output inventory and review reports. Changed source/helper/
+SDK inputs abort publication. Twenty-one focused project/provenance tests passed,
+including acceptance by the Launcher's existing envelope contract.
+
+Declared attachment pairs identify exact parent/child drawable hashes and named
+anchors (blank explicitly means model origin), plus translation in parent-anchor
+axes. The validator composes parent anchor × translation × inverse(child anchor),
+checks finite nonsingular well-conditioned frames and anchor agreement, and warns
+on orientation reversal. Shared rigs must be explicitly selected and compatible.
+Fragments/drawable-matrix precedence remain `not_checked`; no physics, animation,
+clipping, hierarchy-chain or engine attachment rule is guessed.
+
+React presents declaration/evidence in collapsible scrolling panels. Changed
+declarations invalidate exports and navigation until inspected or discarded.
+Validation-to-optimization handoff retains identical declarations, source hashes
+and shared context in both before/after reports and the exported receipt. The
+existing preservation guards still prohibit model/animation edits by this bounded
+color-texture workflow. Six evidence-shape tests and the real React/Python
+inspect/export and validation→optimization→export integrations passed. Related
+backend coverage passed (53 tests, two environment-gated skips); final broad and
+frozen verification is pending after the last reflected-frame/container checks.
+
+The prior full backend run found only a stale generated vehicle-catalog source
+fingerprint after the preceding catalog-name work. The existing generator updated
+the source version/checksum only; no model/hash pairs or catalog scope changed.
+That targeted regression now passes. This does not establish live-game acceptance.
+
+### September 7 verified handoff and next acceptance boundary
+
+Final unchanged implementation checks passed:
+
+- Full Python: **3,012 passed, 81 skipped**, 460.99 seconds. Skips are not passes.
+- Full default React: **443 passed, 15 skipped**. Two separately enabled real
+  runtime tests passed afterward, including both MSVC-built editions and CTest.
+- Native-enabled validation/material/fragment/texture/assembly/optimization and
+  native-build provenance regression: **89 passed**.
+- Native helper: **113 checks passed**; Rust desktop library: **19 passed**.
+- Fresh frozen service, existing archive/ped smoke checks, production React,
+  native shell build, embedded frontend probe and portable lifecycle: passed.
+- Fresh frozen validation → declared assembly → before/after optimization →
+  temporary Launcher install → changed-byte diagnostics/export → uninstall →
+  exact original recovery: passed. This uses test-owned files, not a GTA session.
+
+Diagnostic candidate: `build/tauri-candidates/6a90fbab49ed48dda34e347634de6b50`.
+Its source identity precedes this documentation-only entry. The diagnostic is
+deliberately **not release-qualified**, not installed/published, and includes the
+existing dirty source snapshot (including preserved unrelated ClipSet drafts).
+Do not represent its successful probes as installer/native-GUI/live-game proof.
+
+The next acceptance step requires the user's choice of a real reference asset
+and GTA edition. Use a reviewed baseline with known rig/attachment behavior,
+then a supported color-texture candidate and exact restoration. Compare the same
+poses/attachments/LOD views and correlate the resulting installation/session
+identities. A natural failure may supply crash evidence; no deliberate crash or
+inferred crash cause is required. No game installation or launch was authorized
+or performed for this resumed offline work. Engine-specific fragment/attachment
+precedence remains outside declared pairwise placement and must not be certified
+from the affine alignment result alone.
+
+### Read-only retail report qualification (September 7 continuation)
+
+Added the opt-in `--asset-report` path to `scripts/smoke_retail_animation_model.py`
+and a real React report-consumption test. The harness uses temporary extracted
+retail XML, selects exact hash-bound shared-rig owners through the same package
+validator, checks that the desktop transport preserves the report, and requires
+an actually executed/passed React assertion (a skipped/empty run is not a pass).
+No retail asset bytes become repository fixtures or distributable outputs.
+
+Executed against the locally installed stock MP-male `uppr_000_r.ydd` and
+`mp_m_freemode_01.yft` in **both Legacy and Enhanced**. Each has 128 selected rig
+bones; all three LODs passed supported bind/skinning checks. Measured geometry
+was 3,355/212/64 vertices and 5,720/284/60 triangles for High/Medium/Low. React
+displayed both actual reports without rejecting or truncating their evidence.
+
+The report correctly remains incomplete: absent attachment/texture declarations,
+partial mip chains, unbound slots and engine LOD activation are not certified.
+Selecting a known shared skeleton does not prove engine-intended assembly rules.
+Full `x64v.rpf` before/after hashes matched:
+
+- Legacy: `6df3454d01f632895d69998355c084bd3176e211df50954b770a5d22de89cb53`.
+- Enhanced: `edb14830c0f869b2b0d811748e4d9e7261fb7652d8d8959f0f56ac60aad9fa42`.
+
+Qualification helper/package/assembly regressions: **29 passed**. Production
+React compilation passed. These additions change qualification scripts/tests,
+not production validation behavior; the preceding frozen candidate and full
+suite results predate this added qualification coverage. No GTA launch, install,
+runtime acceptance, commit or push was performed. The real in-game reference
+package/edition choice is still pending; the overall goal is not complete.
+
+### Acceptance blocker audit
+
+The same reference-package/edition decision remained unanswered across the
+resumed implementation turn and two continuations. Offline source, frozen,
+native and real-retail report checks are finished for the recorded scope; none
+can establish the remaining engine-specific assembly behavior or live candidate
+acceptance. Work is blocked pending that user choice and direction to perform the
+corresponding game test. This preserves the full objective rather than declaring
+the existing static subset complete. No installation, launch or speculative
+engine-rule change is performed to bypass the missing decision.
+
 ## 1. One trustworthy asset-validation report
 
 - [x] Initial versioned, read-only model-XML report with stable report, source,

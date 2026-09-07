@@ -110,6 +110,9 @@ def _converter(root: Path, source: Path, scan: PackageScan):
     project = root / "sdk"
     game = root / "game"
     project.mkdir(exist_ok=True)
+    helper = project / "tools/RpfPatcher/RpfPatcher.exe"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_bytes(b"fixture-helper")
     game.mkdir(exist_ok=True)
     return ManagedVehiclePackageConverter(
         project, game, inspector=_Inspector(scan),
@@ -182,6 +185,7 @@ def test_dual_edition_conversion_selects_one_exact_branch_and_validates_schema_2
         "mod.toml",
         "payload/dlc.rpf",
         "payload/vehicles.json",
+        "sdk-artifact.json",
     )
     with zipfile.ZipFile(first.archive) as archive:
         assert tuple(item.filename for item in archive.infolist()) == first.members

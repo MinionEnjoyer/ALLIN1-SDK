@@ -19,6 +19,7 @@ from allin1_sdk.addon_importer import (
 from allin1_sdk.map_contract import MapProject, SUPPORTED_EDITIONS
 from allin1_sdk.map_project import MapProjectResolver
 from allin1_sdk.mods import ModManifest
+from allin1_sdk import artifact_identity, package_provenance
 from allin1_sdk.rpf_builder import RpfArchiveBuilder
 
 
@@ -98,6 +99,8 @@ class MapAddonPackageBuilder:
             raise ValueError(
                 f"Map project does not declare support for {selected_edition.title()}"
             )
+        source_inputs = package_provenance.snapshot(source)
+        build_identity = artifact_identity.current(resource_root=self.project_root)
 
         target = Path(destination).expanduser().resolve()
         if target.exists() or target.is_symlink():
@@ -192,6 +195,9 @@ class MapAddonPackageBuilder:
             # This validates schema parity, checksums, package ownership, the
             # content descriptor, and exact DLC registration destinations.
             ModManifest.load(manifest_path)
+            package_provenance.complete(stage, source, source_inputs, build_identity,
+                descriptor.to_dict(), edition=selected_edition.title(), reports=["map-package-report.json"],
+                resource_root=self.project_root)
             stage.rename(target)
         except Exception:
             shutil.rmtree(stage, ignore_errors=True)

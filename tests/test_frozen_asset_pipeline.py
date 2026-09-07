@@ -46,11 +46,19 @@ def test_frozen_validation_optimization_install_diagnostics_and_recovery(tmp_pat
 
     payload = {"module":"optimization", **optimization_request(tmp_path)}
     source = Path(payload["source"])
+    (source / "clip.ydr.xml").write_bytes((source / "car.ydr.xml").read_bytes())
+    (source / "clip.meta").write_text('<CVehicleModelInfo__InitDataList><InitDatas><Item><modelName>clip</modelName><txdName>paint</txdName></Item></InitDatas></CVehicleModelInfo__InitDataList>')
+    assemblies = [{"parent":"package:car.ydr.xml","parent_drawable":0,"parent_sha256":sha256(source / "car.ydr.xml"),"parent_bone":"tip",
+                   "child":"package:clip.ydr.xml","child_drawable":0,"child_sha256":sha256(source / "clip.ydr.xml"),"child_bone":"", "offset":[2,0,0]}]
+    payload["settings"]["assembly_bindings"] = assemblies
     (source / "mod.toml").write_text('schema_version = 1\nid = "frozen-pipeline"\nname = "Frozen pipeline"\nversion = "1.0.0"\ntype = "config"\neditions = ["legacy", "enhanced"]\n[[files]]\nsource = "assets/diffuse.dds"\ndestination = "scripts/fixture.dds"\n')
     original = (source / "assets/diffuse.dds").read_bytes()
-    validation = invoke("inspect_authoring_workspace", {"module":"data_tools","task":"asset_validation","source":str(source)})
+    validation = invoke("inspect_authoring_workspace", {"module":"data_tools","task":"asset_validation","source":str(source),"settings":{"assembly_bindings":assemblies}})
     assert validation["document"]["runtime_status"] == "not_tested"
+    assert validation["document"]["assembly_evidence"][0]["status"] == "checked"
     session = invoke("inspect_authoring_workspace", payload)
+    assert session["before_report"]["assembly_evidence"] == session["after_report"]["assembly_evidence"]
+    assert session["validation_context"]["assembly_pair_count"] == 1
     build = session["artifact_manifest"]["build"]
     assert build["mode"] == "frozen_verified_resources"
     assert build["executable_sha256"] == binary_hash

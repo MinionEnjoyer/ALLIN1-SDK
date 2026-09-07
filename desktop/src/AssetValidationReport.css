@@ -3,6 +3,10 @@
 .asset-validation-body { max-height: 58vh; overflow: auto; padding: 0 16px 16px; overscroll-behavior: contain; }
 .asset-validation-body section { border-top: 1px solid var(--border); padding: 8px 0; }
 .asset-validation-body h4 { margin: 4px 0; }
+.assembly-binding-fields { display: grid; gap: 10px; min-width: 0; }
+.assembly-binding-fields label { display: grid; gap: 4px; min-width: 0; }
+.assembly-binding-fields input, .assembly-binding-fields select { width: 100%; min-width: 0; box-sizing: border-box; }
+.assembly-binding-fields section { overflow-wrap: anywhere; }
 .asset-validation-body li, .asset-validation-hash { overflow-wrap: anywhere; }
 .asset-validation-body table { width: 100%; text-align: left; }
 .asset-validation-body th, .asset-validation-body td { padding: 6px; }

@@ -56,6 +56,7 @@ class ExactEntryTests
         CheckCollisionQuantization();
         CheckRelRelationships();
         checks += AnimationSampleTests.Run();
+        checks += ClipSetPsoTests.Run();
         var probe = Path.Combine(Path.GetTempPath(), "allin1-open-header-" + Guid.NewGuid().ToString("N") + ".rpf");
         try
         {

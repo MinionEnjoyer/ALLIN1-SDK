@@ -5,7 +5,10 @@ import CodeWorkspace from "./CodeWorkspace";
 import AssetValidationReport, {type AssetReport} from "./AssetValidationReport";
 import OptimizationWorkspace,{type OptimizationContext} from "./OptimizationWorkspace";
 import SharedRigBindings,{type DrawableCandidate,type RigBinding} from "./SharedRigBindings";
+import AssemblyBindings,{type AssemblyBinding} from "./AssemblyBindings";
 import DiagnosticLogSelection,{type LogBundle,type LogSettings} from "./DiagnosticLogSelection";
+import DiagnosticAssetEvidence from "./DiagnosticAssetEvidence";
+import {consistentStaticReport} from "./assetReportConsistency";
 
 const TOOLS = {
   diagnostic_trail: {title:"Trace build to game", detail:"Compare an SDK artifact manifest, Launcher install receipt, selected installation, and optional runtime session. File mismatches are evidence; crash causes require more than version labels or timestamps."},
@@ -35,13 +38,15 @@ function DataReports({ client, onGuardChange,onOptimize }: { client: DesktopClie
   const [edition,setEdition] = useState(""), [game,setGame] = useState("");
   const [runtimeSession,setRuntimeSession]=useState("");
   const [crashEvent,setCrashEvent]=useState("");
+  const [assetReport,setAssetReport]=useState("");
   const [session, setSession] = useState<WorkspaceResult | null>(null);
   const [rigChoices,setRigChoices]=useState<DrawableCandidate[]>([]),[rigBindings,setRigBindings]=useState<RigBinding[]>([]);
   const [rigDirty,setRigDirty]=useState(false);
+  const [assemblies,setAssemblies]=useState<AssemblyBinding[]>([]),[assemblyDirty,setAssemblyDirty]=useState(false);
   const [logSettings,setLogSettings]=useState<LogSettings>({logs:[],redact_terms:[]}),[logsReviewed,setLogsReviewed]=useState(false),[logsDirty,setLogsDirty]=useState(false);
-  const resetContext=()=>{setSession(null);setRigChoices([]);setRigBindings([]);setRigDirty(false);setLogsReviewed(false);};
-  const work = useAuthoringWorkspace(client, "data_tools", value=>{setSession(value);setRigDirty(false);setLogsDirty(false);setLogsReviewed(false);const document=value.document as {drawable_candidates?:DrawableCandidate[]}|undefined;setRigChoices(document?.drawable_candidates??[]);});
-  useEffect(() => { onGuardChange(work.locked||rigDirty||logsDirty); }, [work.locked,rigDirty,logsDirty,onGuardChange]);
+  const resetContext=()=>{setSession(null);setRigChoices([]);setRigBindings([]);setRigDirty(false);setAssemblies([]);setAssemblyDirty(false);setLogsReviewed(false);};
+  const work = useAuthoringWorkspace(client, "data_tools", value=>{if(task==="asset_validation"&&!consistentStaticReport(value.document))throw new Error("Invalid static validation evidence; inspect with a matching SDK.");setSession(value);setRigDirty(false);setAssemblyDirty(false);setLogsDirty(false);setLogsReviewed(false);const document=value.document as {drawable_candidates?:DrawableCandidate[]}|undefined;setRigChoices(document?.drawable_candidates??[]);});
+  useEffect(() => { onGuardChange(work.locked||rigDirty||logsDirty||assemblyDirty); }, [work.locked,rigDirty,logsDirty,assemblyDirty,onGuardChange]);
   const choose = async (kind: "metadata" | "package" | "package_folder" | "gta_folder" | "code_source" | "rpf", other = false) => {
     if (work.locked) return;
     try {
@@ -50,8 +55,8 @@ function DataReports({ client, onGuardChange,onOptimize }: { client: DesktopClie
     } catch (error) { work.setError(String(error)); }
   };
   const request = { task, source, ...(["meta_diff","asset_validation","diagnostic_trail"].includes(task) && comparison ? {comparison} : {}),
-    ...(task === "asset_validation" ? {edition:edition||undefined,gta_path:game||undefined,settings:{rig_bindings:rigBindings}} : {}),
-    ...(task === "diagnostic_trail" ? {gta_path:game||undefined,document:runtimeSession||undefined,crash_event:crashEvent||undefined,settings:{...logSettings,redact_terms:logSettings.redact_terms.filter(term=>term.length>0)}} : {}) };
+    ...(task === "asset_validation" ? {edition:edition||undefined,gta_path:game||undefined,settings:{rig_bindings:rigBindings,...(assemblies.length?{assembly_bindings:assemblies}:{})}} : {}),
+    ...(task === "diagnostic_trail" ? {gta_path:game||undefined,document:runtimeSession||undefined,crash_event:crashEvent||undefined,settings:{...logSettings,...(assetReport?{asset_report:assetReport}:{}),redact_terms:logSettings.redact_terms.filter(term=>term.length>0)}} : {}) };
   const exportReport = async () => {
     if (!session || work.locked) return;
     const parent = await work.choose("authoring_parent");
@@ -62,10 +67,10 @@ function DataReports({ client, onGuardChange,onOptimize }: { client: DesktopClie
   const report = session?.document as Record<string, unknown> | undefined;
   const rows = (report?.changes ?? report?.vehicles ?? report?.packs) as Record<string, unknown>[] | undefined;
   return <section className="workspace-section" aria-label="Data tools">
-    {task==="asset_validation"&&report&&<button disabled={work.locked||rigDirty} onClick={()=>onOptimize({source,comparison,edition,game,rigBindings})}>Optimize with this validation context</button>}
+    {task==="asset_validation"&&report&&<button disabled={work.locked||rigDirty||assemblyDirty} onClick={()=>onOptimize({source,comparison,edition,game,rigBindings,assemblyBindings:assemblies})}>Optimize with this validation context</button>}
     <div className="section-heading"><div><span className="eyebrow">Metadata and reports</span><h2>Data Tools</h2><p>Inspect your inputs, then export the reviewed report to a new folder.</p></div></div>
     <nav className="models-area-tabs" aria-label="Data tool">
-      {Object.entries(TOOLS).map(([key, value]) => <button key={key} className={task === key ? "selected" : ""} disabled={work.locked||rigDirty||logsDirty} aria-current={task === key ? "page" : undefined} onClick={() => { setTask(key as Tool); setSource(""); setComparison(""); resetContext(); }}><span>{value.title}</span></button>)}
+      {Object.entries(TOOLS).map(([key, value]) => <button key={key} className={task === key ? "selected" : ""} disabled={work.locked||rigDirty||logsDirty||assemblyDirty} aria-current={task === key ? "page" : undefined} onClick={() => { setTask(key as Tool); setSource(""); setComparison(""); resetContext(); }}><span>{value.title}</span></button>)}
     </nav>
     <p>{TOOLS[task].detail}</p>
     <div className="heading-actions">
@@ -95,10 +100,18 @@ function DataReports({ client, onGuardChange,onOptimize }: { client: DesktopClie
     </div>
     <dl><div><dt>Source</dt><dd>{source || "No source selected"}</dd></div>{["meta_diff","asset_validation","diagnostic_trail"].includes(task) && <div><dt>Comparison</dt><dd>{comparison || "No comparison selected"}</dd></div>}</dl>
     <AuthoringFeedback work={work} />
+    {task==="diagnostic_trail"&&<details className="asset-validation"><summary>Optional static-validation report</summary><div className="asset-validation-body">
+      <p>Select an exported asset-validation.json, or optimization.json to use its candidate (after) report. Only that report is linked, not the recovery files. Exact report hashes link evidence; a baseline report is not proof about the candidate, and static findings do not establish a crash cause.</p>
+      <button disabled={work.locked} onClick={async()=>{try{const value=await work.choose("code_source");if(value){setAssetReport(value);setSession(null);setLogsReviewed(false);}}catch(error){work.setError(String(error));}}}>Choose static asset report</button>
+      {assetReport&&<button disabled={work.locked} onClick={()=>{setAssetReport("");setSession(null);setLogsReviewed(false);}}>Clear static asset report</button>}
+      <p>{assetReport||"No static asset report selected"}</p>
+    </div></details>}
     {task==="diagnostic_trail"&&<DiagnosticLogSelection settings={logSettings} preview={report?.log_bundle as LogBundle|undefined} locked={work.locked} reviewed={logsReviewed} onReviewed={setLogsReviewed} choose={()=>work.choose("binary_source")}
       onChange={value=>{setLogSettings(value);setSession(null);setLogsReviewed(false);setLogsDirty(true);}}/>}
     {logsDirty&&<button disabled={work.locked} onClick={()=>{setLogSettings({logs:[],redact_terms:[]});setSession(null);setLogsDirty(false);setLogsReviewed(false);}}>Discard diagnostic log draft</button>}
     {task==="asset_validation"&&rigChoices.length>0&&<SharedRigBindings candidates={rigChoices} bindings={rigBindings} locked={work.locked} onChange={value=>{setRigBindings(value);setSession(null);setRigDirty(true);}}/>}
+    {task==="asset_validation"&&rigChoices.length>0&&<AssemblyBindings candidates={rigChoices} bindings={assemblies} locked={work.locked} onChange={value=>{setAssemblies(value);setSession(null);setAssemblyDirty(true);}}/>}
+    {assemblyDirty&&<button disabled={work.locked} onClick={()=>{setAssemblies([]);setAssemblyDirty(false);setSession(null);}}>Discard assembly draft</button>}
     {rigDirty&&<button disabled={work.locked} onClick={()=>{setRigBindings([]);setRigDirty(false);setSession(null);}}>Discard shared-rig draft</button>}
     {Boolean(work.lastResult?.destination) && <p role="status">Reports saved to {String(work.lastResult?.destination)}</p>}
     {report && <section aria-label="Data report"><h3>{TOOLS[task].title}</h3>
@@ -106,6 +119,7 @@ function DataReports({ client, onGuardChange,onOptimize }: { client: DesktopClie
       {task === "diagnostic_trail" && <details className="asset-validation" open><summary>Build-to-game evidence · cause not established</summary><div className="asset-validation-body">
         <p>Artifact {String(report.artifact_id)}<br/>Build {String(report.build_fingerprint)}<br/>Session {String(report.session_id??"not supplied")}</p>
         <p>Private installation paths are redacted in the exported derived report. No source files or logs are uploaded.</p>
+        {report.asset_validation!==undefined&&<DiagnosticAssetEvidence value={report.asset_validation}/>}
         {Boolean(report.crash_evidence)&&<details><summary>Correlated crash-event evidence</summary><pre>{JSON.stringify(report.crash_evidence,null,2)}</pre></details>}
         {Array.isArray(report.rpf_members)&&report.rpf_members.length>0&&<details><summary>Installed RPF member identities · {report.rpf_members.length}</summary><div className="data-report-scroll"><table><caption>Current installed RPF members</caption><thead><tr><th>Archive / member</th><th>Result</th><th>Extracted bytes</th></tr></thead><tbody>
           {(report.rpf_members as {archive:string;entry:string;status:string;actual_sha256:string|null;expected_sha256:string|null;reason?:string}[]).map((row,i)=><tr key={i}><th scope="row">{row.archive}<br/>{row.entry}</th><td>{row.status}{row.reason&&<p>{row.reason}</p>}</td><td>Actual {row.actual_sha256??"not verified"}<br/>Selected artifact {row.expected_sha256??"not included"}</td></tr>)}
