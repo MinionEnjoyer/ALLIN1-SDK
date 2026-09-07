@@ -5,11 +5,9 @@
     "missing": []
   },
   "vehicles": {
-    "included": 934,
+    "included": 935,
     "catalog_total": 935,
-    "missing": [
-      "tampa"
-    ]
+    "missing": []
   },
   "gear": {
     "included": 10,
