@@ -6871,5 +6871,43 @@ for _command in (
     sdk_compatibility_group.add_command(_command)
 
 
+def _calibration_request(raw: str, operation: str):
+    from allin1_sdk import weapon_calibration, weapon_desktop
+    from allin1_sdk.release_paths import strict_json
+    try:
+        if len(raw.encode("utf-8")) > 128 * 1024:
+            raise ValueError("Calibration request exceeds 128 KiB")
+        payload = strict_json(raw.encode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Calibration request must be an object")
+        if operation != "inspect" and payload.get("action") != "calibration_session" and not payload.get("calibration_evidence"):
+            raise ValueError("Use a calibration session or an evidence-bound edit")
+        handler = {"inspect": weapon_calibration.inspect, "review": weapon_desktop.review, "apply": weapon_desktop.apply}[operation]
+        click.echo(json.dumps(handler(payload), indent=2))
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@main.command("inspect-weapon-calibration")
+@click.option("--payload", required=True, help="JSON request: workspace, weapon, calibration_action list/compare/propose.")
+def inspect_weapon_calibration(payload: str):
+    """Inspect recorded sight tests or compute an unapplied visual proposal."""
+    _calibration_request(payload, "inspect")
+
+
+@main.command("review-weapon-calibration")
+@click.option("--payload", required=True, help="JSON request shared with the Weapon Workbench API.")
+def review_weapon_calibration(payload: str):
+    """Review immutable session recording or an evidence-bound weapon edit."""
+    _calibration_request(payload, "review")
+
+
+@main.command("apply-weapon-calibration")
+@click.option("--payload", required=True, help="Reviewed JSON including review_sha256 and authoring_confirmed=true.")
+def apply_weapon_calibration(payload: str):
+    """Apply a digest-confirmed calibration action to a copied workspace only."""
+    _calibration_request(payload, "apply")
+
+
 if __name__ == "__main__":
     main()

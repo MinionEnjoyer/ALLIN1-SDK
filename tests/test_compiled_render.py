@@ -43,6 +43,20 @@ def _fake_blender(path: Path) -> Path:
     return path
 
 
+def test_interchange_keeps_distinct_numeric_tints_for_shared_shader_and_texture(tmp_path):
+    from dataclasses import replace
+    from allin1_sdk.native_assets import NativeModelParameter
+    original = _scene().geometries[0]
+    geometries = tuple(replace(original, shader_parameters=(NativeModelParameter(
+        'matDiffuseColor', 'Vector', ((2., layer, layer, 0.),)),)) for layer in (2.,4.))
+    scene = replace(_scene(), geometries=geometries)
+    exported = export_render_interchange(scene, tmp_path)
+    manifest = json.loads(exported.manifest_path.read_text())
+    assert len(manifest['materials']) == 2
+    assert [m['shader_parameters'][0]['values'] for m in manifest['materials']] == [
+        [[2.,2.,2.,0.]], [[2.,4.,4.,0.]]]
+
+
 class FakeBlenderRunner:
     def __init__(self, *, fail_render: bool = False) -> None:
         self.commands: list[tuple[list[str], Path, float]] = []

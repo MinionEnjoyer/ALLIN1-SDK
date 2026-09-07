@@ -26,6 +26,7 @@ Current manuals describe implemented behavior and explicit limits. Reference con
 - [RPF member-package v4 contract](rpf-member-package-v4.md)
 - [Tkinter/React feature-parity ledger](tauri-feature-parity.md)
 - [Weapon fire-rate authoring](weapon-fire-rate-authoring.md)
+- [Weapon Calibration & Testing](weapon-calibration.md)
 - [Weapon scope authoring](weapon-scope-authoring.md)
 - [Weapon shop and animation authoring](weapon-shop-animation-authoring.md)
 

@@ -31,6 +31,7 @@
     "docs/tauri-validation.md": "historical",
     "docs/validation.md": "current",
     "docs/weapon-fire-rate-authoring.md": "reference",
+    "docs/weapon-calibration.md": "reference",
     "docs/weapon-optics-refinement.md": "historical",
     "docs/weapon-scope-authoring.md": "reference",
     "docs/weapon-shop-animation-authoring.md": "reference",

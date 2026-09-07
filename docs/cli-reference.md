@@ -18,6 +18,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk analyze-package-graph` | Resolve and persist typed vehicle relationships in a package graph. | graph, --output / -o |
 | `allin1-sdk apply-authoring-action` | Apply a typed authoring request using the desktop's shared validation. | --acknowledge-authoring, --request-file, --request-json |
 | `allin1-sdk apply-rpf-plan` | Apply a ready RPF plan through backup, staging, verification, and receipt. | plan, --gta-path, --workspace-root, --receipt-dir, --acknowledge-write |
+| `allin1-sdk apply-weapon-calibration` | Apply a digest-confirmed calibration action to a copied workspace only. | --payload |
 | `allin1-sdk assistant` | Prompt or inspect the optional local-first SDK assistant. |  |
 | `allin1-sdk assistant context` | Show the exact evidence and typed operations supplied to the model. | question, --repository-root, --workspace-root, --manifest, --gta-path, --operation-mode, --source, --symbol, --prioritize, --telemetry, --telemetry-pattern |
 | `allin1-sdk assistant prompt` | Ask the configured Qwen/compatible model a read-only question. | prompt, --root, --system-prompt, --repository-root, --workspace-root, --manifest, --gta-path, --operation-mode, --source, --symbol, --prioritize, --telemetry, --telemetry-pattern, --timeout, --startup-timeout, --max-tokens, --json-output, --no-progress |
@@ -108,6 +109,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk inspect-vehicle-tuning` | Inspect tuning parts, performance entries, assets, and validation findings. | workspace, model, --kit |
 | `allin1-sdk inspect-weapon-animation` | Inspect exact animation-set coverage retained for one weapon. | workspace, weapon, --source |
 | `allin1-sdk inspect-weapon-authoring` | Inspect a weapon workspace, relationships, and editable values. | workspace, --weapon, --component |
+| `allin1-sdk inspect-weapon-calibration` | Inspect recorded sight tests or compute an unapplied visual proposal. | --payload |
 | `allin1-sdk inspect-weapon-shop` | Inspect a weapon's exact existing storefront record and representations. | workspace, weapon, --source |
 | `allin1-sdk inspect-workbench` | Return the Workbench's linked vehicle, weapon, and ped evidence as JSON. | source, --category, --gta-path |
 | `allin1-sdk install-package` | Install a validated manifest, package folder, or bounded ZIP package. | manifest, --gta-path, --acknowledge-write |
@@ -176,6 +178,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk reparent-rpf-graph-node` | Reconnect a graph node to a validated archive or directory parent. | graph, node_id, parent_id, --acknowledge-edit |
 | `allin1-sdk replace-ytd-texture` | Replace one texture using DDS or a converted raster image. | workspace, texture_name, image, --acknowledge-edit |
 | `allin1-sdk review-authoring-action` | Review a typed authoring request using the desktop's shared validation. | --request-file, --request-json |
+| `allin1-sdk review-weapon-calibration` | Review immutable session recording or an evidence-bound weapon edit. | --payload |
 | `allin1-sdk rollback-rpf-transaction` | Roll back an applied receipt if the archive is still transaction-owned. | receipt, --gta-path, --workspace-root, --acknowledge-write |
 | `allin1-sdk run-rpf-program` | Execute a ready external-authoring graph with exact failure cleanup. | program, --report, --acknowledge-execution |
 | `allin1-sdk sdk` | Compatibility alias for commands previously hosted by the launcher. |  |

@@ -153,6 +153,8 @@ class _ModelGeometry:
     # Authored UV channels, indexed by TexCoord semantic (empty = absent).
     # Keep texcoords as the backwards-compatible UV0 view.
     texcoord_sets: tuple[tuple[tuple[float, float], ...], ...] = ()
+    # Preserve per-drawable numeric material inputs, including paint selectors.
+    shader_parameters: tuple[NativeModelParameter, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1177,6 +1179,7 @@ def _transform_model_geometry(
         texcoords=geometry.texcoords,
         texture_parameters=geometry.texture_parameters,
         texcoord_sets=geometry.texcoord_sets,
+        shader_parameters=geometry.shader_parameters,
     )
 
 
@@ -1504,6 +1507,7 @@ def _read_model_geometry(
         "texture_parameters": (
             material.texture_parameters if material is not None else ()
         ),
+        "shader_parameters": material.parameters if material is not None else (),
     }
     index_data = None if geometry is None else geometry.find("./IndexBuffer/Data")
     if index_data is None or not index_data.text:

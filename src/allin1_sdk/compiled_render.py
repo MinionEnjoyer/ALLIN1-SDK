@@ -582,7 +582,7 @@ def export_render_interchange(
         )
         source_key = (
             geometry.material_index, identity, semantic, tuple(geometry.texture_names),
-            parameters,
+            parameters, geometry.shader_parameters,
         )
         key = material_keys.get(source_key)
         if key is None:
@@ -608,6 +608,10 @@ def export_render_interchange(
                 "color": [channel / 255.0 for channel in color],
                 "texture_names": list(geometry.texture_names),
                 "texture_bindings": bindings,
+                "shader_parameters": [
+                    {"name": p.name, "type": p.source_type, "values": p.values}
+                    for p in geometry.shader_parameters
+                ],
                 **properties,
             })
         geometry_materials.append(key)

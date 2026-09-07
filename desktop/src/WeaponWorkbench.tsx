@@ -8,6 +8,7 @@ import type { CameraField } from "./WeaponCamera";
 import { WeaponAnimations } from "./WeaponAnimations";
 import type { AnimationDraft, AnimationRecord } from "./WeaponAnimations";
 import { WeaponNativePreview } from "./WeaponNativePreview";
+import WeaponCalibration from "./WeaponCalibration";
 import type { WeaponPreviewLinks } from "./WeaponNativePreview";
 import "./weapon-workbench.css";
 
@@ -39,6 +40,7 @@ interface Review {
   clone_plan?: WeaponClonePlan; removed_records?: CloneRecord[];
   component?: string; weapon?: string; attach_bone?: string; subject?: string; source?: string; template_weapon?: string;
   destination?: string; weapon_count?: number; affected_weapons?: string[];
+  calibration?: { profile: string; baseline_sha256: string; trial_sha256: string; status: string };
   changes?: { field: string; before: string; after: string; source?: string; set?: string }[];
 }
 const labels: Record<string, string> = {
@@ -74,6 +76,8 @@ export default function WeaponWorkbench({ client, onDirtyChange, initialSource =
 }) {
   const [snapshot, setSnapshot] = useState<WeaponSnapshot | null>(null);
   const [snapshotEpoch, setSnapshotEpoch] = useState(0);
+  const [tab, setTab] = useState("authoring");
+  const [calibrationPending, setCalibrationPending] = useState(false);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [cloneDraft, setCloneDraft] = useState<WeaponCloneDraft | null>(null);
   const [animationDraft, setAnimationDraft] = useState<AnimationDraft | null>(null);
@@ -94,7 +98,8 @@ export default function WeaponWorkbench({ client, onDirtyChange, initialSource =
   const editorKind = snapshot?.editor_kind ?? "weapon";
   const editableFields = (editorKind === "weapon" ? snapshot?.editable_fields : snapshot?.relationship_editable_fields) ?? [];
   const updates = Object.fromEntries(Object.entries(draft).filter(([key, value]) => value !== data?.values[key]));
-  const dirty = Object.keys(updates).length > 0 || cloneDraft !== null || animationDraft !== null;
+  const metadataDirty = Object.keys(updates).length > 0 || cloneDraft !== null || animationDraft !== null;
+  const dirty = metadataDirty || calibrationPending;
   const locked = busy || Boolean(review);
   useEffect(() => { onDirtyChange(dirty || locked); }, [dirty, locked, onDirtyChange]);
   useEffect(() => { if (review) reviewHeading.current?.focus(); }, [review]);
@@ -103,6 +108,7 @@ export default function WeaponWorkbench({ client, onDirtyChange, initialSource =
     if (value.kind !== "weapon_workbench" || !Array.isArray(value.project?.weapons)) {
       throw new Error("Unexpected weapon inspection response. Refresh the workbench and try again.");
     }
+    setCalibrationPending(false);
     setSnapshot(value); setSnapshotEpoch(epoch => epoch + 1); setDraft(editorData(value)?.values ?? {}); setShared(false); setReview(null); setConfirmed(false); setCloneDraft(null); setAnimationDraft(null);
     const nextInventory = value.editor_kind === "component" ? "components" : "weapons";
     if (nextInventory !== inventoryMode) setQuery("");
@@ -231,9 +237,14 @@ export default function WeaponWorkbench({ client, onDirtyChange, initialSource =
       {review.result.action === "undo" && review.result.changes?.some(change => change.field === "animation.mapping") && <p>Restore removes the added target mappings. The template mappings remain unchanged.</p>}
       {review.result.affected_weapons && <p>Affected weapons: {review.result.affected_weapons.join(", ")}</p>}
       <p>Python rechecks the reviewed source contents and relationships during the transactional save. No game installation or publication is performed.</p>
+      {review.result.calibration && <div><p>Empirical visual hypothesis for {review.result.calibration.profile}, not a ballistic correction or proven fix. Retest after installation; the opposite profile is not edited.</p><p>Baseline evidence: <code>{review.result.calibration.baseline_sha256}</code><br />Trial evidence: <code>{review.result.calibration.trial_sha256}</code></p></div>}
       <label className="weapon-checkbox"><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} disabled={busy || blockedPlan} />I confirm this change to the editable copy only.</label>
       <div className="heading-actions"><button className="quiet-button" onClick={() => { setReview(null); setConfirmed(false); }} disabled={busy}>Cancel review</button><button className="primary-button" onClick={() => void apply()} disabled={busy || !confirmed || blockedPlan}>Confirm {review.result.action === "create" ? "copy" : review.result.action === "clone" ? "clone" : review.result.action === "undo" ? "restore" : "save"}</button></div>
     </section>}
+    {snapshot && <div role="tablist" aria-label="Weapon workflow"><button role="tab" aria-selected={tab === "authoring"} disabled={locked || calibrationPending} onClick={() => setTab("authoring")}>Authoring</button><button role="tab" aria-selected={tab === "calibration"} disabled={locked || metadataDirty || editorKind !== "weapon"} onClick={() => setTab("calibration")}>Calibration &amp; Testing</button></div>}
+    {snapshot && <div hidden={tab !== "calibration"}><WeaponCalibration key={snapshotEpoch} client={client} snapshot={snapshot} disabled={locked || metadataDirty}
+      onPending={setCalibrationPending} onReview={payload => { setTab("authoring"); void run("review_weapon_authoring", payload); }} /></div>}
+    <div hidden={tab !== "authoring"}>
     {snapshot && <WeaponNativePreview client={client} snapshot={snapshot} epoch={snapshotEpoch} dirty={dirty} />}
     <div className="weapon-panes">
       <section className="weapon-pane" aria-label="Weapon inventory">
@@ -321,6 +332,7 @@ export default function WeaponWorkbench({ client, onDirtyChange, initialSource =
           </>}
         </div>
       </section>
+    </div>
     </div>
   </section>;
 }

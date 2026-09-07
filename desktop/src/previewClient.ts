@@ -1461,6 +1461,10 @@ export function createPreviewClient(mode: string, nativeDemo: string | null = nu
         onEvent({ ...envelope({ revision, message: "XML/JSON/Lua parsing and file editing require the desktop SDK service; this browser-only preview cannot validate or save source." }), operation: "error", job_id: jobId });
         return { job_id: jobId, accepted: { ...envelope({ revision }), job_id: jobId, terminal: false } };
       }
+      if ((operation === "inspect_weapon_workbench" && payload.calibration_action) || (operation === "review_weapon_authoring" && (payload.action === "calibration_session" || payload.calibration_evidence))) {
+        onEvent({ ...envelope({ revision, message: "Calibration sessions require the local SDK sidecar. This browser fixture cannot inspect installed builds, record observations or propose edits." }), operation: "error", job_id: jobId });
+        return { job_id: jobId, accepted: { ...envelope({ revision }), job_id: jobId, terminal: false } };
+      }
       const result = ((operation === "inspect_authoring_workspace" || operation === "review_workspace_action") && payload.module === "graph") ? graphWorkspacePreview(operation, payload)
         : operation === "inspect_ped_workbench" ? pedPreviewSnapshot(typeof payload.workspace === "string" ? payload.workspace : null, typeof payload.ped === "string" ? payload.ped : undefined)
         : operation === "review_ped_authoring" ? pedPreviewReview(payload)

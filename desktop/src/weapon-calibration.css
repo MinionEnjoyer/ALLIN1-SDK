@@ -1,0 +1,13 @@
+.weapon-calibration { padding: 1rem; min-width: 0; }
+.weapon-calibration fieldset { border: 0; padding: 0; min-width: 0; }
+.weapon-calibration details { border: 1px solid var(--border-color, #394342); border-radius: .5rem; margin: .75rem 0; padding: .75rem; }
+.weapon-calibration summary { cursor: pointer; font-weight: 600; }
+.calibration-scroll { max-height: 65vh; overflow: auto; padding: .75rem .25rem; }
+.calibration-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .75rem; margin: .75rem 0; }
+.weapon-calibration label { display: grid; gap: .3rem; margin: .5rem 0; }
+.weapon-calibration label.weapon-checkbox { display: flex; align-items: flex-start; }
+.weapon-calibration input:not([type=checkbox]), .weapon-calibration select, .weapon-calibration textarea { width: 100%; min-width: 0; box-sizing: border-box; }
+.weapon-calibration button { margin: .25rem; }
+.weapon-calibration code, .weapon-calibration pre { overflow-wrap: anywhere; white-space: pre-wrap; }
+.calibration-image { width: 100%; height: auto; display: block; background: #151a1c; cursor: crosshair; }
+.weapon-calibration [role=alert] { color: #ffb6a8; }

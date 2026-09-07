@@ -629,6 +629,8 @@ async fn select_path(kind: String) -> Result<Option<String>, String> {
             .add_filter("Compiled RPF plan", &["json"]).pick_file().await.map(|h| h.path().to_path_buf()),
         "rpf_receipt" => rfd::AsyncFileDialog::new().set_title("Open RPF transaction receipt")
             .add_filter("RPF receipt", &["json"]).pick_file().await.map(|h| h.path().to_path_buf()),
+        "calibration_screenshot" => rfd::AsyncFileDialog::new().set_title("Choose weapon test screenshot")
+            .add_filter("Screenshot", &["png", "jpg", "jpeg"]).pick_file().await.map(|h| h.path().to_path_buf()),
         "rpf_payload" => rfd::AsyncFileDialog::new().set_title("Choose replacement or added file")
             .pick_file().await.map(|h| h.path().to_path_buf()),
         "rpf_authorized_root" => rfd::AsyncFileDialog::new().set_title("Choose the folder directly containing the workspace archive")

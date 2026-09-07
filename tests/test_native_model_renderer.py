@@ -470,6 +470,34 @@ def test_native_model_decoder_preserves_exact_vector_and_array_parameters():
     )
 
 
+def test_numeric_tint_survives_geometry_decode_and_mirrored_wheel_placement():
+    root = etree.fromstring(b"""
+    <Drawable>
+      <ShaderGroup><Shaders><Item><Name>vehicle_tire</Name><Parameters>
+        <Item name="DiffuseSampler" type="Texture"><Name>tyrewallwhite</Name></Item>
+        <Item name="matDiffuseColor" type="Vector" x="2" y="2" z="2" w="0"/>
+      </Parameters></Item></Shaders></ShaderGroup>
+      <Models><Item><Geometries><Item><ShaderIndex value="0"/>
+        <VertexBuffer><Layout><Position/></Layout><Data>
+          0 0 0
+          1 0 0
+          0 1 0
+        </Data></VertexBuffer>
+        <IndexBuffer><Data>0 1 2</Data></IndexBuffer>
+      </Item></Geometries></Item></Models>
+    </Drawable>
+    """)
+    geometry = native_assets._read_model_geometry(root.find('.//VertexBuffer'))
+    assert geometry is not None
+    assert geometry.shader_parameters == (native_assets.NativeModelParameter(
+        'matDiffuseColor', 'Vector', ((2.,2.,2.,0.),)),)
+    mirrored = native_assets._transform_model_geometry(
+        geometry, ((-1.,0.,0.,0.),(0.,1.,0.,0.),(0.,0.,1.,0.),(0.,0.,0.,1.)),
+        'wheel_rf', reverse_winding=True)
+    assert mirrored.shader_parameters == geometry.shader_parameters
+    assert mirrored.triangles == ((0,2,1),)
+
+
 @pytest.mark.parametrize(
     ("parameter", "message"),
     [

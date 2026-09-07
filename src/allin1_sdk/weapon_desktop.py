@@ -50,6 +50,9 @@ def _tree_digest(source: Path) -> tuple[str, Any]:
 
 
 def inspect(payload: dict) -> dict[str, Any]:
+    if "calibration_action" in payload:
+        from allin1_sdk.weapon_calibration import inspect as inspect_calibration
+        return inspect_calibration(payload)
     workspace = WeaponAuthoringWorkspace(_path(payload, "workspace", writable=True)) if payload.get("workspace") else None
     source = workspace.source if workspace else _path(payload, "source")
     scan = AddonPackageInspector().inspect(source)
@@ -180,7 +183,18 @@ def _clone_spec(payload: dict) -> dict[str, Any]:
 
 def review(payload: dict) -> dict[str, Any]:
     action = payload.get("action")
-    if action == "create":
+    calibration = None
+    if payload.get("calibration_evidence") is not None:
+        from allin1_sdk.weapon_calibration import proposal
+        if action != "edit" or not isinstance(payload["calibration_evidence"], dict):
+            raise ValueError("Calibration evidence requires a weapon edit")
+        calibration = proposal({**payload["calibration_evidence"], "workspace": payload.get("workspace")})
+        if payload.get("weapon") != calibration["weapon"] or payload.get("updates") != calibration["updates"]:
+            raise ValueError("Edits do not match the bounded calibration proposal")
+    if action == "calibration_session":
+        from allin1_sdk.weapon_calibration import prepare
+        result = {"action": action, "session": prepare(payload), "changes": []}
+    elif action == "create":
         source = _path(payload, "source")
         parent = _path(payload, "parent", writable=True)
         name = payload.get("name")
@@ -250,13 +264,15 @@ def review(payload: dict) -> dict[str, Any]:
                                              if change.get("field") == "bundle.created_record"]
     else:
         raise ValueError("Unsupported weapon action; expected create, edit, edit_component, edit_attachment, edit_shop, clone_animation, clone, or undo")
-    if action in {"clone", "clone_animation", "edit_shop", "undo"}:
+    if action in {"clone", "clone_animation", "edit_shop", "undo", "calibration_session"}:
         # A confirmation must describe the complete bundle, not a silently
         # truncated subset of its records or dependencies.
         from allin1_sdk.desktop_protocol import _bounded
         if _bounded(result) != result:
             raise ValueError("Weapon evidence exceeds desktop review limits; narrow the selected package or operation before reviewing again")
     result.update({"kind": "weapon_authoring_review", "review_only": True, "game_write_performed": False})
+    if calibration is not None:
+        result["calibration"] = calibration
     result["review_sha256"] = _digest(result)
     return result
 
@@ -269,6 +285,9 @@ def apply(payload: dict) -> dict[str, Any]:
     if current["review_sha256"] != expected:
         raise ValueError("Weapon workspace, source, or edits changed after review; review again")
     action = current["action"]
+    if action == "calibration_session":
+        from allin1_sdk.weapon_calibration import save
+        return save(payload, current["session"])
     if action == "create":
         workspace = WeaponAuthoringWorkspace.create(current["source"], current["destination"])
         if _tree_digest(workspace.source)[0] != current["source_sha256"]:
