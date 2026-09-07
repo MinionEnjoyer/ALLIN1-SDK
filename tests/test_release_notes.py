@@ -29,7 +29,7 @@ def test_current_notes_are_concise_and_tag_bound():
     from allin1_sdk import __version__
     text = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
     rendered = render_notes(text, __version__, "sdk")
-    assert "/blob/v0.6.4/docs/sdk-guide.md" in rendered
+    assert f"/blob/v{__version__}/docs/sdk-guide.md" in rendered
     assert "What's new in 0.6.3" not in rendered
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert [line for line in readme.splitlines() if line.startswith("## What's new")] == [f"## What's new in {__version__}"]

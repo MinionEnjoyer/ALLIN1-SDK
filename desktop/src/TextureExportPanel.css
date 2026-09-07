@@ -1,4 +1,4 @@
-.texture-export-panel { margin: 12px 0; border: 1px solid var(--border); border-radius: 4px; padding: 10px; min-width: 0; font-size: .76rem; line-height: 1.5; }
+.texture-export-panel { margin: 12px 0; border: 1px solid var(--border); border-radius: 4px; padding: 10px; min-width: 0; font-size: var(--font-label); line-height: 1.5; }
 .texture-export-panel summary { cursor: pointer; font-weight: 600; }
 .texture-export-panel p { color: var(--muted); overflow-wrap: anywhere; }
 .texture-export-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }

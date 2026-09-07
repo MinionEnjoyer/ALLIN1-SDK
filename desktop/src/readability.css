@@ -1,0 +1,150 @@
+/* Launcher visual language, adapted to the SDK's multi-pane workspaces.
+   Keep viewport/canvas geometry and code-editor metrics owned by their tools. */
+:root {
+  font-family: "Segoe UI", sans-serif;
+  --text: #192e22;
+  --muted: #52685a;
+  --subtle: #52685a;
+  --canvas: #f1f4f2;
+  --surface: #fff;
+  --surface-raised: #eaf0e8;
+  --surface-muted: #eaf0e8;
+  --sidebar: #fff;
+  --border: #becdc1;
+  --border-strong: #9eafa2;
+  --accent-soft: #e1f1e7;
+  --brand-700: #1b6d4f;
+  --header: #111814;
+  --header-border: #314138;
+  --header-text: #e5ebe8;
+  --header-muted: #adbbb2;
+  --header-height: 74px;
+  --text-muted: var(--muted);
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --text: #e0e6e3;
+  --muted: #abbcb0;
+  --subtle: #abbcb0;
+  --canvas: #101512;
+  --surface: #171e1a;
+  --surface-raised: #1e2721;
+  --surface-muted: #1e2721;
+  --sidebar: #171e1a;
+  --border: #34443a;
+  --border-strong: #52685a;
+  --accent-soft: #1b3528;
+  --brand-700: #246f53;
+  --header: #111814;
+  --header-border: #314138;
+  color-scheme: dark;
+}
+body { font-size: var(--font-body); line-height: 1.5; }
+.app-shell small { font-size: var(--font-caption); line-height: 1.5; }
+.app-shell .row-type { width: auto; min-width: 32px; min-height: 24px; padding: 2px 4px; }
+.app-shell .vehicle-render-modes { grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); }
+.app-shell .vehicle-render-modes button { min-height: 36px; white-space: normal; padding: 6px; }
+:root[data-theme="dark"] :is(.output-state.ready, .action-notice, .input-action button, .vehicle-inspector-tabs button.active, .appearance-editor-tabs button.active, .workbench-category-bar button.active small) { color: #88d6ad; }
+.app-shell :is(button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid #41b77f;
+  outline-offset: 2px;
+}
+.app-shell :is(.quiet-button, .primary-button, .danger-button, .icon-button) {
+  min-height: 36px;
+  padding: 8px 12px;
+  border-radius: 5px;
+  font-size: var(--font-label);
+  line-height: 1.35;
+}
+.app-shell .icon-button { width: 36px; padding: 0; }
+.app-shell .icon-button svg { width: 19px; height: 19px; }
+.app-shell button:disabled { opacity: .55; }
+.app-shell .primary-button:hover:not(:disabled) { background: #21865d; border-color: #21865d; }
+.app-shell input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
+.app-shell select {
+  min-height: 38px;
+  height: auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 8px 10px;
+  border-radius: 5px;
+  font-size: var(--font-label);
+  line-height: 1.4;
+}
+.app-shell input:is([type="checkbox"], [type="radio"]) {
+  width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--brand-700);
+}
+.app-shell textarea { font-size: var(--font-label); line-height: 1.5; border-radius: 5px; }
+.app-shell .search-field { min-height: 40px; }
+.app-shell .search-field input { padding: 7px 2px; }
+.app-header { padding: 10px 22px; flex-wrap: wrap; gap: 8px 20px; }
+.brand-lockup strong { font-size: 19px; letter-spacing: .045em; }
+.brand-lockup small { font-size: var(--font-caption); line-height: 1.5; }
+.brand-mark { width: 66px; height: 49px; }
+.header-actions { flex-wrap: wrap; }
+.sidebar { width: 234px; padding: 14px 9px 10px; }
+.sidebar nav button { min-height: 41px; padding: 9px 10px; gap: 11px; border-radius: 5px; }
+.nav-copy strong { font-size: var(--font-label); white-space: normal; overflow-wrap: anywhere; }
+.nav-glyph, .nav-glyph svg { width: 19px; height: 19px; }
+.sidebar nav button.active { box-shadow: inset 3px 0 #319f69; }
+.sidebar-toggle { color: white; background: #24774f; border-color: #24774f; font-size: 20px; }
+.sidebar-toggle:hover { color: white; background: #1b633f; border-color: #1b633f; }
+.workspace-section { padding: 24px clamp(20px, 2.5vw, 36px) 32px; }
+.workspace-host { scrollbar-gutter: stable; }
+.workspace-heading { margin-bottom: 20px; flex-wrap: wrap; }
+.workspace-heading > :first-child { min-width: 0; }
+.workspace-heading h2 { font-size: 26px; }
+.workspace-heading p { font-size: var(--font-label); line-height: 1.55; margin-top: 8px; }
+.heading-actions { gap: 8px; }
+.source-strip, .summary-row { padding: 10px 12px; margin-bottom: 12px; flex-wrap: wrap; gap: 10px; }
+.source-path { min-width: 120px; }
+.pane-header { min-height: 64px; padding: 12px 14px; gap: 12px; flex-wrap: wrap; }
+.pane-header h3 { font-size: 18px; }
+.pane-tabs button { min-height: 38px; padding: 8px; font-size: var(--font-label); }
+.data-row, .finding-row { min-height: 54px; padding: 10px 12px; gap: 10px; }
+.data-row strong, .finding-row strong { font-size: var(--font-label); }
+.app-shell :is(.vehicle-inspector-tabs, .model-material-detail-tabs) { height: auto; }
+.app-shell :is(.vehicle-inspector-tabs, .model-material-detail-tabs) button { min-height: 38px; white-space: normal; overflow-wrap: anywhere; }
+.app-shell :is(.vehicle-authoring-editor, .model-edit-form) label { padding-block: 8px; gap: 8px 14px; }
+.app-shell .sdk-slider-controls { flex-wrap: wrap; gap: 10px; }
+.app-shell .sdk-slider-reset { min-width: 36px; min-height: 36px; }
+.app-shell .weapon-pane > header { height: auto; min-height: 76px; }
+.app-shell .weapon-pane-body { gap: 18px; padding: 18px; }
+.app-shell .weapon-workbench > [role="tablist"] { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.app-shell .weapon-workbench > [role="tablist"] button,
+.app-shell .weapon-calibration button { min-height: 36px; padding: 8px 12px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; font-size: var(--font-label); font-weight: 600; }
+.app-shell .weapon-workbench > [role="tablist"] button[aria-selected="true"] { background: var(--accent-soft); border-color: var(--brand-600); box-shadow: inset 0 -2px var(--brand-600); }
+.app-shell .weapon-calibration [role="alert"] { color: var(--red-500); }
+:root[data-theme="dark"] .weapon-calibration [role="alert"] { color: #efa6a1; }
+.confirmation-dialog { border-radius: 8px; box-shadow: 0 24px 80px #0007; }
+.confirmation-heading { padding: 24px 24px 16px; }
+.confirmation-heading h2 { font-size: 18px; }
+.confirmation-heading p { font-size: var(--font-label); line-height: 1.55; }
+.confirmation-details div { padding: 12px 24px; }
+.confirmation-actions { position: sticky; bottom: 0; flex-wrap: wrap; gap: 8px; padding: 16px 24px; background: var(--surface); border-top: 1px solid var(--border); }
+.confirmation-warning { font-size: var(--font-label); line-height: 1.5; }
+/* Reflow before a sidebar plus two fixed-minimum panes can overflow. */
+@media (min-width: 721px) and (max-width: 1200px) {
+  .sidebar { width: 214px; }
+  .workbench-category-bar { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .workspace-section { padding: 20px 24px 28px; }
+  .app-shell :is(.asset-grid, .rpf-grid, .receipts-grid, .quick-import-grid, .vehicle-project-grid, .model-material-grid, .texture-grid, .recipe-grid, .linker-grid) {
+    height: auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-template-areas: none;
+  }
+  .app-shell :is(.asset-grid, .rpf-grid, .receipts-grid, .quick-import-grid, .vehicle-project-grid, .model-material-grid, .texture-grid, .recipe-grid, .linker-grid) > .pane {
+    grid-area: auto; min-height: 320px; max-height: 70vh; overflow: auto;
+  }
+  .app-shell .weapon-panes { grid-template-columns: minmax(0, 1fr); }
+  .app-shell .weapon-pane + .weapon-pane { border-left: 0; border-top: 1px solid var(--border); }
+  .app-shell .weapon-pane-body { min-height: 160px; }
+  .model-material-source { grid-template-columns: minmax(0, 1fr) auto; }
+  .model-material-source > .primary-button:last-child { grid-column: auto; }
+  .lifecycle-review-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 720px) {
+  :root { --header-height: auto; }
+  .app-header { min-height: 74px; padding: 10px 12px; }
+  .workspace-section { padding: 20px 12px 24px 34px; }
+  .confirmation-actions { padding: 12px; }
+  .app-shell .vehicle-authoring-editor label { grid-template-columns: minmax(0, 1fr); }
+}

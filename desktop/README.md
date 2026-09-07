@@ -1,11 +1,11 @@
 # ALLIN1 Tauri desktop
 
-> 0.6.4 unsigned manual-download release. For scope and known validation limits,
-> see the [release guide](../docs/release-0.6.4.md) and
+> 0.6.5 unsigned manual-download release. For scope and known validation limits,
+> see the [release guide](../docs/release-0.6.5.md) and
 > [validation procedure](../docs/validation.md). Existing local installers may
 > predate current source; a checksum alone is not release approval.
 
-0.6.4 uses unsigned manual downloads. The workflow uploads
+0.6.5 uses unsigned manual downloads. The workflow uploads
 candidate installers, complete portable packages, checksums and evidence; it
 does not publish a release. See [release preparation](../RELEASE_SIGNING.md).
 

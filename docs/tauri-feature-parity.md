@@ -14,7 +14,7 @@ The full 0.6.4 release requires complete React/Tauri v2 replacement and verified
 Tkinter/Tcl/Tk removal in both products; a mixed-interface release is not the
 milestone. Code parity and release qualification remain separate: a migrated
 workflow can match Tkinter while packaged lifecycle or live acceptance is pending.
-See the [mandatory release milestone](release-0.6.4.md#mandatory-064-full-release-milestone).
+See the [mandatory release milestone](release-0.6.5.md#validation-scope).
 
 ## 0.6.4 RC parity gate
 

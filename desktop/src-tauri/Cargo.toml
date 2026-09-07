@@ -1,6 +1,6 @@
 [package]
 name = "allin1-sdk-desktop"
-version = "0.6.4"
+version = "0.6.5"
 description = "Tauri shell for the ALLIN1 SDK"
 authors = ["MinionEnjoyer"]
 edition = "2021"

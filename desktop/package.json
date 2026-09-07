@@ -1,7 +1,7 @@
 {
   "name": "allin1-sdk-desktop",
   "private": true,
-  "version": "0.6.4",
+  "version": "0.6.5",
   "type": "module",
   "packageManager": "pnpm@11.19.0",
   "scripts": {

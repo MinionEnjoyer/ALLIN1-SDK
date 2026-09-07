@@ -1,12 +1,12 @@
 .archive-browser { display: grid; gap: 12px; min-width: 0; }
-.archive-browser { font-size: .79rem; line-height: 1.5; }
+.archive-browser { font-size: var(--font-label); line-height: 1.5; }
 .archive-browser :is(input:not([type=checkbox]), select) { min-height: 33px; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--text); background: var(--surface); }
 .browser-context { padding: 10px 12px; border: 1px solid var(--border); background: var(--surface); }
 .browser-context span + span { border-left: 1px solid var(--border); padding-left: 10px; }
-.browser-table-wrap th { position: sticky; top: 0; background: var(--surface); font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.browser-table-wrap th { position: sticky; top: 0; background: var(--surface); font-size: var(--font-caption); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .browser-table-wrap td:first-child { width: 30px; }
 .browser-table-wrap td button { border: 0; background: transparent; padding: 2px; min-height: 26px; }
-.browser-places h3 { margin: 14px 0 4px; font-size: .75rem; }
+.browser-places h3 { margin: 14px 0 4px; font-size: var(--font-label); }
 .browser-context, .browser-address, .browser-search, .browser-pagination { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .browser-context span { overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .browser-address input, .browser-search input { flex: 1; min-width: 200px; }

@@ -1,4 +1,4 @@
-.offline-workbench { display:flex; flex-direction:column; gap:12px; min-width:0; font-size:.79rem; line-height:1.5; }
+.offline-workbench { display:flex; flex-direction:column; gap:12px; min-width:0; font-size:var(--font-label); line-height:1.5; }
 .offline-toolbar { display:flex; justify-content:space-between; gap:20px; align-items:start; }
 .offline-toolbar h3 { margin:0 0 6px; }
 .offline-toolbar p { margin:0; color:var(--muted); }
@@ -11,7 +11,7 @@
 .offline-pane-body > .source-path, .offline-pane-body fieldset > .source-path { text-align:left; white-space:normal; overflow-wrap:anywhere; }
 .offline-pane-body label { display:flex; flex-direction:column; gap:6px; margin-bottom:12px; }
 .offline-pane-body :is(input,textarea,select) { width:100%; min-width:0; }
-.offline-pane-body :is(input:not([type=checkbox]),textarea,select) { min-height:33px; padding:6px 8px; border:1px solid var(--border-strong); border-radius:3px; color:var(--text); background:var(--surface); font-size:.76rem; }
+.offline-pane-body :is(input:not([type=checkbox]),textarea,select) { min-height:33px; padding:6px 8px; border:1px solid var(--border-strong); border-radius:3px; color:var(--text); background:var(--surface); font-size:var(--font-label); }
 .offline-pane-body textarea { min-height:80px; font-family:var(--font-mono, monospace); }
 .offline-pane-body fieldset { border:0; padding:0; margin:0 0 20px; min-width:0; }
 .offline-pane-body button { margin-bottom:8px; }

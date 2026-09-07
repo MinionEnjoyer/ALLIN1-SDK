@@ -16,5 +16,5 @@
 .animation-model { margin: 14px 0; padding: 12px; border: 1px solid var(--border); border-radius: 5px; min-width: 0; }
 .animation-model canvas { display: block; width: 100%; height: auto; max-height: 540px; object-fit: contain; background: #131d23; }
 .animation-model canvas[hidden] { display: none; }
-.animation-model-source { overflow-wrap: anywhere; font-size: .75rem; }
+.animation-model-source { overflow-wrap: anywhere; font-size: var(--font-label); }
 .animation-model-body { max-height: min(680px, max(280px, calc(100dvh - 240px))); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 0 8px 0 0; }

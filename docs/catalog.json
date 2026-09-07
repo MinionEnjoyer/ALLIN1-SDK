@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "product": "sdk",
-  "release": "0.6.4",
+  "release": "0.6.5",
   "documents": {
     "CODE_SIGNING_POLICY.md": "reference",
     "README.md": "current",
@@ -32,6 +32,8 @@
     "docs/validation.md": "current",
     "docs/weapon-fire-rate-authoring.md": "reference",
     "docs/weapon-calibration.md": "reference",
+    "docs/ui-readability.md": "current",
+    "docs/release-0.6.5.md": "current",
     "docs/weapon-optics-refinement.md": "historical",
     "docs/weapon-scope-authoring.md": "reference",
     "docs/weapon-shop-animation-authoring.md": "reference",
@@ -42,6 +44,9 @@
     "runtime/VehicleWorkbenchAxles/README.md": "reference",
     "runtime/VehicleWorkbenchAxles/SUPPORTED_BUILDS.md": "reference",
     "runtime/VehicleWorkbenchAxles/profiles/README.md": "reference",
-    "sdk/examples/colored_smokes/sources/enhanced-smoke-rpf-port.md": "reference"
+    "sdk/examples/colored_smokes/sources/enhanced-smoke-rpf-port.md": "reference",
+    "docs/react-openiv-parity-roadmap.md": "reference",
+    "docs/sdk-three-goals.md": "reference",
+    "docs/vehicle-hitches.md": "reference"
   }
 }

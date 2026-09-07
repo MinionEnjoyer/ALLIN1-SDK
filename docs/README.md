@@ -1,6 +1,6 @@
 # ALLIN1 SDK documentation
 
-**0.6.4 — unsigned prerelease, not release-qualified.** Start with the [release guide](release-0.6.4.md) and [SDK manual](sdk-guide.md).
+**0.6.5 — unsigned prerelease, not release-qualified.** Start with the [release guide](release-0.6.5.md) and [SDK manual](sdk-guide.md).
 
 Current manuals describe implemented behavior and explicit limits. Reference contracts and architecture proposals do not prove native/live acceptance. Historical evidence applies only to its named source/session. Independent mods retain separate release ownership.
 
@@ -9,7 +9,7 @@ Current manuals describe implemented behavior and explicit limits. Reference con
 - [Product overview and quick start](../README.md)
 - [Release notes](../RELEASE_NOTES.md)
 - [React/Tauri desktop setup and packaging](../desktop/README.md)
-- [0.6.4 release guide and known limits](release-0.6.4.md)
+- [0.6.5 release guide and known limits](release-0.6.5.md)
 - [SDK manual](sdk-guide.md)
 - [Validation and acceptance](validation.md)
 
@@ -40,7 +40,7 @@ Current manuals describe implemented behavior and explicit limits. Reference con
 ## Historical evidence — not current instructions
 
 - [Earlier release notes](archive/release-notes-before-0.6.4.md)
-- [SDK guide before 0.6.4](archive/sdk-guide-before-0.6.4.md)
+- [SDK guide before 0.6.5](archive/sdk-guide-before-0.6.4.md)
 - [September 4 release-hardening checkpoint](release-hardening-2026-09-04.md)
 - [Tauri validation history](tauri-validation.md)
 - [Vector optics refinement checkpoint](weapon-optics-refinement.md)

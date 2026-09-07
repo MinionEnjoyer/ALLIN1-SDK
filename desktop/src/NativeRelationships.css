@@ -1,4 +1,4 @@
-.native-relationships { border: 1px solid var(--border); padding: 12px; margin: 12px 0; font-size: .78rem; }
+.native-relationships { border: 1px solid var(--border); padding: 12px; margin: 12px 0; font-size: var(--font-label); }
 .native-relationships > summary { cursor: pointer; font-weight: 600; }
 .relationship-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
 .relationship-layout { display: grid; grid-template-columns: minmax(160px, .7fr) minmax(220px, 1.5fr) minmax(180px, 1fr); gap: 10px; }
