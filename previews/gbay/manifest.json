@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "version": "gbay-previews-2026-09-07",
+  "categories": {
+    "weapons": {
+      "url": "https://github.com/MinionEnjoyer/ALLIN1-SDK/releases/download/gbay-previews-2026-09-07/gbay-weapons.zip",
+      "sha256": "5e2a036486a8839fdf7d26afaa9bc00b0bc1164a40d4ab86abaa373d86d3c36c",
+      "bytes": 16288588,
+      "count": 111
+    },
+    "vehicles": {
+      "url": "https://github.com/MinionEnjoyer/ALLIN1-SDK/releases/download/gbay-previews-2026-09-07/gbay-vehicles.zip",
+      "sha256": "8bd26e3545097dfa971112b2726e3fdb327cb8a769db9c136de1ad8ad2c8146f",
+      "bytes": 192589816,
+      "count": 934
+    },
+    "gear": {
+      "url": "https://github.com/MinionEnjoyer/ALLIN1-SDK/releases/download/gbay-previews-2026-09-07/gbay-gear.zip",
+      "sha256": "8646efd858251c0fa0f2e185638c91a7ca43e8a3bd54497a929f3edb9d0e5915",
+      "bytes": 1442920,
+      "count": 10
+    }
+  }
+}
