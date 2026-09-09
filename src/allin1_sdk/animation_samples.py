@@ -12,7 +12,9 @@ from allin1_sdk.release_paths import strict_json
 MAX_XML = 16 * 1024**2
 
 
-def analyze(data: bytes, selection=None):
+def analyze(data: bytes, selection=None, *, inventory_only=False):
+    if not isinstance(inventory_only, bool) or (inventory_only and selection is not None):
+        raise ValueError("Inventory mode must be a boolean and cannot select a clip")
     if not 0 < len(data) <= MAX_XML:
         raise ValueError("Animation XML exceeds the 16 MiB limit")
     if selection is not None and (not isinstance(selection, str) or not re.fullmatch(r"(?:animation|clip):[0-9A-F]{8}", selection)):
@@ -24,7 +26,9 @@ def analyze(data: bytes, selection=None):
         xml = Path(temporary) / "source.ycd.xml"
         xml.write_bytes(data)
         command = [str(helper), "animation-samples", str(xml)]
-        if selection is not None:
+        if inventory_only:
+            command.append("--inventory")
+        elif selection is not None:
             command.append(selection)
         try:
             result = run_hidden(command, capture_output=True, text=True, timeout=30)

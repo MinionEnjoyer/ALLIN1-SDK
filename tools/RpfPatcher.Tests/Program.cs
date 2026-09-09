@@ -52,6 +52,7 @@ class ExactEntryTests
 
     static void Main()
     {
+        checks += ArchiveKeyContextTests.Run();
         CheckTextureMipRoundTrips();
         CheckCollisionQuantization();
         CheckRelRelationships();

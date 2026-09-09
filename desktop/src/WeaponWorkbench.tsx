@@ -9,6 +9,7 @@ import { WeaponAnimations } from "./WeaponAnimations";
 import type { AnimationDraft, AnimationRecord } from "./WeaponAnimations";
 import { WeaponNativePreview } from "./WeaponNativePreview";
 import WeaponCalibration from "./WeaponCalibration";
+import WeaponSightBench from "./WeaponSightBench";
 import type { WeaponPreviewLinks } from "./WeaponNativePreview";
 import "./weapon-workbench.css";
 
@@ -34,6 +35,7 @@ export interface WeaponSnapshot {
   };
   values: { weapon: string; values: Record<string, string>; sources: Record<string, string>; affected_weapons: string[] } | null;
   assets: { path: string; size: number }[];
+  animation_assets?: string[];
 }
 interface Review {
   kind: "weapon_authoring_review"; action: "create" | "edit" | "edit_component" | "edit_attachment" | "edit_shop" | "clone_animation" | "clone" | "undo"; review_sha256: string;
@@ -241,7 +243,9 @@ export default function WeaponWorkbench({ client, onDirtyChange, initialSource =
       <label className="weapon-checkbox"><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} disabled={busy || blockedPlan} />I confirm this change to the editable copy only.</label>
       <div className="heading-actions"><button className="quiet-button" onClick={() => { setReview(null); setConfirmed(false); }} disabled={busy}>Cancel review</button><button className="primary-button" onClick={() => void apply()} disabled={busy || !confirmed || blockedPlan}>Confirm {review.result.action === "create" ? "copy" : review.result.action === "clone" ? "clone" : review.result.action === "undo" ? "restore" : "save"}</button></div>
     </section>}
-    {snapshot && <div role="tablist" aria-label="Weapon workflow"><button role="tab" aria-selected={tab === "authoring"} disabled={locked || calibrationPending} onClick={() => setTab("authoring")}>Authoring</button><button role="tab" aria-selected={tab === "calibration"} disabled={locked || metadataDirty || editorKind !== "weapon"} onClick={() => setTab("calibration")}>Calibration &amp; Testing</button></div>}
+    {snapshot && <div role="tablist" aria-label="Weapon workflow"><button role="tab" aria-selected={tab === "authoring"} disabled={locked || calibrationPending} onClick={() => setTab("authoring")}>Authoring</button><button role="tab" aria-selected={tab === "calibration"} disabled={locked || metadataDirty || editorKind !== "weapon"} onClick={() => setTab("calibration")}>Calibration &amp; Testing</button><button role="tab" aria-selected={tab === "sights"} disabled={locked || calibrationPending || editorKind !== "weapon" || !!cloneDraft} onClick={() => setTab("sights")}>Offline sights</button></div>}
+    {snapshot && <div hidden={tab !== "sights"}><WeaponSightBench key={snapshotEpoch} client={client} snapshot={snapshot} draft={draft} locked={locked}
+      onChange={changes => setDraft(previous => ({ ...previous, ...changes }))} onReview={() => { setTab("authoring"); void reviewChanges(); }} /></div>}
     {snapshot && <div hidden={tab !== "calibration"}><WeaponCalibration key={snapshotEpoch} client={client} snapshot={snapshot} disabled={locked || metadataDirty}
       onPending={setCalibrationPending} onReview={payload => { setTab("authoring"); void run("review_weapon_authoring", payload); }} /></div>}
     <div hidden={tab !== "authoring"}>

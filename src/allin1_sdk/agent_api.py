@@ -42,6 +42,7 @@ GAME_WRITE_COMMANDS = frozenset({
     "uninstall-package",
 })
 AUTHORING_COMMANDS = frozenset({
+    "build-edition-bundle",
     "apply-authoring-action",
     "inspect-authoring-workspace",
     "add-vehicle-tuning-entry",
@@ -209,6 +210,7 @@ READ_ONLY_COMMANDS = frozenset({
     "inspect-vehicle-tuning",
     "inspect-weapon-authoring",
     "inspect-weapon-calibration",
+    "inspect-weapon-sights",
     "review-weapon-calibration",
     "inspect-weapon-animation",
     "inspect-weapon-shop",

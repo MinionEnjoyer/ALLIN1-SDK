@@ -1699,10 +1699,13 @@ def list_installed_packages(gta_path: Path | None) -> None:
 @click.argument(
     "manifest", type=click.Path(exists=True, path_type=Path),
 )
-def validate_package(manifest: Path) -> None:
+@click.option("--edition", type=click.Choice(["legacy", "enhanced"]))
+def validate_package(manifest: Path, edition: str | None = None) -> None:
     """Validate a mod.toml, package folder, or bounded ZIP package."""
     try:
         with open_mod_package(manifest) as package:
+            if edition:
+                package = package.for_edition(edition)
             payload = {
                 "valid": True, "manifest": str(package.manifest_path),
                 "schema_version": package.schema_version,
@@ -1711,6 +1714,8 @@ def validate_package(manifest: Path) -> None:
                 "dependencies": list(package.dependencies), "files": len(package.files),
                 "rpf_entries": len(package.rpf_entries),
                 "allin1_extension": package.extension is not None,
+                "variants": [dict(edition=child.editions[0], files=len(child.files),
+                                  rpf_entries=len(child.rpf_entries)) for child in package.variants],
             }
     except (OSError, TypeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -2016,6 +2021,25 @@ def audit_folder(folder: Path, output: Path, draft_dir: Path | None) -> None:
     destination.write_text("\n".join(line for line in lines if line != "") + "\n", encoding="utf-8")
     destination.with_suffix(".json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
     click.echo(f"Audited {len(rows)} package(s): {destination}")
+
+
+@main.command("build-edition-bundle")
+@click.option("--legacy", required=True, help="Legacy OIV/managed package, or OIV member path with --source-zip.")
+@click.option("--enhanced", required=True, help="Enhanced OIV/managed package, or OIV member path with --source-zip.")
+@click.option("--source-zip", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--id", "mod_id", required=True)
+@click.option("--name", required=True)
+@click.option("--version", required=True)
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def build_edition_bundle_command(legacy, enhanced, source_zip, mod_id, name, version, output):
+    """Build one edition-aware launcher ZIP; never execute OIVs or write to GTA."""
+    from allin1_sdk.edition_bundle import build_edition_bundle
+    try:
+        result = build_edition_bundle(output, legacy=legacy, enhanced=enhanced,
+                                      source_zip=source_zip, mod_id=mod_id, name=name, version=version)
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, indent=2))
 
 
 @main.command("oiv-plan")
@@ -6907,6 +6931,23 @@ def review_weapon_calibration(payload: str):
 def apply_weapon_calibration(payload: str):
     """Apply a digest-confirmed calibration action to a copied workspace only."""
     _calibration_request(payload, "apply")
+
+
+@main.command("inspect-weapon-sights")
+@click.option("--payload", required=True, help="JSON: source/workspace, weapon, expected_revision, edition, entry, sight_action model/animation.")
+def inspect_weapon_sights(payload: str):
+    """Decode exact package geometry or motion for the offline sight bench (read-only)."""
+    from allin1_sdk.weapon_sight import inspect
+    from allin1_sdk.release_paths import strict_json
+    try:
+        if len(payload.encode("utf-8")) > 128 * 1024:
+            raise ValueError("Sight request exceeds 128 KiB")
+        request = strict_json(payload.encode("utf-8"))
+        if not isinstance(request, dict):
+            raise ValueError("Sight request must be an object")
+        click.echo(json.dumps(inspect(request), indent=2))
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 if __name__ == "__main__":

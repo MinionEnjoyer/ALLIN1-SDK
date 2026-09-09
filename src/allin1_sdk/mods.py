@@ -12,14 +12,14 @@ import tempfile
 import uuid
 import zipfile
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator
 
 from allin1_sdk.extensions import ExtensionManifest, ExtensionRegistry
 from allin1_sdk.processes import run_hidden
-from allin1_sdk.mod_package_contract import validate_mod_schema_envelope, rpf_targets_overlap, split_nested_rpf_entry
+from allin1_sdk.mod_package_contract import validate_mod_schema_envelope, validate_edition_bundle, rpf_targets_overlap, split_nested_rpf_entry
 from allin1_sdk.official_vehicle_models import OFFICIAL_VEHICLE_MODELS
 from allin1_sdk.vehicle_catalog import VehicleCatalog
 from allin1_sdk.weapon_catalog import WeaponCatalog
@@ -257,6 +257,20 @@ class ModManifest:
     package_requirements: tuple[PackageRequirement, ...] = ()
     extension: ExtensionReference | None = None
     schema_version: int = 1
+    variants: tuple["ModManifest", ...] = ()
+    bundle_manifest_path: Path | None = None
+
+    def for_edition(self, edition: str) -> "ModManifest":
+        if edition not in SUPPORTED_EDITIONS:
+            raise ValueError("Select a valid GTA V edition")
+        if edition not in self.editions:
+            raise ValueError(f"{self.name} has no {edition} variant")
+        if self.schema_version != 5:
+            return self
+        matches = [child for child in self.variants if child.editions == (edition,)]
+        if len(matches) != 1:
+            raise ValueError(f"Bundle requires exactly one {edition} variant")
+        return replace(matches[0], bundle_manifest_path=self.manifest_path)
 
     @property
     def package_root(self) -> Path:
@@ -269,6 +283,7 @@ class ModManifest:
         *,
         validate_payload: bool = True,
         reserved_models: Iterable[str] | None = None,
+        _allow_bundle: bool = True,
     ) -> "ModManifest":
         path = no_links(Path(manifest_path)).resolve()
         if path.is_dir():
@@ -288,6 +303,31 @@ class ModManifest:
             raise ValueError(f"Invalid mod.toml manifest: {exc}") from exc
 
         schema_version, raw_allin1 = validate_mod_schema_envelope(data)
+        if schema_version == 5:
+            if not _allow_bundle:
+                raise ValueError("Nested edition bundles are not supported")
+            children = []
+            for edition, relative in validate_edition_bundle(data).items():
+                child_path = _contained_path(path.parent, relative)
+                if not child_path.is_file() or _sha256(child_path) != data["variants"][edition]["sha256"]:
+                    raise ValueError(f"Variant manifest missing or checksum mismatch: {edition}")
+                child = cls.load(child_path, validate_payload=validate_payload,
+                                 reserved_models=reserved_models, _allow_bundle=False)
+                if child.editions != (edition,):
+                    raise ValueError(f"Variant must declare only its matching edition: {edition}")
+                if any(item.sha256 is None for item in (*child.files, *child.rpf_entries)):
+                    raise ValueError("Edition bundle payloads require SHA-256 checksums")
+                if (child.mod_id, child.name, child.version) != (data["id"], data["name"], data["version"]):
+                    raise ValueError("Bundle and variant id, name and version must match")
+                children.append(child)
+            return cls(
+                manifest_path=path, mod_id=data["id"], name=data["name"],
+                version=data["version"], mod_type="bundle",
+                description=str(data.get("description", "")),
+                editions=tuple(data["editions"]), dependencies=(), conflicts=(),
+                dlc_packs=(), files=(), rpf_entries=(), schema_version=5,
+                variants=tuple(children),
+            )
         mod_id = str(data.get("id", "")).strip().lower()
         if not _ID_PATTERN.fullmatch(mod_id):
             raise ValueError("Mod id must be 2-64 lowercase letters, numbers, dots, dashes, or underscores")
@@ -573,6 +613,9 @@ class ModManifest:
                     )
 
     def validate_payload(self) -> None:
+        if self.schema_version == 5:
+            type(self).load(self.manifest_path, validate_payload=True)
+            return
         package_root = no_links(self.package_root).resolve()
         for item in self.files:
             unresolved_source = package_root / Path(*item.source.parts)
@@ -623,7 +666,7 @@ def _archive_member_path(info: zipfile.ZipInfo) -> PurePosixPath | None:
 def open_mod_package(
     source: str | Path, *, validate_payload: bool = True,
 ) -> Iterator[ModManifest]:
-    """Open a folder/manifest or safely stage one unambiguous ZIP package."""
+    """Stage one package; schema 5 permits only its declared child manifests."""
     selected = Path(source).expanduser()
     if selected.is_dir() or (
         selected.is_file() and selected.name.casefold() == "mod.toml"
@@ -662,14 +705,18 @@ def open_mod_package(
                     candidates.append(relative)
             if not candidates:
                 raise ValueError("ZIP package does not contain a mod.toml manifest")
-            if len(candidates) != 1:
+            roots = [candidate for candidate in candidates if all(
+                other == candidate or candidate.parent in other.parents
+                for other in candidates
+            )]
+            if len(roots) != 1:
                 names = ", ".join(path.as_posix() for path in candidates)
                 raise ValueError(
                     "ZIP package contains multiple mod.toml manifests; "
                     f"select an unambiguous package archive ({names})"
                 )
 
-            manifest_member = candidates[0]
+            manifest_member = roots[0]
             package_prefix = manifest_member.parent
             extracted = [
                 (info, relative) for info, relative in members
@@ -715,10 +762,17 @@ def open_mod_package(
                             output.write(chunk)
                     if member_total != info.file_size:
                         raise ValueError(f"ZIP member size changed while reading: {relative}")
-                yield ModManifest.load(
+                manifest = ModManifest.load(
                     staging_root / Path(*manifest_member.parts),
                     validate_payload=validate_payload,
                 )
+                declared = {manifest_member} | {
+                    PurePosixPath(child.manifest_path.relative_to(staging_root).as_posix())
+                    for child in manifest.variants
+                }
+                if set(candidates) != declared:
+                    raise ValueError("ZIP contains undeclared or multiple mod.toml manifests")
+                yield manifest
     except zipfile.BadZipFile as exc:
         raise ValueError(f"Invalid ZIP package: {exc}") from exc
 
@@ -1236,6 +1290,8 @@ class ModIntegrationService:
 
     def review_install(self, manifest: ModManifest) -> dict[str, Any]:
         """Build a mutation-free install/update review from the live game state."""
+        if manifest.schema_version == 5:
+            manifest = type(manifest).load(manifest.manifest_path).for_edition(self.edition)
         findings: list[dict[str, str]] = []
         operations: list[dict[str, Any]] = []
         replacing = self._receipt_path(manifest.mod_id).is_file()
@@ -1559,6 +1615,8 @@ class ModIntegrationService:
         }
 
     def install(self, manifest: ModManifest) -> ModStatus:
+        if manifest.schema_version == 5:
+            manifest = type(manifest).load(manifest.manifest_path).for_edition(self.edition)
         manifest.validate_payload()
         # Check every root and destination before backing up/copying the first
         # file. A late hostile path must not cause an earlier write.

@@ -82,7 +82,7 @@ namespace RpfPatcher
                     "  RpfPatcher.exe asset-xml    <input_asset> <output_xml> <asset_folder> [legacy|gen9] [gta_path]\n" +
                     "  RpfPatcher.exe asset-xml-batch <manifest_tsv> [legacy|gen9] [gta_path]\n" +
                     "  RpfPatcher.exe rel-relationships <input_xml>\n" +
-                    "  RpfPatcher.exe animation-samples <input_xml> [selection_key]\n" +
+                    "  RpfPatcher.exe animation-samples <input_xml> [selection_key|--inventory]\n" +
                     "  RpfPatcher.exe asset-from-xml <input_xml> <output_asset> <asset_folder> [legacy|gen9] [source_asset] [gta_path]\n" +
                     "  RpfPatcher.exe audit-seats  <gta_path> <output_json> [output_cs]\n" +
                     "  RpfPatcher.exe build-ytd    <dds_folder> <output_ytd> [legacy|gen9]\n" +

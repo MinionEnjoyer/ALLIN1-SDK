@@ -24,17 +24,19 @@ namespace RpfPatcher
         {
             try
             {
-                if (args.Length < 2 || args.Length > 3) throw new ArgumentException("Usage: RpfPatcher.exe animation-samples <input_xml> [selection_key]");
+                if (args.Length < 2 || args.Length > 3) throw new ArgumentException("Usage: RpfPatcher.exe animation-samples <input_xml> [selection_key|--inventory]");
                 var file = new FileInfo(args[1]);
                 if (!file.Exists || file.Length > MaxXml) throw new InvalidDataException("YCD XML is missing or exceeds 16 MiB");
-                Console.WriteLine(JsonSerializer.Serialize(Analyze(System.IO.File.ReadAllText(file.FullName), args.Length == 3 ? args[2] : null)));
+                bool inventory = args.Length == 3 && args[2] == "--inventory";
+                Console.WriteLine(JsonSerializer.Serialize(Analyze(System.IO.File.ReadAllText(file.FullName), args.Length == 3 && !inventory ? args[2] : null, inventory)));
                 return 0;
             }
             catch (Exception error) { Console.Error.WriteLine("ERROR: Animation sampling failed: " + error.Message); return 5; }
         }
 
-        public static object Analyze(string xml, string selection = null)
+        public static object Analyze(string xml, string selection = null, bool inventoryOnly = false)
         {
+            if (inventoryOnly && selection != null) throw new ArgumentException("Inventory cannot select a clip");
             if (string.IsNullOrWhiteSpace(xml) || xml.Length > MaxXml) throw new InvalidDataException("YCD XML exceeds analysis limits");
             var doc = new XmlDocument { XmlResolver = null };
             using (var reader = XmlReader.Create(new StringReader(xml), new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = MaxXml })) doc.Load(reader);
@@ -57,7 +59,12 @@ namespace RpfPatcher
             if (ycd.AnimMap.Count != xmlAnimations.Count || ycd.ClipMap.Count != xmlClips.Count)
                 throw new InvalidDataException("Duplicate hashes or omitted animation records");
             var animations = ycd.AnimMap.Values.Select(entry => entry.Animation).ToArray();
-            foreach (var animation in animations) Validate(animation);
+            // Keep a bad/unsupported clip visible without making all other
+            // clips disappear. Sampling never skips an invalid channel.
+            var animationErrors = new Dictionary<Animation, string>();
+            foreach (var animation in animations)
+                try { Validate(animation); }
+                catch (InvalidDataException error) { animationErrors[animation] = error.Message; }
             var choices = new List<Choice>();
             foreach (var entry in ycd.ClipMap.OrderBy(entry => (uint)entry.Key))
             {
@@ -82,12 +89,15 @@ namespace RpfPatcher
                         || layer.Start < 0 || layer.End <= layer.Start || layer.Rate <= 0 || layer.End > layer.Animation.Duration + .0001)
                         error = "Unresolved animation binding or invalid clip interval/rate";
                 if (layers.Sum(layer => layer.Animation?.BoneIds?.data_items?.Length ?? 0) > MaxTracks) error = "Clip exceeds 512 combined tracks";
+                foreach (var layer in layers)
+                    if (layer.Animation != null && animationErrors.TryGetValue(layer.Animation, out var problem)) error = problem;
                 choices.Add(new Choice("clip:" + Hash(entry.Key), clip?.Name ?? Hash(entry.Key), "clip", Finite(duration) && duration > 0 ? duration : 0, layers, error));
             }
-            choices.AddRange(animations.OrderBy(anim => (uint)anim.Hash).Select(anim => new Choice("animation:" + Hash(anim.Hash), Hash(anim.Hash), "animation", anim.Duration,
-                new[] { new Layer(anim, 0, anim.Duration, 1) }, null)));
-            var chosen = selection == null ? choices.FirstOrDefault(choice => choice.Error == null) : choices.FirstOrDefault(choice => choice.Key == selection);
+            choices.AddRange(animations.OrderBy(anim => (uint)anim.Hash).Select(anim => new Choice("animation:" + Hash(anim.Hash), Hash(anim.Hash), "animation", Finite(anim.Duration) && anim.Duration > 0 ? anim.Duration : 0,
+                new[] { new Layer(anim, 0, anim.Duration, 1) }, animationErrors.GetValueOrDefault(anim))));
+            var chosen = inventoryOnly ? null : selection == null ? choices.FirstOrDefault(choice => choice.Error == null) : choices.FirstOrDefault(choice => choice.Key == selection);
             if (selection != null && chosen == null) throw new InvalidDataException("Selected animation/clip is not in this dictionary");
+            if (!inventoryOnly && chosen == null && choices.Any(choice => choice.Error != null)) throw new InvalidDataException(choices.First(choice => choice.Error != null).Error);
             if (chosen?.Error != null) throw new InvalidDataException(chosen.Error);
             var times = chosen == null ? Array.Empty<double>() : Enumerable.Range(0, MaxSamples).Select(i => chosen.Duration * i / (MaxSamples-1)).ToArray();
             var tracks = new List<object>();
@@ -128,7 +138,7 @@ namespace RpfPatcher
             }
             return new { schema_version = 1, read_only = true, selected = chosen?.Key, duration = chosen?.Duration ?? 0,
                 choices = choices.Select(choice => new { key = choice.Key, name = choice.Name, kind = choice.Kind, duration = choice.Duration, error = choice.Error }),
-                times, tracks, sampled = true,
+                times, tracks, sampled = chosen != null,
                 scope = "Decoded local channels, up to 240 time samples. Quaternion tracks use shortest-arc interpolation. Layers remain separate; model/skeleton binding, skinning, expressions and game playback are not implied." };
         }
 
@@ -156,7 +166,7 @@ namespace RpfPatcher
                         throw new InvalidDataException("Animation track has an invalid channel layout");
                     int dimensions = track.Channels.Sum(channel => channel is AnimChannelStaticVector3 ? 3 : channel is AnimChannelStaticQuaternion ? 4 : 1);
                     bool cached = track.Channels.Any(channel => channel is AnimChannelCachedQuaternion);
-                    if ((!cached && dimensions > 4) || (cached && (track.Channels.Length < 4 || track.Channels.Take(3).Any(channel => channel is AnimChannelCachedQuaternion || channel is AnimChannelStaticVector3 || channel is AnimChannelStaticQuaternion)
+                    if ((!cached && dimensions > 4) || (cached && !FullQuaternionWithCache(track) && (track.Channels.Length < 4 || track.Channels.Take(3).Any(channel => channel is AnimChannelCachedQuaternion || channel is AnimChannelStaticVector3 || channel is AnimChannelStaticQuaternion)
                         || track.Channels.Skip(3).Any(channel => channel is not AnimChannelCachedQuaternion))))
                         throw new InvalidDataException("Animation channel components would be omitted");
                     foreach (var channel in track.Channels)
@@ -181,7 +191,16 @@ namespace RpfPatcher
             int local = frame % animation.SequenceFrameLimit;
             Vector4 value;
             var cached = channel.Channels.OfType<AnimChannelCachedQuaternion>().FirstOrDefault();
-            if (cached != null)
+            if (FullQuaternionWithCache(channel))
+            {
+                // Clip.cs marks IsType7Quat only for CachedQuaternion1. A lone
+                // type-2 cache after four stored scalars uses those four scalars,
+                // including their sign; reconstructing a positive component here
+                // flips real stock hand poses during cover/MG reloads.
+                value = new Vector4(channel.Channels[0].EvaluateFloat(local), channel.Channels[1].EvaluateFloat(local),
+                    channel.Channels[2].EvaluateFloat(local), channel.Channels[3].EvaluateFloat(local));
+            }
+            else if (cached != null)
             {
                 // ReadXml has no binary reader/value cache. Match Clip.cs's cached
                 // quaternion reconstruction directly from its three decoded scalars.
@@ -201,6 +220,14 @@ namespace RpfPatcher
                 value /= length;
             }
             return value;
+        }
+
+        static bool FullQuaternionWithCache(AnimSequence track)
+        {
+            return track?.Channels?.Length == 5
+                && track.Channels.Take(4).All(channel => channel is AnimChannelStaticFloat || channel is AnimChannelRawFloat
+                    || channel is AnimChannelQuantizeFloat || channel is AnimChannelIndirectQuantizeFloat || channel is AnimChannelLinearFloat)
+                && track.Channels[4] is AnimChannelCachedQuaternion cache && cache.Type == AnimChannelType.CachedQuaternion2;
         }
     }
 }

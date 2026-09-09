@@ -115,10 +115,10 @@ def test_mod_package_schema_versions_remain_bounded(tmp_path):
     manifest_path = _schema_v2_package(tmp_path)
     original = manifest_path.read_text(encoding="utf-8")
     manifest_path.write_text(
-        original.replace("schema_version = 2", "schema_version = 5", 1),
+        original.replace("schema_version = 2", "schema_version = 99", 1),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="Unsupported mod.toml schema_version; this reader supports 1, 2, 3 or 4"):
+    with pytest.raises(ValueError, match="Unsupported mod.toml schema_version"):
         ModManifest.load(manifest_path)
 
     # Schemas 3/4 now exist for exact RPF members, but must not accept schema-2

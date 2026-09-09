@@ -50,6 +50,9 @@ def _tree_digest(source: Path) -> tuple[str, Any]:
 
 
 def inspect(payload: dict) -> dict[str, Any]:
+    if "sight_action" in payload:
+        from allin1_sdk.weapon_sight import inspect as inspect_sight
+        return inspect_sight(payload)
     if "calibration_action" in payload:
         from allin1_sdk.weapon_calibration import inspect as inspect_calibration
         return inspect_calibration(payload)
@@ -147,6 +150,7 @@ def inspect(payload: dict) -> dict[str, Any]:
         "shop_values": shop_values, "shop_sources": shop_sources,
         "native_preview": native_preview(scan, selected, payload.get("component") if editor_kind in {"component", "attachment"} else None),
         "assets": [{"path": item.path, "size": item.size} for item in scan.entries if item.suffix in {".ydr", ".ydd", ".ytd", ".yft", ".ybn"}][:500],
+        "animation_assets": [item.path for item in scan.entries if item.suffix == ".ycd"][:500],
         "read_only": True, "workspace_write_performed": False, "game_write_performed": False,
     }
 

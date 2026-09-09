@@ -4,6 +4,7 @@ export type AnimationModel = {
   schema_version: number; read_only: boolean; source?: string; source_sha256: string; scope: string;
   drawables: {key: string; name: string}[]; selected: string | null; lod: string | null; lods: string[];
   vertex_count: number; triangle_count: number;
+  mesh_labels?: string[];
   binding_required?: string;
   view_unavailable?: string;
   skeleton_binding?: {mode: "external"; source?: string; source_sha256: string; selected: string|null; drawables: {key:string; name:string}[]; scope:string};
@@ -66,7 +67,8 @@ function unpack(chunks: number[][], max: number): number[] {
   if(values.length>max) throw new Error("Model buffer exceeds playback limits");
   return values;
 }
-export function prepareModel(model: AnimationModel): PreparedModel {
+export function prepareModel(model: AnimationModel, profile: "playback"|"sight"="playback"): PreparedModel {
+  const vertexLimit=profile==="sight"?100000:30000, triangleLimit=profile==="sight"?150000:40000;
   if(!model || model.schema_version!==1 || model.read_only!==true || !Array.isArray(model.bones) || !model.bones.length || model.bones.length>512
     || !Array.isArray(model.meshes) || !model.meshes.length || model.meshes.length>128) throw new Error("Invalid animation model");
   const tags=new Set<number>();
@@ -79,9 +81,9 @@ export function prepareModel(model: AnimationModel): PreparedModel {
   let vertices=0, triangles=0;
   const meshes=model.meshes.map(raw=>{
     if(!raw || typeof raw.skin!=="boolean" || !integer(raw.rigid_bone,model.bones.length-1)) throw new Error("Invalid mesh binding");
-    const positions=unpack(raw.positions,90000), faces=unpack(raw.triangles,120000), weights=unpack(raw.weights,120000), indices=unpack(raw.indices,120000), count=positions.length/3;
+    const positions=unpack(raw.positions,vertexLimit*3), faces=unpack(raw.triangles,triangleLimit*3), weights=unpack(raw.weights,vertexLimit*4), indices=unpack(raw.indices,vertexLimit*4), count=positions.length/3;
     vertices+=count; triangles+=faces.length/3;
-    if(!count || !Number.isInteger(count) || !faces.length || faces.length%3 || faces.some(v=>!integer(v,count-1)) || vertices>30000 || triangles>40000
+    if(!count || !Number.isInteger(count) || !faces.length || faces.length%3 || faces.some(v=>!integer(v,count-1)) || vertices>vertexLimit || triangles>triangleLimit
       || (raw.skin ? weights.length!==count*4 || indices.length!==count*4 || weights.some(v=>v<0||v>1) || indices.some(v=>!integer(v,model.bones.length-1)) : weights.length!==0 || indices.length!==0)) throw new Error("Invalid mesh vertex/skin buffers");
     if(raw.skin) for(let i=0;i<weights.length;i+=4) if(Math.abs(weights.slice(i,i+4).reduce((a,b)=>a+b,0)-1)>2.001/255) throw new Error("Invalid vertex weight total");
     return {skin:raw.skin,rigid:raw.rigid_bone,positions,triangles:faces,weights,indices};
@@ -164,5 +166,5 @@ export function poseModel(prepared: PreparedModel, animation: AnimationPacket, t
     }
     return {positions,triangles:mesh.triangles};
   });
-  return {meshes,bones:matrices.map(m=>[m[3],m[7],m[11]]),matched,missing,unsupported};
+  return {meshes,bones:matrices.map(m=>[m[3],m[7],m[11]]),matrices,matched,missing,unsupported};
 }

@@ -15,6 +15,43 @@ NATIVE = pytest.mark.skipif(os.environ.get("ALLIN1_NATIVE_RPF_TEST") != "1", rea
 
 
 @NATIVE
+def test_explicit_inventory_never_auto_samples_and_keeps_bad_clips_visible():
+    from copy import deepcopy
+    from lxml import etree
+    inventory = samples.analyze(FIXTURE.read_bytes(), inventory_only=True)
+    assert inventory['selected'] is None and not inventory['sampled']
+    assert inventory['times'] == inventory['tracks'] == []
+    root = etree.fromstring(FIXTURE.read_bytes())
+    bad = deepcopy(root.find('Animations/Item'))
+    bad.find('Hash').text = 'hash_55555555'
+    # A legal XML encoding with an unsupported five-component channel.
+    channels = bad.find('Sequences/Item/SequenceData/Item/Channels')
+    for _ in range(2):
+        channels.append(deepcopy(channels[-1]))
+    root.find('Animations').append(bad)
+    clip = deepcopy(root.find('Clips/Item'))
+    clip.find('Hash').text = 'hash_00000001'
+    clip.find('AnimationHash').text = 'hash_55555555'
+    clip.find('Name').text = 'bad_clip'
+    root.find('Clips').append(clip)
+    xml = etree.tostring(root)
+    inventory = samples.analyze(xml, inventory_only=True)
+    choices = {row['key']: row for row in inventory['choices']}
+    assert 'omitted' in choices['clip:00000001']['error']
+    assert choices['clip:11111111']['error'] is None
+    with pytest.raises(ValueError, match='omitted'):
+        samples.analyze(xml, 'clip:00000001')
+    valid = samples.analyze(xml, 'clip:11111111')
+    assert valid['tracks'] and valid['selected'] == 'clip:11111111'
+
+
+@pytest.mark.parametrize('mode,selection', [('yes', None), (True, 'clip:11111111')])
+def test_invalid_inventory_requests_fail_before_native_decode(mode, selection):
+    with pytest.raises(ValueError, match='Inventory'):
+        samples.analyze(FIXTURE.read_bytes(), selection, inventory_only=mode)
+
+
+@NATIVE
 def test_fixture_rate_endpoints_and_transport_contract():
     packet = samples.analyze(FIXTURE.read_bytes())
     assert packet["selected"] == "clip:11111111" and packet["duration"] == .5
@@ -79,6 +116,20 @@ def test_cached_quaternion_xml_matches_normalized_identity():
         '<Item><Type value="StaticFloat"/><Value value="0"/></Item>'*3 + '<Item><Type value="CachedQuaternion1"/><QuatIndex value="3"/></Item>')
     packet = samples.analyze(xml.encode())
     assert packet["tracks"][1]["values"] == [0, 0, 0, 1]*240
+
+
+@NATIVE
+def test_full_quaternion_with_trailing_type2_cache_keeps_stored_sign():
+    original = '<Item><Type value="StaticQuaternion"/><Value x="0" y="0" z="0" w="1"/></Item>'
+    full = ''.join(f'<Item><Type value="StaticFloat"/><Value value="{v}"/></Item>' for v in (.6, 0, 0, -.8))
+    cache = '<Item><Type value="CachedQuaternion2"/><QuatIndex value="0"/></Item>'
+    packet = samples.analyze(FIXTURE.read_text().replace(original, full + cache).encode())
+    assert packet['tracks'][1]['values'] == pytest.approx([.6, 0, 0, -.8]*240)
+    # A fifth real component or different cache kind is still unsupported.
+    for invalid in (full + '<Item><Type value="StaticFloat"/><Value value="1"/></Item>',
+                    full + cache.replace('CachedQuaternion2', 'CachedQuaternion1')):
+        with pytest.raises(ValueError, match='omitted'):
+            samples.analyze(FIXTURE.read_text().replace(original, invalid).encode())
 
 
 @pytest.mark.parametrize("selection", ["../escape", "animation:not-a-hash", 1, [], "clip:22222222 --x"])

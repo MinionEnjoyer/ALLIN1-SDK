@@ -2,6 +2,8 @@
 
 Source implementation, not a released or in-game-qualified feature. Open an editable weapon copy and choose **Calibration & Testing** beside Authoring. This first increment records imported sight-test evidence; it does not launch, control, inject into, or capture GTA.
 
+For deterministic model-space geometry and animation inspection without launching GTA, see the experimental [Offline sight bench](weapon-sight-bench.md). Its rendered trials are not accepted game captures and do not satisfy this calibration workflow's evidence requirements.
+
 ## Record and compare
 
 1. Select the weapon and edition. Iron and scope sessions are separate. Mark the intended aim point, visible sight position, and optional impact group in one fixed-camera PNG/JPEG frame. Coordinates use original image pixels even when the display thumbnail is smaller. The selected source hash is checked at review and save. EXIF-rotated images must be normalized before marking.

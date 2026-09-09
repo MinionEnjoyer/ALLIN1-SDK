@@ -1,0 +1,24 @@
+.weapon-sight { padding: 1rem; min-width: 0; }
+.weapon-sight h4 { margin: 0 0 .5rem; font-size: 1.2rem; }
+.weapon-sight h4 small { color: #f2cb86; margin-left: .7rem; font-size: .8rem; }
+.weapon-sight h5 { font-size: 1rem; margin: .8rem 0; }
+.sight-boundary { border-left: 3px solid #e0b96f; padding: .65rem .9rem; background: #8a683018; }
+.sight-fields, .sight-toolbar { display: flex; align-items: start; flex-wrap: wrap; gap: .8rem; margin: .8rem 0; }
+.sight-fields > *, .sight-toolbar > * { flex: 1 1 180px; min-width: 0; }
+.weapon-sight label { display: grid; gap: .35rem; font-size: .9rem; }
+.weapon-sight label:has(input[type=checkbox]) { display: flex; align-items: center; }
+.weapon-sight select, .weapon-sight textarea, .weapon-sight input:not([type=checkbox]) { max-width: 100%; width: 100%; box-sizing: border-box; }
+.sight-columns { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1.5rem; }
+.sight-columns section { border: 1px solid var(--border,#3b484a); border-radius: .5rem; padding: 1rem; }
+.sight-columns .sight-fields > .sdk-slider-field { flex-basis: 245px; }
+.sight-canvas { position: relative; margin: .8rem 0; background: #131d23; }
+.sight-canvas canvas { width: 100%; display: block; aspect-ratio: 16/9; }
+.sight-canvas canvas[hidden] { display: none; }
+.sight-canvas svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.sight-measurement { display: block; font-variant-numeric: tabular-nums; padding: .8rem; background: #4f86791a; }
+.sight-source { overflow-wrap: anywhere; font-size: .85rem; }
+.weapon-sight details { border-top: 1px solid var(--border,#3b484a); margin: 1rem 0; padding-top: .8rem; }
+.weapon-sight summary { cursor: pointer; font-weight: 600; }
+.weapon-sight [role=alert] { color: #ffb6a8; }
+.weapon-sight button { margin: .25rem; }
+@media(max-width:1000px) { .sight-columns { grid-template-columns: 1fr; } }

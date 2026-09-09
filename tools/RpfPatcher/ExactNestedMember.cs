@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using CodeWalker.GameFiles;
 
@@ -12,8 +14,20 @@ namespace RpfPatcher
     partial class Program
     {
         const long ExactMemberLimit = 128L * 1024 * 1024;
-        const long NestedArchiveLimit = 512L * 1024 * 1024;
-        const long OuterArchiveLimit = 2L * 1024 * 1024 * 1024;
+        // Legacy x64e.rpf contains a ~756 MB vehicles.rpf. Keep the child
+        // bounded below the CLR large-array ceiling while admitting that stock
+        // archive for exact schema-4 replacement.
+        const long NestedArchiveLimit = 1024L * 1024 * 1024;
+        // Enhanced update.rpf exceeds 2 GiB. The outer file is copied through
+        // streams and long seek offsets, never loaded into a byte array. Keep
+        // separate, unchanged in-memory leaf/child limits and a bounded outer.
+        const long OuterArchiveLimit = 4L * 1024 * 1024 * 1024;
+
+        static void ValidateExactIoSizes(long outerSize, long payloadSize)
+        {
+            if (outerSize <= 0 || outerSize > OuterArchiveLimit || payloadSize <= 0 || payloadSize > ExactMemberLimit)
+                throw new InvalidDataException("Outer archive or payload exceeds the bounded exact-I/O size limit.");
+        }
 
         static string[] ParseNestedMember(string path)
         {
@@ -75,7 +89,7 @@ namespace RpfPatcher
             long size = entry is RpfResourceFileEntry resourceSize
                 ? (long)resourceSize.SystemSize + resourceSize.GraphicsSize
                 : entry is RpfBinaryFileEntry binary ? Math.Max(binary.FileSize, binary.FileUncompressedSize) : 0;
-            if (size > limit) throw new InvalidDataException("Member exceeds the bounded exact-I/O size limit.");
+            if (size > limit) throw new InvalidDataException("Member exceeds the bounded exact-I/O size limit: " + entry.Name);
             byte[] bytes = entry.File.ExtractFile(entry);
             if (bytes == null || bytes.Length == 0 || bytes.LongLength > limit)
                 throw new InvalidDataException("Member is empty, unreadable or over the exact-I/O size limit.");
@@ -84,7 +98,44 @@ namespace RpfPatcher
             return bytes;
         }
 
-        static void ExactFingerprints(RpfFile archive, string prefix, Dictionary<string, string> hashes, int depth = 0)
+        static string ExactStoredFingerprint(RpfFileEntry entry)
+        {
+            // Untouched leaves need byte preservation, not decompression. Hash their
+            // stored bytes and decoding metadata with fixed memory, including leaves
+            // larger than the payload limit. Exclude offsets: staging may relocate them.
+            var archive = entry.File;
+            long length = entry.GetFileSize();
+            long offset = checked(archive.StartPos + (long)entry.FileOffset * 512);
+            using var input = new FileStream(archive.GetPhysicalFilePath(), FileMode.Open,
+                FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan);
+            long end = checked(archive.StartPos + archive.FileSize);
+            if (archive.StartPos < 0 || archive.FileSize < 16 || end > input.Length
+                || length < 0 || length > OuterArchiveLimit
+                || offset < archive.StartPos + 16 || offset > end || length > end - offset)
+                throw new InvalidDataException("Stored member lies outside its archive: " + entry.Name);
+            string metadata = entry is RpfResourceFileEntry resource
+                ? $"resource:{resource.FileSize}:{resource.SystemFlags.Value}:{resource.GraphicsFlags.Value}"
+                : entry is RpfBinaryFileEntry binary
+                    ? $"binary:{binary.FileSize}:{binary.FileUncompressedSize}"
+                    : throw new InvalidDataException("Unsupported member type: " + entry.Name);
+            // Non-AES encrypted entries use NG even when their TOC is OPEN.
+            metadata += $":{entry.IsEncrypted}:{(entry.IsEncrypted && archive.IsAESEncrypted)}\n";
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            hash.AppendData(Encoding.UTF8.GetBytes(metadata));
+            input.Position = offset;
+            var buffer = new byte[65536];
+            while (length > 0)
+            {
+                int read = input.Read(buffer, 0, (int)Math.Min(length, buffer.Length));
+                if (read == 0) throw new EndOfStreamException("Truncated member: " + entry.Name);
+                hash.AppendData(buffer, 0, read);
+                length -= read;
+            }
+            return "stored:" + Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+        }
+
+        static void ExactFingerprints(RpfFile archive, string prefix, Dictionary<string, string> hashes,
+            string target, int depth = 0)
         {
             if (depth > 8) throw new InvalidDataException("Archive verification exceeds 8 layers.");
             foreach (var entry in archive.AllEntries.OfType<RpfFileEntry>())
@@ -97,12 +148,16 @@ namespace RpfPatcher
                     var children = (archive.Children ?? new List<RpfFile>())
                         .Where(child => ReferenceEquals(child.ParentFileEntry, entry)).ToArray();
                     if (children.Length != 1) throw new InvalidDataException("Unreadable or ambiguous child archive.");
-                    ExactFingerprints(children[0], prefix + relative + "!", hashes, depth + 1);
+                    ExactFingerprints(children[0], prefix + relative + "!", hashes, target, depth + 1);
                 }
                 else
                 {
                     if (hashes.Count >= 25000) throw new InvalidDataException("Archive verification exceeds 25,000 files.");
-                    hashes.Add(prefix + relative, Sha256(ExactMemberBytes(entry)));
+                    string path = prefix + relative;
+                    // Only the authorized target is decoded/recompressed. All other
+                    // leaves must retain both stored data and decoding metadata.
+                    hashes.Add(path, path.Equals(target, StringComparison.OrdinalIgnoreCase)
+                        ? Sha256(ExactMemberBytes(entry)) : ExactStoredFingerprint(entry));
                 }
             }
         }
@@ -121,6 +176,52 @@ namespace RpfPatcher
             }
             catch (FileNotFoundException error) { Console.Error.WriteLine(error.Message); return 5; }
             catch (Exception error) { Console.Error.WriteLine("Exact nested extraction refused: " + error.Message); return 99; }
+        }
+
+        static int CanonicalizeExactNestedPayload(string[] args)
+        {
+            // game, outer archive, exact nested target, source payload, output payload
+            if (args.Length != 6) return 1;
+            string staging = null;
+            try
+            {
+                string[] parts = ParseNestedMember(args[3]);
+                byte[] payload = File.ReadAllBytes(args[4]);
+                ValidateExactIoSizes(new FileInfo(args[2]).Length, payload.LongLength);
+                staging = Path.Combine(Path.GetTempPath(), "allin1-canonical-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(staging);
+
+                RpfFile current = ReadExactArchive(args[1], args[2]);
+                string innermost = null;
+                for (int i = 0; i < parts.Length - 1; i++)
+                {
+                    byte[] child = ExactMemberBytes(FindExactFileEntry(current, parts[i]), NestedArchiveLimit);
+                    string layer = Path.Combine(staging, "layer-" + i);
+                    Directory.CreateDirectory(layer);
+                    innermost = Path.Combine(layer, parts[i].Split('/').Last());
+                    File.WriteAllBytes(innermost, child);
+                    current = ReadExactArchive(args[1], innermost);
+                }
+
+                var writable = OpenWritableRpf(args[1], innermost);
+                var target = FindExactFileEntry(writable, parts.Last());
+                if (target == null) throw new FileNotFoundException("Exact canonicalization member not found.");
+                RpfFile.CreateFile(target.Parent, target.Name, payload, true);
+                var canonicalArchive = ReadExactArchive(args[1], innermost);
+                byte[] canonical = ExactMemberBytes(FindExactFileEntry(canonicalArchive, parts.Last()));
+                File.WriteAllBytes(args[5], canonical);
+                Console.WriteLine("Canonicalized exact nested payload: " + Sha256(canonical));
+                return 0;
+            }
+            catch (Exception error) { Console.Error.WriteLine("Exact nested canonicalization refused: " + error.Message); return 99; }
+            finally
+            {
+                if (staging != null && Directory.Exists(staging))
+                {
+                    try { Directory.Delete(staging, true); }
+                    catch (IOException error) { Console.Error.WriteLine("Staging cleanup warning: " + error.Message); }
+                }
+            }
         }
 
         static void RequireExactGameClosed()
@@ -160,8 +261,7 @@ namespace RpfPatcher
                 NoReparseAncestors(target);
                 RequireExactGameClosed();
                 long outerSize = new FileInfo(target).Length, payloadSize = new FileInfo(args[4]).Length;
-                if (outerSize > OuterArchiveLimit || payloadSize <= 0 || payloadSize > ExactMemberLimit)
-                    throw new InvalidDataException("Outer archive or payload exceeds the bounded exact-I/O size limit.");
+                ValidateExactIoSizes(outerSize, payloadSize);
                 byte[] payload = File.ReadAllBytes(args[4]);
                 if (Sha256(payload) != args[6]) throw new InvalidDataException("Replacement checksum mismatch.");
                 using var guard = new FileStream(target + ".allin1-member.lock", FileMode.CreateNew, FileAccess.ReadWrite,
@@ -174,7 +274,8 @@ namespace RpfPatcher
                     throw new InvalidDataException("Current nested member checksum mismatch.");
                 if (currentHash == args[6]) return 0; // Idempotent recovery of a completed or unstarted write.
                 var before = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                ExactFingerprints(original, "", before);
+                string exactTarget = args[3].Replace('\\', '/');
+                ExactFingerprints(original, "", before, exactTarget);
                 long required = checked(outerSize * (parts.Length + 2L) + 64L * 1024 * 1024);
                 if (new DriveInfo(Path.GetPathRoot(target)).AvailableFreeSpace < required)
                     throw new IOException("Insufficient free space for verified nested staging.");
@@ -212,11 +313,21 @@ namespace RpfPatcher
                         replacement = File.ReadAllBytes(copies[i]);
                     }
                 }
+                ValidateExactIoSizes(new FileInfo(copies[0]).Length, payloadSize);
                 var after = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                ExactFingerprints(ReadExactArchive(args[1], copies[0]), "", after);
+                ExactFingerprints(ReadExactArchive(args[1], copies[0]), "", after, exactTarget);
                 before[args[3].Replace('\\', '/')] = args[6];
                 if (after.Count != before.Count || before.Any(pair => !after.TryGetValue(pair.Key, out string hash) || hash != pair.Value))
+                {
+                    foreach (var pair in before.Where(pair => !after.TryGetValue(pair.Key, out string hash) || hash != pair.Value).Take(10))
+                    {
+                        after.TryGetValue(pair.Key, out string actual);
+                        Console.Error.WriteLine("Staged mismatch: " + pair.Key + " expected=" + pair.Value + " actual=" + (actual ?? "<missing>"));
+                    }
+                    foreach (string unexpected in after.Keys.Where(key => !before.ContainsKey(key)).Take(10))
+                        Console.Error.WriteLine("Staged unexpected member: " + unexpected);
                     throw new InvalidDataException("Staged archive verification failed; original unchanged.");
+                }
                 using (var durable = new FileStream(copies[0], FileMode.Open, FileAccess.ReadWrite, FileShare.None))
                     durable.Flush(true);
                 RequireExactGameClosed();

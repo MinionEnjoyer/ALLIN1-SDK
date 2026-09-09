@@ -18,6 +18,12 @@ MAX_XML = 16 * 1024**2
 MAX_VERTICES = 30000
 MAX_TRIANGLES = 40000
 LODS = ("High", "Medium", "Low", "VeryLow")
+# Explicit internal profiles, never numeric limits supplied by a package/API.
+# Sight inspection needs complete high-detail weapons; normal playback retains
+# its smaller budget. Neither path samples geometry or silently changes LOD.
+SIGHT_MAX_XML = 64 * 1024**2
+SIGHT_MAX_VERTICES = 100000
+SIGHT_MAX_TRIANGLES = 150000
 
 
 def _integer(node, field, minimum, maximum):
@@ -57,9 +63,10 @@ def inspect(source, drawable=None, lod=None, *, skeleton_xml=None, skeleton_draw
     return result
 
 
-def _drawables(data):
-    if len(data) > MAX_XML:
-        raise ValueError("Animation model XML exceeds 16 MiB")
+def _drawables(data, *, sight=False):
+    maximum = SIGHT_MAX_XML if sight else MAX_XML
+    if len(data) > maximum:
+        raise ValueError(f"Animation model XML exceeds {64 if sight else 16} MiB")
     try:
         root = etree.fromstring(data, etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False))
     except etree.XMLSyntaxError as exc:
@@ -107,8 +114,12 @@ def compatible_skeleton(owner, skeleton_owner):
     return nodes
 
 
-def analyze(data: bytes, drawable=None, lod=None, *, skeleton_data=None, skeleton_drawable=None):
-    drawables = _drawables(data)
+def analyze(data: bytes, drawable=None, lod=None, *, skeleton_data=None, skeleton_drawable=None, sight=False):
+    if not isinstance(sight, bool):
+        raise ValueError("Invalid internal model profile")
+    vertices_limit = SIGHT_MAX_VERTICES if sight else MAX_VERTICES
+    triangles_limit = SIGHT_MAX_TRIANGLES if sight else MAX_TRIANGLES
+    drawables = _drawables(data, sight=sight)
     drawable = _select(drawables, drawable)
     packet = {"schema_version": 1, "read_only": True, "source_sha256": hashlib.sha256(data).hexdigest(),
               "drawables": _choices(drawables), "selected": drawable, "lod": None, "lods": [], "bones": [], "meshes": [],
@@ -116,7 +127,7 @@ def analyze(data: bytes, drawable=None, lod=None, *, skeleton_data=None, skeleto
               "scope": "Untextured XML-bind-pose playback. Exact bone tags and geometry palettes; no expression, cloth, physics or game-render equivalence. Fragment physics children are not included."}
     skeleton_owner = None
     if skeleton_data is not None:
-        skeleton_owners = _drawables(skeleton_data)
+        skeleton_owners = _drawables(skeleton_data, sight=sight)
         skeleton_drawable = _select(skeleton_owners, skeleton_drawable)
         packet["skeleton_binding"] = {"mode": "external", "source_sha256": hashlib.sha256(skeleton_data).hexdigest(),
             "drawables": _choices(skeleton_owners), "selected": skeleton_drawable,
@@ -128,6 +139,8 @@ def analyze(data: bytes, drawable=None, lod=None, *, skeleton_data=None, skeleto
     if drawable is None:
         return packet
     owner = drawables[int(drawable)]
+    if sight:
+        packet["mesh_labels"] = []
     packet["lods"] = [name for name in LODS if owner.findall(f"DrawableModels{name}/Item")]
     if lod is None:
         lod = next(iter(packet["lods"]), None)
@@ -221,16 +234,23 @@ def analyze(data: bytes, drawable=None, lod=None, *, skeleton_data=None, skeleto
                         indices.append(palette[index] if weight else 0)
             packet["vertex_count"] += len(parsed.vertices)
             packet["triangle_count"] += len(parsed.triangles)
-            if packet["vertex_count"] > MAX_VERTICES or packet["triangle_count"] > MAX_TRIANGLES or len(packet["meshes"]) >= 128:
+            if packet["vertex_count"] > vertices_limit or packet["triangle_count"] > triangles_limit or len(packet["meshes"]) >= 128:
                 # Retain exact owner/LOD choices so React can request a smaller
                 # LOD. Never return a partially truncated pose as a valid mesh.
-                packet.update(view_unavailable="Animation model exceeds 30,000 vertices / 40,000 triangles / 128 geometries; choose a lower LOD",
+                packet.update(view_unavailable=f"Animation model exceeds {vertices_limit:,} vertices / {triangles_limit:,} triangles / 128 geometries; choose a lower LOD",
                               bones=[], meshes=[], vertex_count=0, triangle_count=0)
                 return packet
             packet["meshes"].append({"skin": skin, "rigid_bone": rigid,
                 "positions": _chunks([value for point in parsed.vertices for value in point]),
                 "triangles": _chunks([value for face in parsed.triangles for value in face]),
                 "weights": _chunks(weights), "indices": _chunks(indices)})
+            if sight:
+                shaders = owner.findall("ShaderGroup/Shaders/Item")
+                index = geometry.find("ShaderIndex")
+                raw = index.get("value", "") if index is not None else ""
+                shader = shaders[int(raw)] if raw.isdecimal() and int(raw) < len(shaders) else None
+                label = (shader.findtext("FileName") or shader.findtext("Name") or "unknown shader") if shader is not None else "unknown shader"
+                packet["mesh_labels"].append(f"Mesh {len(packet['meshes'])}: {label[:160]}")
     if not packet["meshes"]:
         raise ValueError("Selected model LOD contains no geometry")
     return packet

@@ -10,7 +10,7 @@ export type AnimationPacket = {
   tracks: { id: string; layer: number; animation_hash: string; bone_tag: number; track: number; flags: number; label: string; quaternion: boolean; source_frames: number; values: number[] }[];
 };
 const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= 1e9;
-function valid(packet: AnimationPacket): boolean {
+export function validAnimationPacket(packet: AnimationPacket): boolean {
   if (!packet || packet.schema_version !== 1 || packet.read_only !== true || typeof packet.scope !== "string"
     || !finite(packet.duration) || packet.duration < 0 || packet.duration > 86400 || !Array.isArray(packet.times) || packet.times.length > 240
     || !Array.isArray(packet.choices) || packet.choices.length > 2000 || !Array.isArray(packet.tracks) || packet.tracks.length > 512
@@ -44,7 +44,7 @@ export default function NativeAnimationView({ packet, active, locked, draftDirty
   const [playing, setPlaying] = useState(false), [time, setTime] = useState(0), [rate, setRate] = useState(1), [loop, setLoop] = useState(true);
   const [trackId, setTrackId] = useState(""), [open, setOpen] = useState(true);
   const timeRef = useRef(0);
-  const safe = useMemo(() => valid(packet), [packet]);
+  const safe = useMemo(() => validAnimationPacket(packet), [packet]);
   const tracks = safe ? packet.tracks : [];
   const selectedTrack = tracks.find(track => track.id === trackId) ?? tracks[0];
   const duration = safe ? packet.duration : 0;
