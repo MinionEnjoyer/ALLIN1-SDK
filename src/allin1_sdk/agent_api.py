@@ -19,6 +19,7 @@ import click
 from click.testing import CliRunner
 
 from allin1_sdk.paths import gta_root_containing, user_data_root
+from allin1_sdk.jsonl_protocol import FrameError, load_request, read_frame
 
 
 PROTOCOL_VERSION = "1.0"
@@ -42,6 +43,7 @@ GAME_WRITE_COMMANDS = frozenset({
     "uninstall-package",
 })
 AUTHORING_COMMANDS = frozenset({
+    "build-component-bundle",
     "build-edition-bundle",
     "apply-authoring-action",
     "inspect-authoring-workspace",
@@ -696,18 +698,18 @@ def serve_stdio(
     allow_game_writes: bool = False, audit_path: Path | None = None,
 ) -> None:
     """Serve newline-delimited JSON requests until stdin closes."""
-    for raw_line in input_stream:
-        if len(raw_line.encode("utf-8")) > MAX_REQUEST_BYTES:
-            response = _response(None, ok=False, error="request exceeds the size limit")
+    while True:
+        try:
+            raw_line = read_frame(input_stream, MAX_REQUEST_BYTES)
+            if raw_line is None:
+                break
+            request = load_request(raw_line)
+        except FrameError as exc:
+            response = _response(None, ok=False, error=str(exc))
         else:
-            try:
-                request = json.loads(raw_line)
-            except json.JSONDecodeError as exc:
-                response = _response(None, ok=False, error=f"invalid JSON: {exc.msg}")
-            else:
-                response = execute_request(
-                    request, allow_game_writes=allow_game_writes,
-                    audit_path=audit_path,
-                )
+            response = execute_request(
+                request, allow_game_writes=allow_game_writes,
+                audit_path=audit_path,
+            )
         output_stream.write(json.dumps(response, ensure_ascii=False) + "\n")
         output_stream.flush()

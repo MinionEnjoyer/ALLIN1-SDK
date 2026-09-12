@@ -221,6 +221,16 @@ def _git_value(root: Path, *arguments: str) -> str:
     if not (root / ".git").exists() or shutil.which("git") is None:
         return ""
     try:
+        # `git -C` walks upward when this directory has a partial/corrupt
+        # .git fixture (or a removed worktree).  Never let an enclosing product
+        # checkout donate its identity to the explicitly selected repository.
+        top_level = run_hidden(
+            ["git", "-C", root, "rev-parse", "--show-toplevel"],
+            text=True, capture_output=True, timeout=5, check=False,
+        )
+        if (top_level.returncode != 0
+                or Path(top_level.stdout.strip()).resolve() != root.expanduser().resolve()):
+            return ""
         completed = run_hidden(
             ["git", "-C", root, *arguments], text=True, capture_output=True,
             timeout=5, check=False,
@@ -251,12 +261,19 @@ def _workspace_roots(
     sdk_root = project_root()
     candidates = [current, *explicit]
     # A source checkout is useful evidence. A frozen managed SDK directory is
-    # runtime payload, not a fourth workspace repository.
-    if (sdk_root / ".git").exists():
+    # runtime payload, not a fourth workspace repository. Only discover the
+    # running checkout and its siblings when the selected repository is itself
+    # one of those siblings; otherwise this would make an unrelated nested
+    # folder under the host checkout an implicitly authorized workspace root.
+    runtime_sibling = current == sdk_root or current.parent == sdk_root.parent
+    if runtime_sibling and (sdk_root / ".git").exists():
         candidates.append(sdk_root)
     if manifest is not None:
         candidates.append(manifest.parent)
-    for parent in {current.parent, project_root().parent}:
+    parents = {current.parent}
+    if runtime_sibling:
+        parents.add(sdk_root.parent)
+    for parent in parents:
         for name in WORKSPACE_NAMES:
             candidate = parent / name
             if candidate.is_dir():
@@ -570,8 +587,7 @@ def _selected_grounding(
         record = cached_inspect_log(resolved, patterns=selected_patterns)
         record["access_scope"] = (
             "explicit_verified_gta_path_read_only"
-            if not _is_within(resolved, roots)
-            and _is_within(resolved, telemetry_roots)
+            if _is_within(resolved, telemetry_roots)
             else "workspace_read_only"
         )
         evidence.append(record)

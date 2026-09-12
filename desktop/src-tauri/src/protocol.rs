@@ -3,6 +3,9 @@ use serde_json::{json, Value};
 
 pub const PROTOCOL_VERSION: &str = "1.0.0";
 pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
+/// A valid sidecar response can include an inspection graph, but no single
+/// JSONL frame may consume unbounded desktop-process memory.
+pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {

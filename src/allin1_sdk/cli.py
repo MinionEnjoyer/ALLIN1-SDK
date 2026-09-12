@@ -1714,7 +1714,8 @@ def validate_package(manifest: Path, edition: str | None = None) -> None:
                 "dependencies": list(package.dependencies), "files": len(package.files),
                 "rpf_entries": len(package.rpf_entries),
                 "allin1_extension": package.extension is not None,
-                "variants": [dict(edition=child.editions[0], files=len(child.files),
+                "variants": [dict(edition=child.editions[0], id=child.mod_id, version=child.version,
+                                  schema_version=child.schema_version, files=len(child.files),
                                   rpf_entries=len(child.rpf_entries)) for child in package.variants],
             }
     except (OSError, TypeError, ValueError) as exc:
@@ -1766,8 +1767,9 @@ def verify_package_ownership(mod_id: str, gta_path: Path | None) -> None:
     "--acknowledge-write", is_flag=True,
     help="Confirm that validated package files may be installed or backed up.",
 )
+@click.option("--component", help="Explicit component id from a schema-6 bundle.")
 def install_package(
-    manifest: Path, gta_path: Path | None, acknowledge_write: bool,
+    manifest: Path, gta_path: Path | None, acknowledge_write: bool, component: str | None = None,
 ) -> None:
     """Install a validated manifest, package folder, or bounded ZIP package."""
     if not acknowledge_write:
@@ -1780,7 +1782,7 @@ def install_package(
             "Close GTA V before installing a package: " + ", ".join(running)
         )
     with open_mod_package(manifest) as package:
-        status = _mod_service(gta_path).install(package)
+        status = _mod_service(gta_path).install(package, component_id=component)
     click.echo(
         f"Installed {status.name} {status.version} ({status.mod_id}); "
         "receipt and rollback ownership verified."
@@ -2021,6 +2023,24 @@ def audit_folder(folder: Path, output: Path, draft_dir: Path | None) -> None:
     destination.write_text("\n".join(line for line in lines if line != "") + "\n", encoding="utf-8")
     destination.with_suffix(".json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
     click.echo(f"Audited {len(rows)} package(s): {destination}")
+
+
+@main.command("build-component-bundle")
+@click.option("--legacy", multiple=True, required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--enhanced", multiple=True, required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--id", "mod_id", required=True)
+@click.option("--name", required=True)
+@click.option("--version", required=True)
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path))
+def build_component_bundle_command(legacy, enhanced, mod_id, name, version, output):
+    """Bundle ordered managed components per edition, preserving independent lifecycles."""
+    from allin1_sdk.component_bundle import build_component_bundle
+    try:
+        result = build_component_bundle(output, legacy=legacy, enhanced=enhanced,
+                                        mod_id=mod_id, name=name, version=version)
+    except (OSError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, indent=2))
 
 
 @main.command("build-edition-bundle")

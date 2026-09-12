@@ -9,6 +9,7 @@ from pathlib import Path
 from allin1_sdk.gxt2_desktop import _digest, _file_hash
 from allin1_sdk.managed_package_conversion import _safe_publication_path
 from allin1_sdk.paths import gta_root_containing, user_data_root
+from allin1_sdk.release_paths import filesystem_path
 from allin1_sdk.rpf_change_set_desktop import MAX_ACTIONS, MAX_ARCHIVE, MAX_DOCUMENT, MAX_PAYLOAD, _file, _path, _service
 from allin1_sdk.rpf_tools import RpfExplorerService
 from allin1_sdk import rpf_lock_recovery
@@ -224,12 +225,19 @@ def review(payload):
             raise ValueError("Lock cleanup requires a matching, supported transaction lock")
         if lock["process_running"]:
             raise ValueError("Lock owner is still running; cleanup is blocked")
-        retained = _local_path(str(path.parent / f"cleared-lock-{lock['sha256']}.json"))
+        retained = rpf_lock_recovery.evidence_path(
+            path.parent / f"cleared-lock-{lock['sha256']}.json"
+        )
+        if gta_root_containing(retained):
+            raise ValueError("Retained lock evidence must stay outside GTA V")
+        retained_disk = filesystem_path(retained)
         existing = None
-        if retained.exists():
-            _file(str(retained), rpf_lock_recovery.MAX_LOCK)
-            existing = _file_hash(retained)
-            if existing != lock["sha256"] or retained.stat().st_nlink != 1:
+        if retained_disk.exists():
+            info = retained_disk.stat()
+            if not retained_disk.is_file() or info.st_size > rpf_lock_recovery.MAX_LOCK:
+                raise ValueError("Retained lock evidence exceeds desktop limits")
+            existing = _file_hash(retained_disk)
+            if existing != lock["sha256"] or info.st_nlink != 1:
                 raise ValueError("Retained lock evidence is different or linked; nothing may be overwritten")
         lock_evidence = {"path": str(retained), "sha256": lock["sha256"], "existing_sha256": existing}
         backup_root = path.parent
@@ -325,7 +333,9 @@ def apply(payload, *, allow_rpf_writes=False):
                 raise ValueError("Archive, backup or lock changed after recovery review")
         if clearing:
             _absolute_path(session["archive_lock"]["path"])
-            _local_path(value["lock_evidence"]["path"])
+            retained = rpf_lock_recovery.evidence_path(value["lock_evidence"]["path"])
+            if gta_root_containing(retained):
+                raise ValueError("Retained lock evidence must stay outside GTA V")
 
     final_guard()
     if value["action"] == "execute":
@@ -348,7 +358,9 @@ def apply(payload, *, allow_rpf_writes=False):
         raise RuntimeError(f"Transaction returned unverifiable evidence. Inspect receipt before retrying: {receipt}")
     if clearing and (result["state_sha256"] != session["state_sha256"]
             or result["archive_sha256"] != session["archive_sha256"] or result["archive_lock"] is not None
-            or _file_hash(Path(value["lock_evidence"]["path"])) != value["lock_evidence"]["sha256"]):
+            or _file_hash(filesystem_path(rpf_lock_recovery.evidence_path(
+                value["lock_evidence"]["path"]
+            ))) != value["lock_evidence"]["sha256"]):
         raise RuntimeError("Lock cleanup completed but evidence changed; recheck the receipt before another operation")
     return {"kind": "rpf_transaction_applied", "action": value["action"], "review_sha256": value["review_sha256"],
         "session": result, "archive_write_performed": value["archive_write_required"],

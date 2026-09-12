@@ -148,7 +148,7 @@ def build_edition_bundle(
                 path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             else:
                 with open_mod_package(selected) as manifest:
-                    if manifest.schema_version == 5:
+                    if manifest.schema_version in (5, 6):
                         raise ValueError("Nested edition bundles are not supported")
                     if manifest.editions != (edition,):
                         raise ValueError(f"Managed {edition} input must declare only that edition")

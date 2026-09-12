@@ -1,4 +1,5 @@
 import os
+import hashlib
 from pathlib import Path
 import shutil
 
@@ -30,6 +31,21 @@ def test_changed_original_is_detected_after_materialized_inspection(tmp_path):
         with package_intake.materialize(archive) as (root,provenance):
             assert root!=tmp_path
             archive.write_bytes(b"changed")
+
+
+def test_staging_copy_refuses_growth_before_writing_past_inventory_bound(tmp_path):
+    source = tmp_path / "source.rpf"
+    source.write_bytes(b"inventory-plus-later-growth")
+    target = tmp_path / "staged.rpf"
+
+    with pytest.raises(ValueError, match="size changed while staging"):
+        package_intake._copy_inventory_file(
+            source, target, 9, hashlib.sha256(b"inventory").hexdigest(),
+        )
+
+    # The helper copies no more than the size captured during inventory. The
+    # temporary materialization root is discarded on this error in production.
+    assert target.read_bytes() == b"inventory"
 
 
 def native_archive(tmp_path,edition,size=1):

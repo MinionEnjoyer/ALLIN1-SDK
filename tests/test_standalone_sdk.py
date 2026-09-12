@@ -6,9 +6,11 @@ from pathlib import Path
 
 import pytest
 
+import scripts.stage_desktop_resources as desktop_resources
 from allin1_sdk.assistant_client import default_assistant_root, load_assistant_settings
 from allin1_sdk.assistant_settings import save_standalone_assistant_settings
 from allin1_sdk.desktop_protocol import DesktopProtocolService, envelope
+from allin1_sdk.release_paths import filesystem_path
 from scripts.package_release import _REQUIRED_AUTHORING_RESOURCES
 from scripts.stage_desktop_resources import stage_resources
 
@@ -137,7 +139,9 @@ def test_resource_home_contains_schemas_examples_sources_and_self_contained_help
     assert "licenses/tauri-installer-MIT.txt" in manifest
     assert "runtime/VehicleWorkbenchAxles/out/leftover.asi" not in manifest
     for relative, digest in manifest.items():
-        assert hashlib.sha256((staged / relative).read_bytes()).hexdigest() == digest
+        assert hashlib.sha256(
+            filesystem_path(staged / relative).read_bytes()
+        ).hexdigest() == digest
     (staged / "stale.txt").write_text("stale generated payload")
     stage_resources(root, rpf)
     assert not (staged / "stale.txt").exists()
@@ -164,3 +168,64 @@ def test_diagnostic_staging_is_scoped_and_never_replaces_release_staging(tmp_pat
         with pytest.raises(ValueError, match="inside this checkout"):
             stage_resources(root, rpf, destination=invalid)
     assert not (tmp_path / "outside").exists()
+
+
+def test_diagnostic_resource_staging_handles_a_long_owned_destination(tmp_path):
+    root, rpf = resource_fixture(tmp_path)
+    destination = root / "build" / ("long-stage-" + "x" * 160)
+    staged = stage_resources(root, rpf, destination=destination)
+    assert staged == destination
+    assert len(str(destination / "runtime/VehicleWorkbenchAxles/include/"
+                   "vehicle_workbench_axles/runtime_settings_document.hpp")) > 260
+    manifest = json.loads(
+        filesystem_path(destination / "resource-checksums.json").read_text()
+    )
+    assert "runtime/VehicleWorkbenchAxles/include/vehicle_workbench_axles/runtime_settings_document.hpp" in manifest
+    with pytest.raises(FileExistsError):
+        stage_resources(root, rpf, destination=destination)
+
+
+def test_diagnostic_resource_staging_preserves_a_raced_target(tmp_path, monkeypatch):
+    root, rpf = resource_fixture(tmp_path)
+    destination = root / "build" / "diagnostic" / "resources"
+    outside = tmp_path / "outside-canary"
+    original_validate = desktop_resources._validate_example_sources
+    calls = 0
+
+    def create_raced_target(candidate):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            destination.mkdir(parents=True)
+            (destination / "target-canary").write_bytes(b"preserve me")
+            outside.write_bytes(b"also preserve me")
+        return original_validate(candidate)
+
+    monkeypatch.setattr(desktop_resources, "_validate_example_sources", create_raced_target)
+    with pytest.raises(FileExistsError, match="never replaces"):
+        desktop_resources.stage_resources(root, rpf, destination=destination)
+    assert (destination / "target-canary").read_bytes() == b"preserve me"
+    assert outside.read_bytes() == b"also preserve me"
+
+
+def test_diagnostic_resource_staging_preserves_a_target_created_at_publish(
+    tmp_path, monkeypatch,
+):
+    root, rpf = resource_fixture(tmp_path)
+    destination = root / "build" / "diagnostic" / "resources"
+    outside = tmp_path / "outside-publish-canary"
+    original_copytree = desktop_resources.shutil.copytree
+    target_disk = filesystem_path(destination)
+
+    def create_target_before_publish(source, target, *args, **kwargs):
+        if Path(target) == target_disk:
+            destination.mkdir(parents=True)
+            (destination / "target-canary").write_bytes(b"preserve me")
+            outside.write_bytes(b"also preserve me")
+        return original_copytree(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(desktop_resources.shutil, "copytree", create_target_before_publish)
+    with pytest.raises(FileExistsError):
+        desktop_resources.stage_resources(root, rpf, destination=destination)
+    assert (destination / "target-canary").read_bytes() == b"preserve me"
+    assert outside.read_bytes() == b"also preserve me"

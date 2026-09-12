@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 import stat
 
-from allin1_sdk.managed_package_conversion import _safe_publication_path
+from allin1_sdk.release_paths import filesystem_path, no_links
 
 MAX_LOCK = 16384
 
@@ -28,22 +28,28 @@ def require_supported(path):
         raise ValueError("Reviewed lock cleanup requires a local Windows volume")
 
 
+def evidence_path(path):
+    """Validate a local evidence path while retaining its normal display form."""
+    original = Path(path)
+    # Refuse unsupported locations before no_links can probe a network share
+    # or any other path outside the reviewed local-volume contract.
+    require_supported(original)
+    return no_links(original)
+
+
 @contextmanager
 def _exclusive_file(path, *, create=False, delete=False):
     """Deny concurrent read/write/delete opens, including our own path reopens."""
-    require_supported(path)
+    path = evidence_path(path)
     import msvcrt
 
-    _safe_publication_path(path)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
                                   wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
     kernel.CreateFileW.restype = wintypes.HANDLE
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel.CloseHandle.restype = wintypes.BOOL
-    name = str(path)
-    if not name.startswith("\\\\?\\"):
-        name = "\\\\?\\" + name
+    name = str(filesystem_path(path))
     # GENERIC_READ, optional GENERIC_WRITE / DELETE; OPEN_REPARSE_POINT.
     handle = kernel.CreateFileW(name, 0x80000000 | (0x40000000 if create else 0)
                                | (0x10000 if delete else 0), 0, None,
@@ -60,8 +66,10 @@ def _exclusive_file(path, *, create=False, delete=False):
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                 or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
             raise ValueError("Lock evidence must be a regular file without links")
-        _safe_publication_path(path)
-        if identity(path.stat()) != identity(info):
+        # Keep the reparse/hardlink guard and compare the lexical path to the
+        # held handle through the same long-path adapter as CreateFileW.
+        evidence_path(path)
+        if identity(filesystem_path(path).stat()) != identity(info):
             raise ValueError("Lock evidence path changed while opening")
         yield stream
 

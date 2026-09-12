@@ -1439,6 +1439,7 @@ namespace RpfPatcher
                 rpf.ScanStructure(null, warning => warnings.Add(warning));
                 if (rpf.AllEntries == null || rpf.AllEntries.Count == 0)
                     throw new InvalidDataException("RPF scan returned no entries.");
+                RequireCompleteKeylessScan(keyMode, warnings);
 
                 var archives = new List<Dictionary<string, object>>();
                 var entries = new List<Dictionary<string, object>>();

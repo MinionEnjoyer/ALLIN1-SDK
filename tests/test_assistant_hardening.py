@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from allin1_sdk import cli
+from allin1_sdk import assistant_context, cli
 from allin1_sdk.agent_api import command_catalog
 from allin1_sdk.assistant_client import (
     AssistantContextOverflow, _merge_review_advisories, plan_grounding, prompt_assistant,
@@ -424,6 +424,30 @@ def test_explicit_verified_gta_path_grants_read_only_telemetry_scope(
 
     outside = tmp_path / "untrusted.log"
     outside.write_text("containment=99\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="explicit verified --gta-path"):
+        build_assistant_context(
+            "Review GTA telemetry", repository_root=repository, gta_path=game,
+            telemetry_files=(outside,), telemetry_patterns=("containment",),
+        )
+
+
+def test_nested_host_checkout_is_not_an_implicit_telemetry_workspace(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    host = tmp_path / "host"
+    runtime_sdk = host / "ALLIN1-SDK"
+    (runtime_sdk / ".git").mkdir(parents=True)
+    repository = _repository(
+        host / "ALLIN1" / "build" / "fixture" / "GTAV-ALLIN1-VR",
+    )
+    game = tmp_path / "installed-game"
+    game.mkdir()
+    (game / "GTA5_Enhanced.exe").write_bytes(b"MZ")
+    outside = host / "ALLIN1" / "build" / "untrusted.log"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("containment=99\n", encoding="utf-8")
+    monkeypatch.setattr(assistant_context, "project_root", lambda: runtime_sdk)
+
     with pytest.raises(ValueError, match="explicit verified --gta-path"):
         build_assistant_context(
             "Review GTA telemetry", repository_root=repository, gta_path=game,

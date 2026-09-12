@@ -132,6 +132,22 @@ def test_zip_import_rejects_traversal_and_symlinks(tmp_path: Path) -> None:
             pass
 
 
+def test_zip_import_rejects_a_symlinked_parent_directory(tmp_path: Path) -> None:
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    archive = real_parent / "package.zip"
+    _zip_tree(archive, FIXTURES / "schema_v1")
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(real_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="Symlink/junction/reparse"):
+        with open_mod_package(alias / archive.name):
+            pass
+
+
 def test_zip_import_enforces_expansion_limit(tmp_path: Path, monkeypatch) -> None:
     archive = tmp_path / "large.zip"
     _zip_tree(archive, FIXTURES / "schema_v1")

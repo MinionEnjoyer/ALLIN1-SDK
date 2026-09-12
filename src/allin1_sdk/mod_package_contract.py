@@ -13,7 +13,7 @@ from pathlib import PurePosixPath
 from typing import Any, Iterable, Mapping
 
 
-SUPPORTED_MOD_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5})
+SUPPORTED_MOD_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6})
 EXTENSION_API_VERSION = 1
 _HASH_PATTERN = re.compile(r"^(?:0x)?[0-9A-Fa-f]{8}$")
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{1,95}$")
@@ -35,7 +35,10 @@ def validate_mod_schema_envelope(
     """Validate legacy, extension, or exact-member package envelopes."""
     schema_version = data.get("schema_version")
     if type(schema_version) is not int or schema_version not in SUPPORTED_MOD_SCHEMA_VERSIONS:
-        raise ValueError("Unsupported mod.toml schema_version; this reader supports 1, 2, 3, 4 or 5")
+        raise ValueError("Unsupported mod.toml schema_version; this reader supports 1, 2, 3, 4, 5 or 6")
+    if schema_version == 6:
+        validate_component_bundle(data)
+        return schema_version, None
     if schema_version == 5:
         validate_edition_bundle(data)
         return schema_version, None
@@ -104,6 +107,46 @@ def validate_edition_bundle(data: Mapping[str, Any]) -> dict[str, str]:
     if len({p.casefold() for p in paths.values()}) != len(paths):
         raise ValueError("Edition variants must use separate manifest paths")
     return paths
+
+
+def validate_component_bundle(data: Mapping[str, Any]) -> dict[str, list[Mapping[str, Any]]]:
+    """Schema 6 is an ordered, edition-scoped collection of independent packages."""
+    allowed = {"schema_version", "id", "name", "version", "description", "author", "type", "editions", "variants"}
+    if set(data) - allowed or data.get("type") != "collection":
+        raise ValueError("Schema 6 requires a component collection with no install operations")
+    for key in ("id", "name", "version"):
+        if not isinstance(data.get(key), str) or not data[key].strip():
+            raise ValueError(f"Component bundle requires {key}")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,63}", data["id"]) or data["id"].startswith("allin1."):
+        raise ValueError("Invalid component bundle id")
+    editions, variants = data.get("editions"), data.get("variants")
+    if (not isinstance(editions, list) or not editions
+            or any(not isinstance(e, str) or e not in {"legacy", "enhanced"} for e in editions)
+            or len(set(editions)) != len(editions) or not isinstance(variants, Mapping)
+            or set(variants) != set(editions)):
+        raise ValueError("Bundle editions must match exactly the declared legacy/enhanced variants")
+    result, paths = {}, set()
+    for edition in editions:
+        variant = variants[edition]
+        if not isinstance(variant, Mapping) or set(variant) != {"components"}:
+            raise ValueError("Each component variant requires only components")
+        rows = variant["components"]
+        if not isinstance(rows, list) or not 1 <= len(rows) <= 32:
+            raise ValueError("Each edition requires 1–32 components")
+        for row in rows:
+            if not isinstance(row, Mapping) or set(row) != {"manifest", "sha256"}:
+                raise ValueError("Each component requires only manifest and sha256")
+            path = _safe_path(row["manifest"], "Component manifest")
+            parts = PurePosixPath(path).parts
+            if len(parts) != 3 or parts[0] != edition or parts[2] != "mod.toml" or "\\" in row["manifest"]:
+                raise ValueError("Component manifest must be <edition>/<component>/mod.toml")
+            if path.casefold() in paths:
+                raise ValueError("Component trees must be separate")
+            paths.add(path.casefold())
+            if not isinstance(row["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", row["sha256"]):
+                raise ValueError("Component manifest requires a lowercase SHA-256")
+        result[edition] = rows
+    return result
 
 
 def _validate_exact_rpf_package(data: Mapping[str, Any]) -> None:

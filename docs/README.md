@@ -12,6 +12,7 @@ Current manuals describe implemented behavior and explicit limits. Reference con
 - [0.6.5 release guide and known limits](release-0.6.5.md)
 - [SDK manual](sdk-guide.md)
 - [Validation and acceptance](validation.md)
+- [Off-game hardening receipt](hardening-harness.md)
 
 ## Contracts and references
 

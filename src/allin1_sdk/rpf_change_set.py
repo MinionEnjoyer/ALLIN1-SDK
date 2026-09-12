@@ -28,6 +28,23 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _stable_file_snapshot(path: Path, label: str) -> tuple[int, str]:
+    """Return a digest only when one regular file stayed stable while read.
+
+    Change sets are evidence documents: a size check before a digest is not
+    sufficient because a same-size replacement can otherwise be recorded with
+    the previous file's hash.  The final metadata check also catches an atomic
+    replacement of the path while it was being read.
+    """
+    before = path.stat()
+    digest = _sha256_file(path)
+    after = path.stat()
+    attributes = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(before, attribute) != getattr(after, attribute) for attribute in attributes):
+        raise ValueError(f"{label} changed while reading")
+    return after.st_size, digest
+
+
 def _is_sha256(value: object) -> bool:
     return (
         isinstance(value, str) and len(value) == 64
@@ -93,7 +110,8 @@ class RpfChangeSet:
         source = index.source.resolve()
         if not source.is_file() or source.is_symlink():
             raise FileNotFoundError(f"RPF source archive not found: {source}")
-        if source.stat().st_size != index.archive_size:
+        source_size, source_sha256 = _stable_file_snapshot(source, "RPF source archive")
+        if source_size != index.archive_size:
             raise ValueError("RPF source changed after indexing; index it again")
         output = Path(destination).expanduser().resolve()
         if output.suffix.casefold() != ".json":
@@ -101,11 +119,8 @@ class RpfChangeSet:
         detected = _detected_gta_root(output)
         if detected is not None:
             raise ValueError(f"RPF change sets must be stored outside GTA V: {detected}")
-        source_sha256 = _sha256_file(source)
         if expected_archive_sha256 is not None and source_sha256 != expected_archive_sha256:
             raise ValueError("RPF source changed after review")
-        if source.stat().st_size != index.archive_size:
-            raise ValueError("RPF source changed while creating the change set")
         now = datetime.now(timezone.utc).isoformat()
         payload = {
             "schema_version": RPF_CHANGE_SET_SCHEMA,
@@ -221,9 +236,11 @@ class RpfChangeSet:
                 if verify_files:
                     if not payload_path.is_file() or payload_path.is_symlink():
                         raise FileNotFoundError(f"RPF action payload not found: {payload_path}")
-                    if payload_path.stat().st_size != payload_record["size"] or (
-                        _sha256_file(payload_path) != payload_sha256
-                    ):
+                    payload_size, actual_payload_sha256 = _stable_file_snapshot(
+                        payload_path, f"RPF action payload {payload_path}",
+                    )
+                    if (payload_size != payload_record["size"]
+                            or actual_payload_sha256 != payload_sha256):
                         raise ValueError(f"RPF action payload changed: {payload_path}")
             elif item.get("payload") not in (None, ""):
                 raise ValueError(f"RPF {action} action {action_id} cannot have a payload")
@@ -238,9 +255,10 @@ class RpfChangeSet:
         if verify_files:
             if not archive_path.is_file() or archive_path.is_symlink():
                 raise FileNotFoundError(f"RPF source archive not found: {archive_path}")
-            if archive_path.stat().st_size != archive["size"] or (
-                _sha256_file(archive_path) != archive_sha256
-            ):
+            archive_size, actual_archive_sha256 = _stable_file_snapshot(
+                archive_path, "RPF source archive",
+            )
+            if archive_size != archive["size"] or actual_archive_sha256 != archive_sha256:
                 raise ValueError("RPF source archive changed after the change set was created")
         return {
             "archive": archive_path, "archive_record": archive_record,
@@ -254,10 +272,11 @@ class RpfChangeSet:
         authored = Path(path).expanduser().resolve()
         if not authored.is_file() or authored.is_symlink():
             raise FileNotFoundError(f"RPF change set not found: {authored}")
-        before_sha256 = _sha256_file(authored)
+        _, before_sha256 = _stable_file_snapshot(authored, "RPF change set")
         source, payload = cls._read(path)
         state = cls._normalize(payload, verify_files=verify_files)
-        if _sha256_file(source) != before_sha256:
+        _, after_sha256 = _stable_file_snapshot(source, "RPF change set")
+        if after_sha256 != before_sha256:
             raise ValueError("RPF change set changed while opening it")
         state.update({
             "change_set": source, "change_set_sha256": before_sha256,
@@ -288,8 +307,14 @@ class RpfChangeSet:
         cls, path: str | Path, callback: Callable[[dict[str, Any]], Any],
         *, expected_sha256: str | None = None,
     ) -> Any:
-        source, payload = cls._read(path)
-        before_sha256 = _sha256_file(source)
+        source = Path(path).expanduser().resolve()
+        if not source.is_file() or source.is_symlink():
+            raise FileNotFoundError(f"RPF change set not found: {source}")
+        _, before_sha256 = _stable_file_snapshot(source, "RPF change set")
+        source, payload = cls._read(source)
+        _, opened_sha256 = _stable_file_snapshot(source, "RPF change set")
+        if opened_sha256 != before_sha256:
+            raise ValueError("RPF change set changed while opening it")
         if expected_sha256 is not None and before_sha256 != expected_sha256:
             raise ValueError("RPF change set changed after review")
         detected = _detected_gta_root(source)
@@ -299,7 +324,8 @@ class RpfChangeSet:
         result = callback(payload)
         payload["updated_utc"] = datetime.now(timezone.utc).isoformat()
         cls._normalize(payload, verify_files=False)
-        if _sha256_file(source) != before_sha256:
+        _, after_sha256 = _stable_file_snapshot(source, "RPF change set")
+        if after_sha256 != before_sha256:
             raise ValueError("RPF change set changed during edit")
         _write_json_atomic(source, payload)
         return result
@@ -325,9 +351,12 @@ class RpfChangeSet:
             selected = authored.resolve()
             if not selected.is_file():
                 raise FileNotFoundError(f"RPF change-set payload not found: {selected}")
+            payload_size, payload_sha256 = _stable_file_snapshot(
+                selected, "RPF change-set payload",
+            )
             prepared_payload = {
-                "path": str(selected), "size": selected.stat().st_size,
-                "sha256": _sha256_file(selected),
+                "path": str(selected), "size": payload_size,
+                "sha256": payload_sha256,
             }
         elif payload is not None:
             raise ValueError(f"RPF {action} cannot include a payload")
@@ -409,10 +438,14 @@ class RpfChangeSet:
             raise ValueError("RPF change set contains no staged actions")
         indexed = service.index(state["archive"])
         archive = state["archive_record"]
+        indexed_size, indexed_sha256 = _stable_file_snapshot(
+            indexed.source, "RPF source archive",
+        )
         if (
             indexed.edition.casefold() != archive["edition"].casefold()
             or indexed.archive_size != archive["size"]
-            or _sha256_file(indexed.source) != archive["sha256"]
+            or indexed_size != archive["size"]
+            or indexed_sha256 != archive["sha256"]
         ):
             raise ValueError("RPF source index no longer matches the change set")
         authored = []

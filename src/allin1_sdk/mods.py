@@ -265,11 +265,25 @@ class ModManifest:
             raise ValueError("Select a valid GTA V edition")
         if edition not in self.editions:
             raise ValueError(f"{self.name} has no {edition} variant")
+        if self.schema_version == 6:
+            return replace(self, editions=(edition,),
+                           variants=tuple(child for child in self.variants if child.editions == (edition,)))
         if self.schema_version != 5:
             return self
         matches = [child for child in self.variants if child.editions == (edition,)]
         if len(matches) != 1:
             raise ValueError(f"Bundle requires exactly one {edition} variant")
+        return replace(matches[0], bundle_manifest_path=self.manifest_path)
+
+    def select_component(self, edition: str, component_id: str | None = None) -> "ModManifest":
+        selected = self.for_edition(edition)
+        if self.schema_version != 6:
+            if component_id is not None:
+                raise ValueError("Component selection requires a schema-6 bundle")
+            return selected
+        matches = [child for child in selected.variants if child.mod_id == component_id]
+        if not isinstance(component_id, str) or len(matches) != 1:
+            raise ValueError("Select one component from the matching edition before installation")
         return replace(matches[0], bundle_manifest_path=self.manifest_path)
 
     @property
@@ -303,6 +317,11 @@ class ModManifest:
             raise ValueError(f"Invalid mod.toml manifest: {exc}") from exc
 
         schema_version, raw_allin1 = validate_mod_schema_envelope(data)
+        if schema_version == 6:
+            if not _allow_bundle:
+                raise ValueError("Nested edition bundles are not supported")
+            from allin1_sdk.component_bundles import load_collection
+            return load_collection(cls, path, data, validate_payload)
         if schema_version == 5:
             if not _allow_bundle:
                 raise ValueError("Nested edition bundles are not supported")
@@ -594,10 +613,10 @@ class ModManifest:
                 raise ValueError("Config/data mod destinations must be below scripts/ or mods/")
             if mod_type == "mixed":
                 root_plugin = len(parts) == 1 and suffix in {
-                    ".asi", ".dll", ".ini", ".toml", ".addon64",
+                    ".asi", ".dll", ".ini", ".toml", ".addon", ".addon64", ".md",
                 }
                 managed_tree = bool(parts) and parts[0] in {
-                    "scripts", "plugins", "mods", "reshade-shaders",
+                    "scripts", "plugins", "mods", "reshade-shaders", "customshaders",
                 }
                 axle_runtime_data = (
                     len(parts) >= 2
@@ -607,13 +626,13 @@ class ModManifest:
                 if not root_plugin and not managed_tree and not axle_runtime_data:
                     raise ValueError(
                         "Mixed package files must target a supported root plug-in "
-                        "or scripts/plugins/mods/reshade-shaders directory, or a "
+                        "or scripts/plugins/mods/reshade-shaders/customshaders directory, or a "
                         "JSON file "
                         "below the VehicleWorkbenchAxles runtime tree"
                     )
 
     def validate_payload(self) -> None:
-        if self.schema_version == 5:
+        if self.schema_version in (5, 6):
             type(self).load(self.manifest_path, validate_payload=True)
             return
         package_root = no_links(self.package_root).resolve()
@@ -675,6 +694,10 @@ def open_mod_package(
         return
     if not selected.is_file() or selected.suffix.casefold() != ".zip":
         raise ValueError("Select a package folder, mod.toml, or .zip archive")
+    # The archive itself is checked below, but its parent chain is also an
+    # input boundary.  A junction parent would otherwise be followed by
+    # ZipFile even though package folders are rejected by ModManifest.load.
+    no_links(selected.parent)
     metadata = selected.lstat()
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     if selected.is_symlink() or (
@@ -1288,10 +1311,10 @@ class ModIntegrationService:
     def _review_finding(code: str, message: object) -> dict[str, str]:
         return {"severity": "error", "code": code, "message": str(message)}
 
-    def review_install(self, manifest: ModManifest) -> dict[str, Any]:
+    def review_install(self, manifest: ModManifest, *, component_id: str | None = None) -> dict[str, Any]:
         """Build a mutation-free install/update review from the live game state."""
-        if manifest.schema_version == 5:
-            manifest = type(manifest).load(manifest.manifest_path).for_edition(self.edition)
+        from allin1_sdk.component_bundles import installation_component
+        manifest = installation_component(manifest, self.edition, component_id)
         findings: list[dict[str, str]] = []
         operations: list[dict[str, Any]] = []
         replacing = self._receipt_path(manifest.mod_id).is_file()
@@ -1614,9 +1637,9 @@ class ModIntegrationService:
             },
         }
 
-    def install(self, manifest: ModManifest) -> ModStatus:
-        if manifest.schema_version == 5:
-            manifest = type(manifest).load(manifest.manifest_path).for_edition(self.edition)
+    def install(self, manifest: ModManifest, *, component_id: str | None = None) -> ModStatus:
+        from allin1_sdk.component_bundles import installation_component
+        manifest = installation_component(manifest, self.edition, component_id)
         manifest.validate_payload()
         # Check every root and destination before backing up/copying the first
         # file. A late hostile path must not cause an earlier write.

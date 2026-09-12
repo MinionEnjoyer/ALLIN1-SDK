@@ -84,6 +84,52 @@ class ExactEntryTests
                 .Invoke(null, new object[] { Path.GetTempPath(), true, probe });
             if (keyMode != "not-required-unencrypted-root") throw new Exception("OPEN archive unexpectedly required GTA keys");
             checks++;
+            var fakeGame = Path.Combine(Path.GetTempPath(), "allin1-open-keyless-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(fakeGame);
+            try
+            {
+                // The edition marker is intentionally not a real executable.
+                // OPEN authoring archives must not require key extraction from it.
+                System.IO.File.WriteAllBytes(Path.Combine(fakeGame, "GTA5.exe"), new byte[] { 1 });
+                keyMode = (string)Helper.GetMethod("LoadReadOnlyArchiveKeys", BindingFlags.NonPublic | BindingFlags.Static)
+                    .Invoke(null, new object[] { fakeGame, false, probe });
+                if (keyMode != "not-required-unencrypted-root")
+                    throw new Exception("OPEN archive attempted to require unusable game keys");
+                checks++;
+
+                using (var stream = System.IO.File.Create(probe))
+                using (var writer = new BinaryWriter(stream))
+                {
+                    writer.Write(0x52504637u); writer.Write(1u); writer.Write(16u); writer.Write(0x0FFFFFF9u);
+                }
+                try
+                {
+                    Helper.GetMethod("LoadReadOnlyArchiveKeys", BindingFlags.NonPublic | BindingFlags.Static)
+                        .Invoke(null, new object[] { fakeGame, false, probe });
+                    throw new Exception("Encrypted RPF unexpectedly bypassed unusable game keys");
+                }
+                catch (TargetInvocationException error) when (error.InnerException != null)
+                {
+                    checks++;
+                }
+
+                var scanGuard = Helper.GetMethod("RequireCompleteKeylessScan", BindingFlags.NonPublic | BindingFlags.Static);
+                scanGuard.Invoke(null, new object[] {
+                    "not-required-unencrypted-root", new List<string>()
+                });
+                try
+                {
+                    scanGuard.Invoke(null, new object[] {
+                        "not-required-unencrypted-root", new List<string> { "encrypted nested RPF" }
+                    });
+                    throw new Exception("Keyless scan warning unexpectedly certified an archive");
+                }
+                catch (TargetInvocationException error) when (error.InnerException is InvalidDataException)
+                {
+                    checks++;
+                }
+            }
+            finally { Directory.Delete(fakeGame, true); }
         }
         finally { System.IO.File.Delete(probe); }
         var archive = new RpfFile("unused.rpf", "unused.rpf", 0) { Root = new RpfDirectoryEntry { Name = "" } };

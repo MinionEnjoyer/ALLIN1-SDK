@@ -8,7 +8,9 @@ risk classifications and all CLI safety checks remain authoritative.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
+import math
 import os
 import re
 import signal
@@ -159,6 +161,16 @@ _ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _MAX_ENTRIES = 2_000
 _MAX_FINDINGS = 500
 _MAX_STRING = 32_768
+# The persistent sidecar receives job output from a child over pipes.  Keep
+# this comfortably below the native frame limit and enforce it on both sides
+# of that boundary so an accidentally verbose inspection cannot pin either
+# process in an unbounded ``communicate()`` buffer.
+# Rust rejects desktop frames at 16 MiB.  Leave room for the surrounding
+# result envelope rather than applying the much smaller CLI transcript budget.
+MAX_JOB_WORKER_STDOUT_BYTES = 15 * 1024 * 1024
+MAX_JOB_WORKER_STDERR_BYTES = 32_768
+_WORKER_READ_CHUNK_BYTES = 8_192
+_WORKER_JSON_NODE_BUDGET = 20_000
 
 NAVIGATION = (
     {"id": "linker", "label": "Package Linker", "shortcut": "Ctrl+1", "phase": 3},
@@ -191,9 +203,42 @@ class _Job:
     request_id: str
     revision: str | None
     risk: str
-    process: subprocess.Popen[str]
+    process: subprocess.Popen[bytes]
     worker_request: dict[str, Any]
     cancelled: bool = False
+
+
+def _drain_worker_stream(
+    stream: IO[bytes], *, max_bytes: int, state: dict[str, Any],
+) -> None:
+    """Drain one worker pipe while retaining at most its bounded payload.
+
+    The caller starts one reader per pipe.  Continuing to drain after the
+    limit is crossed lets an owned child exit cleanly (or be cancelled by the
+    monitor) without a pipe backpressure deadlock.
+    """
+    try:
+        while True:
+            # BufferedReader.read() may wait to fill its requested size on a
+            # live pipe; read1() returns currently available bytes instead.
+            reader = getattr(stream, "read1", stream.read)
+            chunk = reader(_WORKER_READ_CHUNK_BYTES)
+            if not chunk:
+                return
+            if state["tail_mode"]:
+                state["tail"].extend(chunk)
+                if len(state["tail"]) > max_bytes:
+                    del state["tail"][:-max_bytes]
+                    state["truncated"] = True
+                continue
+            if state["bytes"] + len(chunk) > max_bytes:
+                state["overflow"].set()
+                continue
+            if not state["overflow"].is_set():
+                state["chunks"].append(chunk)
+                state["bytes"] += len(chunk)
+    except (OSError, ValueError) as exc:
+        state["error"] = str(exc)
 
 
 def envelope(
@@ -5348,7 +5393,7 @@ class DesktopProtocolService:
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
             process = subprocess.Popen(
                 _worker_command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                stderr=subprocess.PIPE,
                 creationflags=creationflags,
                 start_new_session=(os.name != "nt"),
             )
@@ -5365,7 +5410,17 @@ class DesktopProtocolService:
             target=self._monitor_job, args=(job,), daemon=True,
             name=f"allin1-desktop-{job_id}",
         )
-        thread.start()
+        try:
+            thread.start()
+        except RuntimeError:
+            # Thread exhaustion must not strand a child waiting for its first
+            # request or leave the service permanently busy. This worker has
+            # read-only authority and belongs exclusively to this service.
+            self._cancel_active_job(
+                request_id=request_id, requested_job_id=job_id,
+                status="Worker monitor could not start",
+            )
+            raise
         return envelope(
             "job_event", {
                 "state": "accepted", "status": "Job accepted", "progress": None,
@@ -5375,17 +5430,124 @@ class DesktopProtocolService:
         )
 
     def _monitor_job(self, job: _Job) -> None:
+        stdout_state: dict[str, Any] = {
+            "chunks": [], "bytes": 0, "overflow": threading.Event(), "error": None,
+            "tail": None, "tail_mode": False, "truncated": False,
+        }
+        stderr_state: dict[str, Any] = {
+            "chunks": [], "bytes": 0, "overflow": threading.Event(), "error": None,
+            "tail": bytearray(), "tail_mode": True, "truncated": False,
+        }
+        readers: list[threading.Thread] = []
+        feeder: threading.Thread | None = None
+        feed_state: dict[str, Any] = {"error": None, "done": threading.Event()}
+        transport_error: str | None = None
         try:
-            stdout, stderr = job.process.communicate(
+            for name, stream, limit, state in (
+                ("stdout", job.process.stdout, MAX_JOB_WORKER_STDOUT_BYTES, stdout_state),
+                ("stderr", job.process.stderr, MAX_JOB_WORKER_STDERR_BYTES, stderr_state),
+            ):
+                if stream is None:
+                    raise OSError(f"desktop job worker {name} pipe is unavailable")
+                reader = threading.Thread(
+                    target=_drain_worker_stream,
+                    kwargs={"stream": stream, "max_bytes": limit, "state": state},
+                    daemon=True,
+                    name=f"allin1-desktop-{job.job_id}-{name}",
+                )
+                reader.start()
+                readers.append(reader)
+            if job.process.stdin is None:
+                raise OSError("desktop job worker input pipe is unavailable")
+            worker_input = (
                 json.dumps(job.worker_request, ensure_ascii=False) + "\n"
+            ).encode("utf-8")
+
+            def feed_worker() -> None:
+                try:
+                    job.process.stdin.write(worker_input)
+                    job.process.stdin.flush()
+                except (OSError, ValueError) as exc:
+                    feed_state["error"] = str(exc)
+                finally:
+                    try:
+                        job.process.stdin.close()
+                    except (OSError, ValueError):
+                        pass
+                    feed_state["done"].set()
+
+            # A malformed child can ignore stdin while writing forever.  Feed
+            # it independently so pipe overflow detection can still cancel the
+            # exclusively owned read-only process.
+            feeder = threading.Thread(
+                target=feed_worker, daemon=True,
+                name=f"allin1-desktop-{job.job_id}-stdin",
             )
-        except (OSError, ValueError) as exc:
-            stdout, stderr = "", str(exc)
+            feeder.start()
+            while job.process.poll() is None:
+                if stdout_state["overflow"].is_set():
+                    # This process is created exclusively for a read-only job.
+                    # Cancelling it on a pipe limit never interrupts a writer.
+                    self._terminate_job_process(job)
+                    break
+                if feed_state["done"].is_set() and feed_state["error"]:
+                    transport_error = str(feed_state["error"])
+                    self._terminate_job_process(job)
+                    break
+                try:
+                    job.process.wait(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    pass
+        except (OSError, ValueError, RuntimeError) as exc:
+            transport_error = str(exc)
+            self._terminate_job_process(job)
+        finally:
+            if feeder is not None:
+                feeder.join(timeout=5)
+                if feeder.is_alive():
+                    transport_error = "desktop job worker input feeder did not finish"
+                    self._terminate_job_process(job)
+            for reader in readers:
+                reader.join(timeout=5)
+                if reader.is_alive():
+                    transport_error = "desktop job worker output reader did not finish"
+                    self._terminate_job_process(job)
+            # An already-exited child can cross a cap between the poll above
+            # and the reader completing; make that terminal state explicit.
+            if stdout_state["overflow"].is_set():
+                self._terminate_job_process(job)
+        stdout = b"".join(stdout_state["chunks"]).decode("utf-8", errors="replace")
+        stderr = bytes(stderr_state["tail"]).decode("utf-8", errors="replace")
         with self._lock:
             if job.cancelled or self._job is not job:
                 return
             self._job = None
-        diagnostics = stderr[-32_768:].strip()
+        if transport_error:
+            self.emit(self._error(
+                job.request_id, transport_error, job_id=job.job_id, sequence=1,
+                risk=job.risk,
+            ))
+            return
+        overflowed = []
+        if stdout_state["overflow"].is_set():
+            overflowed.append("stdout")
+        if overflowed:
+            self.emit(self._error(
+                job.request_id,
+                "desktop job worker exceeded bounded " + "/".join(overflowed) + " output",
+                job_id=job.job_id, sequence=1, risk=job.risk,
+            ))
+            return
+        if stdout_state["error"] or stderr_state["error"]:
+            self.emit(self._error(
+                job.request_id,
+                str(stdout_state["error"] or stderr_state["error"]),
+                job_id=job.job_id, sequence=1, risk=job.risk,
+            ))
+            return
+        diagnostics = stderr.strip()
+        if stderr_state["truncated"]:
+            diagnostics = "[stderr truncated] " + diagnostics
         lines = [line for line in stdout.splitlines() if line.strip()]
         if job.process.returncode != 0 or len(lines) != 1:
             message = diagnostics or "desktop job worker exited without one result"
@@ -5423,16 +5585,12 @@ class DesktopProtocolService:
             risk=job.risk, terminal=True,
         ))
 
-    def _cancel_active_job(
-        self, *, request_id: str, requested_job_id: str, status: str,
-    ) -> dict[str, Any]:
-        with self._lock:
-            job = self._job
-            if job is None or job.job_id != requested_job_id:
-                raise ProtocolError(f"job is not active: {requested_job_id}")
-            job.cancelled = True
-            self._job = None
+    @staticmethod
+    def _terminate_job_process(job: _Job) -> None:
+        """Terminate only a child owned by a cancellable read-only job."""
         try:
+            if job.process.poll() is not None:
+                return
             if os.name == "nt":
                 subprocess.run(
                     ["taskkill", "/PID", str(job.process.pid), "/T", "/F"],
@@ -5452,6 +5610,17 @@ class DesktopProtocolService:
                 job.process.wait(timeout=2)
             except (OSError, subprocess.TimeoutExpired):
                 pass
+
+    def _cancel_active_job(
+        self, *, request_id: str, requested_job_id: str, status: str,
+    ) -> dict[str, Any]:
+        with self._lock:
+            job = self._job
+            if job is None or job.job_id != requested_job_id:
+                raise ProtocolError(f"job is not active: {requested_job_id}")
+            job.cancelled = True
+            self._job = None
+        self._terminate_job_process(job)
         return envelope(
             "job_event", {
                 "state": "cancelled", "status": status, "progress": None,
@@ -5634,26 +5803,134 @@ def serve_stdio(
         allow_rpf_writes=allow_rpf_writes,
         audit_path=audit_path, emit=write,
     )
-    for raw_line in input_stream:
-        if len(raw_line.encode("utf-8")) > MAX_REQUEST_BYTES:
-            messages = [service._error(None, "request exceeds the size limit")]
-        else:
+    from allin1_sdk.jsonl_protocol import FrameError, load_request, read_frame
+
+    try:
+        while True:
             try:
-                request = json.loads(raw_line)
-            except json.JSONDecodeError as exc:
-                messages = [service._error(None, f"invalid JSON: {exc.msg}")]
+                raw_line = read_frame(input_stream, MAX_REQUEST_BYTES)
+                if raw_line is None:
+                    break
+                request = load_request(raw_line)
+            except FrameError as exc:
+                messages = [service._error(None, str(exc))]
             else:
                 messages = service.handle(request)
-        for message in messages:
-            write(message)
-        if service.stopping:
-            break
+            for message in messages:
+                write(message)
+            if service.stopping:
+                break
+    finally:
+        # EOF/broken stdout can bypass the explicit shutdown message. Reap only
+        # this service's read-only inspection job, never a synchronous writer.
+        with service._lock:
+            active = service._job.job_id if service._job else None
+        if active is not None:
+            try:
+                service._cancel_active_job(request_id="transport-closed", requested_job_id=active,
+                                           status="Transport closed")
+            except ProtocolError:
+                pass  # The monitor may have completed the job meanwhile.
+
+
+def _worker_json_value(
+    value: object, *, depth: int = 0, remaining: list[int] | None = None,
+    ancestors: set[int] | None = None,
+) -> object:
+    """Make worker output finite before JSON encoding can allocate a giant token."""
+    if remaining is None:
+        remaining = [_WORKER_JSON_NODE_BUDGET]
+    if ancestors is None:
+        ancestors = set()
+    remaining[0] -= 1
+    if remaining[0] < 0:
+        raise ValueError("job worker result exceeds node budget")
+    if depth > 8:
+        return "[depth limit]"
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value.bit_length() > 4_096:
+            raise ValueError("job worker result integer exceeds size budget")
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else "[non-finite number]"
+    if isinstance(value, str):
+        return value[:_MAX_STRING]
+    if isinstance(value, Path):
+        return str(value)[:_MAX_STRING]
+    if isinstance(value, dict):
+        identity = id(value)
+        if identity in ancestors:
+            return "[circular reference]"
+        ancestors.add(identity)
+        try:
+            return {
+                str(key)[:256]: _worker_json_value(
+                    item, depth=depth + 1, remaining=remaining, ancestors=ancestors,
+                )
+                for key, item in itertools.islice(value.items(), 500)
+            }
+        finally:
+            ancestors.remove(identity)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        identity = id(value)
+        if identity in ancestors:
+            return "[circular reference]"
+        ancestors.add(identity)
+        try:
+            return [
+                _worker_json_value(item, depth=depth + 1, remaining=remaining, ancestors=ancestors)
+                for item in itertools.islice(value, 2_000)
+            ]
+        finally:
+            ancestors.remove(identity)
+    return f"[unsupported {type(value).__name__}]"
+
+
+def _serialize_worker_response(response: dict[str, Any]) -> str | None:
+    """Encode one worker result without first constructing an unbounded JSON string."""
+    encoded_chunks: list[str] = []
+    byte_count = 1  # The line-feed added by the caller is part of the pipe cap.
+    try:
+        chunks = json.JSONEncoder(
+            ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+        ).iterencode(response)
+        for chunk in chunks:
+            chunk_bytes = len(chunk.encode("utf-8"))
+            if byte_count + chunk_bytes > MAX_JOB_WORKER_STDOUT_BYTES:
+                return None
+            encoded_chunks.append(chunk)
+            byte_count += chunk_bytes
+    except (TypeError, ValueError, UnicodeError):
+        return None
+    return "".join(encoded_chunks) + "\n"
+
+
+def _write_worker_response(output_stream: IO[str], response: dict[str, Any]) -> bool:
+    serialized = _serialize_worker_response(response)
+    if serialized is None:
+        response = {
+            "ok": False,
+            "risk": "unclassified",
+            "error": "job worker result exceeds bounded output limit",
+        }
+        serialized = _serialize_worker_response(response)
+        if serialized is None:  # A local cap must never make the pipe malformed.
+            raise RuntimeError("job worker output limit is too small for an error response")
+    output_stream.write(serialized)
+    output_stream.flush()
+    return response["ok"] is True
 
 
 def run_job_worker(input_stream: IO[str], output_stream: IO[str]) -> int:
     """Run one isolated read-only job for a persistent sidecar."""
     try:
-        request = json.loads(input_stream.readline())
+        from allin1_sdk.jsonl_protocol import load_request, read_frame
+        raw_line = read_frame(input_stream, MAX_REQUEST_BYTES)
+        if raw_line is None:
+            raise ProtocolError("job worker request is missing")
+        request = load_request(raw_line)
         if not isinstance(request, dict):
             raise ProtocolError("job worker request must be an object")
         operation = request.get("operation")
@@ -5664,16 +5941,19 @@ def run_job_worker(input_stream: IO[str], output_stream: IO[str]) -> int:
         if risk != "read_only" or request.get("allow_game_writes") is not False:
             raise ProtocolError("job worker accepts read-only work only", risk=risk)
         _risk, result = dispatch_operation(str(operation), payload)
-        response = {"ok": True, "risk": risk, "result": result}
+        response = {"ok": True, "risk": risk, "result": _worker_json_value(result)}
     except ProtocolError as exc:
+        try:
+            details = _worker_json_value(exc.details)
+        except ValueError:
+            details = "[bounded error details]"
         response = {
             "ok": False, "risk": exc.risk, "error": str(exc),
-            "details": _bounded(exc.details),
+            "details": details,
         }
     except (json.JSONDecodeError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        response = {"ok": False, "risk": "unclassified", "error": str(exc)}
-    output_stream.write(
-        json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n"
-    )
-    output_stream.flush()
-    return 0 if response["ok"] else 1
+        response = {
+            "ok": False, "risk": "unclassified",
+            "error": _worker_json_value(str(exc)),
+        }
+    return 0 if _write_worker_response(output_stream, response) else 1

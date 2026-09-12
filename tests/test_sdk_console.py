@@ -69,8 +69,15 @@ def test_progressive_command_option_and_alias_suggestions(tmp_path):
         "inspect-vehicle-tuning ",
         "inspect-weapon-animation ", "inspect-weapon-authoring ",
         "inspect-weapon-calibration ", "inspect-weapon-shop ",
-        "inspect-workbench ",
+        "inspect-weapon-sights ",
     ]
+    # The 32-entry cap must truncate the sorted catalog, not hide newly added
+    # commands or drop the remaining command from a larger request.
+    expanded = suggestions_for("ins", cwd=tmp_path, limit=64)
+    assert [item.replacement for item in expanded][:32] == [
+        item.replacement for item in commands
+    ]
+    assert "inspect-workbench " in [item.replacement for item in expanded]
 
     options = suggestions_for("inspect-rpf --g", cwd=tmp_path)
     assert options[0].replacement == "inspect-rpf --gta-path "

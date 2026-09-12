@@ -61,6 +61,16 @@ def test_invalid_explicit_regression_fixture_fails_instead_of_skipping(key: str,
         _regression_paths({key: value})
 
 
+def test_private_regression_never_discovers_default_paths_without_opt_in(tmp_path, monkeypatch):
+    import sys
+    for key in ("SDK_SUPPRESSOR_REGRESSION_PACKAGE", "SDK_SUPPRESSOR_REGRESSION_GTA"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(sys.modules[__name__], "_regression_paths",
+                        lambda *_: pytest.fail("Private paths were inspected without opt-in"))
+    with pytest.raises(pytest.skip.Exception, match="explicit package and GTA"):
+        test_private_suppressor_package_is_an_end_to_end_regression_fixture(tmp_path, monkeypatch)
+
+
 def _entry(name: str, number: int) -> RpfEntryRecord:
     return RpfEntryRecord(
         id=f"entry-{number}", archive_path="x64/models/content.rpf",
@@ -321,6 +331,10 @@ destination = "scripts/Test/allin1.content.json"
 def test_private_suppressor_package_is_an_end_to_end_regression_fixture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    if not all(os.environ.get(key) for key in (
+        "SDK_SUPPRESSOR_REGRESSION_PACKAGE", "SDK_SUPPRESSOR_REGRESSION_GTA",
+    )):
+        pytest.skip("private regression requires explicit package and GTA fixture opt-ins")
     package, source_game = _regression_paths(dict(os.environ))
     if not package.is_file() or not source_game.is_dir():
         pytest.skip("private suppressor fixture and Enhanced GTA installation are local-only; set SDK_SUPPRESSOR_REGRESSION_PACKAGE and SDK_SUPPRESSOR_REGRESSION_GTA")

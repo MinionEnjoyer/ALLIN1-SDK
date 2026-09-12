@@ -69,11 +69,11 @@ it("shows truncation and missing endpoints instead of implying the graph is comp
 });
 
 it.each([
-  { ...graph, read_only: false },
-  { ...graph, nodes: [{ ...graph.nodes[0], position: [NaN, 1, 2] }] },
-  { ...graph, nodes: [{ ...graph.nodes[0], vertices: [[1e10, 0, 0]] }] },
-  { ...graph, nodes: [graph.nodes[0], graph.nodes[0]] },
-])("rejects malformed relationship evidence", malformed => {
+  ["writable graph", { ...graph, read_only: false }],
+  ["non-finite position", { ...graph, nodes: [{ ...graph.nodes[0], position: [NaN, 1, 2] }] }],
+  ["out-of-range vertex", { ...graph, nodes: [{ ...graph.nodes[0], vertices: [[1e10, 0, 0]] }] }],
+  ["duplicate nodes", { ...graph, nodes: [graph.nodes[0], graph.nodes[0]] }],
+])("rejects malformed relationship evidence: %s", (_case, malformed) => {
   render(<NativeRelationships graph={malformed} locked={false} />);
   expect(screen.getByRole("alert")).toHaveTextContent("invalid evidence");
   expect(screen.queryByRole("img")).not.toBeInTheDocument();

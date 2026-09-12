@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 from scripts.package_release import _copy_authoring_resources, _validate_example_sources
-from allin1_sdk.release_paths import no_links, tree_files
+from allin1_sdk.release_paths import filesystem_path, no_links, tree_files
 
 
 def stage_resources(root: Path, rpf_dir: Path, build_identity: Path | None = None,
@@ -30,39 +30,59 @@ def stage_resources(root: Path, rpf_dir: Path, build_identity: Path | None = Non
         target = no_links(destination).absolute()
         if not target.is_relative_to(root / "build") or target == root / "build":
             raise ValueError("Diagnostic resources must be inside this checkout's build directory")
-        if target.exists():
+        if filesystem_path(target).exists():
             raise FileExistsError("Diagnostic staging never replaces existing resources")
     no_links(target)
-    if target.exists():
+    target_disk = filesystem_path(target)
+    if target_disk.exists():
         tree_files(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.resolve() != target or target.is_symlink():
+    target_disk.parent.mkdir(parents=True, exist_ok=True)
+    if target_disk.resolve() != target_disk or target_disk.is_symlink():
         raise ValueError("Desktop resource staging directory must not redirect elsewhere")
-    with tempfile.TemporaryDirectory(prefix=".stage-resources-", dir=target.parent) as directory:
-        staged = Path(directory)
+    with tempfile.TemporaryDirectory(
+        prefix=".stage-resources-", dir=target_disk.parent,
+    ) as directory:
+        staged = filesystem_path(Path(directory))
         for name in ("assets", "sdk"):
-            shutil.copytree(root / name, staged / name)
+            shutil.copytree(filesystem_path(root / name), filesystem_path(staged / name))
         for name in ("README.md", "LICENSE"):
-            shutil.copy2(root / name, staged / name)
+            shutil.copy2(filesystem_path(root / name), filesystem_path(staged / name))
         _copy_authoring_resources(root, staged)
-        shutil.copytree(rpf_dir, staged / "tools" / "RpfPatcher")
+        shutil.copytree(
+            filesystem_path(rpf_dir), filesystem_path(staged / "tools" / "RpfPatcher"),
+        )
         if build_identity is not None:
-            shutil.copy2(no_links(build_identity), staged / "build-identity.json")
+            shutil.copy2(
+                filesystem_path(no_links(build_identity)),
+                filesystem_path(staged / "build-identity.json"),
+            )
         license_path = no_links(root / "desktop/src-tauri/windows/TAURI-LICENSE-MIT")
-        (staged / "licenses").mkdir()
-        shutil.copy2(license_path, staged / "licenses/tauri-installer-MIT.txt")
+        filesystem_path(staged / "licenses").mkdir()
+        shutil.copy2(
+            filesystem_path(license_path),
+            filesystem_path(staged / "licenses/tauri-installer-MIT.txt"),
+        )
         _validate_example_sources(staged)
         manifest = {
-            path.relative_to(staged).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in sorted(staged.rglob("*")) if path.is_file()
+            relative: hashlib.sha256(path.read_bytes()).hexdigest()
+            for relative, path in sorted(tree_files(staged).items())
         }
-        (staged / "resource-checksums.json").write_text(
+        filesystem_path(staged / "resource-checksums.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8",
         )
         # This exact, validated, generated directory is replaced to remove stale payloads.
-        if target.exists():
-            shutil.rmtree(target)
-        shutil.copytree(staged, target)
+        # Re-check at the publication boundary: a diagnostic target must remain
+        # exclusive for the entire staging operation.
+        no_links(target)
+        if destination is not None:
+            if not target.is_relative_to(root / "build") or target == root / "build":
+                raise ValueError("Diagnostic resources must be inside this checkout's build directory")
+            if target_disk.exists():
+                raise FileExistsError("Diagnostic staging never replaces existing resources")
+        if destination is None and target_disk.exists():
+            tree_files(target)
+            shutil.rmtree(target_disk)
+        shutil.copytree(staged, target_disk)
     return target
 
 

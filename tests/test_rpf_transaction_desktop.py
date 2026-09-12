@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from allin1_sdk import rpf_transaction_desktop as desktop, rpf_change_set_desktop, rpf_tools
+from allin1_sdk.release_paths import filesystem_path
 from allin1_sdk.rpf_tools import RpfExplorerService
 from test_rpf_tools import _transaction_service
 
@@ -61,15 +62,58 @@ def test_reviewed_lock_cleanup_retains_bytes_and_leaves_transaction_unchanged(st
     before = [path.read_bytes() for path in (archive, receipt, backup)]
     raw = lock.read_bytes()
     reviewed = desktop.review(request)
-    assert lock.exists() and not Path(reviewed["lock_evidence"]["path"]).exists()
+    assert lock.exists() and not filesystem_path(Path(reviewed["lock_evidence"]["path"])).exists()
     assert reviewed["lock_write_required"] and not reviewed["archive_write_required"]
     result = desktop.apply(confirm_lock(request))
     assert not lock.exists() and result["session"]["archive_lock"] is None
-    assert Path(result["lock_evidence"]["path"]).read_bytes() == raw
+    assert filesystem_path(Path(result["lock_evidence"]["path"])).read_bytes() == raw
     assert result["lock_write_performed"] and not result["archive_write_performed"]
     assert not result["receipt_write_performed"] and not result["game_write_performed"]
     assert before == [path.read_bytes() for path in (archive, receipt, backup)]
     assert desktop.review({**request, "action": "rollback"})["archive_write_required"]
+
+
+def test_lock_cleanup_retains_evidence_beyond_legacy_windows_path_limit(
+    planned, tmp_path, monkeypatch,
+):
+    if os.name != "nt":
+        pytest.skip("Reviewed file-handle cleanup is Windows-only")
+    request, archive, _, _ = planned
+    # Keep the receipt and backup below the legacy boundary, but make the
+    # derived cleared-lock evidence path exceed it.  This must exercise the
+    # same long-path adapter used by CreateFileW, not a shorter fixture.
+    padding = "l" * max(1, 150 - len(str(tmp_path)))
+    monkeypatch.setattr(desktop, "user_data_root", lambda: tmp_path / padding)
+    applied = desktop.apply(confirmed(request))
+    session = applied["session"]
+    lock = archive.with_name(f".{archive.name}.allin1.lock")
+    raw = json.dumps({
+        "pid": 99999999, "plan_id": session["plan_id"],
+        "created_at": "2026-09-04T00:00:00Z",
+    }).encode("utf-8")
+    lock.write_bytes(raw)
+    monkeypatch.setattr(RpfExplorerService, "_pid_is_running", staticmethod(lambda _pid: False))
+    clear = {**rollback_request(applied, request), "action": "clear_lock"}
+    reviewed = desktop.review(clear)
+    retained = Path(reviewed["lock_evidence"]["path"])
+    retained_disk = filesystem_path(retained)
+    assert len(str(retained)) > 260
+    assert not retained_disk.exists()
+
+    result = desktop.apply(confirm_lock(clear))
+    assert not lock.exists()
+    assert str(retained) == result["lock_evidence"]["path"]
+    assert retained_disk.read_bytes() == raw
+    assert hashlib.sha256(retained_disk.read_bytes()).hexdigest() == result["lock_evidence"]["sha256"]
+
+
+def test_lock_evidence_refuses_unc_before_filesystem_link_walk(monkeypatch):
+    recovery = desktop.rpf_lock_recovery
+    monkeypatch.setattr(
+        recovery, "no_links", lambda _path: pytest.fail("UNC path was traversed"),
+    )
+    with pytest.raises(ValueError, match="local Windows volume"):
+        recovery.evidence_path(Path(r"\\server\share\reviewed-lock.json"))
 
 
 @pytest.mark.parametrize("mutation", ["confirmation", "digest", "lock", "owner", "plan", "receipt", "backup", "archive", "game", "scope", "evidence"])
@@ -87,7 +131,7 @@ def test_lock_cleanup_refuses_stale_or_unconfirmed_inputs(stale_lock, monkeypatc
     elif mutation == "archive": archive.write_bytes(b"changed")
     elif mutation == "game": monkeypatch.setattr(rpf_tools, "_running_gta_processes", lambda: ("GTA5_Enhanced.exe",))
     elif mutation == "scope": payload["authorized_root"] = str(archive.parent.parent)
-    else: Path(desktop.review(request)["lock_evidence"]["path"]).write_bytes(b"unrelated evidence")
+    else: filesystem_path(Path(desktop.review(request)["lock_evidence"]["path"])).write_bytes(b"unrelated evidence")
     before = archive.read_bytes(), lock.read_bytes()
     with pytest.raises((ValueError, RuntimeError, OSError)):
         desktop.apply(payload)
@@ -108,11 +152,12 @@ def test_cleanup_holds_the_exact_lock_and_retains_evidence_if_delete_fails(stale
     with pytest.raises(OSError, match="injected"):
         desktop.apply(confirm_lock(request))
     retained = Path(desktop.review(request)["lock_evidence"]["path"])
-    assert lock.read_bytes() == raw == retained.read_bytes()
+    retained_disk = filesystem_path(retained)
+    assert lock.read_bytes() == raw == retained_disk.read_bytes()
     monkeypatch.setattr(recovery, "_delete_open_file", original)
     # A fresh review can reuse the exact retained bytes; it never overwrites them.
     desktop.apply(confirm_lock(request))
-    assert not lock.exists() and retained.read_bytes() == raw
+    assert not lock.exists() and retained_disk.read_bytes() == raw
 
 
 def test_cleanup_requires_reconciled_receipt(stale_lock):

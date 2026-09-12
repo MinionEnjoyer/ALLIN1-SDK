@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using CodeWalker.GameFiles;
 
 namespace RpfPatcher
@@ -20,17 +22,33 @@ namespace RpfPatcher
 
         static string LoadReadOnlyArchiveKeys(string gtaPath, bool gen9, string archivePath)
         {
-            // OPEN describes the root directory, not every file or child archive.
-            // Real modded update.rpf files can have an OPEN root and still contain
-            // encrypted HUD/Scaleform members. Keep offline fixtures keyless only
-            // when no matching executable was supplied as a game-key context.
             bool hasGameContext = HasArchiveKeyContext(gtaPath, gen9);
-            if (IsUnencryptedRpf(archivePath) && !hasGameContext)
+            bool unencryptedRoot = IsUnencryptedRpf(archivePath);
+            if (unencryptedRoot)
             {
                 // OPEN/NONE authoring archives do not need game encryption keys.
-                // Callers still require a complete, warning-free structure scan;
-                // an encrypted nested archive remains an error without its keys.
-                Console.Error.WriteLine("No game context; reading an unencrypted authoring archive.");
+                // A file named like a GTA executable is not proof it contains
+                // usable keys; this is common for edition-only isolated tooling.
+                // If loading those optional keys fails, continue keyless; the
+                // later structural scan records any encrypted-child failure.
+                if (hasGameContext)
+                {
+                    try
+                    {
+                        GTA5Keys.LoadFromPath(gtaPath, gen9, null);
+                        return "loaded";
+                    }
+                    catch
+                    {
+                        Console.Error.WriteLine(
+                            "No usable game keys; reading an unencrypted authoring archive.");
+                    }
+                }
+                else
+                {
+                    Console.Error.WriteLine(
+                        "No game context; reading an unencrypted authoring archive.");
+                }
                 return "not-required-unencrypted-root";
             }
             GTA5Keys.LoadFromPath(gtaPath, gen9, null);
@@ -41,6 +59,18 @@ namespace RpfPatcher
         {
             return !string.IsNullOrWhiteSpace(gtaPath) && File.Exists(Path.Combine(
                 gtaPath, gen9 ? "GTA5_Enhanced.exe" : "GTA5.exe"));
+        }
+
+        static void RequireCompleteKeylessScan(
+            string keyMode, IReadOnlyCollection<string> warnings)
+        {
+            if (keyMode == "not-required-unencrypted-root"
+                && warnings != null && warnings.Count != 0)
+            {
+                throw new InvalidDataException(
+                    "RPF scan could not be completed without encryption keys: "
+                    + warnings.FirstOrDefault());
+            }
         }
     }
 }

@@ -1,4 +1,4 @@
-# SDK validation for 0.6.4
+# SDK validation for 0.6.5
 
 This is the current validation procedure. [Tauri validation history](tauri-validation.md)
 and [the dated hardening audit](release-hardening-2026-09-04.md) preserve earlier
@@ -18,6 +18,49 @@ Coverage remains 80%. Report required skips and warnings separately, including
 privileged-link or private-fixture cases. Retired Tk widget tests are removed,
 not counted as passes; domain tests and React/protocol replacements remain.
 Do not lower a threshold or substitute a narrower test selection for the full gate.
+
+## Off-game hardening harness
+
+For one fresh, source-bound aggregate receipt, run the SDK-owned harness from
+this checkout:
+
+```powershell
+python scripts/hardening_harness.py --run-id sdk-hardening-01
+```
+
+It creates exactly one new `build/hardening/<run-id>/` directory (it never
+reuses or deletes one), with command logs, JUnit, coverage, Vitest, CTest and
+the human-readable `AUDIT.md` where those tools are available. The receipt snapshots the complete
+tracked **and untracked** source identity before and after the run, including a
+dirty worktree, and hashes selected tool executables.  A changed source tree,
+missing/empty/malformed report, duplicate or unnamed test, failing result, or
+unreconciled report is not accepted merely because a process exited zero.
+
+The Python layer runs the complete `tests` collection at the existing 80%
+branch-coverage threshold. React requires the TypeScript production build and
+each entry in `desktop/module-happy-paths.json` to map to exactly one passing
+Vitest assertion. Rust records every named libtest result and its executable;
+the configured RpfPatcher custom .NET runner records its unique positive named
+check count, and C++ uses the project’s explicit off-game test options and
+CTest only when their configured Windows fixtures and tools are available. The
+source Tk-retirement audit is also included. Selected tools are hashed before
+and after the run; a changed tool is a failure.
+
+The default is deliberately source-only: it removes inherited native/Blender
+test opt-ins and never launches GTA, reads a retail install, installs/downloads
+anything, writes real user state, packages an installer, or emits release
+artifacts. Use the explicit prepared-fixture mode only after provisioning the
+listed native test tools yourself:
+
+```powershell
+python scripts/hardening_harness.py --run-id sdk-native-01 --real-tools --blender <pinned-blender.exe>
+```
+
+Missing prerequisites and skipped required evidence make the aggregate result
+`INCOMPLETE`; a required command/test/evidence failure is `FAIL`. Either exits
+nonzero. A `PASS` is still only off-game source validation: the receipt always
+labels package/installer/native-installer lifecycle/GTA/live-game/user-state
+acceptance as `NOT TESTED` and `release_ready: false`.
 
 React qualification requires all native workflows:
 
@@ -136,5 +179,5 @@ binary/dependency hashes and independently anchored session identity. Keep SDK
 previews and Reactor in-game rendering in their distinct acceptance suites.
 Report package integrity, automated tests and live acceptance separately.
 
-See [release guide](release-0.6.4.md), [protocol](desktop-protocol-v1.md) and
+See [release guide](release-0.6.5.md), [protocol](desktop-protocol-v1.md) and
 [feature-parity ledger](tauri-feature-parity.md).

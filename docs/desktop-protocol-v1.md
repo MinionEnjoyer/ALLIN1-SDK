@@ -23,6 +23,18 @@ Requests are limited to 256 KiB. IDs are limited to 128 conservative ASCII
 characters. Arguments are limited to 128 NUL-free strings. Unknown operations,
 versions, fields, commands, and risks fail closed.
 
+Agent and desktop JSONL inputs reject duplicate keys, non-finite numbers,
+invalid Unicode, integers above 128 digits, and nesting beyond 64 levels.
+Oversized input frames are drained with bounded reads before accepting the next
+request. The native desktop reader limits each complete UTF-8 response frame
+to 16 MiB; malformed, incomplete, or oversized responses disconnect the
+transport rather than silently truncating results.
+
+Closing the Python transport reaps its owned read-only inspection job. A lost
+native connection does not authorize killing or replacing a still-running
+sidecar: it might be finishing a write. Replacement is refused until that child
+has exited. Failed startup handshakes clean up only their unadmitted child.
+
 ## Negotiation
 
 The first message must be `handshake` and list the client's supported versions.

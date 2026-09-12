@@ -22,7 +22,12 @@ it.each(["matrix","error","status","hash","missing"])("rejects malformed %s evid
   if(kind==="missing")value.child_to_parent_matrix=null;
   expect(validAssemblyEvidence([value])).toBe(false);
 });
-it.each([[0,0,0,0],[0,0,0,2],[0,0,1],[0,0,NaN,1]])("rejects invalid quaternion %j",(...rotation)=>{
+it.each([
+  { caseName: "zero length", rotation: [0,0,0,0] },
+  { caseName: "non-unit length", rotation: [0,0,0,2] },
+  { caseName: "wrong component count", rotation: [0,0,1] },
+  { caseName: "non-finite component", rotation: [0,0,NaN,1] },
+])("rejects invalid quaternion: $caseName",({rotation})=>{
   expect(validAssemblyEvidence([{...row(),rotation}])).toBe(false);
 });
 it("retains a declared rotation and labels its axes",()=>{

@@ -28,6 +28,12 @@ from scripts import candidate_test_evidence
 
 PLUGIN_NAMES = {"System.dll", "modern-wizard.bmp", "nsDialogs.dll", "nsis_tauri_utils.dll", "StartMenu.dll", "NSISdl.dll"}
 REQUIRED_GATES = frozenset({"python", "react", "rust", "native-rpf", "frontend"})
+PYTHON_COVERAGE_PARENT_ENV = (
+    # coverage.py's documented process auto-start/config handoff variables.
+    # A nested candidate pytest gate starts its own --cov session instead.
+    "COVERAGE_PROCESS_START", "COVERAGE_PROCESS_CONFIG",
+    "COVERAGE_RCFILE", "COVERAGE_FORCE_CONFIG",
+)
 
 
 def external_executable(path: Path) -> Path:
@@ -203,6 +209,19 @@ def run_gate(
     exit_code = -1
     environment = dict(os.environ, PYTHONPATH=str(root / "src"))
     environment.pop("PYTEST_ADDOPTS", None)
+    coverage_data = None
+    if name == "python":
+        # Do not let a nested disposable gate append to or overwrite a parent
+        # aggregate's data file. pytest-cov is started only by the canonical
+        # --cov command above; inherited coverage.py auto-start/config state is
+        # neither needed nor safe for this independent measurement.
+        coverage_data = contained(identity_path.parent, "gate-python.coverage")
+        no_links(coverage_data)
+        if coverage_data.exists():
+            raise FileExistsError("Candidate Python coverage data already exists")
+        for key in PYTHON_COVERAGE_PARENT_ENV:
+            environment.pop(key, None)
+        environment["COVERAGE_FILE"] = str(coverage_data)
     with log_path.open("x", encoding="utf-8") as stream:
         stream.write(f"candidate={identity['build_id']}\ngate={name}\n")
         stream.flush()
@@ -268,6 +287,11 @@ def run_gate(
         record["launcher"] = {
             "path": str(launcher_path), "sha256": sha256(launcher_path),
             "bytes": launcher_path.stat().st_size,
+        }
+    if coverage_data is not None and coverage_data.is_file():
+        record["coverage_data"] = {
+            "file": coverage_data.name, "sha256": sha256(coverage_data),
+            "bytes": coverage_data.stat().st_size,
         }
     write_new(gate_path, record)
     if record["status"] != "PASS":

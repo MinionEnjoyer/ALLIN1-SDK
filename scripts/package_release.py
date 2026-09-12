@@ -11,7 +11,7 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path
-from allin1_sdk.release_paths import no_links, tree_files
+from allin1_sdk.release_paths import filesystem_path, no_links, tree_files
 from allin1_sdk.release_identity import require_reviewed_source
 from allin1_sdk.self_update import inspect_release_archive
 
@@ -137,15 +137,17 @@ def _copy_authoring_resources(root: Path, app_dir: Path) -> None:
     for relative in _ROOT_DOCUMENTATION:
         source = no_links(root / relative)
         destination = no_links(app_dir / relative)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        filesystem_path(destination).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(filesystem_path(source), filesystem_path(destination))
 
     for relative_root in _AUTHORING_RESOURCE_TREES:
         source_root = root / relative_root
         if not source_root.is_dir():
             raise ValueError(f"SDK authoring resource tree is missing: {source_root}")
-        for source in sorted(source_root.rglob("*")):
-            relative = source.relative_to(source_root)
+        for relative_text, source in sorted(
+            tree_files(source_root).items(), key=lambda item: item[0].casefold(),
+        ):
+            relative = Path(relative_text)
             if any(
                 part.casefold() in _AUTHORING_RESOURCE_IGNORED_PARTS
                 for part in relative.parts
@@ -158,8 +160,8 @@ def _copy_authoring_resources(root: Path, app_dir: Path) -> None:
             if source.suffix.casefold() in _AUTHORING_RESOURCE_IGNORED_SUFFIXES:
                 continue
             target = app_dir / relative_root / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+            filesystem_path(target).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(filesystem_path(source), filesystem_path(target))
 
 
 def _copy_runtime(root: Path, app_dir: Path, rpf_dir: Path) -> None:

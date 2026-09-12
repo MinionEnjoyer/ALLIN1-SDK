@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from allin1_sdk.agent_api import command_catalog
 from allin1_sdk.cli import main
+from allin1_sdk import rpf_change_set
 from allin1_sdk.rpf_change_set import RpfChangeSet
 from allin1_sdk.rpf_tools import RpfArchiveRecord, RpfIndex
 
@@ -154,6 +155,65 @@ def test_rpf_change_set_rejects_archive_and_document_drift(tmp_path):
     with pytest.raises(ValueError, match="changed while compiling"):
         RpfChangeSet.compile_plan(change_set, service, tmp_path / "plan.json")
     assert not (tmp_path / "plan.json").exists()
+
+
+def test_rpf_change_set_refuses_same_size_inputs_changed_during_hashing(tmp_path, monkeypatch):
+    """A pre-hash size check cannot bind a file changed during the hash."""
+    index = _index(tmp_path)
+    original_hash = rpf_change_set._sha256_file
+
+    def replace_after_hash(path):
+        digest = original_hash(path)
+        selected = Path(path)
+        if selected == index.source:
+            selected.write_bytes(b"x" * selected.stat().st_size)
+        return digest
+
+    monkeypatch.setattr(rpf_change_set, "_sha256_file", replace_after_hash)
+    with pytest.raises(ValueError, match="source archive changed while reading"):
+        RpfChangeSet.create(index, tmp_path / "changes.json")
+
+    # Start a fresh document, then prove staged payload evidence gets the same
+    # containment instead of recording the old digest against the new bytes.
+    monkeypatch.setattr(rpf_change_set, "_sha256_file", original_hash)
+    index.source.write_bytes(b"RPF7 source archive")
+    change_set = RpfChangeSet.create(index, tmp_path / "changes.json")
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"payload")
+
+    def replace_payload_after_hash(path):
+        digest = original_hash(path)
+        selected = Path(path)
+        if selected == payload:
+            selected.write_bytes(b"x" * selected.stat().st_size)
+        return digest
+
+    monkeypatch.setattr(rpf_change_set, "_sha256_file", replace_payload_after_hash)
+    with pytest.raises(ValueError, match="payload changed while reading"):
+        RpfChangeSet.stage(change_set, "add", "new.bin", payload=payload)
+    assert RpfChangeSet.describe(change_set)["actions"] == []
+
+
+def test_rpf_change_set_mutation_binds_before_and_after_parsing(tmp_path, monkeypatch):
+    index = _index(tmp_path)
+    change_set = RpfChangeSet.create(index, tmp_path / "changes.json")
+    original_read = RpfChangeSet._read
+
+    def read_then_replace(path):
+        source, document = original_read(path)
+        # `_read` has already returned the old parsed object.  Keep the file
+        # length identical so only the post-parse content binding can catch it.
+        source.write_bytes(source.read_bytes().replace(
+            b"rpf_change_set", b"rpf_change_sEt", 1,
+        ))
+        return source, document
+
+    monkeypatch.setattr(RpfChangeSet, "_read", staticmethod(read_then_replace))
+    with pytest.raises(ValueError, match="changed while opening it"):
+        RpfChangeSet.stage(change_set, "mkdir", "new")
+
+    assert b"rpf_change_sEt" in change_set.read_bytes()
+    assert b'"entry": "new"' not in change_set.read_bytes()
 
 
 def test_rpf_change_set_cli_sdk_alias_and_agent_risk(tmp_path, monkeypatch):

@@ -315,6 +315,55 @@ def test_cross_file_post_commit_failure_restores_atomic_snapshot(tmp_path, monke
     assert not list((workspace.root / "history").iterdir())
 
 
+def test_same_size_external_edit_after_snapshot_is_not_overwritten(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    authored = workspace.source / "weapons.meta"
+    original_snapshot = workspace._core.snapshot
+
+    def snapshot_then_external_edit(*args, **kwargs):
+        history = original_snapshot(*args, **kwargs)
+        # Preserve the byte count to cover the gap that a filename/size-only
+        # inventory cannot see.  The in-memory tree still contains WT_AUTHOR.
+        external = authored.read_bytes().replace(b"WT_AUTHOR", b"WT_RACERX")
+        assert len(external) == len(authored.read_bytes())
+        authored.write_bytes(external)
+        return history
+
+    monkeypatch.setattr(workspace._core, "snapshot", snapshot_then_external_edit)
+    with pytest.raises(ValueError, match="changed while preparing the edit"):
+        workspace.update("WEAPON_AUTHOR", {"weapon.statName": "WT_SDK_EDIT"})
+
+    assert b"WT_RACERX" in authored.read_bytes()
+    assert b"WT_SDK_EDIT" not in authored.read_bytes()
+    assert workspace.revision == 0
+    assert not list((workspace.root / "history").iterdir())
+
+
+def test_unrelated_external_edit_after_snapshot_rejects_without_rollback(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    authored = workspace.source / "weapons.meta"
+    unrelated = workspace.source / "stream" / "w_pi_author.ydr"
+    original_snapshot = workspace._core.snapshot
+
+    def snapshot_then_external_edit(*args, **kwargs):
+        history = original_snapshot(*args, **kwargs)
+        external = b"external-model:" + b"x" * (
+            unrelated.stat().st_size - len(b"external-model:")
+        )
+        assert len(external) == unrelated.stat().st_size
+        unrelated.write_bytes(external)
+        return history
+
+    monkeypatch.setattr(workspace._core, "snapshot", snapshot_then_external_edit)
+    with pytest.raises(ValueError, match="changed while preparing the edit"):
+        workspace.update("WEAPON_AUTHOR", {"weapon.statName": "WT_SDK_EDIT"})
+
+    assert unrelated.read_bytes().startswith(b"external-model:")
+    assert b"WT_SDK_EDIT" not in authored.read_bytes()
+    assert workspace.revision == 0
+    assert not list((workspace.root / "history").iterdir())
+
+
 def test_weapon_semantic_guards_reject_without_mutation(tmp_path):
     workspace = _workspace(tmp_path)
     ammo_before = (workspace.source / "ammo.meta").read_bytes()

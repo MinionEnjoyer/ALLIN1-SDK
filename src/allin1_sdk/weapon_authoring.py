@@ -1186,6 +1186,7 @@ class WeaponAuthoringWorkspace:
     def _clone_weapon_bundle_locked(
         self, plan: WeaponClonePlan,
     ) -> WeaponAuthoringResult:
+        state_before = self.state_sha256()
         scan, before_project = self._scan_project()
         spec = plan.spec
         donor = self._unique_weapon(scan, spec.donor_weapon)
@@ -1293,6 +1294,7 @@ class WeaponAuthoringWorkspace:
             trees=trees,
             changes=tuple(changes),
             before_project=before_project,
+            expected_state_sha256=state_before,
             verify=lambda after_scan: self._verify_weapon_bundle_clone(
                 after_scan, plan, originals,
             ),
@@ -1327,7 +1329,7 @@ class WeaponAuthoringWorkspace:
         self, weapon_name: str, template_weapon: str, source: str | None, *,
         review_only: bool = False,
     ) -> WeaponAuthoringResult | dict[str, Any]:
-        state_before = self.state_sha256() if review_only else ""
+        state_before = self.state_sha256()
         scan, before_project = self._scan_project()
         weapon = self._unique_weapon(scan, weapon_name)
         template = self._animation_identity(scan, template_weapon)
@@ -1403,6 +1405,7 @@ class WeaponAuthoringWorkspace:
             trees={selected_source: tree},
             changes=tuple(changes),
             before_project=before_project,
+            expected_state_sha256=state_before,
             verify=lambda after_scan: self._verify_animation_clone(
                 after_scan,
                 weapon.name,
@@ -1442,7 +1445,7 @@ class WeaponAuthoringWorkspace:
         self, weapon_name: str, updates: dict[str, Any], source: str | None, *,
         review_only: bool = False,
     ) -> WeaponAuthoringResult | dict[str, Any]:
-        state_before = self.state_sha256() if review_only else ""
+        state_before = self.state_sha256()
         unknown = sorted(set(updates) - set(EDITABLE_SHOP_FIELDS))
         if unknown:
             raise ValueError(
@@ -1485,6 +1488,7 @@ class WeaponAuthoringWorkspace:
             trees={current.source: tree},
             changes=tuple(changes),
             before_project=before_project,
+            expected_state_sha256=state_before,
             verify=lambda after_scan: self._verify_shop_values(
                 after_scan, current.weapon, current.source, changed,
             ),
@@ -1540,7 +1544,7 @@ class WeaponAuthoringWorkspace:
         acknowledge_shared: bool,
         review_only: bool = False,
     ) -> WeaponAuthoringResult | dict[str, Any]:
-        state_before = self.state_sha256() if review_only else None
+        state_before = self.state_sha256()
         unknown = sorted(set(updates) - set(EDITABLE_FIELDS))
         if unknown:
             raise ValueError("Unsupported weapon authoring fields: " + ", ".join(unknown))
@@ -1657,6 +1661,7 @@ class WeaponAuthoringWorkspace:
             trees=trees,
             changes=tuple(changes),
             before_project=before_project,
+            expected_state_sha256=state_before,
             verify=lambda after_scan: self._verify_weapon_values(
                 after_scan, current.weapon, changed,
             ),
@@ -1717,7 +1722,7 @@ class WeaponAuthoringWorkspace:
         acknowledge_shared: bool,
         review_only: bool = False,
     ) -> WeaponAuthoringResult | dict[str, Any]:
-        state_before = self.state_sha256() if review_only else ""
+        state_before = self.state_sha256()
         unknown = sorted(set(updates) - set(EDITABLE_COMPONENT_FIELDS))
         if unknown:
             raise ValueError(
@@ -1765,6 +1770,7 @@ class WeaponAuthoringWorkspace:
             trees={current.source: tree},
             changes=tuple(changes),
             before_project=before_project,
+            expected_state_sha256=state_before,
             verify=lambda after_scan: self._verify_component_values(
                 after_scan, current.component, changed,
             ),
@@ -1809,7 +1815,7 @@ class WeaponAuthoringWorkspace:
         updates: dict[str, Any],
         *, review_only: bool = False,
     ) -> WeaponAuthoringResult | dict[str, Any]:
-        state_before = self.state_sha256() if review_only else ""
+        state_before = self.state_sha256()
         unknown = sorted(set(updates) - set(ATTACHMENT_FIELDS))
         if unknown:
             raise ValueError("Unsupported attachment fields: " + ", ".join(unknown))
@@ -1874,6 +1880,7 @@ class WeaponAuthoringWorkspace:
             trees={link.source: tree},
             changes=tuple(changes),
             before_project=before_project,
+            expected_state_sha256=state_before,
             verify=lambda after_scan: self._verify_attachment(
                 after_scan, link.weapon_name, link.component_name, changed,
             ),
@@ -1972,14 +1979,33 @@ class WeaponAuthoringWorkspace:
         trees: dict[str, etree._ElementTree],
         changes: tuple[dict[str, str], ...],
         before_project: WeaponAuthoringProject,
+        expected_state_sha256: str,
         verify: Any,
         operation: str,
         manifest_created_records: tuple[dict[str, str], ...] = (),
     ) -> WeaponAuthoringResult:
+        if self.state_sha256() != expected_state_sha256:
+            raise ValueError("Weapon workspace changed while preparing the edit; review again")
         history = self._core.snapshot(
             subject, tuple(trees), changes, operation=operation,
         )
         previous_manifest = dict(self.manifest)
+        # This check happens before any source write.  It must stay outside the
+        # rollback handler below: restoring this snapshot after detecting an
+        # external edit would itself overwrite the edit we are trying to keep.
+        try:
+            record = self._core.history_record(history)
+            expected_hashes = record.get("sha256")
+            if (self.state_sha256() != expected_state_sha256
+                    or not isinstance(expected_hashes, dict) or any(
+                not isinstance(expected_hashes.get(relative), str)
+                or _file_sha256(self._core.member(relative)) != expected_hashes[relative]
+                for relative in trees
+            )):
+                raise ValueError("Weapon workspace changed while preparing the edit; review again")
+        except Exception:
+            shutil.rmtree(history, ignore_errors=True)
+            raise
         try:
             self._core.commit_trees(trees)
             after_scan, after_project = self._scan_project()

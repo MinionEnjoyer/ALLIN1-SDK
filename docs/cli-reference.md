@@ -30,6 +30,8 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk build-axle-oiv` | Build a verified Legacy OIV or Enhanced OpenRPF fallback archive. | request_json, --identity-store, --output / -o, --acknowledge-edit |
 | `allin1-sdk build-axle-runtime-bundle` | Build ready runtime targets into a new atomic staging directory. | config_json, --target, --skeleton-xml, --story-profile, --game-build, --output-dir / -o, --gta-path, --acknowledge-edit |
 | `allin1-sdk build-binary-workspace` | Build a same-size binary asset and bounded changed-range report. | workspace, --output / -o |
+| `allin1-sdk build-component-bundle` | Bundle ordered managed components per edition, preserving independent lifecycles. | --legacy, --enhanced, --id, --name, --version, --output / -o |
+| `allin1-sdk build-edition-bundle` | Build one edition-aware launcher ZIP; never execute OIVs or write to GTA. | --legacy, --enhanced, --source-zip, --id, --name, --version, --output / -o |
 | `allin1-sdk build-gxt2-workspace` | Rebuild and semantically reparse an edited GXT2 text table. | workspace, --output / -o |
 | `allin1-sdk build-map-package` | Build a new validated map DLC and ALLIN1 runtime descriptor package. | source, descriptor, output, --project-root, --gta-path, --edition |
 | `allin1-sdk build-material-workspace` | Compile edited material XML and reparse it before publication. | workspace, --gta-path, --output / -o |
@@ -111,8 +113,9 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk inspect-weapon-authoring` | Inspect a weapon workspace, relationships, and editable values. | workspace, --weapon, --component |
 | `allin1-sdk inspect-weapon-calibration` | Inspect recorded sight tests or compute an unapplied visual proposal. | --payload |
 | `allin1-sdk inspect-weapon-shop` | Inspect a weapon's exact existing storefront record and representations. | workspace, weapon, --source |
+| `allin1-sdk inspect-weapon-sights` | Decode exact package geometry or motion for the offline sight bench (read-only). | --payload |
 | `allin1-sdk inspect-workbench` | Return the Workbench's linked vehicle, weapon, and ped evidence as JSON. | source, --category, --gta-path |
-| `allin1-sdk install-package` | Install a validated manifest, package folder, or bounded ZIP package. | manifest, --gta-path, --acknowledge-write |
+| `allin1-sdk install-package` | Install a validated manifest, package folder, or bounded ZIP package. | manifest, --gta-path, --acknowledge-write, --component |
 | `allin1-sdk layout-rpf-graph` | Apply a deterministic readable tree layout to all graph nodes. | graph, --x-spacing, --y-spacing, --acknowledge-edit |
 | `allin1-sdk layout-rpf-program` | Apply deterministic left-to-right layout to the operation graph. | program, --acknowledge-edit |
 | `allin1-sdk link` | Write a linked integration and install-plan report. | manifest, --output / -o, --allow-failing-report |
@@ -346,7 +349,7 @@ Listing a command here does not authorize execution, imply React UI parity, or q
 | `allin1-sdk validate` | Validate an addon.json and its cross-file links. | manifest |
 | `allin1-sdk validate-map-project` | Validate a declarative map, level, portal, and garage project. | descriptor |
 | `allin1-sdk validate-meta-roundtrip` | Prove parse/serialize/reparse semantic equivalence for authored metadata. | source, --serialized-output, --output / -o |
-| `allin1-sdk validate-package` | Validate a mod.toml, package folder, or bounded ZIP package. | manifest |
+| `allin1-sdk validate-package` | Validate a mod.toml, package folder, or bounded ZIP package. | manifest, --edition |
 | `allin1-sdk validate-package-settings-proposal` | Validate a typed advisory diff against its immutable host request. | request, proposal |
 | `allin1-sdk validate-rpf-graph` | Validate the complete graph tree and every referenced source hash. | graph, --output / -o |
 | `allin1-sdk verify-package-ownership` | Verify receipt-owned files, backups, and RPF entries without mutation. | mod_id, --gta-path |

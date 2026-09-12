@@ -1,8 +1,8 @@
-use crate::protocol::{Envelope, MAX_REQUEST_BYTES};
+use crate::protocol::{Envelope, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,6 +16,69 @@ fn locked<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, String> {
     mutex
         .lock()
         .map_err(|_| "desktop broker lock was poisoned".to_string())
+}
+
+fn reject_unadmitted_child(child: &mut Child, message: &str) -> String {
+    // This child has not been published to a Broker and has received no
+    // request, so cleanup cannot destroy an uncertain user operation.
+    let _ = child.kill();
+    let _ = child.wait();
+    message.into()
+}
+
+fn read_bounded_frame(reader: &mut impl BufRead) -> Result<Option<String>, String> {
+    let mut bytes = Vec::new();
+    loop {
+        let (count, complete) = {
+            let available = reader
+                .fill_buf()
+                .map_err(|error| format!("sidecar stdout failed: {error}"))?;
+            if available.is_empty() {
+                if bytes.is_empty() {
+                    return Ok(None);
+                }
+                return Err("sidecar stdout ended in an unterminated protocol frame".into());
+            }
+            let count = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|index| index + 1)
+                .unwrap_or(available.len());
+            if bytes.len().saturating_add(count) > MAX_RESPONSE_BYTES {
+                return Err(format!(
+                    "sidecar stdout frame exceeds the {} MiB protocol limit",
+                    MAX_RESPONSE_BYTES / 1024 / 1024
+                ));
+            }
+            bytes.extend_from_slice(&available[..count]);
+            (count, bytes.last() == Some(&b'\n'))
+        };
+        reader.consume(count);
+        if complete {
+            bytes.pop();
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+            return String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|error| format!("sidecar stdout is not UTF-8: {error}"));
+        }
+    }
+}
+
+fn drain_to_eof(reader: &mut impl Read) {
+    let mut block = [0; 4096];
+    while matches!(reader.read(&mut block), Ok(count) if count != 0) {}
+}
+
+fn retire_before_replacement(broker: &Broker, request_id: String) -> Result<(), String> {
+    // `alive == false` can mean the protocol reader disconnected while the
+    // child still performs a write. `try_shutdown` makes the child status the
+    // authority and refuses to kill that uncertain writer.
+    if !broker.is_alive() {
+        broker.try_shutdown(request_id)?;
+    }
+    Ok(())
 }
 
 fn validate_build_peer(payload: &Value, expected: &Value, version: &str) -> Result<(), String> {
@@ -130,9 +193,18 @@ impl Broker {
         let mut child = command
             .spawn()
             .map_err(|error| format!("failed to start the ALLIN1 sidecar: {error}"))?;
-        let stdin = child.stdin.take().ok_or("sidecar stdin was not piped")?;
-        let stdout = child.stdout.take().ok_or("sidecar stdout was not piped")?;
-        let stderr = child.stderr.take().ok_or("sidecar stderr was not piped")?;
+        let stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            None => return Err(reject_unadmitted_child(&mut child, "sidecar stdin was not piped")),
+        };
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => return Err(reject_unadmitted_child(&mut child, "sidecar stdout was not piped")),
+        };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => return Err(reject_unadmitted_child(&mut child, "sidecar stderr was not piped")),
+        };
         let pending = Arc::new(Mutex::new(HashMap::<String, SyncSender<Envelope>>::new()));
         let jobs = Arc::new(Mutex::new(HashMap::<String, Channel<Envelope>>::new()));
         let alive = Arc::new(AtomicBool::new(true));
@@ -147,18 +219,16 @@ impl Broker {
         });
 
         let status_app = app.clone();
-        std::thread::Builder::new()
+        let stdout_reader = std::thread::Builder::new()
             .name("allin1-sidecar-stdout".to_string())
             .spawn(move || {
-                let reader = BufReader::new(stdout);
+                let mut reader = BufReader::new(stdout);
                 let mut failure = "ALLIN1 SDK sidecar exited".to_string();
-                for line in reader.lines() {
-                    let line = match line {
-                        Ok(value) => value,
-                        Err(error) => {
-                            failure = format!("ALLIN1 SDK sidecar stdout failed: {error}");
-                            break;
-                        }
+                loop {
+                    let line = match read_bounded_frame(&mut reader) {
+                        Ok(Some(value)) => value,
+                        Ok(None) => break,
+                        Err(error) => { failure = error; break; }
                     };
                     let message = match serde_json::from_str::<Envelope>(&line) {
                         Ok(value) => value,
@@ -203,20 +273,31 @@ impl Broker {
                     }
                 }
                 let _ = status_app.emit("sidecar-status", format!("Sidecar crash: {failure}"));
-            })
-            .map_err(|error| format!("failed to start sidecar reader: {error}"))?;
+                // Once protocol trust is lost the process may still be
+                // writing. Keep draining raw stdout after marking it
+                // unavailable, so it cannot deadlock on a full pipe while the
+                // broker preserves the uncertain outcome.
+                drain_to_eof(&mut reader);
+            });
+        if let Err(error) = stdout_reader {
+            broker.terminate();
+            return Err(format!("failed to start sidecar reader: {error}"));
+        }
 
-        std::thread::Builder::new()
+        let stderr_reader = std::thread::Builder::new()
             .name("allin1-sidecar-stderr".to_string())
             .spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    eprintln!(
-                        "[ALLIN1 sidecar] {}",
-                        line.chars().take(8_192).collect::<String>()
-                    );
+                let mut reader = BufReader::new(stderr);
+                let mut block = [0; 4096];
+                while let Ok(count) = reader.read(&mut block) {
+                    if count == 0 { break; }
+                    eprintln!("[ALLIN1 sidecar] {}", String::from_utf8_lossy(&block[..count]));
                 }
-            })
-            .map_err(|error| format!("failed to start sidecar diagnostics: {error}"))?;
+            });
+        if let Err(error) = stderr_reader {
+            broker.terminate();
+            return Err(format!("failed to start sidecar diagnostics: {error}"));
+        }
 
         Ok(broker)
     }
@@ -371,6 +452,8 @@ impl SidecarManager {
             if current.is_alive() {
                 return Ok(current.clone());
             }
+            retire_before_replacement(current, self.next_id("replacement-shutdown"))?;
+            *slot = None;
         }
         let broker = Broker::spawn(self.app.clone())?;
         let handshake = Envelope::request(
@@ -381,7 +464,15 @@ impl SidecarManager {
                 "supported_versions": [crate::protocol::PROTOCOL_VERSION]
             }),
         );
-        let mut response = broker.request(handshake, Duration::from_secs(8))?;
+        let mut response = match broker.request(handshake, Duration::from_secs(8)) {
+            Ok(response) => response,
+            Err(error) => {
+                // The broker is still private to this handshake attempt. Once
+                // admitted to the manager, uncertain work must use try_shutdown.
+                broker.terminate();
+                return Err(error);
+            }
+        };
         if response.operation == "error" {
             broker.terminate();
             return Err(format!("sidecar handshake failed: {}", response.payload));
@@ -396,7 +487,13 @@ impl SidecarManager {
             broker.terminate();
             return Err("Release shell has no build provenance. Rebuild through the candidate pipeline.".into());
         }
-        *locked(&self.handshake)? = Some(response);
+        match locked(&self.handshake) {
+            Ok(mut retained) => *retained = Some(response),
+            Err(error) => {
+                broker.terminate();
+                return Err(error);
+            }
+        }
         *slot = Some(broker.clone());
         let _ = self.app.emit("sidecar-status", "SDK sidecar connected");
         Ok(broker)
@@ -497,6 +594,7 @@ pub fn validate_command(command: &str, args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod build_identity_tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn running_or_timed_out_requests_and_jobs_block_shutdown() {
@@ -518,5 +616,55 @@ mod build_identity_tests {
         ] {
             assert!(validate_build_peer(&invalid, &expected, "0.6.4").is_err());
         }
+    }
+
+    #[test]
+    fn bounded_reader_handles_eof_multibyte_and_oversize_frames() {
+        let mut multiple = Cursor::new(b"{}\nnext\n");
+        assert_eq!(read_bounded_frame(&mut multiple).unwrap(), Some("{}".into()));
+        assert_eq!(read_bounded_frame(&mut multiple).unwrap(), Some("next".into()));
+        assert_eq!(read_bounded_frame(&mut Cursor::new("{\"name\":\"café\"}\r\n".as_bytes())).unwrap(), Some("{\"name\":\"café\"}".into()));
+        assert_eq!(read_bounded_frame(&mut Cursor::new(Vec::<u8>::new())).unwrap(), None);
+        assert!(read_bounded_frame(&mut Cursor::new(b"{}".to_vec())).is_err());
+        let mut exact = vec![b'x'; MAX_RESPONSE_BYTES - 1];
+        exact.push(b'\n');
+        assert_eq!(read_bounded_frame(&mut Cursor::new(exact)).unwrap().unwrap().len(), MAX_RESPONSE_BYTES - 1);
+        assert!(read_bounded_frame(&mut Cursor::new(vec![b'x'; MAX_RESPONSE_BYTES + 1])).is_err());
+    }
+
+    #[cfg(windows)]
+    fn disconnected_owned_broker() -> Arc<Broker> {
+        use std::os::windows::process::CommandExt;
+        let mut child = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "[Console]::In.ReadLine() | Out-Null"])
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn().unwrap();
+        Arc::new(Broker {
+            stdin: Mutex::new(child.stdin.take().unwrap()),
+            child: Mutex::new(child),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            // Simulates a protocol-reader disconnect while the owned child
+            // remains running and could still be committing a write.
+            alive: Arc::new(AtomicBool::new(false)),
+            accepting: AtomicBool::new(false),
+        })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn disconnected_live_child_cannot_be_retired_for_replacement() {
+        let broker = disconnected_owned_broker();
+        let error = retire_before_replacement(&broker, "test-replacement".into()).unwrap_err();
+        let alive = {
+            let mut child = broker.child.lock().unwrap();
+            let alive = child.try_wait().unwrap().is_none();
+            // This test owns the inert child. The retirement guard itself did
+            // not terminate it.
+            child.kill().unwrap(); child.wait().unwrap(); alive
+        };
+        assert!(error.contains("automatic termination is blocked"));
+        assert!(alive);
     }
 }

@@ -138,6 +138,11 @@ def test_real_python_gate_requires_actual_no_skip_framework_results(tmp_path, mo
     (tmp_path / "test_actual.py").write_text("import pytest\nfrom allin1_sdk import value\ndef test_actual():\n    assert value == 1\n" + ("    pytest.skip('required check absent')\n" if skip else ""))
     (tmp_path / "pyproject.toml").write_text('[tool.coverage.run]\nbranch = true\n[tool.coverage.report]\nfail_under = 80\n')
     executable = candidate.external_executable(Path(sys.executable))
+    parent_coverage = tmp_path / "parent-aggregate.coverage"
+    parent_coverage.write_bytes(b"outer coverage canary")
+    monkeypatch.setenv("COVERAGE_FILE", str(parent_coverage))
+    for key in candidate.PYTHON_COVERAGE_PARENT_ENV:
+        monkeypatch.setenv(key, "parent coverage state must not reach nested pytest")
     identity = tmp_path / "identity.json"
     candidate.write_new(identity, {"schema_version": 1, "kind": "sdk_build_identity", "build_id": "disposable", "source": source,
         "toolchain_files": {"python": candidate.tool_identity(executable)}})
@@ -146,11 +151,14 @@ def test_real_python_gate_requires_actual_no_skip_framework_results(tmp_path, mo
         with pytest.raises(subprocess.CalledProcessError): candidate.run_gate(tmp_path, identity, "python", command)
     else: candidate.run_gate(tmp_path, identity, "python", command)
     record = json.loads((tmp_path / "gate-python.json").read_text())
+    assert parent_coverage.read_bytes() == b"outer coverage canary"
     assert record["schema_version"] == 2
     assert record["status"] == ("FAIL" if skip else "PASS")
     if not skip:
         assert record["evidence"]["tests"] == 1
         assert record["evidence"]["coverage_percent"] == 100
+        assert record["coverage_data"]["file"] == "gate-python.coverage"
+        assert (tmp_path / record["coverage_data"]["file"]).is_file()
         monkeypatch.setattr(candidate, "REQUIRED_GATES", {"python"})
         assert candidate.gate_evidence(identity, root=tmp_path)["python"]["status"] == "PASS"
         (tmp_path / "gate-python.xml").write_text("<testsuites/>")
