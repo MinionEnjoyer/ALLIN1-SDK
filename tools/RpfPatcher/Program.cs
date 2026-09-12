@@ -2092,8 +2092,7 @@ namespace RpfPatcher
                     }
                     else if (suffix == ".ymt")
                     {
-                        var parsed = RpfFile.GetFile<YmtFile>(sourceEntry, sourceData);
-                        meta = parsed?.Meta; pso = parsed?.Pso; rbf = parsed?.Rbf;
+                        ClassifyLooseYmtSource(sourceData, out meta, out pso, out rbf);
                     }
                     else if (suffix == ".ymf")
                     {
@@ -2171,6 +2170,39 @@ namespace RpfPatcher
                 FileUncompressedSize = (uint)Math.Min(
                     new FileInfo(path).Length, uint.MaxValue),
             };
+        }
+
+        // A loose YMT has no RpfResourceFileEntry to tell CodeWalker that an
+        // RSC7 header is a resource.  YmtFile.Load(data, entry) therefore
+        // only finds PSO/RBF in this situation.  Keep this separate from the
+        // command handler: it is exercised with a synthetic RSC resource in
+        // RpfPatcher.Tests without distributing a game asset.
+        static void ClassifyLooseYmtSource(
+            byte[] sourceData, out Meta meta, out PsoFile pso, out RbfFile rbf)
+        {
+            if (sourceData == null) throw new ArgumentNullException(nameof(sourceData));
+            meta = null;
+            pso = null;
+            rbf = null;
+            using (var stream = new MemoryStream(sourceData, false))
+            {
+                if (RbfFile.IsRBF(stream))
+                {
+                    rbf = new RbfFile();
+                    rbf.Load(stream);
+                    return;
+                }
+                if (PsoFile.IsPSO(stream))
+                {
+                    pso = new PsoFile();
+                    pso.Load(stream);
+                    return;
+                }
+            }
+
+            var parsed = new YmtFile();
+            parsed.Load(sourceData);
+            meta = parsed.Meta;
         }
 
         static void LoadAwcKey(string gtaPath, bool gen9)

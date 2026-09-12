@@ -95,6 +95,19 @@ evidence without mounting content. It does not enable YMT limit expansion or
 certify runtime compatibility. See the [ped migration/handoff](ped-workbench-migration-and-ymt-handoff.md)
 for the implemented surface and deferred runtime work.
 
+Ped packages may declare `kind: "ped"` catalogs in `allin1.content.json` with
+the `ped.population` capability. These are population lists, not shop inventory;
+the catalog must still be an owned package file. Native XML import recognizes
+loose RSC7 YMT metadata alongside PSO/RBF variants. Legacy skinned drawables
+whose only vertex buffer is `Data2` retain their vertex count during Enhanced
+conversion, preventing zero-filled output meshes. Existing `Data1` buffers
+remain authoritative when both buffers are present.
+
+These conversion fixes do not retarget skeletons, repair source skin weights,
+or raise game metadata limits. Check the exported geometry and skeleton, then
+test the intended character and animations in the target game edition. The SDK
+does not include third-party test models or automatically change game settings.
+
 ### RPF Archives
 
 Select the correct game edition when keys are required. The tabs expose archive

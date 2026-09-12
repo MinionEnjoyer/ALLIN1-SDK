@@ -22,6 +22,7 @@ from allin1_sdk.mod_package_contract import (
     WeaponEnhancementContract,
     parse_workbench_contract,
 )
+from allin1_sdk.release_paths import no_links
 
 
 log = logging.getLogger("allin1.extensions")
@@ -36,6 +37,7 @@ PRELOAD_MAX_ENTRIES = 64
 PRELOAD_MAX_ENTRY_BYTES = 4 * 1024 * 1024
 PRELOAD_MAX_AGGREGATE_BYTES = 16 * 1024 * 1024
 PRELOAD_MAX_MANIFEST_BYTES = 256 * 1024
+RETIRED_BUILTIN_EXTENSION_IDS = frozenset({"allin1.experimental-gameplay"})
 PRELOAD_STATIC_ENTRIES: tuple[dict[str, Any], ...] = (
     {
         "id": "config",
@@ -84,7 +86,7 @@ SUPPORTED_SETTING_TYPES = frozenset({
     "boolean", "integer", "number", "string", "choice",
 })
 SUPPORTED_CATALOG_KINDS = frozenset({
-    "vehicle", "weapon", "gear", "service", "property",
+    "vehicle", "weapon", "gear", "service", "property", "ped",
 })
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{1,95}$")
 _SETTING_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
@@ -622,8 +624,18 @@ class ExtensionManifest:
         capability_set = set(capabilities)
         if sections and "gbay.sections" not in capability_set:
             raise ValueError("GBAY sections require the gbay.sections capability")
-        if catalogs and "gbay.catalogs" not in capability_set:
+        # Ped population catalogs share the receipt-hashed catalog transport,
+        # but they are deliberately not GBAY/shop inventory.  Keep their
+        # capability distinct so a package cannot accidentally make people
+        # purchasable simply by declaring a population model list.
+        non_ped_catalogs = [catalog for catalog in catalogs if catalog.kind != "ped"]
+        ped_catalogs = [catalog for catalog in catalogs if catalog.kind == "ped"]
+        if non_ped_catalogs and "gbay.catalogs" not in capability_set:
             raise ValueError("GBAY catalogs require the gbay.catalogs capability")
+        if ped_catalogs and "ped.population" not in capability_set:
+            raise ValueError(
+                "Ped population catalogs require the ped.population capability"
+            )
         if any(system.settings for system in systems) and (
             "launcher.settings" not in capability_set
         ):
@@ -846,6 +858,7 @@ class _RegistryCandidate:
     runtime_files: tuple[dict[str, str], ...] = ()
     catalog_files: tuple[dict[str, str], ...] = ()
     map_files: tuple[dict[str, str], ...] = ()
+    dlc_packs: tuple[str, ...] = ()
     blocked_reason: str = ""
     requirements: tuple[_ContentRequirement, ...] = ()
 
@@ -854,7 +867,8 @@ class ExtensionRegistry:
     """Build the single receipt-authorized registry consumed by Story Mode."""
 
     def __init__(self, gta_path: str | Path) -> None:
-        self.gta_path = Path(gta_path).expanduser().resolve()
+        self._declared_gta_path = Path(gta_path).expanduser()
+        self.gta_path = self._declared_gta_path.resolve()
         self.state_root = self.gta_path / "scripts" / ".allin1" / "extensions"
         self.builtin_root = self.state_root / "builtins"
         self.registry_path = self.state_root / "registry.json"
@@ -964,6 +978,66 @@ class ExtensionRegistry:
         except Exception:
             self._restore_file(target, target_snapshot)
             raise
+
+    def retire_builtin(self, extension_id: str) -> bool:
+        """Remove one known retired ALLIN1 built-in without touching packages.
+
+        This intentionally accepts only an explicit product retirement allowlist.
+        A package receipt, its settings, and every other built-in record stay
+        outside the transaction.  Registry and preload snapshots make an
+        upgrade failure recover the exact prior built-in record and derived
+        state instead of leaving a partially retired installation behind.
+        """
+        normalized = _identifier(extension_id, "retired extension id")
+        if normalized not in RETIRED_BUILTIN_EXTENSION_IDS:
+            raise ValueError(f"Not a retired ALLIN1 built-in: {extension_id}")
+        target, snapshot_paths = self._retirement_paths(normalized)
+        if target.exists() and not target.is_file():
+            raise ValueError(f"Retired built-in target is not a regular file: {target}")
+        if not target.exists():
+            return False
+        snapshots = {
+            path: self._snapshot_file(path)
+            for path in snapshot_paths
+        }
+        try:
+            target.unlink()
+            self.rebuild()
+        except Exception:
+            for path, snapshot in snapshots.items():
+                self._restore_file(path, snapshot)
+            raise
+        return True
+
+    def _retirement_paths(self, extension_id: str) -> tuple[Path, tuple[Path, ...]]:
+        """Fail closed on every filesystem boundary retirement can mutate.
+
+        The constructor preserves the established resolved-root behavior for
+        the broad registry API.  Retirement is deliberately stricter: it
+        checks the caller-declared game root and every owned descendant before
+        it snapshots, unlinks, rebuilds, or rolls back anything.
+        """
+        root = no_links(self._declared_gta_path)
+        if not root.is_dir():
+            raise ValueError(f"GTA path is not a directory: {root}")
+        scripts = no_links(root / "scripts")
+        if scripts.exists() and not scripts.is_dir():
+            raise ValueError(f"GTA scripts directory is not a directory: {scripts}")
+        state_root = no_links(scripts / ".allin1" / "extensions")
+        builtin_root = no_links(state_root / "builtins")
+        target = no_links(builtin_root / f"{extension_id}.json")
+        registry = no_links(state_root / "registry.json")
+        preload = no_links(scripts / ".reactorv" / "preload" / "allin1.json")
+        bases = (target, registry, registry.with_suffix(".json.bak"), preload)
+        for path in (
+            *bases,
+            target.with_suffix(".json.tmp"),
+            registry.with_suffix(".json.tmp"),
+            preload.with_suffix(".json.tmp"),
+            *(path.with_name(path.name + ".rollback.tmp") for path in bases),
+        ):
+            no_links(path)
+        return target, bases
 
     def _refuse_enabled_dependents(self, extension_id: str) -> None:
         """Keep receipt-declared dependencies intact across built-in changes."""
@@ -1118,6 +1192,15 @@ class ExtensionRegistry:
                     for requirement in requirements
                 ):
                     raise ValueError("a content receipt may not depend on itself")
+                raw_dlc_packs = receipt.get("dlc_packs", [])
+                if not isinstance(raw_dlc_packs, list):
+                    raise ValueError("receipt dlc_packs must be an array")
+                dlc_packs = tuple(sorted({
+                    _identifier(value, "receipt DLC pack")
+                    for value in raw_dlc_packs
+                }))
+                if len(dlc_packs) != len(raw_dlc_packs):
+                    raise ValueError("receipt contains duplicate DLC pack ids")
                 records = {
                     str(item.get("destination", "")).replace("\\", "/").casefold(): item
                     for item in receipt.get("files", []) if isinstance(item, dict)
@@ -1196,6 +1279,7 @@ class ExtensionRegistry:
                     runtime_files=tuple(runtime_files),
                     catalog_files=tuple(catalog_files),
                     map_files=tuple(map_files),
+                    dlc_packs=dlc_packs,
                     blocked_reason=blocked,
                     requirements=requirements,
                 ))
@@ -1275,6 +1359,7 @@ class ExtensionRegistry:
             item["runtime_files"] = list(candidate.runtime_files)
             item["catalog_files"] = list(candidate.catalog_files)
             item["map_files"] = list(candidate.map_files)
+            item["dlc_packs"] = list(candidate.dlc_packs)
             if blocked:
                 item["blocked_reason"] = blocked
             normalized.append(item)

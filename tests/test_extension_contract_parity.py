@@ -22,6 +22,10 @@ def _normalized_contract_source(path: Path, namespace: str) -> str:
             f"from {namespace}.mod_package_contract import (",
             "from CONTRACT.mod_package_contract import (",
         )
+        .replace(
+            f"from {namespace}.release_paths import no_links",
+            "from CONTRACT.release_paths import no_links",
+        )
         .rstrip()
     )
 
@@ -151,3 +155,73 @@ def test_full_contract_rejects_duplicate_system_ids(tmp_path: Path) -> None:
     path.write_text(json.dumps(descriptor), encoding="utf-8")
     with pytest.raises(ValueError, match="duplicate system ids"):
         ExtensionManifest.load(path)
+
+
+def _ped_manifest_payload(*, capabilities: list[str]) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "api_version": 1,
+        "id": "fixture.ped-population",
+        "name": "Ped population fixture",
+        "version": "1.0.0",
+        "description": "Ped catalog capability fixture.",
+        "capabilities": capabilities,
+        "systems": [],
+        "gbay": {"sections": [], "catalogs": [{
+            "id": "fixture-peds",
+            "kind": "ped",
+            "source": "scripts/Fixture/peds.json",
+        }]},
+        "runtime": {"assemblies": []},
+    }
+
+
+def test_ped_population_catalog_requires_its_own_capability() -> None:
+    manifest = ExtensionManifest.from_dict(_ped_manifest_payload(
+        capabilities=["ped.population"],
+    ))
+    assert manifest.gbay_catalogs[0].kind == "ped"
+    assert manifest.capabilities == ("ped.population",)
+
+    with pytest.raises(ValueError, match="Ped population catalogs require"):
+        ExtensionManifest.from_dict(_ped_manifest_payload(capabilities=[]))
+    with pytest.raises(ValueError, match="Ped population catalogs require"):
+        ExtensionManifest.from_dict(_ped_manifest_payload(
+            capabilities=["gbay.catalogs"],
+        ))
+
+
+def _write_receipt(
+    game: Path, *, dlc_packs: object,
+) -> None:
+    receipt_root = game / "scripts" / ".allin1" / "mods"
+    receipt_root.mkdir(parents=True)
+    manifest = _ped_manifest_payload(capabilities=["ped.population"])
+    (receipt_root / "fixture.ped-population.json").write_text(json.dumps({
+        "id": manifest["id"],
+        "enabled": True,
+        "extension": manifest,
+        "files": [],
+        "dlc_packs": dlc_packs,
+    }), encoding="utf-8")
+
+
+def test_receipt_dlc_packs_are_normalized_and_transport_to_registry(
+    tmp_path: Path,
+) -> None:
+    game = tmp_path / "game"
+    _write_receipt(game, dlc_packs=["mp_patch", "mp_base"])
+    entry = ExtensionRegistry(game).inspect()["extensions"]
+    assert len(entry) == 1
+    assert entry[0]["dlc_packs"] == ["mp_base", "mp_patch"]
+
+
+@pytest.mark.parametrize("dlc_packs", ["mp_patch", ["mp_patch", "mp_patch"], ["Bad ID"]])
+def test_receipt_rejects_malformed_or_duplicate_dlc_pack_ids(
+    tmp_path: Path, dlc_packs: object,
+) -> None:
+    game = tmp_path / "game"
+    _write_receipt(game, dlc_packs=dlc_packs)
+    # Receipt parsing is fail-closed: an invalid package is absent rather than
+    # becoming an enabled registry record.
+    assert ExtensionRegistry(game).inspect()["extensions"] == []

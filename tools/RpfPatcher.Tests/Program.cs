@@ -54,6 +54,8 @@ class ExactEntryTests
     {
         checks += ArchiveKeyContextTests.Run();
         CheckTextureMipRoundTrips();
+        CheckLooseRscYmtClassification();
+        CheckData2OnlySkinnedGen9RoundTrip();
         CheckCollisionQuantization();
         CheckRelRelationships();
         checks += AnimationSampleTests.Run();
@@ -273,5 +275,105 @@ class ExactEntryTests
             }
         }
         finally { RpfManager.IsGen9 = previous; }
+    }
+
+    // Exercises the actual XML importer, Gen9 resource builder, binary loader,
+    // and XML exporter.  Legacy ped drawables may place their only vertices in
+    // Data2; losing VertexCount here makes the Gen9 remap write an all-zero
+    // buffer while leaving the index buffer intact.
+    static void CheckData2OnlySkinnedGen9RoundTrip()
+    {
+        const string vertices = "0 0 0  255 0 0 0  1 0 0 0  0 0 1  0 0\n"
+            + "1 0 1  255 0 0 0  0 0 0 0  0 0 1  1 0\n"
+            + "0 1 1  128 127 0 0  0 1 0 0  0 0 1  0 1";
+        string xml = "<Drawable><Name>data2_skin_fixture</Name>"
+            + "<BoundingSphereCenter x=\"0\" y=\"0\" z=\"0.5\"/><BoundingSphereRadius value=\"2\"/>"
+            + "<BoundingBoxMin x=\"0\" y=\"0\" z=\"0\"/><BoundingBoxMax x=\"1\" y=\"1\" z=\"1\"/>"
+            + "<LodDistHigh value=\"100\"/><FlagsHigh value=\"1\"/>"
+            + "<ShaderGroup><Shaders><Item><Name>ped</Name><FileName>ped.sps</FileName><RenderBucket value=\"0\"/>"
+            + "<Parameters><Item name=\"DiffuseSampler\" type=\"Texture\"><Name>fixture_diffuse</Name></Item></Parameters>"
+            + "</Item></Shaders></ShaderGroup><Skeleton><Bones>"
+            + "<Item><Name>root</Name><Tag value=\"0\"/><Index value=\"0\"/><ParentIndex value=\"-1\"/><SiblingIndex value=\"-1\"/>"
+            + "<Flags>RotX, RotY, RotZ, TransX, TransY, TransZ</Flags><Translation x=\"0\" y=\"0\" z=\"0\"/>"
+            + "<Rotation x=\"0\" y=\"0\" z=\"0\" w=\"1\"/><Scale x=\"1\" y=\"1\" z=\"1\"/><TransformUnk x=\"0\" y=\"0\" z=\"0\" w=\"0\"/></Item>"
+            + "<Item><Name>tip</Name><Tag value=\"42\"/><Index value=\"1\"/><ParentIndex value=\"0\"/><SiblingIndex value=\"-1\"/>"
+            + "<Flags>RotX, RotY, RotZ</Flags><Translation x=\"0\" y=\"0\" z=\"1\"/>"
+            + "<Rotation x=\"0\" y=\"0\" z=\"0\" w=\"1\"/><Scale x=\"1\" y=\"1\" z=\"1\"/><TransformUnk x=\"0\" y=\"0\" z=\"0\" w=\"0\"/></Item>"
+            + "</Bones></Skeleton><DrawableModelsHigh><Item><RenderMask value=\"255\"/><Flags value=\"0\"/><HasSkin value=\"1\"/><BoneIndex value=\"0\"/>"
+            + "<Geometries><Item><ShaderIndex value=\"0\"/><BoneIDs>1, 0</BoneIDs><BoundingBoxMin x=\"0\" y=\"0\" z=\"0\" w=\"0\"/>"
+            + "<BoundingBoxMax x=\"1\" y=\"1\" z=\"1\" w=\"0\"/><VertexBuffer><Flags value=\"0\"/>"
+            + "<Layout type=\"GTAV1\"><Position/><BlendWeights/><BlendIndices/><Normal/><TexCoord0/></Layout><Data2>"
+            + vertices + "</Data2></VertexBuffer><IndexBuffer><Data>0 1 2</Data></IndexBuffer></Item></Geometries></Item></DrawableModelsHigh></Drawable>";
+        bool previous = RpfManager.IsGen9;
+        try
+        {
+            // Data remains authoritative when both buffers are present.  This
+            // protects normal legacy assets from the Data2-only compatibility
+            // assignment and exercises both resource formats.
+            string oneVertex = "0 0 0  255 0 0 0  1 0 0 0  0 0 1  0 0";
+            string xmlWithData1 = xml.Replace(
+                "<Data2>" + vertices + "</Data2>",
+                "<Data>" + vertices + "</Data><Data2>" + oneVertex + "</Data2>");
+            foreach (bool isGen9 in new[] { false, true })
+            {
+                RpfManager.IsGen9 = isGen9;
+                var mixed = XmlYdr.GetYdr(xmlWithData1);
+                var mixedBuffer = mixed.Drawable.AllModels[0].Geometries[0].VertexBuffer;
+                if (mixedBuffer.Data1 == null || mixedBuffer.Data2 == null
+                    || ReferenceEquals(mixedBuffer.Data1, mixedBuffer.Data2)
+                    || mixedBuffer.Data1.VertexCount != 3 || mixedBuffer.Data2.VertexCount != 1
+                    || mixedBuffer.VertexCount != 3)
+                    throw new Exception("Data1 precedence changed for " + (isGen9 ? "Gen9" : "Legacy") + " XML");
+                var compiledMixed = new YdrFile();
+                compiledMixed.Load(mixed.Save());
+                var mixedDocument = new System.Xml.XmlDocument();
+                mixedDocument.LoadXml(YdrXml.GetXml(compiledMixed));
+                string exportedData = string.Join(" ", mixedDocument.SelectSingleNode("//VertexBuffer/Data").InnerText.Split((char[])null, StringSplitOptions.RemoveEmptyEntries));
+                string expectedData = string.Join(" ", vertices.Split((char[])null, StringSplitOptions.RemoveEmptyEntries));
+                if (exportedData != expectedData)
+                    throw new Exception("Data1 changed during " + (isGen9 ? "Gen9" : "Legacy") + " round trip");
+                checks += 2;
+            }
+
+            RpfManager.IsGen9 = true;
+            var authored = XmlYdr.GetYdr(xml);
+            var authoredBuffer = authored.Drawable.AllModels[0].Geometries[0].VertexBuffer;
+            if (authoredBuffer.VertexCount != 3) throw new Exception("Data2-only XML lost its vertex count before Gen9 conversion");
+            if (authoredBuffer.Data1 != null) throw new Exception("Data2-only XML unexpectedly fabricated legacy Data1 before conversion");
+            var compiled = new YdrFile();
+            compiled.Load(authored.Save());
+            var output = YdrXml.GetXml(compiled);
+            var document = new System.Xml.XmlDocument();
+            document.LoadXml(output);
+            string actualVertices = string.Join(" ", document.SelectSingleNode("//VertexBuffer/Data").InnerText.Split((char[])null, StringSplitOptions.RemoveEmptyEntries));
+            string expectedVertices = string.Join(" ", vertices.Split((char[])null, StringSplitOptions.RemoveEmptyEntries));
+            if (actualVertices != expectedVertices) throw new Exception("Data2-only skinned vertices changed during Gen9 round trip");
+            if (document.SelectSingleNode("//IndexBuffer/Data").InnerText.Trim() != "0 1 2") throw new Exception("Data2-only Gen9 round trip changed indices");
+            if (document.SelectNodes("//Skeleton/Bones/Item").Count != 2
+                || document.SelectSingleNode("//Skeleton/Bones/Item[2]/Tag").Attributes["value"].Value != "42")
+                throw new Exception("Data2-only Gen9 round trip changed skeleton");
+            checks += 5;
+        }
+        finally { RpfManager.IsGen9 = previous; }
+    }
+
+    // This creates a resource with an RSC7 header using CodeWalker's own
+    // builder.  It is deliberately named as a YMT only at classification
+    // time: the loose-file bug is about the absent RpfResourceFileEntry, not
+    // the root META type.  A real game YMT is neither needed nor tracked.
+    static void CheckLooseRscYmtClassification()
+    {
+        var document = new System.Xml.XmlDocument();
+        document.LoadXml("<CMapTypes />");
+        byte[] rsc = XmlMeta.GetData(document, MetaFormat.RSC, string.Empty);
+        if (rsc == null || rsc.Length < 4 || BitConverter.ToUInt32(rsc, 0) != 0x37435352)
+            throw new Exception("Synthetic YMT source was not an RSC7 resource");
+
+        var method = Helper.GetMethod("ClassifyLooseYmtSource", BindingFlags.NonPublic | BindingFlags.Static);
+        object[] parameters = { rsc, null, null, null };
+        method.Invoke(null, parameters);
+        if (parameters[1] is not Meta || parameters[2] != null || parameters[3] != null)
+            throw new Exception("Loose RSC7 YMT source did not classify as META");
+        checks += 2;
     }
 }

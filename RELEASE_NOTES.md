@@ -2,6 +2,9 @@
 
 ## What's new
 
+- Ped integration follow-up: population catalog permissions and DLC receipts
+  match Launcher; loose RSC7 YMT import and Enhanced skinned-mesh conversion
+  are corrected, with synthetic regression fixtures and no bundled ped models.
 - A coordinated readability pass using the launcher's typography, spacing,
   green sidebar treatment, larger controls and clear light/dark contrast.
 - Better narrow-window workbench layouts, wrapping labels and confirmation

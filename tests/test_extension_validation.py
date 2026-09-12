@@ -143,6 +143,40 @@ def test_complete_extension_contract_round_trips_settings_and_owned_files(
     assert store.effective(manifest)["mode"] == "safe"
 
 
+def test_ped_catalog_kind_is_a_declarative_owned_catalog() -> None:
+    payload = _manifest_payload()
+    payload["gbay"] = {
+        "sections": [],
+        "catalogs": [{
+            "id": "fixture-peds",
+            "kind": "ped",
+            "source": "scripts/Fixture/peds.json",
+        }],
+    }
+    payload["capabilities"] = ["gbay.catalogs", "ped.population"]
+    payload["systems"] = []
+    payload["runtime"] = {"assemblies": []}
+    manifest = ExtensionManifest.from_dict(payload)
+    assert manifest.gbay_catalogs[0].kind == "ped"
+    assert ExtensionManifest.from_registry_entry(manifest.to_dict()).to_dict() == (
+        manifest.to_dict()
+    )
+    manifest.validate_package_destinations(["scripts/Fixture/peds.json"])
+    with pytest.raises(ValueError, match="GBAY catalog is not owned"):
+        manifest.validate_package_destinations(["scripts/Other/peds.json"])
+
+
+@pytest.mark.parametrize("source", ["../peds.json", "/peds.json", "C:/peds.json"])
+def test_ped_catalog_cannot_escape_package_ownership(source: str) -> None:
+    payload = _manifest_payload()
+    payload["gbay"]["catalogs"] = [{
+        "id": "fixture-peds", "kind": "ped", "source": source,
+    }]
+    payload["capabilities"].append("ped.population")
+    with pytest.raises(ValueError):
+        ExtensionManifest.from_dict(payload)
+
+
 @pytest.mark.parametrize(
     ("payload", "message"),
     [

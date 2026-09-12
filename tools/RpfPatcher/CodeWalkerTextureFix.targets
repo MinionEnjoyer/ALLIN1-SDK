@@ -34,6 +34,11 @@
         bounds = ReplaceOnce(bounds, "Quantum = (BoxMax - BoxMin) * 0.5f / 32767.0f;",
             "// SDK: signed vertex coordinates are relative to GeometryCenter, not the AABB midpoint.\n            var extent = (BoxMax - BoxMin).Abs() * 0.5f;\n            if (Vertices != null) foreach (var vertex in Vertices) extent = Vector3.Max(extent, vertex.Abs());\n            if (VerticesShrunk != null) foreach (var vertex in VerticesShrunk) extent = Vector3.Max(extent, vertex.Abs());\n            Quantum = Vector3.Max(extent, new Vector3(1e-9f)) / 32767.0f;");
         WriteChanged(Path.Combine(OutputRoot, "Bounds.cs"), bounds);
+        var drawable = File.ReadAllText(Path.Combine(SourceRoot, "GameFiles", "Resources", "Drawable.cs")).Replace("\r\n", "\n");
+        drawable = ReplaceOnce(drawable,
+            "Data2 = new VertexData();\n                Data2.ReadXml(dnode2, Info);",
+            "Data2 = new VertexData();\n                Data2.ReadXml(dnode2, Info);\n                // A legacy XML buffer may legitimately contain only Data2.\n                // Gen9 conversion promotes it to Data1 and needs this count to\n                // remap every vertex rather than emitting a zero-filled buffer.\n                if (Data1 == null) VertexCount = (uint)Data2.VertexCount;");
+        WriteChanged(Path.Combine(OutputRoot, "Drawable.cs"), drawable);
       ]]></Code>
     </Task>
   </UsingTask>
@@ -41,9 +46,9 @@
     <PropertyGroup><Allin1MipRoot>$(IntermediateOutputPath)allin1-texture-mips</Allin1MipRoot></PropertyGroup>
     <Allin1TextureMipSources SourceRoot="$(MSBuildProjectDirectory)" OutputRoot="$(Allin1MipRoot)" />
     <ItemGroup>
-      <Compile Remove="GameFiles\Utils\DDSIO.cs;GameFiles\Resources\Texture.cs;GameFiles\Resources\Bounds.cs" />
-      <Compile Include="$(Allin1MipRoot)/DDSIO.cs;$(Allin1MipRoot)/Texture.cs;$(Allin1MipRoot)/Bounds.cs" />
-      <FileWrites Include="$(Allin1MipRoot)/DDSIO.cs;$(Allin1MipRoot)/Texture.cs;$(Allin1MipRoot)/Bounds.cs" />
+      <Compile Remove="GameFiles\Utils\DDSIO.cs;GameFiles\Resources\Texture.cs;GameFiles\Resources\Bounds.cs;GameFiles\Resources\Drawable.cs" />
+      <Compile Include="$(Allin1MipRoot)/DDSIO.cs;$(Allin1MipRoot)/Texture.cs;$(Allin1MipRoot)/Bounds.cs;$(Allin1MipRoot)/Drawable.cs" />
+      <FileWrites Include="$(Allin1MipRoot)/DDSIO.cs;$(Allin1MipRoot)/Texture.cs;$(Allin1MipRoot)/Bounds.cs;$(Allin1MipRoot)/Drawable.cs" />
     </ItemGroup>
   </Target>
 </Project>
