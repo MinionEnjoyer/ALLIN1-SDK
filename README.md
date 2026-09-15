@@ -11,6 +11,8 @@ Standalone: no ALLIN1 Launcher or gameplay client required.
 Tkinter source and GUI build targets are removed. Python services remain.
 See the release notes for validation coverage and known limits.
 
+Got feedback, or need help?  Come chat in our community [Discord](https://discord.gg/hs7c2XfdD)!
+
 ## What's new in 0.6.5
 
 - Larger, consistent text and controls matching the Launcher layout.
