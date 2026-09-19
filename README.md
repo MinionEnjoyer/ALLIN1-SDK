@@ -7,25 +7,25 @@
 Create, inspect and package **GTA V Story Mode** mods for **Legacy and Enhanced**.
 Standalone: no ALLIN1 Launcher or gameplay client required.
 
-**0.6.5 — unsigned manual-download release.** The interface is React/Tauri v2;
+**0.6.6 — unsigned manual-download release.** The interface is React/Tauri v2;
 Tkinter source and GUI build targets are removed. Python services remain.
 See the release notes for validation coverage and known limits.
 
-Got feedback, or need help?  Come chat in our community [Discord](https://discord.gg/hs7c2XfdD)!
+Got feedback, or need help? Come chat in our community [Discord](https://discord.gg/hs7c2XfdD)!
 
-## What's new in 0.6.5
+## What's new in 0.6.6
 
 - Larger, consistent text and controls matching the Launcher layout.
 - Responsive workbenches, clearer spacing and readable numeric inputs.
 - Weapon calibration and source-backed material parameter workflows.
 - RPF editing, package building and reviewed recovery remain available.
 
-[0.6.5 release notes](RELEASE_NOTES.md) · [Earlier releases](docs/archive/release-notes-before-0.6.4.md)
+[0.6.6 release notes](RELEASE_NOTES.md) · [Earlier releases](docs/archive/release-notes-before-0.6.4.md)
 
 ## Downloads
 
 [Published builds](https://github.com/MinionEnjoyer/ALLIN1-SDK/releases) are on GitHub.
-0.6.5 builds are **unsigned manual downloads**, without a promised SignPath
+0.6.6 builds are **unsigned manual downloads**, without a promised SignPath
 certificate. Verify checksums and build identity; automatic-update installation
 remains disabled. Read the [download and trust policy](CODE_SIGNING_POLICY.md).
 
@@ -33,7 +33,7 @@ remains disabled. Read the [download and trust policy](CODE_SIGNING_POLICY.md).
 
 - [SDK manual](docs/sdk-guide.md) — workspaces and authoring.
 - [Source setup](desktop/README.md) — development and building.
-- [Release checklist](docs/release-0.6.5.md) — remaining work and validation.
+- [Release checklist](docs/release-0.6.6.md) — remaining work and validation.
 - [Documentation index](docs/README.md) — CLI, contracts and detailed guides.
 
 [Support the project](https://buymeacoffee.com/minionenjoyer) · [License](LICENSE)

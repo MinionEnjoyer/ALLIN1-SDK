@@ -28,7 +28,7 @@ def test_command_reference_matches_every_command_and_parameter():
 def test_current_guides_are_required_resources_and_versions_are_explicit():
     from allin1_sdk import __version__
     required = {path.as_posix() for path in _REQUIRED_AUTHORING_RESOURCES}
-    assert {"docs/sdk-guide.md", "docs/release-0.6.5.md", "docs/ui-readability.md", "docs/cli-reference.md", "docs/validation.md", "RELEASE_NOTES.md", "desktop/README.md"} <= required
+    assert {"docs/sdk-guide.md", "docs/release-0.6.6.md", "docs/ui-readability.md", "docs/cli-reference.md", "docs/validation.md", "RELEASE_NOTES.md", "desktop/README.md"} <= required
     catalog = json.loads((ROOT / "docs/catalog.json").read_text())
     assert catalog["release"] == __version__
     assert catalog["product"] == "sdk"

@@ -436,11 +436,11 @@ describe("ALLIN1 desktop shell", () => {
   it("checks SDK updates through the standalone desktop service", async () => {
     const user = userEvent.setup();
     const client = mockClient();
-    client.checkUpdate = vi.fn(async () => ({ current_version: "0.6.4", latest_version: "0.6.5", update_available: true, name: "ALLIN1", page_url: "https://example.invalid", archive_name: "sdk.zip", archive_size: 1 }));
+    client.checkUpdate = vi.fn(async () => ({ current_version: "0.6.5", latest_version: "0.6.6", update_available: true, name: "ALLIN1", page_url: "https://example.invalid", archive_name: "sdk.zip", archive_size: 1 }));
     render(<App client={client} />);
     await user.click(await screen.findByRole("button", { name: "Updates" }));
     expect(client.checkUpdate).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText("ALLIN1 SDK 0.6.5 is available")).toBeInTheDocument();
+    expect(await screen.findByText("ALLIN1 SDK 0.6.6 is available")).toBeInTheDocument();
     expect(screen.getByText("Installation is disabled until signed Tauri update metadata is configured.")).toBeInTheDocument();
     expect(screen.queryByText(/legacy updater/i)).not.toBeInTheDocument();
   });

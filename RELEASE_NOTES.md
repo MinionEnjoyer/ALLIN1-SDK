@@ -1,4 +1,4 @@
-# ALLIN1 SDK 0.6.5
+# ALLIN1 SDK 0.6.6
 
 ## What's new
 
@@ -29,7 +29,7 @@
 
 ## Download and trust
 
-**Unsigned manual download.** Publisher code signing is not planned for 0.6.5.
+**Unsigned manual download.** Publisher code signing is not planned for 0.6.6.
 No SignPath certificate or approval is promised. Windows may show an
 unknown-publisher or reputation warning; do not disable security protections.
 
@@ -42,10 +42,10 @@ React update installation is not enabled by this unsigned release policy.
 
 ## Release status
 
-**Maintainer-approved release `v0.6.5`.** Full automated results, build identity
+**Maintainer-approved release `v0.6.6`.** Full automated results, build identity
 and checksums accompany the downloads. Build/package verification and native
 desktop acceptance are reported separately; prior-release evidence is not a
-claim that the final 0.6.5 installer lifecycle was repeated.
+claim that the final 0.6.6 installer lifecycle was repeated.
 
 Windows symbolic-link privilege tests may be skipped on this host, not passed.
 Pristine-Windows dependency installation is outside this release's acceptance
@@ -54,5 +54,5 @@ acceptance remain unverified; authoring/export does not certify game behavior.
 Very long installation paths are refused with relocation guidance. Install the
 SDK in a short local folder and keep its companions together.
 
-See the [SDK manual](docs/sdk-guide.md), [release checklist](docs/release-0.6.5.md)
+See the [SDK manual](docs/sdk-guide.md), [release checklist](docs/release-0.6.6.md)
 and [earlier release history](docs/archive/release-notes-before-0.6.4.md).

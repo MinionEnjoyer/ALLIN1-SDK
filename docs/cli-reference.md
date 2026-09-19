@@ -1,4 +1,4 @@
-# allin1-sdk command reference — 0.6.5
+# allin1-sdk command reference — 0.6.6
 
 Generated from the Click command tree by `documentation_audit.py`; do not edit individual rows.
 

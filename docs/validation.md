@@ -1,4 +1,4 @@
-# SDK validation for 0.6.5
+# SDK validation for 0.6.6
 
 This is the current validation procedure. [Tauri validation history](tauri-validation.md)
 and [the dated hardening audit](release-hardening-2026-09-04.md) preserve earlier
@@ -179,5 +179,5 @@ binary/dependency hashes and independently anchored session identity. Keep SDK
 previews and Reactor in-game rendering in their distinct acceptance suites.
 Report package integrity, automated tests and live acceptance separately.
 
-See [release guide](release-0.6.5.md), [protocol](desktop-protocol-v1.md) and
+See [release guide](release-0.6.6.md), [protocol](desktop-protocol-v1.md) and
 [feature-parity ledger](tauri-feature-parity.md).
