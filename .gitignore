@@ -8,6 +8,9 @@ runtime/VehicleWorkbenchAxles/out/
 .pytest_cache/
 .coverage
 htmlcov/
+/coverage.xml
+# Pinned Launcher checkout used by cross-repository CI tests, not SDK source.
+/launcher/
 .gta_path
 sdk/imported_packages.json
 output/
