@@ -11,6 +11,7 @@ from allin1_sdk.edition_bundle import build_edition_bundle
 from allin1_sdk.mods import ModManifest, ModIntegrationService, open_mod_package
 from allin1_sdk.cli import main
 from allin1_sdk.agent_api import command_risk, execute_request
+from conftest import launcher_source
 
 
 def oiv(root, edition, *, declared=None, unsupported=False):
@@ -66,7 +67,7 @@ def test_zip_of_two_oivs_and_launcher_acceptance(tmp_path):
     result = build_edition_bundle(tmp_path / "ready.zip", source_zip=outer,
                                  legacy="Legacy/install.oiv", enhanced="Enhanced/install.oiv",
                                  mod_id="test.bundle", name="Test bundle", version="1.0")
-    launcher = Path(__file__).resolve().parents[2] / "ALLIN1/src"
+    launcher = launcher_source()
     if not launcher.is_dir():
         pytest.skip("Sibling launcher is unavailable")
     sys.path.insert(0, str(launcher))

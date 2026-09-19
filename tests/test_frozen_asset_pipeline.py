@@ -8,6 +8,7 @@ import pytest
 
 from allin1_sdk.release_identity import sha256, verify_inventory
 from test_optimization_package import request as optimization_request
+from conftest import launcher_source
 
 
 @pytest.mark.skipif(not os.environ.get("ALLIN1_FROZEN_SIDECAR"), reason="explicit frozen sidecar and resource paths required")
@@ -69,7 +70,7 @@ def test_frozen_validation_optimization_install_diagnostics_and_recovery(tmp_pat
     assert json.loads(artifact.read_bytes())["artifact_id"] == session["artifact_manifest"]["artifact_id"]
     assert (source / "assets/diffuse.dds").read_bytes() == original
 
-    launcher = Path(__file__).resolve().parents[2] / "ALLIN1/src"
+    launcher = launcher_source()
     assert (launcher / "allin1/sdk_provenance.py").is_file(), "Matching Launcher is required for this integration"
     monkeypatch.syspath_prepend(str(launcher))
     from allin1.mods import ModManifest, ModIntegrationService

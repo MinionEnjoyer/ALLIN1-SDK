@@ -11,6 +11,7 @@ from allin1_sdk.artifact_contract import validate_manifest
 from allin1_sdk.managed_package_conversion import ManagedVehiclePackageConverter
 from test_managed_package_conversion import _converter, _scan, _source_archive
 from test_vehicle_oiv_export import _prepared
+from conftest import launcher_source
 
 
 @pytest.mark.parametrize("edition", ["legacy", "enhanced"])
@@ -80,7 +81,7 @@ def test_helper_drift_during_conversion_discards_only_staging(tmp_path, monkeypa
 
 def test_launcher_accepts_exported_envelope_and_exact_installed_files(tmp_path, monkeypatch):
     root = _prepared(tmp_path)
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "ALLIN1/src"))
+    monkeypatch.syspath_prepend(str(launcher_source()))
     from allin1.mods import ModManifest
     from allin1 import sdk_provenance
     manifest = ModManifest.load(root)

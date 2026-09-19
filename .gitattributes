@@ -11,3 +11,5 @@ tests/contract_fixtures/mod_packages/**/*.json text eol=lf
 # These two .bin fixtures deliberately contain plain text, not native assets.
 tests/contract_fixtures/mod_packages/schema_v1/payload/ContractV1.bin text eol=lf
 tests/contract_fixtures/mod_packages/schema_v2/payload/ContractV2.bin text eol=lf
+# The animation transport snapshot binds the exact source XML SHA-256.
+tests/fixtures/animation_skin.ydr.xml text eol=lf

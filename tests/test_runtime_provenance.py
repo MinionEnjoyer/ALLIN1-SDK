@@ -7,6 +7,7 @@ import pytest
 from allin1_sdk import artifact_identity, runtime_provenance, story_axle_runtime_builder as builder
 from allin1_sdk.artifact_contract import seal, validate_manifest
 from test_story_axle_runtime_builder import test_candidate_happy_path_stages_both_editions_and_custom_paths as _candidate
+from conftest import launcher_source
 
 
 def test_sdk_drift_before_compile_is_rejected(tmp_path):
@@ -57,7 +58,7 @@ def test_runtime_envelope_matches_launcher_without_broadening_destination_policy
     assert (root / "mod.toml").exists() is not custom
     assert config.read_text() == "{}"
     if not custom:
-        monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "ALLIN1/src"))
+        monkeypatch.syspath_prepend(str(launcher_source()))
         from allin1.mods import ModManifest
         from allin1.sdk_provenance import read
         recorded = read(ModManifest.load(root), "legacy")

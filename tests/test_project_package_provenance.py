@@ -11,6 +11,7 @@ from allin1_sdk.map_contract import MapProject
 from allin1_sdk.vehicle_package import VehicleAddonPackageBuilder
 from test_vehicle_package import _prebuilt_package
 from test_map_package import _prebuilt_map, _use_prebuilt_scan, map_payload
+from conftest import launcher_source
 
 
 def fixture(tmp_path, monkeypatch, kind):
@@ -36,7 +37,7 @@ def test_project_publication_binds_full_source_and_launcher_inventory(tmp_path, 
     inputs = json.loads((root / "sdk-inputs.json").read_bytes())
     assert inputs["source_files"] == original == package_provenance.snapshot(source)
     assert artifact["build"]["resource_files"]["tools/RpfPatcher/RpfPatcher.exe"] == hashlib.sha256(helper.read_bytes()).hexdigest()
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "ALLIN1/src"))
+    monkeypatch.syspath_prepend(str(launcher_source()))
     from allin1.mods import ModManifest
     from allin1.sdk_provenance import read
     evidence = read(ModManifest.load(root), artifact["edition"].casefold())

@@ -1,9 +1,18 @@
 """Shared test isolation for repository-local state."""
 
-
+import os
+from pathlib import Path
 import pytest
 
 import allin1_sdk.detector as detector
+
+
+def launcher_source() -> Path:
+    """Return the explicitly provisioned Launcher source, when available."""
+    configured = os.environ.get("ALLIN1_LAUNCHER_SRC")
+    if configured:
+        return Path(configured).resolve()
+    return Path(__file__).resolve().parents[2] / "ALLIN1/src"
 
 
 @pytest.fixture(autouse=True)

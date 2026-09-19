@@ -20,6 +20,12 @@ jobs:
         with:
           submodules: recursive
 
+      - uses: actions/checkout@v4
+        with:
+          repository: MinionEnjoyer/GTAV-ALLIN1
+          ref: 99677f6ea8f87ae232c8d4c8327227c2daa6f0d5
+          path: launcher
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -46,7 +52,11 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
+          if ($LASTEXITCODE -ne 0) { throw 'pip upgrade failed.' }
           python -m pip install -e ".[test,release]"
+          if ($LASTEXITCODE -ne 0) { throw 'SDK desktop dependency installation failed.' }
+          python -m pip install -e launcher
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher compatibility dependency installation failed.' }
           pnpm --dir desktop install --frozen-lockfile
 
       - name: Prepare real native authoring dependencies
@@ -80,7 +90,9 @@ jobs:
 
       - name: Validate complete Python release gate with configured coverage threshold
         shell: pwsh
-        run: python -m pytest --cov=allin1_sdk --cov-report=term-missing --cov-report=xml --junitxml=build/python-results.xml
+        run: |
+          $env:ALLIN1_LAUNCHER_SRC = Join-Path $PWD 'launcher/src'
+          python -m pytest --cov=allin1_sdk --cov-report=term-missing --cov-report=xml --junitxml=build/python-results.xml
 
       - name: Validate React shell
         shell: pwsh

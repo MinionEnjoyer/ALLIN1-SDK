@@ -12,11 +12,12 @@ from allin1_sdk import optimization_package, workspace_desktop as desktop
 from allin1_sdk.release_identity import sha256
 from test_artifact_identity import build
 from test_optimization_package import request
+from conftest import launcher_source
 
 
 @pytest.mark.parametrize("edition", ["Legacy", "Enhanced"])
 def test_offline_validate_optimize_install_diagnose_and_recover(tmp_path,monkeypatch,edition):
-    launcher = Path(__file__).resolve().parents[2] / "ALLIN1/src"
+    launcher = launcher_source()
     if not (launcher / "allin1/sdk_provenance.py").is_file():
         pytest.skip("Matching Launcher source required for fixture integration")
     monkeypatch.syspath_prepend(str(launcher))
