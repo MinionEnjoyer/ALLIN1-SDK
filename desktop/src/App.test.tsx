@@ -708,6 +708,10 @@ describe("ALLIN1 desktop shell", () => {
 
   it("routes the indexed nested YTD into the native editor with its exact archive and decoder", async () => {
     const client = createPreviewClient("rpf"), user = userEvent.setup();
+    // Start empty: the preview client's usual launch source auto-indexes and
+    // disables Open archive, which made the subsequent click a no-op.
+    client.initialLaunchRequest = vi.fn(async () => ({ workspace: "rpf" as const, source: null, selection: null, category: null, warning: null }));
+    const selectPath = vi.spyOn(client, "selectPath");
     const original = client.startJob.bind(client);
     client.startJob = vi.fn(async (operation, payload, revision, onEvent) => {
       if (operation !== "inspect_authoring_workspace" || payload.module !== "native") return original(operation, payload, revision, onEvent);
@@ -721,12 +725,18 @@ describe("ALLIN1 desktop shell", () => {
     });
     render(<App client={client} />);
     await screen.findByRole("heading", { name: "RPF Archives" });
-    await user.click(screen.getByRole("button", { name: "Open archive" }));
-    await user.click(await screen.findByRole("button", { name: /textures\/vehshare.ytd/ }));
+    const openArchive = screen.getByRole("button", { name: "Open archive" });
+    expect(openArchive).toBeEnabled();
+    expect(client.startJob).not.toHaveBeenCalled();
+    await user.click(openArchive);
+    expect(selectPath).toHaveBeenCalledWith("rpf");
+    await screen.findByText("Recursive index ready");
+    await user.click(within(screen.getByRole("region", { name: "Archive entries" })).getByRole("button", { name: /textures\/vehshare.ytd/ }));
     const nativeButton = await screen.findByRole("button", { name: "Open native editor" });
     await waitFor(() => expect(nativeButton).toBeEnabled());
     await user.click(nativeButton);
-    expect(client.startJob).toHaveBeenCalledWith("inspect_authoring_workspace", expect.objectContaining({ module: "native", archive: "C:\\Games\\Grand Theft Auto V Enhanced\\mods\\update\\update.rpf", entry_id: "x64/data.rpf::textures/vehshare.ytd", gta_path: "C:\\Games\\Grand Theft Auto V Enhanced" }), expect.any(String), expect.any(Function));
+    // Selecting the editor lazy-loads it; inspection starts in its mount effect.
+    await waitFor(() => expect(client.startJob).toHaveBeenCalledWith("inspect_authoring_workspace", expect.objectContaining({ module: "native", archive: "C:\\Games\\Grand Theft Auto V Enhanced\\mods\\update\\update.rpf", entry_id: "x64/data.rpf::textures/vehshare.ytd", gta_path: "C:\\Games\\Grand Theft Auto V Enhanced" }), expect.any(String), expect.any(Function)));
     expect(await screen.findByRole("button", { name: "Review native workspace export" })).toBeEnabled();
   });
 

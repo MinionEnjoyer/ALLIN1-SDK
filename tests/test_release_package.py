@@ -181,6 +181,7 @@ def test_desktop_ci_retains_failed_test_evidence_without_uploading_partial_binar
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/tauri-desktop.yml").read_text(encoding="utf-8")
     react_step = workflow.split("- name: Validate React shell")[1].split("- name:")[0]
     assert "--reporter=json" in react_step and "../build/react-results.json" in react_step
+    assert "--no-file-parallelism" in react_step
     diagnostics = workflow.split("- name: Retain diagnostic evidence even when qualification fails")[1]
     assert "if: always()" in diagnostics
     assert "build/python-results.xml" in diagnostics and "build/react-results.json" in diagnostics
