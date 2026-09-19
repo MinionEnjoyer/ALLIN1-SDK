@@ -390,10 +390,11 @@ describe("ALLIN1 desktop shell", () => {
       return { job_id: "inspect-nodes", accepted: response() };
     });
     render(<App client={client} />);
-    // First navigation lazy-loads the editor before its inspection and focus effects.
-    await waitFor(() => expect(screen.getByRole("button", { name: "Select node focused.yft" })).toHaveAttribute("aria-pressed", "true"), { timeout: 5000 });
+    // Cold navigation transforms/lazy-loads the editor before inspection and focus.
+    // Keep this wait inside the whole-test budget, including on hosted Windows.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Select node focused.yft" })).toHaveAttribute("aria-pressed", "true"), { timeout: 10_000 });
     expect(client.applyWorkspaceAction).not.toHaveBeenCalled();
-  });
+  }, 15_000);
   it.each(catalog.navigation)("honors the advertised $shortcut shortcut for $label", async (route) => {
     const user = userEvent.setup();
     render(<App client={mockClient()} />);

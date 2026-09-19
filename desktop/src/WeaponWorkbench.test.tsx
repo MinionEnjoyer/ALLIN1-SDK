@@ -87,6 +87,8 @@ async function fillCloneForm(user: ReturnType<typeof userEvent.setup>, reuse = f
   await user.type(screen.getByLabelText(reuse ? "Existing ammo identity" : "New ammo identity"), reuse ? "AMMO_DEMO" : "AMMO_NEW");
 }
 
+// Full user-event form entry plus separate inspect/review/create/undo round trips
+// need a workflow budget on hosted Windows; retain real events and every guard.
 it("reviews complete clone additions and confirms creation and undo independently", async () => {
   const client = createPreviewClient("weapons");
   const start = vi.spyOn(client, "startJob");
@@ -136,7 +138,7 @@ it("reviews complete clone additions and confirms creation and undo independentl
   await user.click(screen.getByRole("button", { name: "Confirm restore" }));
   await screen.findByText("Editable copy · Revision 2");
   expect(screen.queryByRole("button", { name: /^WEAPON_NEW / })).not.toBeInTheDocument();
-});
+}, 15_000);
 
 it("shows blocked clone evidence, preserves the draft, and reviews explicit ammo reuse", async () => {
   const client = createPreviewClient("weapons");
