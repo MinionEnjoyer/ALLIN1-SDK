@@ -15,6 +15,7 @@ jobs:
     env:
       ALLIN1_NATIVE_RPF_TEST: "1"
       ALLIN1_NATIVE_RUNTIME_TEST: "1"
+      ALLIN1_LAUNCHER_SRC: ${{ github.workspace }}/launcher/src
     steps:
       - uses: actions/checkout@v4
         with:
@@ -91,7 +92,6 @@ jobs:
       - name: Validate complete Python release gate with configured coverage threshold
         shell: pwsh
         run: |
-          $env:ALLIN1_LAUNCHER_SRC = Join-Path $PWD 'launcher/src'
           python -m pytest --cov=allin1_sdk --cov-report=term-missing --cov-report=xml --junitxml=build/python-results.xml
 
       - name: Validate React shell

@@ -168,6 +168,15 @@ def test_native_unit_ci_does_not_require_stale_installer_staging():
     assert 'TAURI_CONFIG' not in packaging_step
 
 
+def test_desktop_ci_shares_launcher_checkout_with_python_and_react_gates():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github/workflows/tauri-desktop.yml").read_text(encoding="utf-8")
+    job_environment = workflow.split("  windows-desktop:", 1)[1].split("    steps:", 1)[0]
+    assert "ALLIN1_LAUNCHER_SRC: ${{ github.workspace }}/launcher/src" in job_environment
+    assert "path: launcher" in workflow
+    assert "$env:ALLIN1_LAUNCHER_SRC =" not in workflow
+
+
 def test_desktop_ci_retains_failed_test_evidence_without_uploading_partial_binaries():
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/tauri-desktop.yml").read_text(encoding="utf-8")
     react_step = workflow.split("- name: Validate React shell")[1].split("- name:")[0]

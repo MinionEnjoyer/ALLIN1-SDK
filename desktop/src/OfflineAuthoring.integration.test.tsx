@@ -146,11 +146,12 @@ print(json.dumps({'workspace':str(workspace),'build':built['destination'],'archi
   await user.click(screen.getByRole("button", { name: "Export ALLIN1 ZIP" }));
   expect(await screen.findByRole("status")).toHaveTextContent("ALLIN1 ZIP exported and validated");
   expect(readFileSync(input.archive)).toEqual(original);
-  const installed = spawnSync(python, ["-c", `import json,sys,shutil,zipfile
+  const installed = spawnSync(python, ["-c", `import json,os,sys,shutil,zipfile
 from pathlib import Path
 from allin1_sdk.artifact_contract import validate_manifest
 root=Path(sys.argv[1]);mode=sys.argv[2]
-sys.path.insert(0,str(Path.cwd().parent/'ALLIN1/src'))
+launcher_source=Path(os.environ.get('ALLIN1_LAUNCHER_SRC') or Path.cwd().parent/'ALLIN1/src').resolve(strict=True)
+sys.path.insert(0,str(launcher_source))
 from allin1.mods import ModIntegrationService,open_mod_package
 with zipfile.ZipFile(root/'published.zip') as archive:
  artifact=validate_manifest(json.loads(archive.read('sdk-artifact.json')))
@@ -162,7 +163,7 @@ with zipfile.ZipFile(root/'published.zip') as archive:
 if mode=='member':
  from scripts.smoke_rpf_member_install import verify_export
  from allin1_sdk.gxt2_workspace import Gxt2Workspace
- verify_export(root/'published.zip',root/'text-fixture.rpf',Path.cwd()/'tools/RpfPatcher/RpfPatcher.exe',root/'decoder',Path.cwd().parent/'ALLIN1/src',Gxt2Workspace.encode([{'hash':256,'text':'Root dictionary'}]))
+ verify_export(root/'published.zip',root/'text-fixture.rpf',Path.cwd()/'tools/RpfPatcher/RpfPatcher.exe',root/'decoder',launcher_source,Gxt2Workspace.encode([{'hash':256,'text':'Root dictionary'}]))
 else:
  game=root/'install-test';game.mkdir();(game/'GTA5_Enhanced.exe').write_bytes(b'test marker')
  target=game/'mods/update/text-fixture.rpf';target.parent.mkdir(parents=True);shutil.copyfile(root/'text-fixture.rpf',target)
