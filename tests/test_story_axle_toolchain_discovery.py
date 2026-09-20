@@ -535,6 +535,7 @@ def test_selected_toolchain_environment_binds_msvc_and_discards_stale_prompt(
     )
 
     assert "VCTargetsPath" not in environment and "INCLUDE" not in environment
+    assert environment["MSBUILDDISABLENODEREUSE"] == "1"
     assert environment["VCToolsInstallDir"] == (
         str(compiler.parents[3]) + "\\"
     )
@@ -557,7 +558,8 @@ def test_cpp17_probe_failure_retains_first_and_final_stream_diagnostics(
             command,
             1,
             stdout=(
-                "first configure context\n" + "x" * 5_000
+                "CMake Error: generic configure failure\n" + "x" * 35_000
+                + "\nSystem.ComponentModel.Win32Exception: inner compiler failure"
                 + "\nerror MSB4018: The \"CL\" task failed unexpectedly"
             ),
             stderr="FINAL CONTEXT: Microsoft.CppCommon.targets failed",
@@ -573,8 +575,9 @@ def test_cpp17_probe_failure_retains_first_and_final_stream_diagnostics(
 
     assert ready is False
     assert "error MSB4018" in detail
+    assert "inner compiler failure" in detail
     assert "FINAL CONTEXT" in detail
-    assert "middle of command output omitted" in detail
+    assert "prioritized toolchain error" in detail
 
 
 def _ready_snapshot(

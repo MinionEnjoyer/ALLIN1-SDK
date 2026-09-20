@@ -11,6 +11,8 @@ def test_python_gate_runs_against_fresh_frozen_payload_before_sealing():
     assert "Frozen candidate bytes changed during the Python gate." in script
     assert "$env:ALLIN1_FROZEN_SIDECAR = $previousFrozenSidecar" in script
     assert "$env:ALLIN1_FROZEN_RESOURCES = $previousFrozenResources" in script
+    assert "from allin1_sdk.release_paths import filesystem_path" in script
+    assert "'scripts\\smoke_desktop_sidecar.py') $smokeSidecar.Trim()" in script
 
 
 def test_hosted_workflow_runs_recorded_candidate_gates_once_before_artifact_upload():

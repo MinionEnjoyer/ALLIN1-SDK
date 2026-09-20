@@ -65,7 +65,10 @@ if ($LASTEXITCODE -ne 0) { throw 'PyInstaller desktop sidecar build failed.' }
 $sidecar = Join-Path $sidecarDir 'ALLIN1-SDK-Desktop-Sidecar.exe'
 & $python (Join-Path $repo 'scripts\frozen_desktop.py') inspect $sidecar
 if ($LASTEXITCODE -ne 0) { throw 'Tk/legacy UI leaked into the frozen React SDK.' }
-& $python (Join-Path $repo 'scripts\smoke_desktop_sidecar.py') $sidecar `
+# Match the extracted installer's extended-path launch before expensive gates.
+$smokeSidecar = & $python -c 'import sys; from pathlib import Path; from allin1_sdk.release_paths import filesystem_path; print(filesystem_path(Path(sys.argv[1])))' $sidecar
+if ($LASTEXITCODE -ne 0) { throw 'Packaged sidecar smoke path resolution failed.' }
+& $python (Join-Path $repo 'scripts\smoke_desktop_sidecar.py') $smokeSidecar.Trim() `
     --resource-home (Join-Path $desktop 'src-tauri\standalone-resources') --build-identity $candidateIdentity
 if ($LASTEXITCODE -ne 0) { throw 'Packaged desktop sidecar smoke test failed.' }
 & $python (Join-Path $repo 'scripts\smoke_ped_desktop.py') $sidecar `

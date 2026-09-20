@@ -948,6 +948,10 @@ def _selected_toolchain_environment(
         "INCLUDE", "LIB", "LIBPATH",
     ):
         environment.pop(key, None)
+    # A frozen smoke can intentionally replace the user-profile/cache roots
+    # between runs. Do not let MSBuild retain a worker node whose inherited
+    # compiler/cache paths belonged to an earlier disposable environment.
+    environment["MSBUILDDISABLENODEREUSE"] = "1"
     path_entries: list[str] = []
     if cl_path is not None:
         compiler = cl_path.resolve(strict=False)
@@ -979,7 +983,7 @@ def _selected_toolchain_environment(
 
 
 def _probe_command_output(completed: subprocess.CompletedProcess[str]) -> str:
-    """Retain the earliest diagnostic and the final context from both streams."""
+    """Return bounded raw probe output, prioritizing the actionable MSBuild error."""
     streams = tuple(
         (name, value.strip())
         for name, value in (("stdout", completed.stdout), ("stderr", completed.stderr))
@@ -987,30 +991,37 @@ def _probe_command_output(completed: subprocess.CompletedProcess[str]) -> str:
     )
     if not streams:
         return "command exited without diagnostic output"
-    budget = 4_000 // len(streams)
+    detail = "\n".join(f"{name}: {value}" for name, value in streams)
+    maximum = 32 * 1024
+    if len(detail) <= maximum:
+        return detail
 
-    def summarize(value: str) -> str:
-        if len(value) <= budget:
-            return value
-        retained = budget // 2
-        summary = (
-            value[:retained]
-            + "\n... [middle of command output omitted] ...\n"
-            + value[-retained:]
+    # CMake's generic "CMake Error" normally precedes MSBuild's useful task
+    # failure. Select MSBuild first, then an exception, rather than merely the
+    # earliest of all markers in the output.
+    marker = next((
+        re.search(pattern, detail, re.IGNORECASE | re.MULTILINE)
+        for pattern in (
+            r"error\s+MSB\d+", r"(?:unhandled )?exception", r"cmake error",
         )
-        error = re.search(
-            r"(?im).{0,120}(?:error\s+MSB\d+|exception|cmake error).{0,600}",
-            value,
-        )
-        if error is None:
-            return summary
-        return (
-            summary
-            + "\n... [earliest toolchain error context] ...\n"
-            + error.group(0)
-        )
-
-    return "\n".join(f"{name}: {summarize(value)}" for name, value in streams)
+        if re.search(pattern, detail, re.IGNORECASE | re.MULTILINE) is not None
+    ), None)
+    if marker is None:
+        retained = maximum // 2
+        return detail[:retained] + "\n... [middle of command output omitted] ...\n" + detail[-retained:]
+    before = 8 * 1024
+    after = 12 * 1024
+    context_start = max(0, marker.start() - before)
+    context_end = min(len(detail), marker.end() + after)
+    head = detail[:4 * 1024]
+    tail = detail[-4 * 1024:]
+    return "".join((
+        head,
+        "\n... [output omitted before prioritized toolchain error] ...\n",
+        detail[context_start:context_end],
+        "\n... [output omitted after prioritized toolchain error] ...\n",
+        tail,
+    ))
 
 
 def _run_cpp17_static_probe(
