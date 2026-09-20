@@ -11,3 +11,15 @@ def test_python_gate_runs_against_fresh_frozen_payload_before_sealing():
     assert "Frozen candidate bytes changed during the Python gate." in script
     assert "$env:ALLIN1_FROZEN_SIDECAR = $previousFrozenSidecar" in script
     assert "$env:ALLIN1_FROZEN_RESOURCES = $previousFrozenResources" in script
+
+
+def test_hosted_workflow_checks_frozen_candidate_before_repeated_source_gates():
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/tauri-desktop.yml").read_text()
+    candidate = workflow.index("- name: Build, identify, extract and smoke-test")
+    assert workflow.index("- name: Verify pinned Blender archive") < candidate
+    for step in (
+        "Validate complete Python release gate",
+        "Validate React shell",
+        "Validate Rust broker",
+    ):
+        assert candidate < workflow.index("- name: " + step)

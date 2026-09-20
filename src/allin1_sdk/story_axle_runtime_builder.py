@@ -927,9 +927,39 @@ def _cmake_selection_arguments(
 
 
 def _selected_toolchain_environment(
-    *, windows_sdk_path: Path | None, windows_sdk_version: str | None,
+    *,
+    visual_studio: Path | None,
+    cl_path: Path | None,
+    toolset_version: str | None,
+    windows_sdk_path: Path | None,
+    windows_sdk_version: str | None,
 ) -> dict[str, str]:
+    """Bind CMake/MSBuild to the toolchain selected by preflight.
+
+    The frozen sidecar deliberately starts helpers with a minimal PATH.  MSBuild
+    still invokes ``CL`` by name on newer Visual Studio generators, so merely
+    passing CMAKE_CXX_COMPILER is not sufficient.  Do not inherit a stale VS
+    developer prompt either: it can point MSBuild at a different toolset.
+    """
     environment = dict(os.environ)
+    for key in (
+        "VCTargetsPath", "VCToolsInstallDir", "VCToolsVersion",
+        "VCINSTALLDIR", "VSINSTALLDIR", "VisualStudioVersion", "DevEnvDir",
+        "INCLUDE", "LIB", "LIBPATH",
+    ):
+        environment.pop(key, None)
+    path_entries: list[str] = []
+    if cl_path is not None:
+        compiler = cl_path.resolve(strict=False)
+        toolset = compiler.parents[3]
+        environment["VCToolsInstallDir"] = str(toolset).rstrip("\\/") + "\\"
+        environment["VCToolsVersion"] = toolset_version or toolset.name
+        path_entries.append(str(compiler.parent))
+    if visual_studio is not None:
+        installation = visual_studio.resolve(strict=False)
+        environment["VSINSTALLDIR"] = str(installation).rstrip("\\/") + "\\"
+        environment["VCINSTALLDIR"] = str(installation / "VC").rstrip("\\/") + "\\"
+        path_entries.append(str(installation / "MSBuild" / "Current" / "Bin"))
     if windows_sdk_path is not None:
         root = str(windows_sdk_path.resolve(strict=False)).rstrip("\\/") + "\\"
         environment["WindowsSdkDir"] = root
@@ -937,7 +967,50 @@ def _selected_toolchain_environment(
     if windows_sdk_version:
         environment["WindowsSDKVersion"] = windows_sdk_version.rstrip("\\/") + "\\"
         environment["UCRTVersion"] = windows_sdk_version.rstrip("\\/")
+        if windows_sdk_path is not None:
+            path_entries.append(str(
+                windows_sdk_path / "Bin" / windows_sdk_version.rstrip("\\/") / "x64"
+            ))
+    existing_path = environment.get("PATH", "")
+    environment["PATH"] = os.pathsep.join([
+        *dict.fromkeys(path_entries), existing_path,
+    ])
     return environment
+
+
+def _probe_command_output(completed: subprocess.CompletedProcess[str]) -> str:
+    """Retain the earliest diagnostic and the final context from both streams."""
+    streams = tuple(
+        (name, value.strip())
+        for name, value in (("stdout", completed.stdout), ("stderr", completed.stderr))
+        if value and value.strip()
+    )
+    if not streams:
+        return "command exited without diagnostic output"
+    budget = 4_000 // len(streams)
+
+    def summarize(value: str) -> str:
+        if len(value) <= budget:
+            return value
+        retained = budget // 2
+        summary = (
+            value[:retained]
+            + "\n... [middle of command output omitted] ...\n"
+            + value[-retained:]
+        )
+        error = re.search(
+            r"(?im).{0,120}(?:error\s+MSB\d+|exception|cmake error).{0,600}",
+            value,
+        )
+        if error is None:
+            return summary
+        return (
+            summary
+            + "\n... [earliest toolchain error context] ...\n"
+            + error.group(0)
+        )
+
+    return "\n".join(f"{name}: {summarize(value)}" for name, value in streams)
 
 
 def _run_cpp17_static_probe(
@@ -1004,6 +1077,9 @@ def _run_cpp17_static_probe(
                 ],
             )
             selected_environment = _selected_toolchain_environment(
+                visual_studio=visual_studio,
+                cl_path=cl_path,
+                toolset_version=toolset_version,
                 windows_sdk_path=windows_sdk_path,
                 windows_sdk_version=windows_sdk_version,
             )
@@ -1012,11 +1088,14 @@ def _run_cpp17_static_probe(
                     command, cwd=source, capture_output=True, text=True,
                     encoding="utf-8", errors="replace", timeout=120,
                     check=False, env=selected_environment,
+                    sanitize_frozen_dlls=True,
                 )
                 if completed.returncode != 0:
                     phase = "configure" if index == 0 else "compile/link"
-                    detail = (completed.stderr or completed.stdout or "").strip()
-                    return False, f"C++17 probe {phase} failed: {detail[-800:]}"
+                    return False, (
+                        f"C++17 probe {phase} failed: "
+                        f"{_probe_command_output(completed)}"
+                    )
             executable = build / "Release" / "allin1_axle_probe.exe"
             if not executable.is_file():
                 return False, "C++17 probe did not produce an x64 executable"
@@ -1036,11 +1115,13 @@ def _run_cpp17_static_probe(
                 ],
                 cwd=source, capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=120, check=False,
-                env=selected_environment,
+                env=selected_environment, sanitize_frozen_dlls=True,
             )
             if completed.returncode != 0:
-                detail = (completed.stderr or completed.stdout or "").strip()
-                return False, f"C++17 probe CTest failed: {detail[-800:]}"
+                return False, (
+                    "C++17 probe CTest failed: "
+                    f"{_probe_command_output(completed)}"
+                )
             return (
                 True,
                 "C++17 x64 configure/build/link and CTest passed with the static MSVC runtime",
@@ -1765,6 +1846,7 @@ def _run_command(
             timeout=timeout,
             check=False,
             env=dict(env) if env is not None else None,
+            sanitize_frozen_dlls=True,
         )
     except subprocess.TimeoutExpired as exc:
         raise StoryAxleRuntimeBuildError(f"{name} exceeded its {timeout}-second timeout") from exc
@@ -2057,6 +2139,9 @@ def build_story_axle_runtime_candidate(
     commands: list[NativeBuildCommandRecord] = []
     callback = progress or (lambda _message: None)
     selected_environment = _selected_toolchain_environment(
+        visual_studio=toolchain.visual_studio_path,
+        cl_path=toolchain.cl_path,
+        toolset_version=toolchain.msvc_toolset_version,
         windows_sdk_path=toolchain.windows_sdk_path,
         windows_sdk_version=toolchain.windows_sdk_version,
     )

@@ -103,6 +103,16 @@ jobs:
           if (-not (Test-Path -LiteralPath $blender -PathType Leaf)) { throw 'Blender dependency unavailable' }
           "ALLIN1_BLENDER_EXECUTABLE=$blender" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      # Exercise the frozen toolchain before repeating source-only checks. The
+      # candidate builder itself requires the full Python/React/Rust gates.
+      - name: Build, identify, extract and smoke-test the actual candidate bytes
+        shell: pwsh
+        run: |
+          ./scripts/build_tauri_desktop.ps1 -PythonExecutable (Get-Command python).Source -SevenZipExecutable 'C:\Program Files\7-Zip\7z.exe'
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate build failed' }
+          python -m pytest tests/test_nsis_containment.py -q
+          if ($LASTEXITCODE -ne 0) { throw 'Compiled NSIS guard regression checks failed' }
+
       - name: Validate complete Python release gate with configured coverage threshold
         shell: pwsh
         run: |
@@ -129,14 +139,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed' }
           cargo check --locked --manifest-path desktop/src-tauri/Cargo.toml
           if ($LASTEXITCODE -ne 0) { throw 'Rust check failed' }
-
-      - name: Build, identify, extract and smoke-test the actual candidate bytes
-        shell: pwsh
-        run: |
-          ./scripts/build_tauri_desktop.ps1 -PythonExecutable (Get-Command python).Source -SevenZipExecutable 'C:\Program Files\7-Zip\7z.exe'
-          if ($LASTEXITCODE -ne 0) { throw 'Candidate build failed' }
-          python -m pytest tests/test_nsis_containment.py -q
-          if ($LASTEXITCODE -ne 0) { throw 'Compiled NSIS guard regression checks failed' }
 
       - name: Prepare unsigned manual-download notes
         shell: pwsh

@@ -512,6 +512,71 @@ def test_cpp17_probe_runs_selected_ctest_after_release_build(
     assert commands[2][3:] == ("-C", "Release", "--output-on-failure")
 
 
+def test_selected_toolchain_environment_binds_msvc_and_discards_stale_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    visual_studio = tmp_path / "Visual Studio 18" / "BuildTools"
+    compiler = (
+        visual_studio / "VC" / "Tools" / "MSVC" / "14.50.12345" /
+        "bin" / "Hostx64" / "x64" / "cl.exe"
+    )
+    sdk = tmp_path / "Windows Kits" / "10"
+    monkeypatch.setenv("PATH", "C:\\Windows\\System32")
+    monkeypatch.setenv("VCTargetsPath", "C:\\stale-vs\\targets")
+    monkeypatch.setenv("INCLUDE", "C:\\stale-vs\\include")
+
+    environment = builder._selected_toolchain_environment(
+        visual_studio=visual_studio,
+        cl_path=compiler,
+        toolset_version="14.50.12345",
+        windows_sdk_path=sdk,
+        windows_sdk_version="10.0.26100.0",
+    )
+
+    assert "VCTargetsPath" not in environment and "INCLUDE" not in environment
+    assert environment["VCToolsInstallDir"] == (
+        str(compiler.parents[3]) + "\\"
+    )
+    assert environment["VCToolsVersion"] == "14.50.12345"
+    assert environment["VCINSTALLDIR"] == str(visual_studio / "VC") + "\\"
+    assert environment["VSINSTALLDIR"] == str(visual_studio) + "\\"
+    assert environment["PATH"].split(os.pathsep)[:3] == [
+        str(compiler.parent),
+        str(visual_studio / "MSBuild" / "Current" / "Bin"),
+        str(sdk / "Bin" / "10.0.26100.0" / "x64"),
+    ]
+
+
+def test_cpp17_probe_failure_retains_first_and_final_stream_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def failed(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout=(
+                "first configure context\n" + "x" * 5_000
+                + "\nerror MSB4018: The \"CL\" task failed unexpectedly"
+            ),
+            stderr="FINAL CONTEXT: Microsoft.CppCommon.targets failed",
+        )
+
+    monkeypatch.setattr(builder, "run_hidden", failed)
+
+    ready, detail = builder._run_cpp17_static_probe(
+        cmake=tmp_path / "cmake.exe",
+        ctest=tmp_path / "ctest.exe",
+        generator="Visual Studio 18 2026",
+    )
+
+    assert ready is False
+    assert "error MSB4018" in detail
+    assert "FINAL CONTEXT" in detail
+    assert "middle of command output omitted" in detail
+
+
 def _ready_snapshot(
     tmp_path: Path,
 ) -> builder.NativeAxleToolchainReport:
