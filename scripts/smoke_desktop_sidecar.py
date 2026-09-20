@@ -57,6 +57,34 @@ def exchange(process: subprocess.Popen[str], message: dict) -> dict:
     return response
 
 
+def disposable_profile_environment(
+    preview_cache: Path, inherited: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Create a complete, disposable Windows profile before any child starts."""
+    profile = preview_cache / "user"
+    roaming = profile / "AppData" / "Roaming"
+    local = profile / "AppData" / "Local"
+    local_low = profile / "AppData" / "LocalLow"
+    xdg_data = profile / ".local" / "share"
+    xdg_cache = profile / ".cache"
+    for directory in (profile, roaming, local, local_low, xdg_data, xdg_cache):
+        directory.mkdir(parents=True, exist_ok=True)
+    drive, home_path = os.path.splitdrive(str(profile))
+    environment = dict(os.environ if inherited is None else inherited)
+    environment.update({
+        "USERPROFILE": str(profile),
+        "HOME": str(profile),
+        "APPDATA": str(roaming),
+        "LOCALAPPDATA": str(local),
+        "XDG_DATA_HOME": str(xdg_data),
+        "XDG_CACHE_HOME": str(xdg_cache),
+    })
+    if os.name == "nt":
+        environment["HOMEDRIVE"] = drive
+        environment["HOMEPATH"] = home_path or "\\"
+    return environment
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("sidecar", type=Path)
@@ -85,8 +113,7 @@ def main() -> None:
     for key in ("PYTHONPATH", "PYTHONHOME", "ALLIN1_DESKTOP_PYTHON", "ALLIN1_DESKTOP_SIDECAR", "ALLIN1_GTA_PATH"):
         environment.pop(key, None)
     environment["ALLIN1_SDK_HOME"] = str(resource_home)
-    for key in ("LOCALAPPDATA", "APPDATA", "USERPROFILE", "HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
-        environment[key] = str(preview_cache / "user")
+    environment = disposable_profile_environment(preview_cache, environment)
     environment["PATH"] = str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32")
     environment["DOTNET_ROOT"] = str(preview_cache / "no-dotnet")
     environment["ALLIN1_PREVIEW_DIR"] = str(preview_cache)
@@ -130,7 +157,10 @@ def main() -> None:
         saved_assistant = exchange(process, request("smoke-assistant-save", "configure_assistant", {
             "settings": {"mode": "disabled"}, "authoring_confirmed": True,
         }))
-        expected_config = preview_cache / "user" / "ALLIN1-SDK" / "Assistant" / "config.json"
+        expected_config = (
+            preview_cache / "user" / "AppData" / "Local" / "ALLIN1-SDK"
+            / "Assistant" / "config.json"
+        )
         if (
             saved_assistant["operation"] != "result"
             or saved_assistant["risk"] != "authoring_write"
