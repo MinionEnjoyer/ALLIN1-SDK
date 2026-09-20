@@ -163,7 +163,10 @@ def test_native_unit_ci_does_not_require_stale_installer_staging():
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/tauri-desktop.yml").read_text(encoding="utf-8")
     unit_step = workflow.split("- name: Validate Rust broker")[1].split("- name:")[0]
     assert 'TAURI_CONFIG:' in unit_step and '"resources":[]' in unit_step
-    assert "cargo test --locked" in unit_step and "cargo check --locked" in unit_step
+    assert "cargo check --locked" in unit_step
+    builder = (Path(__file__).resolve().parents[1] / "scripts/build_tauri_desktop.ps1").read_text(encoding="utf-8")
+    assert "@('cargo', 'test', '--manifest-path'" in builder
+    assert "--name rust --cwd" in builder
     packaging_step = workflow.split("- name: Build, identify, extract and smoke-test the actual candidate bytes")[1].split("- name:")[0]
     assert 'TAURI_CONFIG' not in packaging_step
 
@@ -179,12 +182,11 @@ def test_desktop_ci_shares_launcher_checkout_with_python_and_react_gates():
 
 def test_desktop_ci_retains_failed_test_evidence_without_uploading_partial_binaries():
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/tauri-desktop.yml").read_text(encoding="utf-8")
-    react_step = workflow.split("- name: Validate React shell")[1].split("- name:")[0]
-    assert "--reporter=json" in react_step and "../build/react-results.json" in react_step
-    assert "--no-file-parallelism" in react_step
+    instrumentation = (Path(__file__).resolve().parents[1] / "scripts/candidate_test_evidence.py").read_text(encoding="utf-8")
+    assert "--reporter=json" in instrumentation and "gate-react-results.json" in instrumentation
+    assert "--no-file-parallelism" in instrumentation
     diagnostics = workflow.split("- name: Retain diagnostic evidence even when qualification fails")[1]
     assert "if: always()" in diagnostics
-    assert "build/python-results.xml" in diagnostics and "build/react-results.json" in diagnostics
     assert "gate-*.json" in diagnostics and "coverage.xml" in diagnostics
     assert "portable-lifecycle/portable-lifecycle.json" in diagnostics
     assert "*.exe" not in diagnostics and "*.zip" not in diagnostics

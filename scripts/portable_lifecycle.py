@@ -28,6 +28,14 @@ REQUIRED = {SHELL, SIDECAR, "release.json", "checksums.json", "build-identity.js
             "tools/RpfPatcher/RpfPatcher.exe", "tools/RpfPatcher/RpfPatcher.dll"}
 SHA = re.compile(r"[a-f0-9]{64}")
 MAX_JSON = 2 * 1024**2
+# A just-exited Windows executable can remain transiently locked by its
+# bootloader or an on-access scanner.  This is deliberately small: relocation
+# remains a required assertion, rather than becoming a best-effort cleanup.
+# Back off exponentially to one second, then use the remaining budget.  Hosted
+# Windows scanners can retain a newly-exited frozen executable for longer than
+# a local workstation does, but a move must still fail promptly if the lock is
+# permanent.
+RELOCATION_RETRY_DELAYS = (0.1, 0.2, 0.4, 0.8, 1.0, 1.0, 1.0, 0.5)
 
 
 def inspect_archive(archive_path: Path, expected_sha256: str) -> dict:
@@ -113,23 +121,42 @@ def run_process(command, *, cwd, env, input=None, timeout=45):
     """Bound lifetime, including the PyInstaller child process on Windows."""
     # Pass lpApplicationName explicitly: Windows otherwise limits the executable
     # portion of lpCommandLine to MAX_PATH even with an extended-length path.
-    process = subprocess.Popen(command, executable=command[0], cwd=filesystem_path(cwd), env=env, stdin=subprocess.PIPE,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
-                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    try:
-        stdout, stderr = process.communicate(input=input, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            subprocess.run([str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/taskkill.exe"),
-                            "/PID", str(process.pid), "/T", "/F"], capture_output=True, timeout=10,
-                           creationflags=subprocess.CREATE_NO_WINDOW)
-        else:
-            process.kill()
-        process.communicate(timeout=10)
-        raise
-    if process.returncode != 0:
-        raise RuntimeError(f"Packaged process exited {process.returncode}: {stderr[-2000:]}")
-    return stdout
+    with subprocess.Popen(command, executable=command[0], cwd=filesystem_path(cwd), env=env, stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)) as process:
+        try:
+            stdout, stderr = process.communicate(input=input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                subprocess.run([str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/taskkill.exe"),
+                                "/PID", str(process.pid), "/T", "/F"], capture_output=True, timeout=10,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            else:
+                process.kill()
+            process.communicate(timeout=10)
+            raise
+        if process.returncode != 0:
+            raise RuntimeError(f"Packaged process exited {process.returncode}: {stderr[-2000:]}")
+        return stdout
+
+
+def relocate(source: Path, destination: Path) -> None:
+    """Require an exact portable-folder move after any packaged process exits.
+
+    Windows may briefly report either ERROR_ACCESS_DENIED (5) or
+    ERROR_SHARING_VIOLATION (32) while a just-exited bootloader/AV scanner drops
+    its executable handle.  Retry only those Windows outcomes and still surface
+    every persistent or unrelated failure.
+    """
+    source, destination = filesystem_path(source), filesystem_path(destination)
+    for delay in (*RELOCATION_RETRY_DELAYS, None):
+        try:
+            source.rename(destination)
+            return
+        except OSError as error:
+            if os.name != "nt" or getattr(error, "winerror", None) not in {5, 32} or delay is None:
+                raise
+            time.sleep(delay)
 
 
 def probe(root: Path, package: dict, user_state: Path, *, expected_location="READY") -> dict:
@@ -226,18 +253,18 @@ def rehearse(archive: Path, expected_sha256: str, output: Path, *, execute_probe
         extract_new(archive, active, package)
         check("fresh extraction and startup", active)
         relocated = output / "Relocated SDK with spaces"
-        filesystem_path(active).rename(filesystem_path(relocated))
+        relocate(active, relocated)
         check("relocation and restart", relocated)
         # Simulate a manual fresh-folder repair, retaining the old folder. This
         # is not the product updater and must never be reported as such.
         backup = output / "Retained previous portable"
-        filesystem_path(relocated).rename(filesystem_path(backup))
+        relocate(relocated, backup)
         extract_new(archive, relocated, package)
         check("same-version fresh-folder repair", relocated)
         verify_tree(backup, package)
         rejected = output / "Retained repair copy"
-        filesystem_path(relocated).rename(filesystem_path(rejected))
-        filesystem_path(backup).rename(filesystem_path(relocated))
+        relocate(relocated, rejected)
+        relocate(backup, relocated)
         check("manual folder rollback", relocated)
         long_root = output / "long paths"
         while len(str(long_root)) < 275:

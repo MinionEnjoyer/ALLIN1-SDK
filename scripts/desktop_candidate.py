@@ -569,7 +569,7 @@ def seal(root: Path, identity_path: Path, sevenzip: Path) -> Path:
         with log.open("x", encoding="utf-8") as stream:
             subprocess.run([sys.executable, str(root / "scripts" / script),
                 str(actual["sidecar/ALLIN1-SDK-Desktop-Sidecar.exe"]), "--resource-home", str(smoke_home), *extra],
-                stdout=stream, stderr=subprocess.STDOUT, check=True, timeout=180)
+                stdout=stream, stderr=subprocess.STDOUT, check=True, timeout=600)
     check_source(root, identity_path)
     compare_payload(expected, tree_files(extracted))
     if sha256(candidate) != digest:

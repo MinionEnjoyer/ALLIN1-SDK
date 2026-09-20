@@ -13,13 +13,18 @@ def test_python_gate_runs_against_fresh_frozen_payload_before_sealing():
     assert "$env:ALLIN1_FROZEN_RESOURCES = $previousFrozenResources" in script
 
 
-def test_hosted_workflow_checks_frozen_candidate_before_repeated_source_gates():
-    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/tauri-desktop.yml").read_text()
+def test_hosted_workflow_runs_recorded_candidate_gates_once_before_artifact_upload():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github/workflows/tauri-desktop.yml").read_text()
+    script = (root / "scripts/build_tauri_desktop.ps1").read_text()
     candidate = workflow.index("- name: Build, identify, extract and smoke-test")
     assert workflow.index("- name: Verify pinned Blender archive") < candidate
-    for step in (
-        "Validate complete Python release gate",
-        "Validate React shell",
-        "Validate Rust broker",
-    ):
-        assert candidate < workflow.index("- name: " + step)
+    assert candidate < workflow.index("- name: Validate Rust broker")
+    assert candidate < workflow.index("- name: Upload unsigned candidates")
+    for gate in ("python", "react", "rust", "frontend", "native-rpf"):
+        assert script.count("--name " + gate + " --cwd") == 1
+        assert script.index("--name " + gate + " --cwd") < script.index("seal --identity")
+    assert "python -m pytest --cov" not in workflow
+    assert "pnpm --dir desktop test" not in workflow
+    assert "pnpm --dir desktop build" not in workflow
+    assert "gate-*.json" in workflow and "gate-*.xml" in workflow

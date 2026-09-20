@@ -103,8 +103,8 @@ jobs:
           if (-not (Test-Path -LiteralPath $blender -PathType Leaf)) { throw 'Blender dependency unavailable' }
           "ALLIN1_BLENDER_EXECUTABLE=$blender" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # Exercise the frozen toolchain before repeating source-only checks. The
-      # candidate builder itself requires the full Python/React/Rust gates.
+      # The builder runs the full public Python/React/Rust/frontend gates against
+      # this candidate, records their evidence, then validates the installer.
       - name: Build, identify, extract and smoke-test the actual candidate bytes
         shell: pwsh
         run: |
@@ -113,21 +113,6 @@ jobs:
           python -m pytest tests/test_nsis_containment.py -q
           if ($LASTEXITCODE -ne 0) { throw 'Compiled NSIS guard regression checks failed' }
 
-      - name: Validate complete Python release gate with configured coverage threshold
-        shell: pwsh
-        run: |
-          python -m pytest --cov=allin1_sdk --cov-report=term-missing --cov-report=xml --junitxml=build/python-results.xml
-
-      - name: Validate React shell
-        shell: pwsh
-        run: |
-          # Native/Blender integration tests compete with jsdom on hosted runners.
-          # Serialize files instead of weakening assertions or retrying failures.
-          pnpm --dir desktop test --no-file-parallelism --reporter=default --reporter=json --outputFile.json=../build/react-results.json
-          if ($LASTEXITCODE -ne 0) { throw 'React happy-path gate failed' }
-          pnpm --dir desktop build
-          if ($LASTEXITCODE -ne 0) { throw 'React production build failed' }
-
       - name: Validate Rust broker
         shell: pwsh
         env:
@@ -135,8 +120,7 @@ jobs:
           # is scoped to this step, never the real candidate/installer build.
           TAURI_CONFIG: '{"bundle":{"active":false,"resources":[]}}'
         run: |
-          cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
-          if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed' }
+          # Named Rust tests already ran in the candidate's recorded gate.
           cargo check --locked --manifest-path desktop/src-tauri/Cargo.toml
           if ($LASTEXITCODE -ne 0) { throw 'Rust check failed' }
 
@@ -165,7 +149,8 @@ jobs:
             build/tauri-candidates/*/nsis-stage.json
             build/tauri-candidates/*/nsis-staged-shell.exe
             build/tauri-candidates/*/*.log
-            build/python-results.xml
+            build/tauri-candidates/*/gate-*.json
+            build/tauri-candidates/*/gate-*.xml
             coverage.xml
           if-no-files-found: error
           retention-days: 14
@@ -178,8 +163,6 @@ jobs:
           # a candidate, but its machine-readable failure evidence must survive.
           name: ALLIN1-Tauri-${{ github.sha }}-${{ github.run_attempt }}-diagnostics
           path: |
-            build/python-results.xml
-            build/react-results.json
             coverage.xml
             build/tauri-candidates/*/gate-*.json
             build/tauri-candidates/*/gate-*.xml

@@ -261,3 +261,61 @@ def test_process_launcher_pins_the_application_and_cleans_up_timeouts(tmp_path, 
     with pytest.raises(subprocess.TimeoutExpired):
         lifecycle.run_process([sys.executable, "-c", "import time; time.sleep(10)"], cwd=tmp_path, env=dict(os.environ), timeout=0.1)
     assert all(child.poll() is not None for child in children)
+    assert all(stream is None or stream.closed for child in children for stream in (child.stdin, child.stdout, child.stderr))
+
+
+class SharingViolation(OSError):
+    def __init__(self, winerror):
+        super().__init__(winerror, "transient Windows file lock")
+        self.winerror = winerror
+
+
+def test_relocation_retries_only_transient_windows_locks_and_requires_the_move(tmp_path, monkeypatch):
+    source = tmp_path / "active"; source.mkdir()
+    destination = tmp_path / "relocated"
+    actual_rename = Path.rename
+    attempts, sleeps = [], []
+
+    def delayed_rename(path, target):
+        attempts.append((path, target))
+        if len(attempts) < 3:
+            raise SharingViolation(32)
+        return actual_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", delayed_rename)
+    monkeypatch.setattr(lifecycle.os, "name", "nt")
+    monkeypatch.setattr(lifecycle, "filesystem_path", lambda path: path)
+    monkeypatch.setattr(lifecycle.time, "sleep", sleeps.append)
+    lifecycle.relocate(source, destination)
+    assert not source.exists() and destination.is_dir()
+    assert len(attempts) == 3
+    assert sleeps == list(lifecycle.RELOCATION_RETRY_DELAYS[:2])
+
+
+def test_relocation_never_retries_unrelated_errors_and_preserves_a_persistent_lock(tmp_path, monkeypatch):
+    source = tmp_path / "active"; source.mkdir()
+    destination = tmp_path / "relocated"
+    attempts, sleeps = [], []
+
+    def unrelated_rename(*_args):
+        attempts.append(None)
+        raise SharingViolation(3)
+
+    monkeypatch.setattr(Path, "rename", unrelated_rename)
+    monkeypatch.setattr(lifecycle.os, "name", "nt")
+    monkeypatch.setattr(lifecycle, "filesystem_path", lambda path: path)
+    monkeypatch.setattr(lifecycle.time, "sleep", sleeps.append)
+    with pytest.raises(SharingViolation):
+        lifecycle.relocate(source, destination)
+    assert len(attempts) == 1 and not sleeps
+
+    def persistent_lock(*_args):
+        attempts.append(None)
+        raise SharingViolation(5)
+
+    monkeypatch.setattr(Path, "rename", persistent_lock)
+    with pytest.raises(SharingViolation):
+        lifecycle.relocate(source, destination)
+    assert len(attempts) == len(lifecycle.RELOCATION_RETRY_DELAYS) + 2
+    assert sleeps == list(lifecycle.RELOCATION_RETRY_DELAYS)
+    assert source.is_dir() and not destination.exists()
