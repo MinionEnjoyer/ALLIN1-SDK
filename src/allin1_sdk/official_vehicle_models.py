@@ -9,8 +9,8 @@ from __future__ import annotations
 SNAPSHOT_SCHEMA_VERSION = 1
 SOURCE_VERSION = "0.6.6"
 SOURCE_FILES = {
-    "data/vehicles.toml": "2bac07553ff80174b4cb40a6363cd9beb4fdc60c30158e2470236a0906b045e9",
-    "data/story_vehicles.json": "c96b0a00789ed10ec5601d32dee3746449dc3b2dfa7a61295738a35d1c60bd81",
+    "data/vehicles.toml": "5fa592bbd550486fa9f1dd557040d435ed0c40db5da776664b302553afd71b3b",
+    "data/story_vehicles.json": "b4a9086a9a4644ed18300a2eaacdae5b2bb8ca9e427510c19cf54d06ff39ffa7",
 }
 
 OFFICIAL_VEHICLE_MODEL_HASH_PAIRS: tuple[tuple[str, int], ...] = (
