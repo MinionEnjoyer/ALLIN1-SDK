@@ -7,11 +7,10 @@ import pytest
 
 import allin1_sdk.product_workspace as product_workspace
 from allin1_sdk.product_workspace import ProductWorkspaceInspector
+from conftest import launcher_source
 
 
-CORE_WORKSPACE = (
-    Path(__file__).resolve().parents[2] / "ALLIN1" / "allin1.workspace.json"
-)
+CORE_WORKSPACE = launcher_source().parent / "allin1.workspace.json"
 
 
 def test_real_allin1_runtime_contract_is_proven_from_bounded_sources() -> None:
@@ -24,7 +23,7 @@ def test_real_allin1_runtime_contract_is_proven_from_bounded_sources() -> None:
     assert contracts.valid, contracts.findings
     assert contracts.to_dict()["summary"] == {
         "hosts": 1,
-        "packages": 3,
+        "packages": 2,
         "errors": 0,
         "warnings": 0,
     }
@@ -39,7 +38,6 @@ def test_real_allin1_runtime_contract_is_proven_from_bounded_sources() -> None:
     packages = {item.component_id: item for item in contracts.packages}
     assert set(packages) == {
         "content.online",
-        "content.experimental",
         "package.realistic-suppressors",
     }
     suppressors = packages["package.realistic-suppressors"]

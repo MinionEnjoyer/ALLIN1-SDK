@@ -9,14 +9,32 @@ from pathlib import Path
 import pytest
 
 from allin1_sdk.extensions import ExtensionManifest, ExtensionRegistry
+from conftest import launcher_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LAUNCHER_ROOT = ROOT.parent / "ALLIN1"
+LAUNCHER_ROOT = launcher_source().parent
+
+_SDK_PED_CATALOG_KINDS = '"vehicle", "weapon", "gear", "service", "property", "ped",'
+_LAUNCHER_CATALOG_KINDS = '"vehicle", "weapon", "gear", "service", "property",'
+_SDK_PED_CATALOG_VALIDATION = '''        # Ped population catalogs share the receipt-hashed catalog transport,
+        # but they are deliberately not GBAY/shop inventory.  Keep their
+        # capability distinct so a package cannot accidentally make people
+        # purchasable simply by declaring a population model list.
+        non_ped_catalogs = [catalog for catalog in catalogs if catalog.kind != "ped"]
+        ped_catalogs = [catalog for catalog in catalogs if catalog.kind == "ped"]
+        if non_ped_catalogs and "gbay.catalogs" not in capability_set:
+            raise ValueError("GBAY catalogs require the gbay.catalogs capability")
+        if ped_catalogs and "ped.population" not in capability_set:
+            raise ValueError(
+                "Ped population catalogs require the ped.population capability"
+            )'''
+_LAUNCHER_CATALOG_VALIDATION = '''        if catalogs and "gbay.catalogs" not in capability_set:
+            raise ValueError("GBAY catalogs require the gbay.catalogs capability")'''
 
 
 def _normalized_contract_source(path: Path, namespace: str) -> str:
-    return (
+    source = (
         path.read_text(encoding="utf-8")
         .replace(
             f"from {namespace}.mod_package_contract import (",
@@ -26,15 +44,28 @@ def _normalized_contract_source(path: Path, namespace: str) -> str:
             f"from {namespace}.release_paths import no_links",
             "from CONTRACT.release_paths import no_links",
         )
-        .rstrip()
     )
+    if namespace == "allin1_sdk":
+        source = source.replace(_SDK_PED_CATALOG_KINDS, _LAUNCHER_CATALOG_KINDS)
+        source = source.replace(
+            _SDK_PED_CATALOG_VALIDATION, _LAUNCHER_CATALOG_VALIDATION,
+        )
+    return source.rstrip()
 
 
 def test_extension_contract_implementation_matches_launcher_copy() -> None:
-    launcher = LAUNCHER_ROOT / "src" / "allin1" / "extensions.py"
+    launcher = launcher_source() / "allin1" / "extensions.py"
     if not launcher.is_file():
         pytest.skip("Sibling ALLIN1 launcher checkout is not present")
     sdk = ROOT / "src" / "allin1_sdk" / "extensions.py"
+    sdk_source = sdk.read_text(encoding="utf-8")
+    launcher_source_text = launcher.read_text(encoding="utf-8")
+    # Ped population is a deliberate SDK-only capability.  Assert the exact
+    # delta before normalizing it, so any other implementation drift fails.
+    assert sdk_source.count(_SDK_PED_CATALOG_KINDS) == 1
+    assert sdk_source.count(_SDK_PED_CATALOG_VALIDATION) == 1
+    assert _SDK_PED_CATALOG_KINDS not in launcher_source_text
+    assert _SDK_PED_CATALOG_VALIDATION not in launcher_source_text
     assert _normalized_contract_source(sdk, "allin1_sdk") == (
         _normalized_contract_source(launcher, "allin1")
     )

@@ -12,11 +12,10 @@ from allin1_sdk.product_workspace import (
     ProductWorkspaceInspector,
     load_product_workspace,
 )
+from conftest import launcher_source
 
 
-SIBLING_ALLIN1 = (
-    Path(__file__).resolve().parents[2] / "ALLIN1" / "allin1.workspace.json"
-)
+SIBLING_ALLIN1 = launcher_source().parent / "allin1.workspace.json"
 
 
 def _descriptor() -> dict:
@@ -119,7 +118,6 @@ def test_actual_allin1_product_workspace_is_a_bounded_typed_graph() -> None:
         "launcher.host",
         "runtime.shared",
         "content.online",
-        "content.experimental",
         "tool.rpfpatcher",
         "example.colored-smokes",
         "package.realistic-suppressors",
@@ -137,22 +135,14 @@ def test_actual_allin1_product_workspace_is_a_bounded_typed_graph() -> None:
     assert nodes["evidence.tests"].category == "evidence"
     assert nodes["evidence.docs"].category == "evidence"
     assert nodes["content.online"].package_id == "allin1.online-content"
-    assert nodes["content.experimental"].package_id == "allin1.experimental-gameplay"
     assert nodes["content.online"].experimental is False
-    assert nodes["content.experimental"].experimental is True
     assert nodes["content.online"].managed_builtin is True
-    assert nodes["content.experimental"].managed_builtin is True
     assert nodes["content.online"].install_candidate is False
-    assert nodes["content.experimental"].install_candidate is False
     components = {
         item.component_id: item for item in report.workspace.components
     }
     assert components["content.online"].defaults == {
         "experimental_systems_enabled": False,
-    }
-    assert components["content.experimental"].defaults == {
-        "systems_enabled": False,
-        "diagnostics_enabled": False,
     }
     assert nodes["package.realistic-suppressors"].package_id == "realistic-suppressors"
     assert nodes["package.realistic-suppressors"].managed_builtin is False

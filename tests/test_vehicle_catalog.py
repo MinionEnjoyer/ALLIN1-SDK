@@ -8,10 +8,11 @@ import pytest
 
 from allin1_sdk import vehicle_catalog as sdk_catalog
 from allin1_sdk.official_vehicle_models import OFFICIAL_VEHICLE_MODELS
+from conftest import launcher_source
 
 
 def _launcher_catalog_module():
-    path = Path(__file__).resolve().parents[2] / "ALLIN1" / "src" / "allin1" / "vehicle_catalog.py"
+    path = launcher_source() / "allin1" / "vehicle_catalog.py"
     if not path.is_file():
         pytest.skip("Sibling ALLIN1 launcher checkout is not present")
     spec = importlib.util.spec_from_file_location("launcher_vehicle_catalog_contract", path)

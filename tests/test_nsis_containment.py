@@ -21,7 +21,10 @@ def nsis_harness(tmp_path_factory):
         if candidate.is_file():
             compiler = str(candidate)
     if not compiler:
-        pytest.skip("NSIS compiler unavailable; installer guard execution NOT TESTED")
+        message = "NSIS compiler unavailable; installer guard execution NOT TESTED"
+        if os.environ.get("SDK_NSIS_REQUIRED") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
     root = tmp_path_factory.mktemp("nsis guard harness")
     executable = root / "guard.exe"
     uninstaller = root / "guard-uninstall.exe"

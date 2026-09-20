@@ -12,6 +12,10 @@ import pytest
 from scripts import candidate_test_evidence as evidence, desktop_candidate as candidate
 
 
+def write_public_scope(root: Path) -> None:
+    (root / evidence.PUBLIC_TEST_SCOPE_FILE).write_text(json.dumps(evidence.PUBLIC_TEST_SCOPE))
+
+
 @pytest.fixture
 def python_report(tmp_path):
     source = tmp_path / "src/allin1_sdk/example.py"; source.parent.mkdir(parents=True); source.write_text("value = 1")
@@ -115,12 +119,51 @@ def test_label_only_commands_cannot_qualify_a_gate(tmp_path, name):
 
 
 def test_filtered_python_and_reused_report_are_refused(tmp_path):
+    write_public_scope(tmp_path)
     command = [sys.executable, "-m", "pytest", "--cov=allin1_sdk", "--cov-report=term-missing"]
     with pytest.raises(ValueError): evidence.instrument("python", [*command, "-k", "one"], tmp_path, tmp_path)
     instrumented = evidence.instrument("python", command, tmp_path, tmp_path)
     assert any(value.startswith("--junitxml=") for value in instrumented)
     (tmp_path / "gate-python.xml").write_text("stale")
     with pytest.raises(FileExistsError): evidence.instrument("python", command, tmp_path, tmp_path)
+
+
+def test_public_scope_is_exact_and_only_instruments_the_declared_private_opt_ins(tmp_path):
+    write_public_scope(tmp_path)
+    python = evidence.instrument("python", [sys.executable, "-m", "pytest", "--cov=allin1_sdk", "--cov-report=term-missing"], tmp_path, tmp_path)
+    assert [item.removeprefix("--deselect=") for item in python if item.startswith("--deselect=")] == evidence.PUBLIC_TEST_SCOPE["private_python_nodeids"]
+    react = evidence.instrument("react", ["pnpm", "test"], tmp_path, tmp_path)
+    assert "--no-file-parallelism" in react
+    assert [react[index + 1] for index, item in enumerate(react[:-1]) if item == "--exclude"] == evidence.PUBLIC_TEST_SCOPE["private_react_files"]
+    for mutation in ("missing", "extra-python", "wrong-status", "extra-react"):
+        if mutation == "missing":
+            (tmp_path / evidence.PUBLIC_TEST_SCOPE_FILE).unlink()
+            with pytest.raises(ValueError, match="Public test scope"):
+                evidence.instrument("python", [sys.executable, "-m", "pytest", "--cov=allin1_sdk", "--cov-report=term-missing"], tmp_path, tmp_path)
+            write_public_scope(tmp_path)
+            continue
+        scope = json.loads((tmp_path / evidence.PUBLIC_TEST_SCOPE_FILE).read_text())
+        if mutation == "extra-python": scope["private_python_nodeids"].append("tests/test_other.py::test_other")
+        elif mutation == "wrong-status": scope["private_status"] = "PASS"
+        else: scope["private_react_files"].append("src/Other.integration.test.tsx")
+        (tmp_path / evidence.PUBLIC_TEST_SCOPE_FILE).write_text(json.dumps(scope))
+        with pytest.raises(ValueError, match="Public test scope"):
+            evidence.instrument("python", [sys.executable, "-m", "pytest", "--cov=allin1_sdk", "--cov-report=term-missing"], tmp_path, tmp_path)
+        write_public_scope(tmp_path)
+
+
+def test_all_canonical_gates_instrument_without_evaluating_an_unrelated_scope(tmp_path):
+    write_public_scope(tmp_path)
+    commands = {
+        "python": [sys.executable, "-m", "pytest", "--cov=allin1_sdk", "--cov-report=term-missing"],
+        "react": ["pnpm", "test"],
+        "frontend": ["pnpm", "build"],
+        "rust": ["cargo", "test", "--manifest-path", str(tmp_path / "desktop/src-tauri/Cargo.toml")],
+        "native-rpf": ["dotnet", "run", "--project", str(tmp_path / "tools/RpfPatcher.Tests/RpfPatcher.Tests.csproj"), "-c", "Release"],
+    }
+    for name, command in commands.items():
+        result = evidence.instrument(name, command, tmp_path, tmp_path)
+        assert result[:len(command)] == command
 
 
 def test_stale_report_is_not_fresh_evidence(tmp_path):
@@ -131,6 +174,7 @@ def test_stale_report_is_not_fresh_evidence(tmp_path):
 
 @pytest.mark.parametrize("skip", [False, True])
 def test_real_python_gate_requires_actual_no_skip_framework_results(tmp_path, monkeypatch, skip):
+    write_public_scope(tmp_path)
     source = {"source_tree_sha256": "b" * 64}
     monkeypatch.setattr(candidate, "source_identity", lambda _: source)
     package = tmp_path / "src/allin1_sdk"; package.mkdir(parents=True)
@@ -145,7 +189,8 @@ def test_real_python_gate_requires_actual_no_skip_framework_results(tmp_path, mo
         monkeypatch.setenv(key, "parent coverage state must not reach nested pytest")
     identity = tmp_path / "identity.json"
     candidate.write_new(identity, {"schema_version": 1, "kind": "sdk_build_identity", "build_id": "disposable", "source": source,
-        "toolchain_files": {"python": candidate.tool_identity(executable)}})
+        "toolchain_files": {"python": candidate.tool_identity(executable)},
+        "public_test_scope": evidence.public_test_scope(tmp_path)})
     command = [sys.executable, "-m", "pytest", "--cov=allin1_sdk", "--cov-report=term-missing"]
     if skip:
         with pytest.raises(subprocess.CalledProcessError): candidate.run_gate(tmp_path, identity, "python", command)

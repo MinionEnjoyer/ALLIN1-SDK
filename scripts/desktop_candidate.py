@@ -128,7 +128,8 @@ def prepare(root: Path, pnpm: str, *, allow_windows_symlink_skips: bool = False)
         "python_packages": dict(sorted((d.metadata["Name"], d.version) for d in importlib.metadata.distributions())),
         "lockfiles": {name: sha256(contained(root, name)) for name in ["desktop/pnpm-lock.yaml", "desktop/src-tauri/Cargo.lock"]},
         "schema_versions": {"desktop_protocol": "1.0.0", "candidate_identity": 1, "candidate_gate": 2, "live_acceptance": 1},
-        "release_qualified": False}
+        "release_qualified": False,
+        "public_test_scope": candidate_test_evidence.public_test_scope(root)}
     if allow_windows_symlink_skips:
         if identity["sdk_version"] != "0.6.4":
             raise ValueError("Windows symlink privilege waiver is approved only for SDK 0.6.4")
@@ -209,6 +210,15 @@ def run_gate(
     exit_code = -1
     environment = dict(os.environ, PYTHONPATH=str(root / "src"))
     environment.pop("PYTEST_ADDOPTS", None)
+    frozen_inputs = None
+    if name == "python" and (environment.get("ALLIN1_FROZEN_SIDECAR") or environment.get("ALLIN1_FROZEN_RESOURCES")):
+        sidecar_path = no_links(Path(environment.get("ALLIN1_FROZEN_SIDECAR", "")))
+        resources_path = no_links(Path(environment.get("ALLIN1_FROZEN_RESOURCES", "")))
+        resource_manifest = no_links(resources_path / "resource-checksums.json")
+        if not sidecar_path.is_file() or not resource_manifest.is_file():
+            raise ValueError("Frozen Python gate requires the exact sidecar and resource manifest")
+        frozen_inputs = {"sidecar_sha256": sha256(sidecar_path),
+                         "resource_checksums_sha256": sha256(resource_manifest)}
     coverage_data = None
     if name == "python":
         # Do not let a nested disposable gate append to or overwrite a parent
@@ -293,6 +303,8 @@ def run_gate(
             "file": coverage_data.name, "sha256": sha256(coverage_data),
             "bytes": coverage_data.stat().st_size,
         }
+    if frozen_inputs is not None:
+        record["frozen_inputs"] = frozen_inputs
     write_new(gate_path, record)
     if record["status"] != "PASS":
         if timed_out:
@@ -331,6 +343,10 @@ def gate_evidence(identity_path: Path, *, root: Path = ROOT) -> dict[str, dict]:
             datetime.fromisoformat(value["started_at"]).timestamp(), datetime.fromisoformat(value["finished_at"]).timestamp(), replay=True)
         if measured != value.get("evidence"):
             raise ValueError(f"Candidate framework evidence changed after execution: {name}")
+        if name in {"python", "react"}:
+            scope = identity.get("public_test_scope")
+            if scope != candidate_test_evidence.public_test_scope(root) or measured.get("public_test_scope") != scope:
+                raise ValueError(f"Candidate public test scope is invalid or unbound: {name}")
         evidence[name] = value
     return evidence
 
@@ -469,8 +485,18 @@ def write_portable(
     }
 
 
+def require_frozen_python_inputs(gates: dict[str, dict], expected: dict[str, str]) -> None:
+    """Require the public Python gate to have used this candidate's frozen pair."""
+    frozen_inputs = gates.get("python", {}).get("frozen_inputs")
+    if frozen_inputs != {"sidecar_sha256": expected.get("sidecar/ALLIN1-SDK-Desktop-Sidecar.exe"),
+                         "resource_checksums_sha256": expected.get("resource-checksums.json")}:
+        raise ValueError("Python gate was not run against the staged frozen sidecar and resources")
+
+
 def seal(root: Path, identity_path: Path, sevenzip: Path) -> Path:
     identity = check_source(root, identity_path)
+    if identity.get("public_test_scope") != candidate_test_evidence.public_test_scope(root):
+        raise ValueError("Candidate public test scope is invalid or changed")
     gates = gate_evidence(identity_path, root=root)
     destination = no_links(identity_path.parent)
     resources = root / "desktop/src-tauri/standalone-resources"
@@ -496,6 +522,7 @@ def seal(root: Path, identity_path: Path, sevenzip: Path) -> Path:
         raise ValueError("NSIS staging capture is invalid or belongs to another build")
     expected["allin1-sdk-desktop.exe"] = nsis_stage["shell_sha256"]
     expected["sidecar/ALLIN1-SDK-Desktop-Sidecar.exe"] = sha256(no_links(sidecar))
+    require_frozen_python_inputs(gates, expected)
     installer = contained(root, f'desktop/src-tauri/target/release/bundle/nsis/ALLIN1 SDK_{identity["sdk_version"]}_x64-setup.exe')
     candidate = destination / f'ALLIN1-SDK-{identity["sdk_version"]}-candidate-{identity["build_id"][:12]}-setup.exe'
     if candidate.exists():
@@ -559,7 +586,9 @@ def seal(root: Path, identity_path: Path, sevenzip: Path) -> Path:
         "package_integrity": "PASS", "automated_packaged_smokes": "PASS",
         "tk_free_frozen_payload": no_tk,
         "embedded_frontend": "PASS", "frontend_probe_sha256": sha256(destination / "frontend-probe.json"),
-        "automated_full_suite": "PASS_WITH_APPROVED_WAIVERS" if gates["python"]["evidence"].get("waived_tests") else "PASS", "validation_gates": gates,
+        "automated_public_suite": "PASS_WITH_APPROVED_WAIVERS" if gates["python"]["evidence"].get("waived_tests") else "PASS",
+        "private_opt_in_regressions": {"status": "NOT_TESTED", "scope": identity["public_test_scope"]},
+        "validation_gates": gates,
         "live_acceptance": "NOT TESTED",
         "reviewed_clean_source": "FAIL" if identity["source"]["dirty"] else "NOT TESTED",
         "signature": "NOT TESTED", "release_readiness": "FAIL",

@@ -4,6 +4,7 @@ from pathlib import Path
 import zipfile
 
 import pytest
+from conftest import launcher_source
 
 from allin1_sdk import gxt2_desktop as desktop
 from allin1_sdk.mods import open_mod_package
@@ -57,7 +58,7 @@ def test_member_zip_contains_only_dictionary_and_exact_original_precondition(pre
         entry = manifest.rpf_entries[0]
         assert entry.original_sha256 == publication["original_sha256"] and entry.sha256 == result["payload_sha256"]
         assert entry.entry.as_posix() == target_entry and entry.archive.as_posix() == request["package_metadata"]["target"]
-    launcher = Path(__file__).resolve().parents[2] / "ALLIN1" / "src"
+    launcher = launcher_source()
     if launcher.is_dir():
         monkeypatch.syspath_prepend(str(launcher))
         from allin1.mods import open_mod_package as launcher_open

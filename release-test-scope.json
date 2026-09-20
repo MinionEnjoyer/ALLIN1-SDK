@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "kind": "allin1_sdk_public_test_scope",
+  "private_python_nodeids": [
+    "tests/test_schema_v2_lifecycle_parity.py::test_suppressor_schema_v2_install_remains_visible_to_launcher_registry",
+    "tests/test_suppressor_workbench_regression.py::test_private_suppressor_package_is_an_end_to_end_regression_fixture"
+  ],
+  "private_react_files": [
+    "src/RetailAnimation.integration.test.tsx",
+    "src/RetailAssetReport.integration.test.tsx"
+  ],
+  "private_reasons": {
+    "tests/test_schema_v2_lifecycle_parity.py::test_suppressor_schema_v2_install_remains_visible_to_launcher_registry": "requires the unbundled sibling Suppressors Enhanced fixture",
+    "tests/test_suppressor_workbench_regression.py::test_private_suppressor_package_is_an_end_to_end_regression_fixture": "requires explicitly opted-in private suppressor package and Enhanced GTA fixture paths",
+    "src/RetailAnimation.integration.test.tsx": "requires a temporary locally decoded retail animation packet",
+    "src/RetailAssetReport.integration.test.tsx": "requires a temporary locally generated retail asset-validation report"
+  },
+  "private_status": "NOT_TESTED"
+}

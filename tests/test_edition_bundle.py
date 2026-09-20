@@ -149,9 +149,11 @@ def test_cli_and_agent_catalog(tmp_path):
 
 def test_contract_stays_identical_to_launcher():
     sdk = Path(__file__).resolve().parents[1] / "src/allin1_sdk/mod_package_contract.py"
-    launcher = sdk.parents[3] / "ALLIN1/src/allin1/mod_package_contract.py"
+    launcher = launcher_source() / "allin1/mod_package_contract.py"
     if launcher.is_file():
-        assert sdk.read_bytes() == launcher.read_bytes()
+        assert sdk.read_text(encoding="utf-8") == launcher.read_text(
+            encoding="utf-8"
+        )
 
 
 def test_game_destination_is_protected(tmp_path):

@@ -15,9 +15,10 @@ from pathlib import Path
 import pytest
 
 from allin1_sdk.mods import ModIntegrationService, ModManifest
+from conftest import launcher_source
 
 
-LAUNCHER_ROOT = Path(__file__).resolve().parents[2] / "ALLIN1"
+LAUNCHER_ROOT = launcher_source().parent
 SUPPRESSOR_PACKAGE = LAUNCHER_ROOT / "mods" / "realistic-suppressors"
 
 
@@ -116,10 +117,10 @@ def _loose_package(
 
 
 def _launcher_registry(game: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
-    launcher_source = LAUNCHER_ROOT / "src"
-    if not launcher_source.is_dir():
+    source = launcher_source()
+    if not source.is_dir():
         pytest.skip("Sibling ALLIN1 launcher checkout is not present")
-    monkeypatch.syspath_prepend(str(launcher_source))
+    monkeypatch.syspath_prepend(str(source))
     # Keep this import local so the SDK remains the implementation under test;
     # the launcher is used only as the authoritative receipt consumer.
     from allin1.extensions import ExtensionRegistry

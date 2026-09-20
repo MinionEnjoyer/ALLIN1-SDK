@@ -20,6 +20,43 @@ WINDOWS_SYMLINK_SKIPS = {
     ("tests.test_rpf_tools", "test_native_workspace_rejects_symlinked_dependencies"): "Symbolic links are not available to this Windows test account",
 }
 
+PUBLIC_TEST_SCOPE_FILE = "release-test-scope.json"
+PUBLIC_TEST_SCOPE = {
+    "schema_version": 1,
+    "kind": "allin1_sdk_public_test_scope",
+    "private_python_nodeids": [
+        "tests/test_schema_v2_lifecycle_parity.py::test_suppressor_schema_v2_install_remains_visible_to_launcher_registry",
+        "tests/test_suppressor_workbench_regression.py::test_private_suppressor_package_is_an_end_to_end_regression_fixture",
+    ],
+    "private_react_files": [
+        "src/RetailAnimation.integration.test.tsx",
+        "src/RetailAssetReport.integration.test.tsx",
+    ],
+    "private_reasons": {
+        "tests/test_schema_v2_lifecycle_parity.py::test_suppressor_schema_v2_install_remains_visible_to_launcher_registry": "requires the unbundled sibling Suppressors Enhanced fixture",
+        "tests/test_suppressor_workbench_regression.py::test_private_suppressor_package_is_an_end_to_end_regression_fixture": "requires explicitly opted-in private suppressor package and Enhanced GTA fixture paths",
+        "src/RetailAnimation.integration.test.tsx": "requires a temporary locally decoded retail animation packet",
+        "src/RetailAssetReport.integration.test.tsx": "requires a temporary locally generated retail asset-validation report",
+    },
+    "private_status": "NOT_TESTED",
+}
+
+
+def public_test_scope(root: Path) -> dict:
+    """Load the exact, deliberately small set unavailable to public CI.
+
+    This is an allow-list, not a marker or glob. Any edit, extra exclusion, or
+    status change fails the candidate before a test command can run.
+    """
+    path = no_links(root / PUBLIC_TEST_SCOPE_FILE)
+    if not path.is_file() or strict_json(path.read_bytes()) != PUBLIC_TEST_SCOPE:
+        raise ValueError("Public test scope is missing, changed, or unsupported")
+    return {"file": PUBLIC_TEST_SCOPE_FILE, "sha256": sha256(path),
+            "private_python_nodeids": list(PUBLIC_TEST_SCOPE["private_python_nodeids"]),
+            "private_react_files": list(PUBLIC_TEST_SCOPE["private_react_files"]),
+            "private_reasons": dict(PUBLIC_TEST_SCOPE["private_reasons"]),
+            "private_status": "NOT_TESTED"}
+
 
 def instrument(name: str, command: list[str], root: Path, folder: Path) -> list[str]:
     """Allow full canonical gates only; no selection flags or label-only scripts."""
@@ -38,11 +75,17 @@ def instrument(name: str, command: list[str], root: Path, folder: Path) -> list[
         for a, b in zip(supplied, expected)
     ):
         raise ValueError(f"Candidate {name} gate requires the complete canonical command")
-    extras = {
-        "python": [f"--junitxml={folder / 'gate-python.xml'}", f"--cov-report=json:{folder / 'gate-coverage.json'}"],
-        "react": ["--reporter=json", f"--outputFile={folder / 'gate-react-results.json'}"],
-        "rust": ["--locked", "--message-format=json", "--", "--format=pretty"],
-    }.get(name, [])
+    scope = public_test_scope(root) if name in {"python", "react"} else None
+    if name == "python":
+        extras = [f"--junitxml={folder / 'gate-python.xml'}", f"--cov-report=json:{folder / 'gate-coverage.json'}",
+                  *[f"--deselect={nodeid}" for nodeid in scope["private_python_nodeids"]]]
+    elif name == "react":
+        extras = ["--no-file-parallelism", "--reporter=json", f"--outputFile={folder / 'gate-react-results.json'}",
+                  *[part for path in scope["private_react_files"] for part in ("--exclude", path)]]
+    elif name == "rust":
+        extras = ["--locked", "--message-format=json", "--", "--format=pretty"]
+    else:
+        extras = []
     for filename in report_names(name):
         if no_links(folder / filename).exists():
             raise FileExistsError(f"Candidate test report already exists: {filename}")
@@ -149,6 +192,7 @@ def collect(name: str, root: Path, folder: Path, started: float, finished: float
     reports = {filename: report_bytes(folder / filename, started, finished, replay=replay) for filename in report_names(name)}
     evidence = {"schema_version": 1, "reports": {filename: {"sha256": sha256(folder / filename), "bytes": len(content)} for filename, content in reports.items()}}
     if name == "python":
+        evidence["public_test_scope"] = public_test_scope(root)
         identity = strict_json((folder / "_build_identity.json").read_bytes()) if (folder / "_build_identity.json").is_file() else {}
         waiver = identity.get("python_skip_waiver")
         if waiver is not None and (waiver != WINDOWS_SYMLINK_WAIVER or identity.get("sdk_version") != "0.6.4"):
@@ -156,6 +200,7 @@ def collect(name: str, root: Path, folder: Path, started: float, finished: float
         evidence.update(python_evidence(reports["gate-python.xml"], strict_json(reports["gate-coverage.json"]), root,
                                         windows_symlink_waiver=waiver == WINDOWS_SYMLINK_WAIVER))
     elif name == "react":
+        evidence["public_test_scope"] = public_test_scope(root)
         inventory = strict_json((root / "desktop/module-happy-paths.json").read_bytes())
         evidence.update(react_evidence(strict_json(reports["gate-react-results.json"]), inventory, root, started, finished))
     elif name == "rust":

@@ -10,13 +10,11 @@ from click.testing import CliRunner
 import allin1_sdk.mods as mods
 from allin1_sdk.cli import main
 from allin1_sdk.mods import ModManifest, open_mod_package
+from conftest import launcher_source
 
 
 FIXTURES = Path(__file__).parent / "contract_fixtures" / "mod_packages"
-LAUNCHER_FIXTURES = (
-    Path(__file__).resolve().parents[2]
-    / "ALLIN1" / "tests" / "contract_fixtures" / "mod_packages"
-)
+LAUNCHER_FIXTURES = launcher_source().parent / "tests" / "contract_fixtures" / "mod_packages"
 
 
 @pytest.mark.parametrize(("folder", "schema"), [("schema_v1", 1), ("schema_v2", 2)])
@@ -41,17 +39,18 @@ def test_contract_fixture_bytes_match_launcher_copy() -> None:
 
 
 def test_shared_contract_implementation_matches_launcher_copy() -> None:
-    launcher_module = (
-        Path(__file__).resolve().parents[2] / "ALLIN1" / "src" / "allin1"
-        / "mod_package_contract.py"
-    )
+    launcher_module = launcher_source() / "allin1" / "mod_package_contract.py"
     if not launcher_module.is_file():
         pytest.skip("Sibling ALLIN1 checkout is not present")
     sdk_module = (
         Path(__file__).resolve().parents[1] / "src" / "allin1_sdk"
         / "mod_package_contract.py"
     )
-    assert sdk_module.read_bytes() == launcher_module.read_bytes()
+    # Git's Windows checkout can materialize the Launcher source with CRLF.
+    # Contract parity is source-text parity, not working-tree newline style.
+    assert sdk_module.read_text(encoding="utf-8") == launcher_module.read_text(
+        encoding="utf-8"
+    )
 
 
 def _zip_tree(archive: Path, root: Path, prefix: str = "") -> None:

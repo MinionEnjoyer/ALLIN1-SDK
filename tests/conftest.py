@@ -8,10 +8,16 @@ import allin1_sdk.detector as detector
 
 
 def launcher_source() -> Path:
-    """Return the explicitly provisioned Launcher source, when available."""
+    """Return the provisioned Launcher source, rejecting a bad CI override."""
     configured = os.environ.get("ALLIN1_LAUNCHER_SRC")
     if configured:
-        return Path(configured).resolve()
+        source = Path(configured).resolve()
+        if not source.is_dir():
+            raise RuntimeError(
+                "ALLIN1_LAUNCHER_SRC must name an existing Launcher src directory: "
+                f"{source}"
+            )
+        return source
     return Path(__file__).resolve().parents[2] / "ALLIN1/src"
 
 

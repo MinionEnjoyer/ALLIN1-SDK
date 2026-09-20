@@ -17,10 +17,11 @@ from allin1_sdk.official_vehicle_models import (
     SOURCE_VERSION,
 )
 from allin1_sdk.vehicle_catalog import vehicle_model_hash
+from conftest import launcher_source
 
 
 def test_official_vehicle_snapshot_matches_sibling_core_catalogs():
-    core_root = Path(__file__).resolve().parents[2] / "ALLIN1"
+    core_root = launcher_source().parent
     if not core_root.is_dir():
         pytest.skip("Sibling ALLIN1 launcher checkout is not present")
 

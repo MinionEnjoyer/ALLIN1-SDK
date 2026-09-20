@@ -23,10 +23,6 @@ $candidateIdentity = & $python (Join-Path $repo 'scripts\desktop_candidate.py') 
 if ($LASTEXITCODE -ne 0) { throw 'Candidate source identity preparation failed.' }
 $candidateIdentity = $candidateIdentity.Trim()
 Write-Host "Candidate identity: $candidateIdentity"
-$pythonGateCommand = ConvertTo-Json -Compress -InputObject @($python, '-m', 'pytest', '--cov=allin1_sdk', '--cov-report=term-missing')
-& $python (Join-Path $repo 'scripts\desktop_candidate.py') gate --identity $candidateIdentity `
-    --name python --cwd . --timeout 3600 --command-json $pythonGateCommand
-if ($LASTEXITCODE -ne 0) { throw 'Python test and coverage gate failed.' }
 New-Item -ItemType Directory -Path $sidecarDir -Force | Out-Null
 # Publish the native helper with its own .NET runtime. End users need neither
 # the Launcher nor Python/.NET installed to author packages with this SDK.
@@ -78,6 +74,26 @@ if ($LASTEXITCODE -ne 0) { throw 'Packaged ped workbench smoke test failed.' }
 $testedSidecarHash = (Get-FileHash -LiteralPath $sidecar -Algorithm SHA256).Hash
 $resourceManifest = Join-Path $desktop 'src-tauri\standalone-resources\resource-checksums.json'
 $testedResourceManifestHash = (Get-FileHash -LiteralPath $resourceManifest -Algorithm SHA256).Hash
+
+# The public Python suite includes a real frozen-sidecar lifecycle test. Run it
+# against this candidate's bytes, not before those bytes have been produced.
+$previousFrozenSidecar = $env:ALLIN1_FROZEN_SIDECAR
+$previousFrozenResources = $env:ALLIN1_FROZEN_RESOURCES
+try {
+    $env:ALLIN1_FROZEN_SIDECAR = $sidecar
+    $env:ALLIN1_FROZEN_RESOURCES = Join-Path $desktop 'src-tauri\standalone-resources'
+    $pythonGateCommand = ConvertTo-Json -Compress -InputObject @($python, '-m', 'pytest', '--cov=allin1_sdk', '--cov-report=term-missing')
+    & $python (Join-Path $repo 'scripts\desktop_candidate.py') gate --identity $candidateIdentity `
+        --name python --cwd . --timeout 3600 --command-json $pythonGateCommand
+    if ($LASTEXITCODE -ne 0) { throw 'Python test and coverage gate failed.' }
+    if ((Get-FileHash -LiteralPath $sidecar -Algorithm SHA256).Hash -ne $testedSidecarHash -or (Get-FileHash -LiteralPath $resourceManifest -Algorithm SHA256).Hash -ne $testedResourceManifestHash) {
+        throw 'Frozen candidate bytes changed during the Python gate.'
+    }
+}
+finally {
+    $env:ALLIN1_FROZEN_SIDECAR = $previousFrozenSidecar
+    $env:ALLIN1_FROZEN_RESOURCES = $previousFrozenResources
+}
 
 if ($SidecarOnly) {
     Write-Host 'ALLIN1 packaged desktop sidecar validation completed.'

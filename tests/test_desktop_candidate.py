@@ -4,9 +4,12 @@ import json
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+
+from scripts import candidate_test_evidence as evidence
 
 
 def test_windows_frontend_gate_uses_tauri_release_target():
@@ -27,6 +30,11 @@ from scripts.desktop_candidate import (
 def _fixture_tool_anchors(executable=Path(sys.executable)):
     anchor = tool_identity(executable.resolve())
     return {name: anchor for name in ("python", "pnpm", "cargo", "dotnet")}
+
+
+def _write_public_scope(root: Path) -> dict:
+    (root / evidence.PUBLIC_TEST_SCOPE_FILE).write_text(json.dumps(evidence.PUBLIC_TEST_SCOPE))
+    return evidence.public_test_scope(root)
 
 
 def test_distributable_tool_identity_omits_paths_but_binds_exact_location_and_bytes(tmp_path):
@@ -220,7 +228,11 @@ def test_candidate_gate_executes_and_binds_complete_logs(tmp_path, monkeypatch):
     # This test isolates log/identity persistence. Framework validation and
     # canonical commands have separate real-process/adversarial tests.
     monkeypatch.setattr("scripts.candidate_test_evidence.instrument", lambda _name, command, *_: command)
-    monkeypatch.setattr("scripts.candidate_test_evidence.collect", lambda *_, **__: {"schema_version": 1, "tests": 1})
+    scope = _write_public_scope(tmp_path)
+    monkeypatch.setattr("scripts.candidate_test_evidence.collect", lambda name, *_args, **_kwargs: {
+        "schema_version": 1, "tests": 1,
+        **({"public_test_scope": scope} if name in {"python", "react"} else {}),
+    })
     source = {
         "schema_version": 1, "sdk_commit": "a" * 40, "dirty": True,
         "versions": {"test": "0.6.4"}, "versions_agree": True,
@@ -231,6 +243,7 @@ def test_candidate_gate_executes_and_binds_complete_logs(tmp_path, monkeypatch):
         "schema_version": 1, "kind": "sdk_build_identity", "build_id": "candidate",
         "source": dict(source),
         "toolchain_files": _fixture_tool_anchors(),
+        "public_test_scope": scope,
     }
     identity_path = tmp_path / "_build_identity.json"
     write_new(identity_path, identity)
@@ -239,12 +252,12 @@ def test_candidate_gate_executes_and_binds_complete_logs(tmp_path, monkeypatch):
             tmp_path, identity_path, name,
             [sys.executable, "-c", f"print('passed {name}')"],
         )
-    evidence = gate_evidence(identity_path)
+    evidence = gate_evidence(identity_path, root=tmp_path)
     assert set(evidence) == REQUIRED_GATES
     assert all(item["status"] == "PASS" for item in evidence.values())
     (tmp_path / "gate-react.log").write_text("unrelated stale output")
     with pytest.raises(ValueError, match="changed after execution"):
-        gate_evidence(identity_path)
+        gate_evidence(identity_path, root=tmp_path)
 
 
 def test_candidate_react_gate_refuses_skipped_tests(tmp_path, monkeypatch):
@@ -281,6 +294,37 @@ def test_candidate_python_gate_refuses_coverage_failure_with_zero_exit(tmp_path,
     evidence = json.loads((tmp_path / "gate-python.json").read_text())
     assert evidence["status"] == "FAIL"
     assert evidence["coverage_failed"] is True
+
+
+def test_python_gate_refuses_a_partial_frozen_input_binding_before_execution(tmp_path, monkeypatch):
+    from scripts import desktop_candidate as candidate
+    executable = candidate.external_executable(Path(sys.executable))
+    identity = {"build_id": "candidate", "toolchain_files": {"python": tool_identity(executable)}}
+    monkeypatch.setattr(candidate, "check_source", lambda *_: identity)
+    monkeypatch.setattr("scripts.candidate_test_evidence.instrument", lambda _name, command, *_: command)
+    monkeypatch.setattr(candidate.subprocess, "run", lambda *_, **__: SimpleNamespace(returncode=0))
+    sidecar = tmp_path / "sidecar.exe"; sidecar.write_bytes(b"candidate sidecar")
+    monkeypatch.setenv("ALLIN1_FROZEN_SIDECAR", str(sidecar))
+    monkeypatch.delenv("ALLIN1_FROZEN_RESOURCES", raising=False)
+    with pytest.raises(ValueError, match="Frozen Python gate requires"):
+        run_gate(tmp_path, tmp_path / "identity.json", "python", [sys.executable, "-c", "print('not run')"])
+
+
+@pytest.mark.parametrize("mutation", ["missing", "sidecar", "resources"])
+def test_sealing_rejects_python_evidence_for_a_different_frozen_pair(mutation):
+    from scripts.desktop_candidate import require_frozen_python_inputs
+    expected = {"sidecar/ALLIN1-SDK-Desktop-Sidecar.exe": "a" * 64,
+                "resource-checksums.json": "b" * 64}
+    frozen = {"sidecar_sha256": expected["sidecar/ALLIN1-SDK-Desktop-Sidecar.exe"],
+              "resource_checksums_sha256": expected["resource-checksums.json"]}
+    if mutation == "missing":
+        gates = {"python": {}}
+    elif mutation == "sidecar":
+        gates = {"python": {"frozen_inputs": {**frozen, "sidecar_sha256": "c" * 64}}}
+    else:
+        gates = {"python": {"frozen_inputs": {**frozen, "resource_checksums_sha256": "c" * 64}}}
+    with pytest.raises(ValueError, match="Python gate was not run"):
+        require_frozen_python_inputs(gates, expected)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows batch-launch regression")

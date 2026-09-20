@@ -15,9 +15,10 @@ import allin1_sdk.product_workspace as product_workspace
 from allin1_sdk.agent_api import command_risk, execute_request
 from allin1_sdk.cli import main
 from allin1_sdk.product_workspace import WorkspaceFinding
+from conftest import launcher_source
 
 
-WORKSPACE = Path(__file__).resolve().parents[2] / "ALLIN1" / "allin1.workspace.json"
+WORKSPACE = launcher_source().parent / "allin1.workspace.json"
 
 
 def _workspace() -> Path:
@@ -61,8 +62,8 @@ def test_product_workspace_adapts_to_existing_visual_linker() -> None:
 
     assert manifest.addon_id == "allin1.core"
     assert manifest.catalog_origin == "product-workspace"
-    assert len(manifest.nodes) == 9
-    assert len(manifest.references) == 14
+    assert len(manifest.nodes) == 8
+    assert len(manifest.references) == 11
     assert report.valid, report.issues
     assert {node.kind for node in manifest.nodes} >= {
         "launcher_host", "story_runtime", "official_content_pack",
@@ -81,7 +82,7 @@ def test_product_workspace_adapts_to_existing_visual_linker() -> None:
     assert manifest.runtime_contracts is not None
     assert len(manifest.runtime_contracts.hosts) == 1
     assert {item.component_id for item in manifest.runtime_contracts.packages} == {
-        "content.online", "content.experimental",
+        "content.online",
         "package.realistic-suppressors",
     }
     markdown = report.to_markdown()
@@ -103,14 +104,14 @@ def test_product_workspace_cli_returns_compact_typed_graph() -> None:
     assert payload["inventory"]["entries"] == []
     assert payload["inventory"]["entries_included"] is False
     evidence = payload["evidence"]
-    assert len(evidence["components"]) == 9
+    assert len(evidence["components"]) == 8
     assert all(item["matched_files"] >= 0 for item in evidence["components"])
     assert all(item["matched_bytes"] >= 0 for item in evidence["components"])
     assert evidence["shared"]["files"] > 0
     assert evidence["shared"]["samples"]
     assert evidence["unassigned"]["files"] > 0
     assert evidence["unassigned"]["samples"]
-    assert len(payload["graph"]["nodes"]) == 9
+    assert len(payload["graph"]["nodes"]) == 8
     nodes = {item["node_id"]: item for item in payload["graph"]["nodes"]}
     assert nodes["content.online"]["managed_builtin"] is True
     assert nodes["content.online"]["install_candidate"] is False
@@ -121,7 +122,7 @@ def test_product_workspace_cli_returns_compact_typed_graph() -> None:
     assert contracts["valid"] is True
     assert contracts["summary"] == {
         "hosts": 1,
-        "packages": 3,
+        "packages": 2,
         "errors": 0,
         "warnings": 0,
     }

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from conftest import launcher_source
 
 
 def sha(data):
@@ -16,7 +17,7 @@ def sha(data):
 @pytest.fixture(params=["allin1_sdk", "allin1"])
 def reader(request, monkeypatch):
     if request.param == "allin1":
-        source = Path(__file__).resolve().parents[2] / "ALLIN1" / "src"
+        source = launcher_source()
         if not source.is_dir(): pytest.skip("Sibling Launcher is unavailable")
         monkeypatch.syspath_prepend(str(source))
     return importlib.import_module(request.param + ".mods"), importlib.import_module(request.param + ".mod_package_contract")
@@ -135,7 +136,8 @@ def test_preflight_failure_has_no_game_writes(installation, monkeypatch, failure
 def test_manifest_cannot_drop_preconditions_by_downgrading(installation):
     mods, _, _, _, root, _ = installation
     data = manifest_data(); data["schema_version"] = 1; write_manifest(root, data)
-    with pytest.raises(ValueError, match="schema_version = 3"): mods.ModManifest.load(root)
+    with pytest.raises(ValueError, match="Original RPF checksums require schema_version"):
+        mods.ModManifest.load(root)
 
 
 def test_original_is_rechecked_after_preflight(installation, monkeypatch):

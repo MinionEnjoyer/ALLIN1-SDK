@@ -4,6 +4,7 @@ from pathlib import Path
 import zipfile
 
 import pytest
+from conftest import launcher_source
 
 from allin1_sdk import gxt2_desktop as desktop, rpf_package_publication as publisher
 from allin1_sdk.gxt2_workspace import Gxt2Workspace
@@ -62,7 +63,7 @@ def test_exports_exact_portable_zip_and_launcher_manifest(prepared, monkeypatch)
         assert manifest.dependencies == ("openrpf",) and not manifest.dlc_packs and not manifest.rpf_entries
         assert manifest.files[0].destination.as_posix() == request["package_metadata"]["target"]
         assert manifest.files[0].sha256 == result["payload_sha256"]
-    launcher = Path(__file__).resolve().parents[2] / "ALLIN1" / "src"
+    launcher = launcher_source()
     if launcher.is_dir():
         monkeypatch.syspath_prepend(str(launcher))
         from allin1.mods import open_mod_package as launcher_open
@@ -168,7 +169,7 @@ def test_member_mode_never_falls_back_to_whole_archive_for_nested_workspace(prep
 
 
 def test_launcher_installs_and_restores_only_a_temporary_game_target(prepared, monkeypatch, tmp_path):
-    launcher = Path(__file__).resolve().parents[2] / "ALLIN1" / "src"
+    launcher = launcher_source()
     if not launcher.is_dir(): pytest.skip("Sibling Launcher checkout is unavailable")
     monkeypatch.syspath_prepend(str(launcher))
     from allin1.mods import ModIntegrationService, open_mod_package as launcher_open

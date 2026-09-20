@@ -3,6 +3,7 @@ from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
+from conftest import launcher_source
 
 
 @pytest.fixture(params=["sdk", "launcher"])
@@ -10,7 +11,7 @@ def service(request, monkeypatch, tmp_path):
     if request.param == "sdk":
         from allin1_sdk.mods import ModIntegrationService
     else:
-        launcher = Path(__file__).resolve().parents[2] / "ALLIN1" / "src"
+        launcher = launcher_source()
         if not launcher.is_dir():
             pytest.skip("Sibling Launcher checkout is unavailable")
         monkeypatch.syspath_prepend(str(launcher))
@@ -74,7 +75,7 @@ def test_success_requires_an_extracted_file(service, monkeypatch, tmp_path):
 
 def test_sdk_and_launcher_share_exact_native_resolution():
     root = Path(__file__).resolve().parents[1]
-    launcher = root.parent / "ALLIN1" / "tools" / "RpfPatcher" / "Program.cs"
+    launcher = launcher_source().parent / "tools" / "RpfPatcher" / "Program.cs"
     if not launcher.is_file():
         pytest.skip("Sibling Launcher checkout is unavailable")
 

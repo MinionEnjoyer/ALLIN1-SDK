@@ -2,6 +2,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
+from conftest import launcher_source
 from test_rpf_member_contract import reader, manifest_data, write_manifest, sha
 
 
@@ -142,6 +143,8 @@ def test_parent_and_member_ownership_conflicts_both_directions(nested_install, p
 
 def test_native_source_is_shared():
     sdk = Path(__file__).resolve().parents[1]
-    launcher = sdk.parent / "ALLIN1/tools/RpfPatcher/ExactNestedMember.cs"
+    launcher = launcher_source().parent / "tools/RpfPatcher/ExactNestedMember.cs"
     if not launcher.is_file(): pytest.skip("Sibling Launcher unavailable")
-    assert (sdk / "tools/RpfPatcher/ExactNestedMember.cs").read_bytes() == launcher.read_bytes()
+    assert (sdk / "tools/RpfPatcher/ExactNestedMember.cs").read_text(
+        encoding="utf-8"
+    ) == launcher.read_text(encoding="utf-8")

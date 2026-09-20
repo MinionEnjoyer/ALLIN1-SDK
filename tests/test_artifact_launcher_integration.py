@@ -7,14 +7,16 @@ import pytest
 
 from allin1_sdk import artifact_contract, optimization_package
 from test_optimization_package import request
+from conftest import launcher_source
 
-LAUNCHER = Path(__file__).resolve().parents[2]/"ALLIN1"
-pytestmark = pytest.mark.skipif(not (LAUNCHER/"src/allin1/sdk_provenance.py").is_file(), reason="matching Launcher source required")
+LAUNCHER = launcher_source().parent
+pytestmark = pytest.mark.skipif(not (launcher_source()/"allin1/sdk_provenance.py").is_file(), reason="matching Launcher source required")
 
 
 def test_contract_is_shared_and_real_sdk_export_installs_with_exact_lineage(tmp_path, monkeypatch):
-    assert Path(artifact_contract.__file__).read_text() == (LAUNCHER/"src/allin1/artifact_contract.py").read_text()
-    monkeypatch.syspath_prepend(str(LAUNCHER/"src"))
+    source = launcher_source()
+    assert Path(artifact_contract.__file__).read_text() == (source/"allin1/artifact_contract.py").read_text()
+    monkeypatch.syspath_prepend(str(source))
     from allin1.mods import ModManifest, ModIntegrationService
     from allin1.sdk_provenance import file_hash
     payload = request(tmp_path)

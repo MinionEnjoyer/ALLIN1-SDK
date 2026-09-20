@@ -39,7 +39,9 @@ This release does not enable unsigned automatic updates.
 | Live Legacy / Enhanced | Full independent final-build in-game acceptance remains unverified; no claim is inferred from exported files or rendered previews |
 
 The previous 0.6.4 symbolic-link privilege waiver is not silently extended to
-0.6.6. Any skipped checks remain untested and block full qualification.
+0.6.6. Any skipped in-scope public check remains untested and blocks public
+suite qualification. Explicitly unavailable private opt-in checks are recorded
+separately as **NOT TESTED** and never contribute to a full-suite claim.
 No failed assertion, coverage failure, or runtime security check is waived.
 
 Installer/lifecycle observations apply to the tested build IDs. The attached
