@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: MinionEnjoyer/GTAV-ALLIN1
-          ref: 281ab6958ac018f3a8c74b761e7294b0612dafe5
+          ref: 6854701aab9a267994ecacc8cf10f8c2ff11420e
           path: launcher
 
       - uses: actions/setup-python@v5
