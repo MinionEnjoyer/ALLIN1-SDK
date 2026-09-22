@@ -67,36 +67,37 @@ function DataReports({ client, onGuardChange,onOptimize }: { client: DesktopClie
   const report = session?.document as Record<string, unknown> | undefined;
   const rows = (report?.changes ?? report?.vehicles ?? report?.packs) as Record<string, unknown>[] | undefined;
   return <section className="workspace-section" aria-label="Data tools">
-    {task==="asset_validation"&&report&&<button disabled={work.locked||rigDirty||assemblyDirty} onClick={()=>onOptimize({source,comparison,edition,game,rigBindings,assemblyBindings:assemblies})}>Optimize with this validation context</button>}
-    <div className="section-heading"><div><span className="eyebrow">Metadata and reports</span><h2>Data Tools</h2><p>Inspect your inputs, then export the reviewed report to a new folder.</p></div></div>
+    <div className="workspace-heading"><div><span className="eyebrow">Metadata and reports</span><h2>Data Tools</h2><p>Inspect your inputs, then export the reviewed report to a new folder.</p></div>
+      {task==="asset_validation"&&report&&<div className="heading-actions"><button className="quiet-button" disabled={work.locked||rigDirty||assemblyDirty} onClick={()=>onOptimize({source,comparison,edition,game,rigBindings,assemblyBindings:assemblies})}>Optimize with this validation context</button></div>}
+    </div>
     <nav className="models-area-tabs" aria-label="Data tool">
       {Object.entries(TOOLS).map(([key, value]) => <button key={key} className={task === key ? "selected" : ""} disabled={work.locked||rigDirty||logsDirty||assemblyDirty} aria-current={task === key ? "page" : undefined} onClick={() => { setTask(key as Tool); setSource(""); setComparison(""); resetContext(); }}><span>{value.title}</span></button>)}
     </nav>
     <p>{TOOLS[task].detail}</p>
-    <div className="heading-actions">
-      <button disabled={work.locked} onClick={() => void choose(task === "diagnostic_trail" ? "code_source" : task === "asset_validation" ? "package_folder" : task === "dlc_inventory" ? "gta_folder" : task === "vehicle_data" ? "package" : "metadata")}>Choose {task === "dlc_inventory" ? "installation" : task === "diagnostic_trail" ? "artifact manifest" : "source"}</button>
+    <div className="task-actions" aria-label="Data report actions">
+      <button className="quiet-button" disabled={work.locked} onClick={() => void choose(task === "diagnostic_trail" ? "code_source" : task === "asset_validation" ? "package_folder" : task === "dlc_inventory" ? "gta_folder" : task === "vehicle_data" ? "package" : "metadata")}>Choose {task === "dlc_inventory" ? "installation" : task === "diagnostic_trail" ? "artifact manifest" : "source"}</button>
       {task === "diagnostic_trail" && <>
-        <button disabled={work.locked} onClick={()=>void choose("code_source",true)}>Choose installation receipt</button>
-        <button disabled={work.locked} onClick={async()=>{const value=await work.choose("gta_folder");if(value){setGame(value);setSession(null);}}}>Choose diagnostic installation</button>
-        <button disabled={work.locked} onClick={async()=>{const value=await work.choose("code_source");if(value){setRuntimeSession(value);setSession(null);}}}>Choose runtime session</button>
-        {runtimeSession&&<button disabled={work.locked} onClick={()=>{setRuntimeSession("");setSession(null);}}>Clear runtime session</button>}
-        <button disabled={work.locked} onClick={async()=>{const value=await work.choose("metadata");if(value){setCrashEvent(value);setSession(null);}}}>Choose crash event XML</button>
-        {crashEvent&&<button disabled={work.locked} onClick={()=>{setCrashEvent("");setSession(null);}}>Clear crash event</button>}
+        <button className="quiet-button" disabled={work.locked} onClick={()=>void choose("code_source",true)}>Choose installation receipt</button>
+        <button className="quiet-button" disabled={work.locked} onClick={async()=>{const value=await work.choose("gta_folder");if(value){setGame(value);setSession(null);}}}>Choose diagnostic installation</button>
+        <button className="quiet-button" disabled={work.locked} onClick={async()=>{const value=await work.choose("code_source");if(value){setRuntimeSession(value);setSession(null);}}}>Choose runtime session</button>
+        {runtimeSession&&<button className="quiet-button" disabled={work.locked} onClick={()=>{setRuntimeSession("");setSession(null);}}>Clear runtime session</button>}
+        <button className="quiet-button" disabled={work.locked} onClick={async()=>{const value=await work.choose("metadata");if(value){setCrashEvent(value);setSession(null);}}}>Choose crash event XML</button>
+        {crashEvent&&<button className="quiet-button" disabled={work.locked} onClick={()=>{setCrashEvent("");setSession(null);}}>Clear crash event</button>}
         <p>Installation: {game||"Not selected"}<br/>Runtime session: {runtimeSession||"Not supplied — runtime remains unverified"}</p>
         <p>Crash evidence: {crashEvent||"Optional — exported Windows Application Error event XML"}. Up to 32 events / 1 MiB; no dump, EVTX, registry changes or upload.</p>
       </>}
       {task === "asset_validation" && <>
-        <button disabled={work.locked} onClick={()=>void choose("rpf")}>Choose RPF archive</button>
-        <button disabled={work.locked} onClick={()=>void choose("package_folder",true)}>Choose comparison context</button>
-        {comparison && <button disabled={work.locked} onClick={()=>{setComparison("");resetContext();}}>Clear comparison context</button>}
+        <button className="quiet-button" disabled={work.locked} onClick={()=>void choose("rpf")}>Choose RPF archive</button>
+        <button className="quiet-button" disabled={work.locked} onClick={()=>void choose("package_folder",true)}>Choose comparison context</button>
+        {comparison && <button className="quiet-button" disabled={work.locked} onClick={()=>{setComparison("");resetContext();}}>Clear comparison context</button>}
         <label>Asset edition<select aria-label="Package validation edition" value={edition} disabled={work.locked} onChange={e=>{setEdition(e.target.value);resetContext();}}><option value="">XML-only / native unverified</option><option>Legacy</option><option>Enhanced</option></select></label>
-        <button disabled={work.locked} onClick={async()=>{const value=await work.choose("gta_folder");if(value){setGame(value);resetContext();}}}>Choose decoder installation</button>
-        {game && <><span>{game}</span><button disabled={work.locked} onClick={()=>{setGame("");resetContext();}}>Clear decoder installation</button></>}
+        <button className="quiet-button" disabled={work.locked} onClick={async()=>{const value=await work.choose("gta_folder");if(value){setGame(value);resetContext();}}}>Choose decoder installation</button>
+        {game && <><span>{game}</span><button className="quiet-button" disabled={work.locked} onClick={()=>{setGame("");resetContext();}}>Clear decoder installation</button></>}
       </>}
-      {task === "vehicle_data" && <button disabled={work.locked} onClick={() => void choose("package_folder")}>Choose package folder</button>}
-      {task === "meta_diff" && <button disabled={work.locked} onClick={() => void choose("metadata", true)}>Choose comparison</button>}
+      {task === "vehicle_data" && <button className="quiet-button" disabled={work.locked} onClick={() => void choose("package_folder")}>Choose package folder</button>}
+      {task === "meta_diff" && <button className="quiet-button" disabled={work.locked} onClick={() => void choose("metadata", true)}>Choose comparison</button>}
       <button className="primary-button" disabled={work.locked || !source || (["meta_diff","diagnostic_trail"].includes(task) && !comparison) || (task === "diagnostic_trail" && !game)} onClick={() => void work.run("inspect_authoring_workspace", request)}>Inspect data</button>
-      <button disabled={work.locked || !session || (task==="diagnostic_trail"&&logSettings.logs.length>0&&!logsReviewed)} onClick={() => void exportReport()}>Review report export</button>
+      <button className="quiet-button" disabled={work.locked || !session || (task==="diagnostic_trail"&&logSettings.logs.length>0&&!logsReviewed)} onClick={() => void exportReport()}>Review report export</button>
     </div>
     <dl><div><dt>Source</dt><dd>{source || "No source selected"}</dd></div>{["meta_diff","asset_validation","diagnostic_trail"].includes(task) && <div><dt>Comparison</dt><dd>{comparison || "No comparison selected"}</dd></div>}</dl>
     <AuthoringFeedback work={work} />

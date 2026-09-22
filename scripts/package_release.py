@@ -47,6 +47,7 @@ _REQUIRED_AUTHORING_RESOURCES = (
     Path("docs/README.md"), Path("docs/catalog.json"),
     Path("docs/sdk-guide.md"), Path("docs/release-0.6.4.md"),
     Path("docs/release-0.6.5.md"), Path("docs/release-0.6.6.md"),
+    Path("docs/release-0.6.7.md"),
     Path("docs/ui-readability.md"),
     Path("docs/cli-reference.md"), Path("docs/validation.md"),
     Path("assets") / "axle-prefabs.json",

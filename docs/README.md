@@ -1,6 +1,6 @@
 # ALLIN1 SDK documentation
 
-**0.6.6 — unsigned prerelease, not release-qualified.** Start with the [release guide](release-0.6.6.md) and [SDK manual](sdk-guide.md).
+**0.6.7 — unsigned manual-download release.** Start with the [release guide](release-0.6.7.md) and [SDK manual](sdk-guide.md). Candidate evidence must still be read for its exact tested and untested scope.
 
 Current manuals describe implemented behavior and explicit limits. Reference contracts and architecture proposals do not prove native/live acceptance. Historical evidence applies only to its named source/session. Independent mods retain separate release ownership.
 
@@ -9,7 +9,7 @@ Current manuals describe implemented behavior and explicit limits. Reference con
 - [Product overview and quick start](../README.md)
 - [Release notes](../RELEASE_NOTES.md)
 - [React/Tauri desktop setup and packaging](../desktop/README.md)
-- [0.6.6 release guide and known limits](release-0.6.6.md)
+- [0.6.7 release guide and known limits](release-0.6.7.md)
 - [SDK manual](sdk-guide.md)
 - [Validation and acceptance](validation.md)
 - [Off-game hardening receipt](hardening-harness.md)

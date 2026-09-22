@@ -8,9 +8,9 @@ export default function FormatCapabilities() {
   const needle = query.trim().toLowerCase();
   const formats = catalog.formats.filter(format => Object.values(format).some(value => typeof value === "string" && value.toLowerCase().includes(needle)));
   return <section className="format-capabilities" aria-label="Format capabilities">
-    <h2>Format capabilities</h2>
-    <p>{catalog.scope}</p>
-    <p>Matrix revision {catalog.revision} · schema {catalog.schemaVersion}. Rebuild still requires a successful file-specific validation receipt. Unsupported variants remain unsupported even when their extension is listed.</p>
+    <div className="workspace-heading"><div><span className="eyebrow">Archive reference</span><h2>Format capabilities</h2>
+      <p>{catalog.scope}</p></div></div>
+    <p className="format-capability-note">Matrix revision {catalog.revision} · schema {catalog.schemaVersion}. Rebuild still requires a successful file-specific validation receipt. Unsupported variants remain unsupported even when their extension is listed.</p>
     <div className="format-capability-controls">
       <label>Find a format or capability<input value={query} onChange={event => setQuery(event.target.value)} placeholder="YMT, audio, texture…" /></label>
       <label>Evidence edition<select value={edition} onChange={event => setEdition(event.target.value as typeof edition)}><option>Legacy</option><option>Enhanced</option></select></label>

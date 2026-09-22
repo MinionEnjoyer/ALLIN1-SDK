@@ -1,7 +1,7 @@
-# ALLIN1 SDK guide — 0.6.6
+# ALLIN1 SDK guide — 0.6.7
 
 The SDK is an independent Story Mode authoring tool. Launcher and the ALLIN1
-gameplay client are optional. Use the published 0.6.6 build and its validation
+gameplay client are optional. Use the published 0.6.7 build and its validation
 summary, not an older local installer. React/Tauri v2 is the only desktop interface;
 Tkinter source and GUI build targets have been removed.
 
@@ -271,5 +271,5 @@ do not force a restart; collect diagnostics and inspect the receipt first.
 
 For a report, include the exact SDK build identity, source operation, edition and
 redacted diagnostics/receipt. Private assets and API keys should not be posted.
-See [validation](validation.md), [release scope](release-0.6.6.md) and the
+See [validation](validation.md), [release scope](release-0.6.7.md) and the
 [feature-parity matrix](tauri-feature-parity.md).

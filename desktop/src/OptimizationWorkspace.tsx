@@ -43,21 +43,21 @@ export default function OptimizationWorkspace({client,onGuardChange,initialConte
   const artifact=session?.artifact_manifest as {artifact_id:string;build:{build_fingerprint:string;mode:string;sdk_version:string}}|undefined;
   const rebuilt=(session?.archive_rebuilds??[]) as {container:string;before_sha256:string;after_sha256:string;changed_members:string[];preservation:string}[];
   return <section className="workspace-section" aria-label="Reversible optimization">
-    <h2>Reversible package optimization</h2><p>Preview color-texture candidates, compare the same validation report, and export an optimized package alongside exact recovery originals. Game files are never changed here.</p>
+    <div className="workspace-heading"><div><span className="eyebrow">Package safety</span><h2>Reversible package optimization</h2><p>Preview color-texture candidates, compare the same validation report, and export an optimized package alongside exact recovery originals. Game files are never changed here.</p></div></div>
     <fieldset disabled={work.locked}><legend>Package context</legend>
-      <button disabled={dirty} onClick={()=>void pick()}>Choose optimization package</button><button disabled={dirty} onClick={()=>void pick("rpf")}>Choose optimization RPF</button><p>{source||"No source selected"}</p>
+      <div className="task-actions"><button className="quiet-button" disabled={dirty} onClick={()=>void pick()}>Choose optimization package</button><button className="quiet-button" disabled={dirty} onClick={()=>void pick("rpf")}>Choose optimization RPF</button><p>{source||"No source selected"}</p></div>
       {initialContext&&<p>Validation context copied from the asset report. Inspect again before choosing candidates or exporting; the previous report is not reused as proof.</p>}
       <label>Optimization edition<select value={edition} onChange={e=>{setEdition(e.target.value);resetRigs();changed();}}><option value="">XML dictionaries only</option><option>Legacy</option><option>Enhanced</option></select></label>
-      <button onClick={async()=>{const value=await work.choose("gta_folder");if(value){setGame(value);resetRigs();changed();}}}>Choose optimization decoder context</button>
-      {game&&<p>{game}</p>}
-      <button disabled={!source} onClick={()=>void work.run("inspect_authoring_workspace",request)}>{queue.length?"Preview optimization candidates":"Inspect optimization inputs"}</button>
-      <button disabled={dirty} onClick={()=>void recover()}>Open recovery package</button>
-      {dirty&&<button onClick={()=>{setQueue([]);resetRigs();setSession(null);setDirty(false);}}>Discard optimization draft</button>}
+      <div className="task-actions"><button className="quiet-button" onClick={async()=>{const value=await work.choose("gta_folder");if(value){setGame(value);resetRigs();changed();}}}>Choose optimization decoder context</button>
+        {game&&<p>{game}</p>}
+        <button className="primary-button" disabled={!source} onClick={()=>void work.run("inspect_authoring_workspace",request)}>{queue.length?"Preview optimization candidates":"Inspect optimization inputs"}</button>
+        <button className="quiet-button" disabled={dirty} onClick={()=>void recover()}>Open recovery package</button>
+        {dirty&&<button className="quiet-button" onClick={()=>{setQueue([]);resetRigs();setSession(null);setDirty(false);}}>Discard optimization draft</button>}</div>
     </fieldset>
     <details className="asset-validation"><summary>Optimization validation context</summary><div className="asset-validation-body"><fieldset disabled={work.locked}><legend>Explicit shared asset and metadata context</legend>
-      <button onClick={async()=>{const value=await work.choose("package_folder");if(value){setComparison(value);resetRigs();changed();}}}>Choose optimization comparison folder</button>
-      <button onClick={async()=>{const value=await work.choose("rpf");if(value){setComparison(value);resetRigs();changed();}}}>Choose optimization comparison RPF</button>
-      {comparison&&<><p>{comparison}</p><button onClick={()=>{setComparison("");resetRigs();changed();}}>Clear optimization comparison</button></>}
+      <div className="task-actions"><button className="quiet-button" onClick={async()=>{const value=await work.choose("package_folder");if(value){setComparison(value);resetRigs();changed();}}}>Choose optimization comparison folder</button>
+        <button className="quiet-button" onClick={async()=>{const value=await work.choose("rpf");if(value){setComparison(value);resetRigs();changed();}}}>Choose optimization comparison RPF</button>
+        {comparison&&<><p>{comparison}</p><button className="quiet-button" onClick={()=>{setComparison("");resetRigs();changed();}}>Clear optimization comparison</button></>}</div>
       <p>Both reports use these same selected dependencies and metadata. They are not modified, included in the optimized payload, or treated as installed load-order proof.</p>
     </fieldset><SharedRigBindings candidates={rigCandidates} bindings={rigBindings} locked={work.locked} inspectionAction={queue.length?"Preview optimization candidates":"Inspect optimization inputs"} onChange={value=>{setRigBindings(value);changed();}}/>
       <AssemblyBindings candidates={rigCandidates} bindings={assemblies} locked={work.locked} inspectionAction={queue.length?"Preview optimization candidates":"Inspect optimization inputs"} onChange={value=>{setAssemblies(value);changed();}}/>
@@ -87,8 +87,8 @@ export default function OptimizationWorkspace({client,onGuardChange,initialConte
     {!!session?.preservation&&<p>{String(session.preservation)}</p>}
     {!!rebuilt.length&&<details className="asset-validation"><summary>Verified RPF rebuilds · {rebuilt.length}</summary><div className="asset-validation-body">{rebuilt.map((row,i)=><section key={i}><h4>{row.container}</h4><p>{row.preservation}</p><p>Before {row.before_sha256}<br/>Candidate {row.after_sha256}</p><ul>{row.changed_members.map(name=><li key={name}>{name}</li>)}</ul></section>)}</div></details>}
     {artifact&&<details><summary>Exact SDK build &amp; artifact identity</summary><p>SDK {artifact.build.sdk_version} · {artifact.build.mode}<br/>Build fingerprint: {artifact.build.build_fingerprint}<br/>Artifact: {artifact.artifact_id}</p><p>The exported package carries sdk-artifact.json. A compatible Launcher verifies those bytes and adds their lineage to its installation receipt. This is not a publisher signature or evidence that the game loaded them.</p></details>}
-    {!!changes.length&&<button disabled={work.locked||dirty} onClick={()=>void exportPackage()}>Review optimized package export</button>}
-    {!!session?.workspace&&<button disabled={work.locked} onClick={()=>void reviewRecovery()}>Review exact original recovery</button>}
+    {(!!changes.length||!!session?.workspace)&&<div className="task-actions" aria-label="Optimization output actions">{!!changes.length&&<button className="primary-button" disabled={work.locked||dirty} onClick={()=>void exportPackage()}>Review optimized package export</button>}
+      {!!session?.workspace&&<button className="quiet-button" disabled={work.locked} onClick={()=>void reviewRecovery()}>Review exact original recovery</button>}</div>}
     <AuthoringFeedback work={work}/>
   </section>;
 }

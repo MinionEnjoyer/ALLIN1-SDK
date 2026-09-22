@@ -44,4 +44,13 @@ describe("Launcher-aligned SDK readability", () => {
       }
     }
   });
+
+  it("keeps task actions grouped and evidence readable without exposing every payload", () => {
+    expect(theme).toContain('.task-actions');
+    expect(theme).toContain('.app-shell details > summary');
+    expect(theme).toContain('summary::before');
+    expect(theme).toContain('details > pre');
+    expect(theme).toContain('.error-banner details');
+    expect(read("./DataToolsWorkspace.tsx")).toContain('aria-label="Data report actions"');
+  });
 });

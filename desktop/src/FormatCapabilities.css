@@ -1,5 +1,6 @@
 .format-capabilities { min-width: 0; }
 .format-capabilities > p { color: var(--text-muted); font-size: var(--font-label); }
+.format-capability-note { max-width: 820px; margin-bottom: 14px; }
 .format-capability-controls { display: flex; flex-wrap: wrap; gap: 12px; }
 .format-capability-controls label { display: flex; flex-direction: column; gap: 5px; font-size: var(--font-label); }
 .format-capability-controls input { min-width: 240px; }
